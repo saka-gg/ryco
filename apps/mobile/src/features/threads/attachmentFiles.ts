@@ -2,7 +2,13 @@ import {
   readAttachmentBytesFromTransport,
   type AttachmentReadTransport,
 } from "@ryco/client-runtime/rpc";
-import type { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { readAttachmentPreviewFromTransport } from "@ryco/client-runtime/rpc/attachmentPreviewRead";
+import type {
+  ChatAttachmentPreviewSize,
+  EnvironmentId,
+  MessageId,
+  ThreadId,
+} from "@ryco/contracts";
 import { Directory, File, Paths } from "expo-file-system";
 
 // A message attachment (an image, a PDF, any file) reaches the phone over its
@@ -30,6 +36,11 @@ export interface AttachmentFileReference {
   readonly attachmentId: string;
   readonly name: string;
   readonly sizeBytes: number;
+  /**
+   * The image's preview of this size instead of the original: what a thread
+   * shows. A machine that makes no previews sends the original.
+   */
+  readonly preview?: ChatAttachmentPreviewSize | undefined;
 }
 
 interface StoredFile {
@@ -50,6 +61,7 @@ export function attachmentFileKey(reference: AttachmentFileReference): string {
     reference.threadId,
     reference.messageId,
     reference.attachmentId,
+    ...(reference.preview === undefined ? [] : [reference.preview]),
   ]);
 }
 
@@ -127,6 +139,7 @@ function writeAttachmentFile(reference: AttachmentFileReference, bytes: Uint8Arr
     ROOT_DIRECTORY,
     attachmentFileSegment(reference.environmentId, "environment"),
     attachmentFileSegment(reference.attachmentId, "attachment"),
+    ...(reference.preview === undefined ? [] : [`preview-${reference.preview}`]),
   );
   directory.create({ intermediates: true, idempotent: true });
   const file = new File(directory, attachmentFileSegment(reference.name, "attachment"));
@@ -170,7 +183,7 @@ export function acquireAttachmentFile(request: {
   let read = inflight.get(key);
   if (read === undefined) {
     const controller = new AbortController();
-    const promise = readAttachmentBytesFromTransport({
+    const source = {
       reference: {
         threadId: reference.threadId,
         messageId: reference.messageId,
@@ -179,7 +192,18 @@ export function acquireAttachmentFile(request: {
       sizeBytes: reference.sizeBytes,
       signal: controller.signal,
       currentTransport: request.currentTransport,
-    }).then((bytes) => {
+    };
+    const bytesRead =
+      reference.preview === undefined
+        ? readAttachmentBytesFromTransport(source)
+        : readAttachmentPreviewFromTransport({ ...source, size: reference.preview }).then(
+            (preview) => {
+              // Without `maxBytes` a preview read always answers.
+              if (preview === null) throw new Error("Attachment preview unavailable.");
+              return preview.bytes;
+            },
+          );
+    const promise = bytesRead.then((bytes) => {
       if (controller.signal.aborted) throw new Error("Attachment load cancelled.");
       const entry = writeAttachmentFile(reference, bytes);
       forget(key);

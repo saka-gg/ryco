@@ -177,4 +177,42 @@ describe("attachment files", () => {
     expect(attachmentFileSegment("", "fallback")).toBe("fallback");
     expect(attachmentFileSegment("report 2026.pdf", "x")).toBe("report 2026.pdf");
   });
+
+  it("keeps a thread's preview apart from the original the gallery opens", async () => {
+    const original = transport();
+    // A machine that makes previews: a 2-byte preview of the 3-byte original.
+    const previews = {
+      readChunk: vi.fn(async (input: { offset: number; preview?: number | undefined }) =>
+        input.preview === undefined
+          ? { offset: input.offset, totalBytes: 3, dataBase64: btoa("abc") }
+          : { offset: input.offset, totalBytes: 2, dataBase64: btoa("pv"), preview: true },
+      ),
+    };
+    const thumbnail = { ...reference("env-a"), preview: 512 as const };
+    const previewUri = await acquireAttachmentFile({
+      reference: thumbnail,
+      currentTransport: () => previews,
+    }).promise;
+    expect(previewUri).toBe("file:///cache/attachment-files/env-a/att-1/preview-512/shot.png");
+    expect(new TextDecoder().decode(hoisted.files.get(previewUri))).toBe("pv");
+    expect(previews.readChunk).toHaveBeenCalledWith(expect.objectContaining({ preview: 512 }));
+    expect(readStoredAttachmentFile(attachmentFileKey(reference("env-a")))).toBeUndefined();
+
+    const originalUri = await acquireAttachmentFile({
+      reference: reference("env-a"),
+      currentTransport: () => original,
+    }).promise;
+    expect(originalUri).toBe("file:///cache/attachment-files/env-a/att-1/shot.png");
+    expect(original.readChunk).toHaveBeenCalledWith(
+      expect.not.objectContaining({ preview: expect.anything() }),
+    );
+
+    // A machine that makes no previews answers with the original; it shows as it is.
+    const older = transport();
+    const fallback = await acquireAttachmentFile({
+      reference: { ...reference("env-b"), preview: 1024 },
+      currentTransport: () => older,
+    }).promise;
+    expect(new TextDecoder().decode(hoisted.files.get(fallback))).toBe("abc");
+  });
 });
