@@ -736,6 +736,30 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     ]);
   });
 
+  it("loads webhook hooks' queries, pipeline, endpoint handler, view and Hub sync after boot", () => {
+    // Boot holds the hook store's facade, the route and the run path; the rest loads with the
+    // first hook operation, request, owner read or Hub connect.
+    const lazy =
+      /apps\/server\/src\/(?:automationHooks\/automationHook(?:StoreSql|Request|Direct|View|Signature|Prompt)|hubConnector\/automationHooksSync(?:Http)?)\.ts$/u;
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(boot.filter((file) => lazy.test(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/automationHooks/automationHookHttp.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/automationHooks/automationHookDirect.ts",
+      "apps/server/src/automationHooks/automationHookPrompt.ts",
+      "apps/server/src/automationHooks/automationHookRequest.ts",
+      "apps/server/src/automationHooks/automationHookSignature.ts",
+      "apps/server/src/automationHooks/automationHookStoreSql.ts",
+      "apps/server/src/automationHooks/automationHookView.ts",
+      "apps/server/src/hubConnector/automationHooksSync.ts",
+      "apps/server/src/hubConnector/automationHooksSyncHttp.ts",
+    ]);
+  });
+
   it("keeps the boot chunks within budget", () => {
     const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
@@ -770,7 +794,14 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // 7.218 MB on 2026-11-09: Statistics recording cache writes and Fast mode per turn and
     // asking usage to price them (#1172) measured 7.216845 MB; the pricing itself loads with
     // the usage pipeline through import().
-    expect(bytes).toBeLessThan(7_218_000);
+    // 7.231 MB on 2026-11-10 with webhook-triggered automations (+12.8 KB, measured 7.229651 MB):
+    // the run path's webhook branch and its stored prompt (2.5 KB), the repository's
+    // triggered-run queries and the webhook-aware active-schedule checks (2.2 KB), the hook
+    // store's facade (2.1 KB), migration 102 and its repair (1.9 KB), the owner hook RPC's
+    // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
+    // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
+    // sync load through import().
+    expect(bytes).toBeLessThan(7_231_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

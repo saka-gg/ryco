@@ -195,6 +195,13 @@ button.ae-tok[aria-expanded="true"] {
   border-top: 1px solid var(--ad-hair);
 }
 
+.ae-hook-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ad-muted);
+}
+
 /* ------------------------------------------------------------ who runs it */
 .ae-agent {
   display: flex;

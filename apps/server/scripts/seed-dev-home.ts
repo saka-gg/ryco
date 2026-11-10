@@ -176,6 +176,11 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   agent_control_mcp_installations: "clear",
   agent_control_automation_quarantine: "clear",
   agent_control_automation_read_state: "clear",
+  // Webhook hooks are registered with the real node's Hub and their secrets are not seeded.
+  automation_hooks: "clear",
+  automation_hook_deliveries: "clear",
+  automation_hook_hub_state: "clear",
+  automation_hook_run_prompts: "clear",
   agent_control_completion_returns: "clear",
   // Pull request watches: the seeded server would read the forge on its own and wake agents in
   // the copied chats.

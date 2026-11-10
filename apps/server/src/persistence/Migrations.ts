@@ -157,6 +157,7 @@ import Migration0099, {
 } from "./Migrations/099_ProjectionThreadTriage.ts";
 import Migration0100 from "./Migrations/100_EventRetention.ts";
 import Migration0101, { ensureProjectImportsTable } from "./Migrations/101_ProjectImports.ts";
+import Migration0102, { ensureAutomationHookTables } from "./Migrations/102_AutomationHooks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -269,6 +270,7 @@ export const migrationEntries = [
   [99, "ProjectionThreadTriage", Migration0099],
   [100, "EventRetention", Migration0100],
   [101, "ProjectImports", Migration0101],
+  [102, "AutomationHooks", Migration0102],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -688,6 +690,14 @@ export const repairProjectImportsTable = Effect.fn("repairProjectImportsTable")(
   }
 });
 
+// Webhook triggers' tables: run 102 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id).
+export const repairAutomationHookTables = Effect.fn("repairAutomationHookTables")(function* () {
+  if (yield* ensureAutomationHookTables) {
+    yield* Effect.log("Repaired automation hook tables");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -889,6 +899,7 @@ const compatibilityRepairs = [
   // 100 again when another branch recorded 100 (or a later id) first; it is idempotent.
   { key: "event-retention", since: 100, run: () => Migration0100 },
   { key: "project-imports", since: 101, run: () => repairProjectImportsTable() },
+  { key: "automation-hooks", since: 102, run: () => repairAutomationHookTables() },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

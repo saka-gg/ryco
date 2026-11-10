@@ -62,12 +62,47 @@ export interface AgentControlAutomationShape {
   readonly reconcileProposal: (
     proposal: AgentControlProposal,
   ) => Effect.Effect<void, AgentControlAutomationServiceError>;
+  /**
+   * One run of a webhook schedule for an accepted request (`docs/automation-webhooks.md`, step
+   * 7): materialized exactly like a due timed run (`scheduledFor` = when the request arrived,
+   * no coalesced occurrences), through the same run policy, with `prompt` (the schedule's prompt
+   * and the request, framed) instead of the schedule's own. `not-accepting` when the schedule is
+   * paused, cancelled or no longer a webhook schedule, or Agent Control is off; `busy` while a run
+   * of it is still waiting for approval or starting (one at a time, like timed runs).
+   */
+  readonly triggerWebhookRun: (input: {
+    readonly automationId: AgentControlAutomationId;
+    readonly receivedAt: string;
+    readonly prompt: string;
+  }) => Effect.Effect<
+    "started" | "awaiting-approval" | "not-accepting" | "busy",
+    AgentControlAutomationServiceError
+  >;
 }
 
 export class AgentControlAutomationService extends Context.Service<
   AgentControlAutomationService,
   AgentControlAutomationShape
 >()("ryco/agentControl/Services/AgentControlAutomation") {}
+
+/** Why an agent's plan may not give a schedule a webhook trigger. */
+export const WEBHOOK_OWNER_ONLY = "Only the project owner can give a schedule a webhook trigger.";
+
+/**
+ * A plan that creates a webhook trigger or switches a schedule to one: the owner's alone. An
+ * agent may still edit, pause or cancel a webhook schedule that keeps its trigger.
+ */
+export const planAddsWebhookTrigger = (
+  plan: Extract<
+    AgentControlActionPlan,
+    { kind: "createAutomation" | "updateAutomation" | "cancelAutomation" }
+  >,
+): boolean =>
+  plan.kind === "createAutomation"
+    ? plan.definition.schedule.kind === "webhook"
+    : plan.kind === "updateAutomation" &&
+      plan.after.schedule.kind === "webhook" &&
+      plan.before.definition.schedule.kind !== "webhook";
 
 /** Why an agent's plan may not let a schedule run without asking. */
 export const UNATTENDED_OWNER_ONLY =

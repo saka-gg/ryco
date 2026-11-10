@@ -231,6 +231,7 @@ export class HubConnector {
   readonly #features: ReadonlyArray<string>;
   readonly #onOnline: () => void;
   readonly #onLinkedAccessChanged: () => void;
+  readonly #onAutomationHooksPending: () => void;
   readonly #onRevoked: () => void;
   readonly #networkFingerprint: () => string;
   readonly #livenessWatchEnabled: boolean;
@@ -339,6 +340,11 @@ export class HubConnector {
      */
     readonly onLinkedAccessChanged?: () => void;
     /**
+     * The Hub's `node.automation-hooks.pending`: it holds webhook requests for this node's hooks
+     * (`docs/automation-webhooks.md`). Must not block: it runs in the connection's frame order.
+     */
+    readonly onAutomationHooksPending?: () => void;
+    /**
      * The Hub refused this node's connection as revoked (`revoked`, `node_revoked`): each time
      * the connector enters its terminal `revoked` state, never on a failure it retries. Must not
      * block.
@@ -383,6 +389,7 @@ export class HubConnector {
     this.#features = options.features ?? [];
     this.#onOnline = options.onOnline ?? (() => undefined);
     this.#onLinkedAccessChanged = options.onLinkedAccessChanged ?? (() => undefined);
+    this.#onAutomationHooksPending = options.onAutomationHooksPending ?? (() => undefined);
     this.#onRevoked = options.onRevoked ?? (() => undefined);
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
@@ -1386,6 +1393,8 @@ export class HubConnector {
       await this.#onE2eeEnrollmentRevoked(frame);
     } else if (frame.type === "node.linked-access.changed") {
       this.#onLinkedAccessChanged();
+    } else if (frame.type === "node.automation-hooks.pending") {
+      this.#onAutomationHooksPending();
     } else if (
       frame.type === "channel.open" ||
       frame.type === "data" ||

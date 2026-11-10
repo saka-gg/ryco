@@ -7,6 +7,9 @@
  * A heartbeat runs into one chat instead: "… in [an existing chat] called
  * [Fix CI flakes]".
  *
+ * A webhook schedule has no times: "When its webhook is called, it runs on
+ * [This device] in [a new worktree] off [main]".
+ *
  * Each connective is glued to its token, so a line never ends on "on" /
  * "for" / "from". Parts that only apply to repeating schedules, to worktree
  * runs or to a heartbeat stay in place, hidden, and fade in when they apply
@@ -151,7 +154,9 @@ const CALENDAR_OPTIONS: ReadonlyArray<PickerRadioOption<CalendarChoice>> = [
 
 export function SentenceEditor(props: SentenceEditorProps) {
   const { editorId, draft, words, open } = props;
-  const repeat = draft.kind !== "once";
+  const webhook = draft.kind === "webhook";
+  const timed = !webhook;
+  const repeat = timed && draft.kind !== "once";
   const heartbeat = props.heartbeat;
   const inChat = draft.target !== null || !!heartbeat?.choosing;
   const worktree = draft.envMode === "worktree" && !inChat;
@@ -169,14 +174,22 @@ export function SentenceEditor(props: SentenceEditorProps) {
 
   // A part that applies again fades in; the sentence settles once.
   const sentenceRef = useRef<HTMLFieldSetElement | null>(null);
-  const shownRef = useRef<Record<"repeat" | "worktree" | "chat", boolean> | null>(null);
+  const shownRef = useRef<Record<
+    "repeat" | "timed" | "webhook" | "worktree" | "chat",
+    boolean
+  > | null>(null);
   useLayoutEffect(() => {
     const previous = shownRef.current;
-    const shown = { repeat, worktree, chat: inChat };
+    const shown = { repeat, timed, webhook, worktree, chat: inChat };
     shownRef.current = shown;
     const sentence = sentenceRef.current;
     if (!previous || !sentence) return;
-    if (previous.repeat === repeat && previous.worktree === worktree && previous.chat === inChat)
+    if (
+      previous.repeat === repeat &&
+      previous.timed === timed &&
+      previous.worktree === worktree &&
+      previous.chat === inChat
+    )
       return;
     const appeared = Array.from(sentence.querySelectorAll<HTMLElement>("[data-m]")).filter(
       (part) => {
@@ -185,7 +198,7 @@ export function SentenceEditor(props: SentenceEditorProps) {
       },
     );
     animateSentenceChange(sentence, appeared);
-  }, [repeat, worktree, inChat]);
+  }, [repeat, timed, webhook, worktree, inChat]);
 
   const onStartChange = (ms: number) => props.onStart(ms);
   const onStartCommit = (
@@ -202,6 +215,9 @@ export function SentenceEditor(props: SentenceEditorProps) {
   return (
     <fieldset ref={sentenceRef} className="ae-sentence">
       <legend className="sr-only">When and where it runs</legend>
+      <Pair m="webhook" hidden={!webhook}>
+        <span className="ae-w">When its webhook is called, it runs</span>
+      </Pair>{" "}
       <Pair m="repeat" hidden={!repeat}>
         <span className="ae-w">Every</span>{" "}
         <TokenPopover
@@ -244,7 +260,7 @@ export function SentenceEditor(props: SentenceEditorProps) {
           </div>
         </TokenPopover>
       </Pair>{" "}
-      <Pair>
+      <Pair m="timed" hidden={!timed}>
         <span className="ae-w">{words.startWord}</span>{" "}
         <TokenPopover
           editorId={editorId}

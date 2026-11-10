@@ -216,9 +216,16 @@ export function isSchedulePaused(automation: AgentControlAutomation | null | und
   return !!automation && !automation.cancelled && !automation.definition.enabled;
 }
 
+/**
+ * Enabled, not cancelled, and with something to run on: a next run, or its webhook (which has
+ * no times). The server counts the same ones against the per-project limit.
+ */
 export function isScheduleActive(automation: AgentControlAutomation | null | undefined): boolean {
   return (
-    !!automation && automation.enabled && !automation.cancelled && automation.nextRunAt !== null
+    !!automation &&
+    automation.enabled &&
+    !automation.cancelled &&
+    (automation.nextRunAt !== null || automation.definition.schedule.kind === "webhook")
   );
 }
 
@@ -248,6 +255,7 @@ const sameExecution = (
 const samePhase = (a: AgentControlAutomationSchedule, b: AgentControlAutomationSchedule) => {
   const x = scheduleToMs(a);
   const y = scheduleToMs(b);
+  if (x.kind === "webhook" || y.kind === "webhook") return x.kind === y.kind;
   if (x.kind === "once" || y.kind === "once")
     return x.kind === y.kind && firstRun(x) === firstRun(y);
   if (x.kind === "calendar" || y.kind === "calendar")
@@ -577,7 +585,7 @@ export function deriveScheduleRows(input: ScheduleRowsInput): ScheduleRow[] {
         ? "running"
         : isSchedulePaused(automation)
           ? "paused"
-          : !automation.enabled || automation.nextRunAt === null
+          : !isScheduleActive(automation)
             ? "finished"
             : "scheduled";
     rows.push({
@@ -602,7 +610,8 @@ export function deriveScheduleRows(input: ScheduleRowsInput): ScheduleRow[] {
     if (p.kind !== "create" || !p.after || listed.has(p.automationId)) continue;
     if (snapshot.automations.some((a) => a.automationId === p.automationId)) continue;
     listed.add(p.automationId);
-    rows.push(newRow(p, p.after, "pending-create", firstRun(p.after.schedule)));
+    const first = firstRun(p.after.schedule);
+    rows.push(newRow(p, p.after, "pending-create", Number.isFinite(first) ? first : null));
   }
   for (const p of lapsed.values()) {
     if (p.kind !== "create" || !p.after || listed.has(p.automationId)) continue;
@@ -686,7 +695,8 @@ export function scheduleRowPresentation(row: ScheduleRow, nowMs: number): Schedu
       metaTone = "fg";
       break;
     default:
-      soonAt = row.nextRunAt;
+      if (row.def.schedule.kind === "webhook") meta = "Waiting for a request";
+      else soonAt = row.nextRunAt;
   }
   let tag = "";
   let tagTone: ScheduleRowPresentation["tagTone"] = "";
@@ -962,7 +972,8 @@ export interface ScheduleDraft {
   readonly tokenMode: AgentTokenMode | null;
   /** The chat each run queues in (a heartbeat); carried through unchanged, like `tokenMode`. */
   readonly target: AgentControlAutomationTarget | null;
-  readonly kind: "once" | "fixed-interval" | "calendar";
+  /** `webhook`: runs when its webhook is called; the time fields only wait for a switch back. */
+  readonly kind: ScheduleMs["kind"];
   /** The run (once) or the first run (repeats). A calendar schedule runs at its time of day. */
   readonly start: number;
   readonly intervalMs: number;
@@ -986,11 +997,16 @@ export interface ScheduleDraft {
  */
 export function draftFromDefinition(
   definition: AgentControlAutomationDefinition,
-  options: { readonly id?: AgentControlAutomationId | null; readonly defaultBaseRef?: string } = {},
+  options: {
+    readonly id?: AgentControlAutomationId | null;
+    readonly defaultBaseRef?: string;
+    /** For a webhook schedule's time fields (a switch back to times starts from tomorrow 09:00). */
+    readonly nowMs?: number;
+  } = {},
 ): ScheduleDraft {
   const ex = definition.execution;
   const s = scheduleToMs(definition.schedule);
-  const start = firstRun(s);
+  const start = s.kind === "webhook" ? tomorrowAtNine(options.nowMs ?? Date.now()) : firstRun(s);
   return {
     id: options.id ?? null,
     projectId: ex.projectId,
@@ -1007,7 +1023,7 @@ export function draftFromDefinition(
     intervalMs: s.kind === "fixed-interval" ? s.intervalMs : DAY_MS,
     weekdays: s.kind === "calendar" ? s.weekdays : [],
     timeZone: s.kind === "calendar" ? s.timeZone : localTimeZone(),
-    endsAt: s.kind === "once" ? addDays(start, 7) : s.endsAt,
+    endsAt: s.kind === "once" || s.kind === "webhook" ? addDays(start, 30) : s.endsAt,
     enabled: definition.enabled,
     runWithoutAsking: definition.runPolicy === "run-without-asking",
   };
@@ -1015,6 +1031,7 @@ export function draftFromDefinition(
 
 /** The draft's schedule in milliseconds. A calendar schedule runs at its first run's time of day. */
 export function draftSchedule(draft: ScheduleDraft): ScheduleMs {
+  if (draft.kind === "webhook") return { kind: "webhook" };
   if (draft.kind === "once") return { kind: "once", runAt: draft.start };
   if (draft.kind === "calendar") {
     return {
@@ -1066,6 +1083,13 @@ export function scheduleDraftKey(draft: ScheduleDraft): string {
   return JSON.stringify(definitionFromDraft(draft));
 }
 
+function tomorrowAtNine(nowMs: number): number {
+  const tomorrow9 = new Date(nowMs);
+  tomorrow9.setDate(tomorrow9.getDate() + 1);
+  tomorrow9.setHours(9, 0, 0, 0);
+  return tomorrow9.getTime();
+}
+
 /**
  * A fresh draft: repeats every 24 hours from tomorrow 09:00 for 30 days, in a
  * new worktree off `baseRef` (default "main"), accepting edits.
@@ -1076,10 +1100,7 @@ export function blankScheduleDraft(input: {
   readonly modelSelection: ModelSelection;
   readonly baseRef?: string;
 }): ScheduleDraft {
-  const tomorrow9 = new Date(input.nowMs);
-  tomorrow9.setDate(tomorrow9.getDate() + 1);
-  tomorrow9.setHours(9, 0, 0, 0);
-  const start = tomorrow9.getTime();
+  const start = tomorrowAtNine(input.nowMs);
   return {
     id: null,
     projectId: input.projectId,
@@ -1121,6 +1142,7 @@ export function draftOfLatest(
     // "" is a choice (the node's default branch), not a missing value.
     {
       id,
+      nowMs,
       ...(options.defaultBaseRef !== undefined ? { defaultBaseRef: options.defaultBaseRef } : {}),
     },
   );
@@ -1196,9 +1218,9 @@ export function validateScheduleDraft(
  * when that is inside the window, else the next quarter hour.
  */
 export function startFix(draft: ScheduleDraft, nowMs: number): number {
-  if (draft.kind !== "once") {
+  if (draft.kind !== "once" && draft.kind !== "webhook") {
     const rolled = rollForward(draftSchedule(draft), nowMs);
-    const start = rolled.kind === "once" ? rolled.runAt : rolled.startsAt;
+    const start = firstRun(rolled);
     if (start > nowMs && start <= nowMs + AUTOMATION_LIMITS.horizonMs) return start;
   }
   return ceilQuarter(nowMs + MINUTE_MS);

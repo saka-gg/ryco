@@ -107,6 +107,13 @@ export const FLAVOR_IMPORT_TABLE_POLICY = {
   agent_control_automation_runs: "rewrite",
   agent_control_automation_quarantine: "keep",
   agent_control_automation_read_state: "keep",
+  // Webhook hooks: their ids are registered with Ryco's Hub (a sync from the copy would take them
+  // over) and their secrets stay in Ryco's secret store. A copied webhook schedule is paused and
+  // gets a new hook when it is resumed. The prompts of webhook runs stay with their runs.
+  automation_hooks: "clear",
+  automation_hook_deliveries: "clear",
+  automation_hook_hub_state: "clear",
+  automation_hook_run_prompts: "keep",
   // Delivers a delegated task's result into its origin chat, which would start a turn.
   agent_control_completion_returns: "clear",
   agent_control_mcp_installations: "clear",

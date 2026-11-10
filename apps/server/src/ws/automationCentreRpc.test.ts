@@ -30,7 +30,7 @@ const input = {
   unread: false,
 };
 
-it.effect("automation reads and mutations are owner-only before service evaluation", () =>
+it.effect("automation reads, mutations and the hook are owner-only before service evaluation", () =>
   Effect.gen(function* () {
     for (const role of ["viewer", "operator", "owner"] as const) {
       const principal = relayRpcPrincipal(role, "channel");
@@ -41,7 +41,7 @@ it.effect("automation reads and mutations are owner-only before service evaluati
           return empty;
         });
       const ctx = {
-        automationCentre: Option.some({ snapshot: invoke, command: invoke }),
+        automationCentre: Option.some({ snapshot: invoke, command: invoke, hook: invoke }),
         ownerEffect: <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
           authorizeRpcPrincipal(principal, "owner", method).pipe(Effect.flatMap(() => effect)),
       } as unknown as WsRpcContext;
@@ -49,6 +49,8 @@ it.effect("automation reads and mutations are owner-only before service evaluati
       for (const method of [
         AGENT_CONTROL_WS_METHODS.automationCentre,
         AGENT_CONTROL_WS_METHODS.automationCommand,
+        // The answer carries the hook's secret.
+        AGENT_CONTROL_WS_METHODS.automationHook,
       ]) {
         const handler = handlers[method] as (
           request: typeof input,
@@ -60,7 +62,7 @@ it.effect("automation reads and mutations are owner-only before service evaluati
         assert.strictEqual(result._tag, role === "owner" ? "Success" : "Failure");
         assert.strictEqual(hostedRoleAllows(role, method), role === "owner");
       }
-      assert.strictEqual(calls, role === "owner" ? 2 : 0);
+      assert.strictEqual(calls, role === "owner" ? 3 : 0);
     }
   }),
 );

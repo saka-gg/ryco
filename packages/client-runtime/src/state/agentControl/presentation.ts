@@ -232,22 +232,27 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
       { kind: "createAutomation" }
     >["definition"]["schedule"],
   ) =>
-    schedule.kind === "once"
-      ? [`Schedule: one-shot`, `Next run: ${schedule.runAt}`]
-      : schedule.kind === "calendar"
-        ? [
-            `Schedule: ${calendarDaysWords(schedule.weekdays)} at ${schedule.localTime} (${schedule.timeZone})`,
-            `Starts: ${schedule.startsAt}`,
-            `Ends: ${schedule.endsAt}`,
-            "A time a clock change skips is skipped that day; a repeated time runs once.",
-            "Missed times coalesce into at most one pending run.",
-          ]
-        : [
-            `Schedule: every ${schedule.intervalMs}ms`,
-            `Next run: ${schedule.startsAt}`,
-            `Ends: ${schedule.endsAt}`,
-            "Missed intervals coalesce into at most one pending run.",
-          ];
+    schedule.kind === "webhook"
+      ? [
+          "Trigger: when its webhook is called",
+          "Each accepted request starts one run, with the request body as untrusted input.",
+        ]
+      : schedule.kind === "once"
+        ? [`Schedule: one-shot`, `Next run: ${schedule.runAt}`]
+        : schedule.kind === "calendar"
+          ? [
+              `Schedule: ${calendarDaysWords(schedule.weekdays)} at ${schedule.localTime} (${schedule.timeZone})`,
+              `Starts: ${schedule.startsAt}`,
+              `Ends: ${schedule.endsAt}`,
+              "A time a clock change skips is skipped that day; a repeated time runs once.",
+              "Missed times coalesce into at most one pending run.",
+            ]
+          : [
+              `Schedule: every ${schedule.intervalMs}ms`,
+              `Next run: ${schedule.startsAt}`,
+              `Ends: ${schedule.endsAt}`,
+              "Missed intervals coalesce into at most one pending run.",
+            ];
   const runPolicyLines = (
     runPolicy: Extract<
       AgentControlProposal["plan"],

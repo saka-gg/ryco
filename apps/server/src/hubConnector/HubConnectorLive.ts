@@ -12,6 +12,7 @@ import { makeRpcByteSession } from "../ws/RpcByteSession.ts";
 import { relayRpcPrincipal, type RelayChannelAuthority } from "../ws/RpcPrincipal.ts";
 import { RelayResponseCompressor } from "../ws/relayResponseCompression.ts";
 import { NODE_LINKED_ACCESS_CHECK_FEATURE } from "@ryco/contracts/node-linked-access";
+import { NODE_AUTOMATION_HOOKS_FEATURE } from "@ryco/contracts/automation-hooks";
 import type { RelayCloseReason } from "@ryco/contracts/relay";
 import {
   makeLinkedAccessCodes,
@@ -75,6 +76,11 @@ import {
   type LinkedAccessCheck,
 } from "./linkedAccessCheck.ts";
 import { makeLinkedAccessAsker } from "./linkedAccessCheckHttp.ts";
+import { startAutomationHooksSync, type AutomationHooksSync } from "./automationHooksSync.ts";
+import { deliverAutomationHook, makeAutomationHooksSyncer } from "./automationHooksSyncHttp.ts";
+import { AutomationHookStore } from "../automationHooks/Services/AutomationHookStore.ts";
+import { AgentControlAutomationService } from "../agentControl/Services/AgentControlAutomation.ts";
+import { AgentControlAutomationRepository } from "../persistence/Services/AgentControlAutomations.ts";
 import { linkedAccessRevocation } from "./linkedAccessRevocation.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
@@ -483,6 +489,13 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     };
     // Set once the connector exists; see `linkedAccessCheck`.
     let linkedAccessCheck: LinkedAccessCheck | undefined;
+    // Webhook schedules' hooks through the Hub; set once the connector exists.
+    let automationHooksSync: AutomationHooksSync | undefined;
+    const hookStore = yield* Effect.serviceOption(AutomationHookStore);
+    const hookAutomations = yield* Effect.serviceOption(AgentControlAutomationService);
+    const hookRepository = yield* Effect.serviceOption(AgentControlAutomationRepository);
+    const hooksAvailable =
+      Option.isSome(hookStore) && Option.isSome(hookAutomations) && Option.isSome(hookRepository);
     // The Hub closed a device's relay channel; see `linkedAccessCloseReaction`.
     const onHubChannelClose = (
       reason: RelayCloseReason | undefined,
@@ -880,9 +893,15 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         await revokeLinkedSessions({ enrollmentId: frame.enrollmentId }, { resweep: true });
         await forgetPushEnrollment(frame.enrollmentId);
       },
-      features: [NODE_LINKED_ACCESS_CHECK_FEATURE],
-      onOnline: () => linkedAccessCheck?.request("online"),
+      features: hooksAvailable
+        ? [NODE_LINKED_ACCESS_CHECK_FEATURE, NODE_AUTOMATION_HOOKS_FEATURE]
+        : [NODE_LINKED_ACCESS_CHECK_FEATURE],
+      onOnline: () => {
+        linkedAccessCheck?.request("online");
+        automationHooksSync?.request("online");
+      },
       onLinkedAccessChanged: () => linkedAccessCheck?.request("nudge"),
+      onAutomationHooksPending: () => automationHooksSync?.request("nudge"),
       // A TLS-authenticated Hub said this node is revoked: every link it issued on the Hub's
       // word ends now, and the devices link again once the node is enrolled again. Pairings the
       // owner made by hand and the owner's own sessions carry no link and stay.
@@ -953,6 +972,68 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           Effect.sync(() => {
             linkedAccessCheck = undefined;
             check.stop();
+            abort.abort();
+          }),
+      );
+    }
+    // Webhook requests the Hub holds for this node's hooks, collected over node-proof HTTPS.
+    if (
+      connectorConfig.enabled &&
+      connectorConfig.origin &&
+      Option.isSome(hookStore) &&
+      Option.isSome(hookAutomations) &&
+      Option.isSome(hookRepository)
+    ) {
+      const store = hookStore.value;
+      const hubOrigin = connectorConfig.origin;
+      const requestDeps = {
+        store,
+        automations: hookAutomations.value,
+        repository: hookRepository.value,
+      };
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const abort = new AbortController();
+          const sync = startAutomationHooksSync({
+            listHookIds: () => runPromise(store.enabledHookIds),
+            hubRegistered: () => runPromise(store.hubRegistered),
+            setHubRegistered: (hookIds) => runPromise(store.setHubRegistered(hookIds)),
+            sync: makeAutomationHooksSyncer({
+              hubOrigin,
+              identity,
+              connector,
+              signal: abort.signal,
+            }),
+            deliver: deliverAutomationHook(runPromise, (request) =>
+              Effect.promise(() => import("../automationHooks/automationHookRequest.ts")).pipe(
+                Effect.flatMap((pipeline) =>
+                  pipeline.takeAutomationHookRequest(
+                    pipeline.automationHookRequestDeps(requestDeps),
+                    request,
+                  ),
+                ),
+              ),
+            ),
+            onState: (state) => store.setHubSyncState(state),
+            isOnline: () => connector.status().state === "online",
+            random: Math.random,
+            setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+            clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+            onError: (error) => {
+              void runPromise(
+                Effect.logWarning("Hub automation hooks sync failed", { error: String(error) }),
+              );
+            },
+          });
+          const unsubscribe = store.onChange(() => sync.request("changed"));
+          automationHooksSync = sync;
+          return { sync, abort, unsubscribe };
+        }),
+        ({ sync, abort, unsubscribe }) =>
+          Effect.sync(() => {
+            automationHooksSync = undefined;
+            unsubscribe();
+            sync.stop();
             abort.abort();
           }),
       );

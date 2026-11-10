@@ -684,3 +684,34 @@ describe("calendar schedules (Europe/Berlin)", () => {
     ).toBe("No run falls between the start and the end.");
   });
 });
+
+describe("webhook trigger", () => {
+  it("is described as such everywhere, with no times", async () => {
+    const schedule = await import("./automationSchedule.ts");
+    const webhook = { kind: "webhook" } as const;
+    const now = Date.parse("2026-11-09T12:00:00.000Z");
+    expect(schedule.scheduleLabel(webhook, now)).toBe("Runs when its webhook is called");
+    expect(schedule.cadence(webhook, now)).toBe("On webhook");
+    expect(schedule.phrase(webhook, now)).toBe("when its webhook is called");
+    expect(schedule.nextRun(webhook, now)).toBeNull();
+    expect(schedule.countRuns(webhook, now)).toBe(0);
+    expect(schedule.scheduleOccurrences(webhook)).toEqual([]);
+    expect(schedule.runPreviewNote(webhook, now, true)).toBe("");
+    expect(schedule.scheduleToContract(webhook)).toEqual(webhook);
+    expect(schedule.isWebhookSchedule(webhook)).toBe(true);
+    expect(schedule.rollForward(webhook, now)).toEqual(webhook);
+    const valid = schedule.validateScheduleDefinition(
+      {
+        execution: {
+          title: "Release notes",
+          prompt: "Write them",
+          modelSelection: { instanceId: "codex", model: "gpt" } as never,
+        },
+        schedule: webhook,
+        enabled: true,
+      },
+      now,
+    );
+    expect(valid.errors).toEqual({});
+  });
+});

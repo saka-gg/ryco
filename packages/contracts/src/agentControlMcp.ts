@@ -54,6 +54,7 @@ import {
   AgentControlAutomationId,
   AgentControlAutomationRun,
   AgentControlAutomationSchedule,
+  AGENT_CONTROL_AUTOMATION_TIMED_SCHEDULES,
   AgentControlCapability,
   AgentControlCreateThreadsPlan,
   AgentControlDeviceArtifactPath,
@@ -403,6 +404,12 @@ export const AgentControlMcpListAutomationRunsInput = Schema.Struct({
 export type AgentControlMcpListAutomationRunsInput =
   typeof AgentControlMcpListAutomationRunsInput.Type;
 
+/** A schedule that runs at times: agents' tools never take a webhook trigger. */
+export const AgentControlAutomationTimedSchedule = Schema.Union(
+  AGENT_CONTROL_AUTOMATION_TIMED_SCHEDULES,
+);
+export type AgentControlAutomationTimedSchedule = typeof AgentControlAutomationTimedSchedule.Type;
+
 export const AgentControlMcpProposeAutomationCreateInput = Schema.Struct({
   requestId: AgentControlRequestId,
   projectId: ProjectId,
@@ -417,7 +424,8 @@ export const AgentControlMcpProposeAutomationCreateInput = Schema.Struct({
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
   /** Runs into this existing chat's follow-up queue instead of a new chat each time. */
   targetThreadId: Schema.optional(ThreadId),
-  schedule: AgentControlAutomationSchedule,
+  /** Timed only: agents cannot create a webhook trigger. */
+  schedule: AgentControlAutomationTimedSchedule,
   enabled: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeAutomationCreateInput =
@@ -438,7 +446,8 @@ export const AgentControlMcpProposeAutomationUpdateInput = Schema.Struct({
   baseRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(256)))),
   /** An existing chat to run into, or null for a new chat each time. */
   targetThreadId: Schema.optional(Schema.NullOr(ThreadId)),
-  schedule: Schema.optional(AgentControlAutomationSchedule),
+  /** Timed only: agents cannot switch a trigger to a webhook. */
+  schedule: Schema.optional(AgentControlAutomationTimedSchedule),
   enabled: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpProposeAutomationUpdateInput =

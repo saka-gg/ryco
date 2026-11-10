@@ -97,6 +97,14 @@ const KIND_OPTIONS = [
   { value: "once", label: "Once" },
 ] as const;
 
+/** Offered where the device takes a webhook trigger (or the draft already has one). */
+const WEBHOOK_KIND_OPTION = {
+  value: "webhook",
+  label: "Webhook",
+  ariaLabel: "When its webhook is called",
+} as const;
+const KIND_OPTIONS_WITH_WEBHOOK = [...KIND_OPTIONS, WEBHOOK_KIND_OPTION] as const;
+
 /** The branch a new worktree run starts off: the checkout's own branch, else "main". */
 function useMainBranch(checkout: ProjectAutomationsCheckout | undefined): string {
   const environmentId = checkout?.environmentId ?? null;
@@ -173,6 +181,13 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
   const heartbeat = offersHeartbeat
     ? { chats, choosing: choosingChat && draft.target === null }
     : null;
+  // Older devices refuse a webhook trigger; a draft that has one keeps it.
+  const offersWebhook = checkout?.snapshot?.webhooks === true || draft.kind === "webhook";
+  /** The schedule already runs on its webhook: its hook (URL and secret) is there. */
+  const hookExists =
+    draft.id !== null &&
+    checkout?.snapshot?.automations.find((automation) => automation.automationId === draft.id)
+      ?.definition.schedule.kind === "webhook";
 
   // A new draft opened before the device's providers arrived takes their
   // default model once they do; it stays a clean draft.
@@ -347,7 +362,10 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
     findEditorToken(editorId, "env")?.focus({ preventScroll: true });
   };
 
-  /** "Repeats" covers an interval and a calendar schedule; "Once" is the other. */
+  /**
+   * "Repeats" covers an interval and a calendar schedule; "Once" and "Webhook" are the
+   * others. The draft keeps its times while it is a webhook, for a switch back.
+   */
   const setKind = (kind: ScheduleDraft["kind"]) => {
     if (draft.kind === kind || (kind === "fixed-interval" && draft.kind === "calendar")) return;
     setOpen(null);
@@ -467,14 +485,17 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
                 onKeyDown={(event) => {
                   if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
                   event.preventDefault();
-                  findEditorToken(editorId, draft.kind === "once" ? "start" : "interval")?.focus();
+                  findEditorToken(
+                    editorId,
+                    draft.kind === "once" ? "start" : draft.kind === "webhook" ? "env" : "interval",
+                  )?.focus();
                 }}
               />
             </div>
             <div className="ad-dh-x">
               <span className="pk">
                 <PickerRadioRow
-                  options={KIND_OPTIONS}
+                  options={offersWebhook ? KIND_OPTIONS_WITH_WEBHOOK : KIND_OPTIONS}
                   value={draft.kind === "calendar" ? "fixed-interval" : draft.kind}
                   label="How often"
                   className="ae-kind"
@@ -512,7 +533,12 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
               setCheckoutKey(key);
               // A chat lives on its own device: a heartbeat there runs in a new chat here.
               setChoosingChat(false);
-              update({ ...draft, projectId: next.projectId, target: null }, key);
+              // A device that takes no webhook trigger gets the schedule's times back.
+              const kind =
+                draft.kind === "webhook" && next.snapshot?.webhooks !== true
+                  ? "fixed-interval"
+                  : draft.kind;
+              update({ ...draft, kind, projectId: next.projectId, target: null }, key);
             }}
             heartbeat={heartbeat}
             onEnv={onRunsIn}
@@ -548,12 +574,19 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
             ))}
           </div>
           <div className="ae-pv">
-            <RunPreview
-              schedule={draftSchedule(draft)}
-              nowMs={nowMs}
-              title="Next runs"
-              visibleRows={2}
-            />
+            {draft.kind === "webhook" ? (
+              <p className="ae-hook-note" data-note="webhook">
+                Each call starts one run, with the request body as untrusted input.
+                {hookExists ? null : " Its URL and secret show once it's approved."}
+              </p>
+            ) : (
+              <RunPreview
+                schedule={draftSchedule(draft)}
+                nowMs={nowMs}
+                title="Next runs"
+                visibleRows={2}
+              />
+            )}
           </div>
           <AgentPicks
             editorId={editorId}

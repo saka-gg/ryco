@@ -218,4 +218,32 @@ describe("the phone's Scheduled list", () => {
       ...changedAutomationProjects({ p1: { ...run, status: "approved" } }, { p1: run }),
     ]).toEqual([RYCO]);
   });
+
+  it("lists a webhook schedule as waiting for a request, never finished", () => {
+    const base = snapshot(RYCO, [{ id: "release notes" }]);
+    const [automation] = base.automations;
+    const hooked = {
+      ...base,
+      automations: [
+        {
+          ...automation!,
+          definition: { ...automation!.definition, schedule: { kind: "webhook" } },
+          nextRunAt: null,
+        },
+      ],
+    } as unknown as AutomationCentreSnapshot;
+    const list = buildScheduledList({
+      checkouts,
+      entries: new Map([[`${MAC}\0${RYCO}`, ready(hooked)]]),
+      queues: new Map(),
+      dismissed: new Set(),
+      filter: { environmentId: MAC, projectId: RYCO },
+      nowMs: NOW_MS,
+    });
+    const row = list.rows[0];
+    expect(row?.item.row.state).toBe("scheduled");
+    expect(row?.presentation.meta).toBe("Waiting for a request");
+    expect(row?.presentation.soonAt).toBeNull();
+    expect(row?.presentation.summary).toBe("On webhook");
+  });
 });

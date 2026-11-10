@@ -84,15 +84,20 @@ export function scheduleEditorOpening(input: {
   return { draft, initialKey: scheduleDraftKey(draft), isNew: !row.automation };
 }
 
-/** What "Repeats" reads as: an interval, chosen days, or one run. */
-export type ScheduleRepeat = "interval" | "days" | "once";
+/**
+ * What "Repeats" reads as: an interval, chosen days, or one run. `webhook`: it runs when its
+ * webhook is called; the phone shows that trigger but does not offer it, and keeps it as is.
+ */
+export type ScheduleRepeat = "interval" | "days" | "once" | "webhook";
 
 export function scheduleRepeatOf(draft: ScheduleDraft): ScheduleRepeat {
+  if (draft.kind === "webhook") return "webhook";
   return draft.kind === "once" ? "once" : draft.kind === "calendar" ? "days" : "interval";
 }
 
 /** The draft as another kind of schedule; its first run stays where it was. */
 export function withRepeat(draft: ScheduleDraft, repeat: ScheduleRepeat): ScheduleDraft {
+  if (repeat === "webhook") return { ...draft, kind: "webhook" };
   if (repeat === "once") return { ...draft, kind: "once" };
   if (repeat === "interval")
     return {

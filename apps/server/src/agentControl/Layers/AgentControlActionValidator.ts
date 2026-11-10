@@ -46,6 +46,8 @@ import { AgentControlPlanValidationError } from "../Errors.ts";
 import {
   AgentControlAutomationService,
   UNATTENDED_OWNER_ONLY,
+  WEBHOOK_OWNER_ONLY,
+  planAddsWebhookTrigger,
 } from "../Services/AgentControlAutomation.ts";
 import type { AgentControlAutomationShape } from "../Services/AgentControlAutomation.ts";
 import { AgentControlProjectPlans } from "../Services/AgentControlProjectPlans.ts";
@@ -1056,6 +1058,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         if (agentPlanRunsUnattended(input.plan)) {
           return yield* fail("privilege-escalation", UNATTENDED_OWNER_ONLY);
         }
+        if (planAddsWebhookTrigger(input.plan)) {
+          return yield* fail("privilege-escalation", WEBHOOK_OWNER_ONLY);
+        }
         yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
         const automation =
           input.plan.kind === "createAutomation"
@@ -1226,6 +1231,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           }
           if (agentPlanRunsUnattended(input.plan)) {
             return yield* fail("privilege-escalation", UNATTENDED_OWNER_ONLY);
+          }
+          if (planAddsWebhookTrigger(input.plan)) {
+            return yield* fail("privilege-escalation", WEBHOOK_OWNER_ONLY);
           }
           yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
           const definition =

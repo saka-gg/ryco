@@ -166,4 +166,49 @@ describe("the phone's schedule editor", () => {
     const saved = definitionFromDraft({ ...opening!.draft, envMode: "worktree" });
     expect(saved.execution).not.toHaveProperty("baseRef");
   });
+
+  it("opens a webhook schedule as a webhook and saves it with its trigger unchanged", () => {
+    const definition = {
+      execution: {
+        projectId: PROJECT,
+        title: "Release notes",
+        prompt: "Write the release notes.",
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5-5" },
+        runtimeMode: "approval-required",
+        envMode: "worktree",
+        baseRef: "main",
+      },
+      schedule: { kind: "webhook" },
+      enabled: true,
+    };
+    const automation = {
+      automationId: "a-hook",
+      projectId: PROJECT,
+      definition,
+      revision: 2,
+      enabled: true,
+      cancelled: false,
+      nextRunAt: null,
+    } as unknown as AgentControlAutomation;
+    const row = {
+      id: "a-hook",
+      automation,
+      proposal: null,
+      lapsed: null,
+    } as unknown as ScheduleRow;
+    const opening = scheduleEditorOpening({
+      mode: "edit",
+      projectId: PROJECT,
+      row,
+      providers,
+      nowMs: NOW_MS,
+    });
+    expect(scheduleRepeatOf(opening!.draft)).toBe("webhook");
+    expect(Number.isFinite(opening!.draft.start)).toBe(true);
+    const renamed = { ...opening!.draft, title: "Release notes (beta)" };
+    expect(definitionFromDraft(renamed).schedule).toEqual({ kind: "webhook" });
+    expect(withRepeat(renamed, "webhook").kind).toBe("webhook");
+    // A switch back to times starts from the draft's kept time fields.
+    expect(withRepeat(renamed, "interval").kind).toBe("fixed-interval");
+  });
 });

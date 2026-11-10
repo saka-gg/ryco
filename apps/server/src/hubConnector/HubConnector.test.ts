@@ -701,6 +701,7 @@ describe("HubConnector", () => {
     const revocations: RelayFrame[] = [];
     let onlineCalls = 0;
     let linkedAccessNudges = 0;
+    let automationHookNudges = 0;
     const activeIdentity = identity();
     const connector = new HubConnector({
       config: enabledConfig,
@@ -731,6 +732,9 @@ describe("HubConnector", () => {
       },
       onLinkedAccessChanged: () => {
         linkedAccessNudges += 1;
+      },
+      onAutomationHooksPending: () => {
+        automationHookNudges += 1;
       },
     });
     const starting = connector.start();
@@ -842,6 +846,16 @@ describe("HubConnector", () => {
     } as MessageEvent);
     await settle();
     expect(linkedAccessNudges).toBe(1);
+
+    socket.emit("message", {
+      data: encoded({
+        type: "node.automation-hooks.pending",
+        protocolMajor: 1,
+        protocolMinor: 3,
+      } as unknown as RelayFrame),
+    } as MessageEvent);
+    await settle();
+    expect(automationHookNudges).toBe(1);
     expect(connector.status().state).toBe("online");
     await connector.stop();
     expect(connector.e2eeSnapshot().accountGrantReady).toBe(false);

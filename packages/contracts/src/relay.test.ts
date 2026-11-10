@@ -99,6 +99,7 @@ const validFrames = [
     deviceAuthEpoch: 3,
   },
   { type: "node.linked-access.changed", ...version3 },
+  { type: "node.automation-hooks.pending", ...version3 },
 ] as const;
 
 describe("relay schemas", () => {
@@ -107,7 +108,7 @@ describe("relay schemas", () => {
   it("decodes both authentication handshakes and every frame class", () => {
     const decoded = validFrames.map((frame) => decodeFrame(frame));
 
-    expect(decoded).toHaveLength(18);
+    expect(decoded).toHaveLength(19);
     expect(new Set(decoded.map((frame) => frame.type))).toEqual(new Set(RELAY_FRAME_TYPES));
   });
 
@@ -184,6 +185,14 @@ describe("relay schemas", () => {
       ...version3,
     });
     expect(() => decodeFrame({ type: "node.linked-access.changed", ...version })).toThrow();
+  });
+
+  it("names nothing in an automation hooks nudge and needs protocol minor 3", () => {
+    expect(decodeFrame({ type: "node.automation-hooks.pending", ...version3 })).toEqual({
+      type: "node.automation-hooks.pending",
+      ...version3,
+    });
+    expect(() => decodeFrame({ type: "node.automation-hooks.pending", ...version })).toThrow();
   });
 
   it("rejects missing and unknown discriminants", () => {

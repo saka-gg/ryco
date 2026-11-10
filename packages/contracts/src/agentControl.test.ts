@@ -1006,3 +1006,49 @@ describe("AgentControlWorktreeHandoffPlan", () => {
     expect(Object.keys(AgentControlExecutionReceipt.fields)).not.toContain("handoffWorktree");
   });
 });
+
+describe("webhook triggers", () => {
+  it("are a schedule the owner's definitions take, never one an agent's tools take", async () => {
+    const { AgentControlAutomationSchedule } = await import("./agentControl.ts");
+    const {
+      AgentControlMcpProposeAutomationCreateInput,
+      AgentControlMcpProposeAutomationUpdateInput,
+    } = await import("./agentControlMcp.ts");
+    expect(Schema.decodeUnknownSync(AgentControlAutomationSchedule)({ kind: "webhook" })).toEqual({
+      kind: "webhook",
+    });
+    // No hook id or secret ever rides in the definition.
+    expect(() =>
+      Schema.decodeUnknownSync(AgentControlAutomationSchedule)({ kind: "webhook", hookId: "x" }),
+    ).toThrow();
+    const create = {
+      requestId: "request-1",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      title: "Release notes",
+      prompt: "Write them",
+      model: "gpt",
+      options: [],
+      runtimeMode: "approval-required",
+      envMode: "worktree",
+      schedule: { kind: "webhook" },
+    };
+    expect(() =>
+      Schema.decodeUnknownSync(AgentControlMcpProposeAutomationCreateInput)(create),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(AgentControlMcpProposeAutomationUpdateInput)({
+        requestId: "request-2",
+        automationId: "automation-1",
+        expectedRevision: 1,
+        schedule: { kind: "webhook" },
+      }),
+    ).toThrow();
+    expect(
+      Schema.decodeUnknownSync(AgentControlMcpProposeAutomationCreateInput)({
+        ...create,
+        schedule: { kind: "once", runAt: "2026-12-01T09:00:00.000Z" },
+      }).schedule.kind,
+    ).toBe("once");
+  });
+});
