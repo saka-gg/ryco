@@ -3,10 +3,7 @@ import {
   type OrchestrationGetFullThreadDiffInput,
   type OrchestrationGetFullThreadDiffResult,
   type OrchestrationGetTurnDiffResult as OrchestrationGetTurnDiffResultType,
-  type OrchestrationTurnDiffFileView,
-  type OrchestrationTurnDiffFileViewRequest,
 } from "@ryco/contracts";
-import { readGitPatchFiles, type GitPatchFile } from "@ryco/shared/gitPatchFiles";
 import { LRUCache } from "@ryco/shared/lruCache";
 import { Effect, Layer, Option, Schema } from "effect";
 
@@ -42,38 +39,6 @@ const checkpointDiffCacheKey = (input: {
   readonly ignoreWhitespace: boolean;
 }) => JSON.stringify([input.cwd, input.fromCommitOid, input.toCommitOid, input.ignoreWhitespace]);
 
-/** Patches split per file, for the few diffs being read file by file right now. */
-const SPLIT_PATCH_CACHE_MAX_ENTRIES = 4;
-
-/** The file view a client asked for (D6), from the patch split per file. */
-function buildFileView(
-  files: ReadonlyArray<GitPatchFile>,
-  request: OrchestrationTurnDiffFileViewRequest,
-  commits: { readonly fromCommitOid: string; readonly toCommitOid: string },
-): OrchestrationTurnDiffFileView {
-  if (request.kind === "index") {
-    return {
-      ...commits,
-      files: files.map((file, index) => ({
-        index,
-        path: file.path,
-        ...(file.previousPath !== null ? { previousPath: file.previousPath } : {}),
-        status: file.status,
-        ...(file.binary ? { binary: true } : {}),
-        additions: file.additions,
-        deletions: file.deletions,
-        patchChars: file.patch.length,
-      })),
-    };
-  }
-  const patches: Array<{ index: number; patch: string }> = [];
-  for (const index of new Set(request.indices)) {
-    const file = files[index];
-    if (file) patches.push({ index, patch: file.patch });
-  }
-  return { ...commits, patches };
-}
-
 const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const checkpointStore = yield* CheckpointStore;
@@ -81,19 +46,18 @@ const make = Effect.gen(function* () {
     CHECKPOINT_DIFF_CACHE_MAX_ENTRIES,
     CHECKPOINT_DIFF_CACHE_MAX_BYTES,
   );
-  /** Insertion-ordered by use: keyed like `diffCache`, so an entry can never go stale. */
-  const splitPatches = new Map<string, ReadonlyArray<GitPatchFile>>();
-  const splitPatch = (cacheKey: string, diff: string): ReadonlyArray<GitPatchFile> => {
-    const cached = splitPatches.get(cacheKey);
-    splitPatches.delete(cacheKey);
-    const files = cached ?? readGitPatchFiles(diff);
-    splitPatches.set(cacheKey, files);
-    for (const oldest of splitPatches.keys()) {
-      if (splitPatches.size <= SPLIT_PATCH_CACHE_MAX_ENTRIES) break;
-      splitPatches.delete(oldest);
-    }
-    return files;
-  };
+  /** Patches split per file, keyed like `diffCache` (so never stale), most recent last. */
+  const splitPatches = new Map<string, unknown>();
+  // The file view loads on its first use, outside the server's boot chunks.
+  const fileView = Effect.fn("CheckpointDiffQuery.fileView")(function* (
+    cacheKey: string,
+    diff: string,
+    request: NonNullable<Parameters<CheckpointDiffQueryShape["getTurnDiff"]>[0]["fileView"]>,
+    commits: { readonly fromCommitOid: string; readonly toCommitOid: string },
+  ) {
+    const module = yield* Effect.promise(() => import("../turnDiffFileView.ts"));
+    return module.answerFileView(splitPatches, cacheKey, diff, request, commits);
+  });
 
   const getTurnDiff: CheckpointDiffQueryShape["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -215,7 +179,7 @@ const make = Effect.gen(function* () {
             fromTurnCount: input.fromTurnCount,
             toTurnCount: input.toTurnCount,
             diff: "",
-            fileView: buildFileView(splitPatch(cacheKey, diff), input.fileView, {
+            fileView: yield* fileView(cacheKey, diff, input.fileView, {
               fromCommitOid,
               toCommitOid,
             }),
