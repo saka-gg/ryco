@@ -24,7 +24,7 @@ concurrency:
 jobs:
   compare:
     name: Compare ${{ inputs.baseline }} to HEAD
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Checkout candidate

@@ -61,23 +61,20 @@ env:
 #   post-job save is skipped when the job fails, exactly the runs where the
 #   retry would benefit most from a warm cache; a cancelled (superseded) run,
 #   though, should free its runners for the new run instead of uploading.
-# - Each cache backend has exactly one Bun install cache writer
-#   (`bun-cache: write`). Blacksmith runners send actions/cache to Blacksmith's
-#   own backend, where Static writes; GitHub-hosted jobs use GitHub's, where the
-#   test leg test-matrix.ts marks writes. A backend lets one job reserve a key,
-#   so any other writer would compress a GB-sized cache only to have the save
+# - Exactly one job writes the Bun install cache (`bun-cache: write`): the test
+#   leg test-matrix.ts marks. The cache service lets one job reserve a key, so
+#   any other writer would compress a GB-sized cache only to have the save
 #   rejected.
 # - Callers that validate arbitrary refs cap this workflow at `cache-mode: read`,
 #   so actions/cache restores main's caches there but skips every save with a
-#   notice. GitHub's cache service also enforces the cap; Blacksmith documents
-#   no such enforcement, so on its runners the cap is only as strong as the
-#   action honoring it.
+#   notice, and GitHub's cache service enforces the cap.
+# - Every job runs on GitHub-hosted `ubuntu-24.04`: 4 vCPU, and free for a
+#   public repository. None of the short jobs is on the critical path (the
+#   browser shards are), so a paid runner would only buy idle time.
 jobs:
   static:
     name: Static
-    # Typecheck is CPU-bound: 4 vCPU roughly halve the job at twice the price
-    # per minute, so it reports sooner for about the same cost.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -95,7 +92,6 @@ jobs:
         with:
           cache-scope: static
           install-resource-monitor-toolchain: "false"
-          bun-cache: write
 
       # Every check reports on its own: a format failure must not hide lint or
       # type errors behind skipped steps.
@@ -126,7 +122,7 @@ jobs:
   # fetches the lockfile's exact Turbo itself when nothing is installed.
   test-matrix:
     name: Test matrix
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       include: ${{ steps.pick.outputs.include }}
@@ -209,7 +205,7 @@ jobs:
   # below, so the job builds them once.
   build:
     name: Build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       # Unreferenced sourcemaps let the bundle budget check below name the
@@ -390,8 +386,8 @@ jobs:
   # These shards are the wall-clock long pole, so they do not wait for the
   # test-matrix job. Each shard resolves the same validation scope itself right
   # after setup and skips its remaining steps when browser tests are not
-  # required. A skipped shard costs about 40 seconds of runner time; waiting on
-  # the matrix would cost that on every run where the suite is needed.
+  # required. A skipped shard costs about 10 seconds of runner time; waiting on
+  # the matrix would cost more than that on every run where the suite is needed.
   browser:
     name: Browser tests ${{ matrix.shard }}
     if: ${{ inputs['run-browser-tests'] }}
@@ -400,7 +396,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
+        shard: ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -411,15 +407,24 @@ jobs:
           fetch-depth: ${{ inputs['affected-base'] == '' && 1 || 0 }}
           persist-credentials: false
 
-      - name: Setup project
-        uses: ./.github/actions/setup-ryco
+      # Resolved before the project setup, like the Test matrix job does:
+      # Turbo's dry plan needs no node_modules, and a shard that has nothing
+      # to run then stops after about 10 seconds instead of 45.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          restore-turbo-cache: "false"
-          install-resource-monitor-toolchain: "false"
+          bun-version-file: package.json
 
       - id: scope
         name: Resolve validation scope
         run: bun scripts/ci/test-matrix.ts
+
+      - name: Setup project
+        if: ${{ steps.scope.outputs.browser == 'true' }}
+        uses: ./.github/actions/setup-ryco
+        with:
+          restore-turbo-cache: "false"
+          install-resource-monitor-toolchain: "false"
 
       # No build step and no Turbo cache: browser tests run Vitest directly,
       # which serves the app through the Vite dev server, and every `@ryco/*`
@@ -436,7 +441,11 @@ jobs:
         working-directory: apps/web
         run: |
           version=$(node -p 'require("playwright/package.json").version')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${version}"
+            # The runner image (GitHub-hosted runners export both variables).
+            echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         if: ${{ steps.scope.outputs.browser == 'true' }}
@@ -446,15 +455,60 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
 
+      # Playwright's `--with-deps` installs nine font packages (21 MB) with apt
+      # on every shard. That is about 10 seconds on a good day, but the Ubuntu
+      # mirror stalls often enough (1 shard in 13, up to 4.5 minutes) that some
+      # shard of most runs waited on it, and the slowest shard sets CI's wall
+      # time. Keep the downloaded packages next to the browser builds and
+      # install them with dpkg instead. The key carries the runner image too,
+      # since the image decides which packages are still missing; the prefix
+      # fallback is safe because a set dpkg cannot install falls back to apt.
+      - name: Restore Playwright system packages
+        if: ${{ steps.scope.outputs.browser == 'true' }}
+        id: playwright-debs
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/playwright-debs
+          key: ${{ runner.os }}-${{ runner.arch }}-playwright-debs-${{ steps.playwright.outputs.version }}-${{ steps.playwright.outputs.image }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-playwright-debs-${{ steps.playwright.outputs.version }}-
+
       # On a cold cache every shard downloads Chromium at once, and the
       # Playwright CDN occasionally fails a request (it once served the wrong
       # TLS certificate). Retry rather than fail the shard; a completed install
       # makes the retry a quick no-op.
       - name: Install browser test runtime
         if: ${{ steps.scope.outputs.browser == 'true' }}
+        id: playwright-install
+        env:
+          DEBS: ${{ runner.temp }}/playwright-debs
         run: |
+          shopt -s nullglob
+          cached=("$DEBS"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ] && sudo dpkg --install "${cached[@]}"; then
+            echo "Installed ${#cached[@]} cached system packages."
+            with_deps=false
+            install=(bun run --cwd apps/web playwright install chromium)
+          else
+            # Start from an empty apt archive so the saved set is exactly what
+            # this install downloads, and make sure apt keeps it.
+            with_deps=true
+            install=(bun run --cwd apps/web test:browser:install)
+            echo 'APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99-keep-downloads > /dev/null
+            sudo apt-get clean
+          fi
           for attempt in 1 2 3; do
-            bun run --cwd apps/web test:browser:install && exit 0
+            if "${install[@]}"; then
+              if [ "$with_deps" = true ]; then
+                rm -rf "$DEBS" && mkdir -p "$DEBS"
+                fresh=(/var/cache/apt/archives/*.deb)
+                if [ "${#fresh[@]}" -gt 0 ]; then
+                  cp "${fresh[@]}" "$DEBS"/
+                  echo "fresh=true" >> "$GITHUB_OUTPUT"
+                fi
+              fi
+              exit 0
+            fi
             echo "::warning::Browser runtime install failed (attempt ${attempt} of 3)."
             sleep $((attempt * 10))
           done
@@ -470,6 +524,15 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs['cache-primary-key'] }}
+
+      # Only a shard that went through apt has a complete set to save; an image
+      # that needs no extra packages leaves the directory empty and saves none.
+      - name: Save Playwright system packages
+        if: ${{ steps.scope.outputs.browser == 'true' && steps.playwright-install.outputs.fresh == 'true' && steps.playwright-debs.outputs['cache-hit'] != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/playwright-debs
+          key: ${{ steps.playwright-debs.outputs['cache-primary-key'] }}
 
       # The dev server compiles every module a shard imports with the React
       # Compiler on its main thread while the browser waits.
@@ -513,7 +576,7 @@ jobs:
     name: Release Smoke
     needs: test-matrix
     if: ${{ inputs['run-release-smoke'] && needs.test-matrix.outputs.release == 'true' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

@@ -48,7 +48,19 @@ export function testJobs(packages: readonly string[]): TestJob[] {
       runner: "ubuntu-24.04",
     });
   }
-  const rest = selected.filter((name) => name !== "ryco-cli" && name !== "@ryco/web");
+  if (selected.includes("@ryco/mobile")) {
+    // The largest suite after the server's. In the shared leg it competed for
+    // four cores with every other package and ran 3.5 minutes, as long as a
+    // browser shard. A runner of its own takes that load off both legs.
+    jobs.push({
+      name: "mobile",
+      filters: "--filter=@ryco/mobile",
+      shard: "",
+      runner: "ubuntu-24.04",
+    });
+  }
+  const dedicated = new Set(["ryco-cli", "@ryco/web", "@ryco/mobile"]);
+  const rest = selected.filter((name) => !dedicated.has(name));
   if (rest.length > 0) {
     jobs.push({
       name: "rest",
@@ -59,16 +71,11 @@ export function testJobs(packages: readonly string[]): TestJob[] {
       runner: "ubuntu-24.04",
     });
   }
-  // Blacksmith runners send actions/cache to Blacksmith's own backend, which
-  // Static writes, so one GitHub-hosted leg writes GitHub's backend for the
-  // others; more writers per backend would only race for the same key. The
-  // rest and web legs end before the server shards, so their save adds no
-  // wall time.
-  const hosted = jobs.filter((job) => !job.runner.startsWith("blacksmith-"));
+  // One leg writes the Bun install cache for every job of the run; more
+  // writers would only race for the same key. The rest and web legs end
+  // before the server shards, so their save adds no wall time.
   const writer =
-    hosted.find((job) => job.name === "rest") ??
-    hosted.find((job) => job.name === "web") ??
-    hosted[0];
+    jobs.find((job) => job.name === "rest") ?? jobs.find((job) => job.name === "web") ?? jobs[0];
   return jobs.map((job) => {
     const bunCache: TestJob["bunCache"] = job === writer ? "write" : "read";
     return Object.assign(job, { bunCache });

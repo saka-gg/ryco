@@ -21,15 +21,21 @@ describe("CI test selection", () => {
     );
     expect(jobs.find((job) => job.name === "web")?.filters).toBe("--filter=@ryco/web");
     expect(testJobs(["@ryco/shared"]).map((job) => job.name)).toEqual(["rest"]);
+    // The mobile suite is large enough to slow every package it shares a runner with.
+    expect(testJobs(["@ryco/mobile", "@ryco/shared"])).toMatchObject([
+      { name: "mobile", filters: "--filter=@ryco/mobile", runner: "ubuntu-24.04" },
+      { name: "rest", filters: "--filter=@ryco/shared" },
+    ]);
+    expect(testJobs(["@ryco/mobile"]).map((job) => job.name)).toEqual(["mobile"]);
     expect(testJobs([])).toEqual([]);
   });
 
-  it("gives GitHub's cache backend exactly one Bun cache writer, on a leg that ends early", () => {
+  it("marks exactly one Bun cache writer, on a leg that ends early", () => {
     const writers = (packages: string[]) =>
       testJobs(packages)
         .filter((job) => job.bunCache === "write")
         .map((job) => job.name);
-    // Every leg is GitHub-hosted; Static alone writes Blacksmith's backend.
+    // Every leg is GitHub-hosted, free for a public repository.
     expect(
       new Set(testJobs(["ryco-cli", "@ryco/web", "@ryco/shared"]).map((job) => job.runner)),
     ).toEqual(new Set(["ubuntu-24.04"]));

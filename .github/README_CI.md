@@ -36,15 +36,16 @@ Ryco keeps CI entrypoints small and routes shared checks through
 ## Parallelism and path scoping
 
 `_validation.yml` runs each check as its own job so they execute in parallel
-rather than as one serial chain. Static uses a four-core Blacksmith runner
-because typecheck is CPU-bound; build, test-matrix, and release-smoke jobs use
-two-core Blacksmith runners; server shards, the web and remaining-package jobs,
-and browser shards use GitHub-hosted `ubuntu-24.04`. Release builds use
+rather than as one serial chain. Every validation job uses GitHub-hosted
+`ubuntu-24.04` (4 vCPU, free for a public repository): the browser shards set
+the wall time, so faster paid runners for the short jobs would not end a run
+sooner. One full run starts 19 jobs, just under the 20 concurrent jobs of
+GitHub's free plan, so overlapping runs queue. Release builds use
 GitHub-hosted macOS arm64, Ubuntu x64/arm64, and Windows x64/arm64 runners.
 
 `scripts/ci/test-matrix.ts` resolves Turbo's dry test plan once. Selected server
-tests run in three shards, selected web tests get a separate runner, and every
-other selected package goes into the remaining-package job. This works for both
+tests run in three shards, selected web and mobile tests each get a separate
+runner, and every other selected package goes into the remaining-package job. This works for both
 PRs and full runs, includes new test packages automatically, and avoids mixing
 Turbo's incompatible `--filter` and `--affected` flags. Workspaces without test
 scripts are omitted. TypeScript and Effect diagnostics share the normal
@@ -83,7 +84,7 @@ them out of `scripts/`: `--affected` attributes a file inside a workspace to
 that workspace alone, so a helper there would select only `@ryco/scripts`.
 Their unit tests are in `scripts/`, since a root file has no test task.
 
-Browser files stay serial within each of six shards. ChatView's six suites
+Browser files stay serial within each of eight shards. ChatView's six suites
 share one harness but separate composer, conversation, navigation, workspace,
 phone composer, and phone surface assertions so no single giant file dominates
 one shard. The browser config's sequencer
@@ -107,6 +108,13 @@ browser tests are not required. They run no build at all: Vitest browser mode
 serves the app through the Vite dev server, and every `@ryco/*` workspace export
 web uses resolves to `src` under the ESM `import` condition, so neither the
 `@ryco/web` bundle nor any dependency's `dist/` is read.
+
+Each shard caches the Chromium build and, separately, the system packages
+Playwright's `--with-deps` installs with apt (a few fonts). A warm shard installs
+those with `dpkg` and never contacts the Ubuntu mirror, whose stalls used to add
+up to minutes to one shard of many runs. The package cache is keyed by the
+Playwright version and the runner image; a set `dpkg` cannot install falls back
+to the apt path.
 
 ## Affected scoping and caching
 
@@ -142,19 +150,15 @@ builds and Vercel still set the unused `RYCO_REACT_COMPILER_CACHE=off`, and
 `RYCO_REACT_COMPILER_CACHE_DIR`. A follow-up removes the steps, the actions
 and these variables once main's workflow no longer references the actions.
 
-Blacksmith runners send `actions/cache` to Blacksmith's own cache backend, not
-GitHub's, so each backend gets one Bun install cache writer: Static on
-Blacksmith, and on GitHub the hosted test leg that `test-matrix.ts` marks (the
-remaining-package job whenever it runs, else the web job).
+One job per run writes the Bun install cache: the test leg that
+`test-matrix.ts` marks (the remaining-package job whenever it runs, else the
+web job).
 
 Pull request, branch, and worktree validation run the code of arbitrary refs
 but start from `main`, so they call `_validation.yml` with `cache-mode: read`:
 they restore `main`'s caches, and their save steps log a notice and continue.
 GitHub's cache service enforces that cap, so those runs cannot seed the caches
-that GitHub-hosted jobs, releases included, restore. Blacksmith does not
-document enforcing it, so on Blacksmith jobs (Static, Build, the test matrix,
-release smoke) only `actions/cache` honoring `ACTIONS_CACHE_MODE` keeps
-a validated ref from seeding the caches that main's Blacksmith jobs restore.
+that main's jobs, releases included, restore.
 
 Browser shards, Build's desktop pipeline steps, and release smoke stay gated
 behind the `run-*` inputs. On PRs `validationScope` in the test-matrix script
@@ -191,7 +195,7 @@ explicitly for Ryco's command surface, and installs dependencies with
 `bun install --frozen-lockfile` using the pinned Bun version. In validation,
 only Build installs the resource-monitor Rust toolchain, and the test-matrix
 job sets up Bun alone. The action also restores the Bun install cache (one job
-per cache backend saves it with `bun-cache: write`; release jobs use `none`) and,
+per run saves it with `bun-cache: write`; release jobs use `none`) and,
 where `restore-turbo-cache` is true, the explicit workspace-local Turbo cache.
 Jobs save the Turbo cache through `.github/actions/save-turbo-cache`, which first
 prunes it to the task hashes in the job's `--summarize` run summaries, so the

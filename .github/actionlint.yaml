@@ -1,9 +1,3 @@
-self-hosted-runner:
-  # Blacksmith runner labels used by the validation and performance workflows.
-  labels:
-    - blacksmith-2vcpu-ubuntu-2404
-    - blacksmith-4vcpu-ubuntu-2404
-    - blacksmith-8vcpu-ubuntu-2404
 paths:
   .github/workflows/**/*.{yml,yaml}:
     ignore:
