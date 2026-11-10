@@ -9,6 +9,8 @@ const COPY_FEEDBACK_DURATION_MS = 1200;
 export const CopyTextButton = memo(function CopyTextButton(props: {
   readonly accessibilityLabel: string;
   readonly text: string;
+  /** Reads the text to copy instead of `text` (the whole text of a message shown as its head). */
+  readonly readText?: (() => Promise<string>) | undefined;
   readonly tintColor: ColorValue;
   readonly copiedTintColor?: ColorValue;
   readonly backgroundColor?: ColorValue;
@@ -35,15 +37,29 @@ export const CopyTextButton = memo(function CopyTextButton(props: {
       disabled={props.text.length === 0}
       hitSlop={8}
       onPress={() => {
-        copyTextWithHaptic(props.text);
-        setCopied(true);
-        if (resetTimeoutRef.current) {
-          clearTimeout(resetTimeoutRef.current);
+        const showCopied = () => {
+          setCopied(true);
+          if (resetTimeoutRef.current) {
+            clearTimeout(resetTimeoutRef.current);
+          }
+          resetTimeoutRef.current = setTimeout(() => {
+            setCopied(false);
+            resetTimeoutRef.current = null;
+          }, COPY_FEEDBACK_DURATION_MS);
+        };
+        if (!props.readText) {
+          copyTextWithHaptic(props.text);
+          showCopied();
+          return;
         }
-        resetTimeoutRef.current = setTimeout(() => {
-          setCopied(false);
-          resetTimeoutRef.current = null;
-        }, COPY_FEEDBACK_DURATION_MS);
+        // Nothing is copied, and no check shown, when the read fails.
+        props.readText().then(
+          (text) => {
+            copyTextWithHaptic(text);
+            showCopied();
+          },
+          (cause: unknown) => console.warn("Failed to read the text to copy.", cause),
+        );
       }}
       style={({ pressed }) => ({
         width: props.buttonSize ?? 30,

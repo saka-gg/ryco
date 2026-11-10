@@ -130,6 +130,7 @@ vi.mock("@legendapp/list/react", async () => {
 
 import { MessagesTimeline } from "./MessagesTimeline";
 import { resetActivityPayloadAtomsForTests } from "../../rpc/activityPayloadAtoms";
+import { resetMessageTextAtomsForTests } from "../../rpc/messageTextAtoms";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import {
   __resetEnvironmentApiOverridesForTests,
@@ -1521,6 +1522,93 @@ describe("MessagesTimeline", () => {
     } finally {
       __resetEnvironmentApiOverridesForTests();
       resetActivityPayloadAtomsForTests();
+      await screen.unmount();
+    }
+  });
+
+  it("shows the whole text of a previewed message on request and copies the whole text", async () => {
+    resetMessageTextAtomsForTests();
+    const wholeTexts: Record<string, string> = {
+      "message-long-user": "the head of the question and its complete tail",
+      "message-long-reply": "the head of the reply and the complete reply tail",
+    };
+    const requests: Array<{ threadId: string; messageId: string }> = [];
+    let fail = true;
+    const read = async (input: { threadId: string; messageId: string }) => {
+      requests.push(input);
+      if (fail) throw new Error("relay dropped");
+      const text = wholeTexts[input.messageId] ?? "";
+      return { messageId: input.messageId, text, fullLength: text.length, truncated: false };
+    };
+    __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+      orchestration: { getMessageText: read },
+    } as never);
+    const copied: string[] = [];
+    vi.spyOn(navigator.clipboard, "write").mockImplementation(async (items) => {
+      const blob = await items[0]!.getType("text/plain");
+      copied.push(await blob.text());
+    });
+    const previewMessage = (id: string, role: "user" | "assistant", fullLength: number) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt: "2026-11-10T12:00:00.000Z",
+      message: {
+        id: MessageId.make(id),
+        role,
+        text: role === "user" ? "the head of the question" : "the head of the reply",
+        textPreview: { fullLength },
+        createdAt: "2026-11-10T12:00:00.000Z",
+        streaming: false,
+      },
+    });
+    const screen = await render(
+      <AppAtomRegistryProvider>
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            previewMessage("message-long-user", "user", 48_000),
+            previewMessage("message-long-reply", "assistant", 52_000),
+          ]}
+        />
+      </AppAtomRegistryProvider>,
+    );
+
+    try {
+      // A preview shows its head; nothing is read until asked for.
+      await expect.element(page.getByText("the head of the reply")).toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: "Show whole message (48,000 characters)" }))
+        .toBeVisible();
+      expect(requests).toEqual([]);
+
+      await page.getByRole("button", { name: "Show whole message (52,000 characters)" }).click();
+      await expect
+        .element(page.getByText("Couldn't load the whole message.", { exact: false }))
+        .toBeVisible();
+      expect(requests[0]).toEqual({ threadId: "thread-1", messageId: "message-long-reply" });
+
+      fail = false;
+      await page.getByRole("button", { name: "Retry" }).click();
+      await expect
+        .element(page.getByText("the complete reply tail", { exact: false }))
+        .toBeVisible();
+      expect(
+        document.querySelectorAll(
+          "[data-message-id='message-long-reply'] [data-message-text-status]",
+        ),
+      ).toHaveLength(0);
+
+      // Copying the question, still shown as its head, reads and copies the whole text.
+      await page.getByRole("button", { name: "Copy message" }).click();
+      await vi.waitFor(() => expect(copied).toEqual([wholeTexts["message-long-user"]]));
+      expect(requests.at(-1)).toEqual({ threadId: "thread-1", messageId: "message-long-user" });
+      // Copying does not expand the row.
+      await expect
+        .element(page.getByRole("button", { name: "Show whole message (48,000 characters)" }))
+        .toBeVisible();
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      resetMessageTextAtomsForTests();
       await screen.unmount();
     }
   });

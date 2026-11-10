@@ -115,7 +115,10 @@ export interface MessageTextView {
  * it holds until the whole text was asked for and arrived.
  */
 export function resolveMessageTextView(
-  message: { readonly text: string; readonly textPreview?: { readonly fullLength: number } },
+  message: {
+    readonly text: string;
+    readonly textPreview?: { readonly fullLength: number } | undefined;
+  },
   cacheKey: string | null,
   state: MessageTextQueryState,
 ): MessageTextView {
@@ -137,4 +140,53 @@ export function resolveMessageTextView(
     truncated: true,
     fullLength: preview.fullLength,
   };
+}
+
+/** What a message row says around a preview of a very long message, on web and phone alike. */
+export const MESSAGE_TEXT_PREVIEW_COPY = {
+  show: (fullLength: number) =>
+    `Show whole message (${fullLength.toLocaleString("en-US")} characters)`,
+  loading: "Loading whole message…",
+  failed: "Couldn't load the whole message.",
+  retry: "Retry",
+  tooLong: "This message is too long to show whole.",
+} as const;
+
+/**
+ * The whole text of a message, for copying it: its own text when whole, else
+ * the cached whole text, else read now (`orchestration.getMessageText`). A
+ * text still longer than one response comes back cut short, the most the
+ * server sends. Rejects when the read fails.
+ */
+export async function readWholeMessageText(
+  query: MessageTextQuery,
+  input: {
+    readonly environmentId: EnvironmentId | null;
+    readonly threadId: ThreadId | null;
+    readonly message: {
+      readonly id: MessageId | string;
+      readonly text: string;
+      readonly textPreview?: { readonly fullLength: number } | undefined;
+    };
+  },
+): Promise<string> {
+  if (input.message.textPreview === undefined) return input.message.text;
+  const queryInput: MessageTextInput = {
+    environmentId: input.environmentId,
+    threadId: input.threadId,
+    messageId: input.message.id,
+  };
+  const cacheKey = query.keyOf(queryInput);
+  if (cacheKey === null) throw new Error("This message cannot be loaded whole here.");
+  // Held while the read runs, so the entry is not collected under it.
+  const release = query.watch(queryInput);
+  try {
+    const current = query.getSnapshot(cacheKey);
+    // Joins the read `watch` started, if any.
+    const state = current.data ? current : await query.refreshAsync(cacheKey);
+    if (state.data) return state.data.text;
+    throw state.error ?? new Error("The whole message could not be loaded.");
+  } finally {
+    release();
+  }
 }

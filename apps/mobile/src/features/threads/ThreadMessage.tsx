@@ -14,6 +14,7 @@ import {
 import {
   canHtmlRenderSendFromMessage,
   EDIT_FROM_HERE_COPY,
+  MESSAGE_TEXT_PREVIEW_COPY,
   UNDO_FILE_CHANGES_COPY,
   readHtmlRenderAttachment,
   type HtmlRenderAttachment,
@@ -38,6 +39,7 @@ import { AppText as Text } from "../../components/AppText";
 import { CopyTextButton } from "../../components/CopyTextButton";
 import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { type MessageText, useMessageText } from "../../rpc/useMessageText";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
@@ -285,6 +287,61 @@ function SentMessageContexts(props: {
   );
 }
 
+/**
+ * Below a very long message the thread window sent as its head: the control
+ * that shows the whole text, then how that read went.
+ */
+function MessageTextPreviewStatus(props: {
+  readonly messageText: MessageText;
+  readonly onShowWhole: () => void;
+}) {
+  const { messageText } = props;
+  if (messageText.fullLength === null) return null;
+  if (messageText.status === "idle") {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        hitSlop={8}
+        onPress={props.onShowWhole}
+        className="mt-2 min-h-7 justify-center self-start active:opacity-70"
+      >
+        <Text className="text-xs font-ryco-medium text-foreground-muted">
+          {MESSAGE_TEXT_PREVIEW_COPY.show(messageText.fullLength)}
+        </Text>
+      </Pressable>
+    );
+  }
+  if (messageText.status === "loading") {
+    return (
+      <Text className="mt-2 text-2xs text-foreground-tertiary">
+        {MESSAGE_TEXT_PREVIEW_COPY.loading}
+      </Text>
+    );
+  }
+  if (messageText.status === "error") {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${MESSAGE_TEXT_PREVIEW_COPY.failed} ${MESSAGE_TEXT_PREVIEW_COPY.retry}`}
+        onPress={messageText.retry}
+        className="mt-2 self-start active:opacity-70"
+      >
+        <Text className="text-2xs text-danger-foreground">
+          {MESSAGE_TEXT_PREVIEW_COPY.failed} Tap to retry.
+        </Text>
+      </Pressable>
+    );
+  }
+  if (messageText.truncated) {
+    return (
+      <Text className="mt-2 text-2xs text-foreground-tertiary">
+        {MESSAGE_TEXT_PREVIEW_COPY.tooLong}
+      </Text>
+    );
+  }
+  return null;
+}
+
 export function ThreadMessage(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -313,15 +370,24 @@ export function ThreadMessage(props: {
   const presentation = threadMessagePresentation(isUser ? "user" : "assistant");
   const metadataColor = useThemeColor("--color-foreground-tertiary");
   const markdownStyle = useNativeMarkdownTextStyle();
+  // A very long message arrives as its head (`textPreview`); the whole text is
+  // read when the reader asks for it, or copies the message.
+  const [wholeTextWanted, setWholeTextWanted] = useState(false);
+  const messageText = useMessageText({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    message: props.message,
+    wanted: wholeTextWanted,
+  });
   // A sent prompt's context blocks show as chips, not as raw text, and its
   // quotes read as plain quoted lines; copying keeps the text as sent.
-  const sentContexts = isUser ? deriveDisplayedUserMessageContext(props.message.text) : null;
+  const sentContexts = isUser ? deriveDisplayedUserMessageContext(messageText.text) : null;
   const sentContextCount =
     (sentContexts?.browserElements.length ?? 0) +
     (sentContexts?.fileReferences.length ?? 0) +
     (sentContexts?.contexts.length ?? 0);
   const text =
-    (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : props.message.text) ||
+    (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : messageText.text) ||
     (props.message.streaming ? "…" : "");
   const attachments = props.message.attachments ?? [];
   const galleryImages = messageImageGallery(props.message.attachments);
@@ -442,6 +508,10 @@ export function ThreadMessage(props: {
             onLinkPress={openWebLink}
           />
         )}
+        <MessageTextPreviewStatus
+          messageText={messageText}
+          onShowWhole={() => setWholeTextWanted(true)}
+        />
         {sentContexts && sentContextCount > 0 ? (
           <SentMessageContexts
             browserElements={sentContexts.browserElements}
@@ -572,7 +642,13 @@ export function ThreadMessage(props: {
           {props.message.text ? (
             <CopyTextButton
               accessibilityLabel="Copy message"
-              text={props.message.text}
+              text={messageText.text}
+              // Copying a preview copies the whole text, read first when not loaded yet.
+              readText={
+                messageText.truncated && messageText.status !== "loaded"
+                  ? messageText.readWholeText
+                  : undefined
+              }
               tintColor={metadataColor}
               iconSize={12}
               buttonSize={28}

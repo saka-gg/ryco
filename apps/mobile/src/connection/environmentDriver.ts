@@ -634,6 +634,12 @@ export function createMobileEnvironmentDriver(
     // payloads (tool output, diffs); a work row reads the full payload when it
     // opens (`orchestration.getActivityPayload`).
     threadWindowActivityPayloads: "preview",
+    // A very long message arrives as its head; its row reads the whole text on
+    // demand (`orchestration.getMessageText`).
+    threadWindowMessageText: "preview",
+    // The first window of a thread fills a phone screen; the rest of the usual
+    // window follows as history pages while the thread is shown.
+    threadWindowInitialLimits: { messages: 30, proposedPlans: 30, activities: 60, checkpoints: 30 },
     syncThreadWindowSnapshot: (environmentId, snapshot) =>
       useStore.getState().syncServerThreadWindow(snapshot, environmentId),
     syncThreadHistoryPage: (environmentId, threadId, page) =>

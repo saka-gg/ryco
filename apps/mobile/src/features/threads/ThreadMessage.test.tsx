@@ -18,6 +18,8 @@ const hoisted = vi.hoisted(() => ({
   share: vi.fn(async (_input: unknown) => undefined),
   openURL: vi.fn(async (_url: string) => true),
   nativeMarkdown: false,
+  /** What `useMessageText` returns, when a test sets it; else the message's own text. */
+  messageText: null as null | Record<string, unknown>,
   player: {
     replace: vi.fn(),
     play: vi.fn(),
@@ -90,6 +92,19 @@ vi.mock("../../native/SelectableMarkdownText", () => ({
   hasNativeSelectableMarkdownText: () => hoisted.nativeMarkdown,
   SelectableMarkdownText: "SelectableMarkdownText",
 }));
+vi.mock("../../rpc/useMessageText", () => ({
+  useMessageText: (input: {
+    message: { text: string; textPreview?: { fullLength: number } } | null;
+  }) =>
+    hoisted.messageText ?? {
+      status: "idle",
+      text: input.message?.text ?? "",
+      truncated: input.message?.textPreview !== undefined,
+      fullLength: input.message?.textPreview?.fullLength ?? null,
+      retry: () => {},
+      readWholeText: async () => input.message?.text ?? "",
+    },
+}));
 vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 vi.mock("./ImageGalleryModal", () => ({
@@ -97,7 +112,11 @@ vi.mock("./ImageGalleryModal", () => ({
 }));
 
 import { ThreadMessage } from "./ThreadMessage";
-import { EDIT_FROM_HERE_COPY, UNDO_FILE_CHANGES_COPY } from "@ryco/client-runtime/state/session";
+import {
+  EDIT_FROM_HERE_COPY,
+  MESSAGE_TEXT_PREVIEW_COPY,
+  UNDO_FILE_CHANGES_COPY,
+} from "@ryco/client-runtime/state/session";
 import {
   THREAD_FORK_COPY,
   type ChatAttachment,
@@ -193,6 +212,7 @@ function renderMessage(
 beforeEach(() => {
   hoisted.memo = null;
   hoisted.nativeMarkdown = false;
+  hoisted.messageText = null;
   hoisted.openURL.mockClear();
   vi.mocked(htmlRenderOfAttachment).mockClear();
 });
@@ -987,6 +1007,87 @@ describe("ThreadMessage Undo file changes", () => {
           onUndoFileChanges: vi.fn(),
         }),
       ),
+    ).toHaveLength(0);
+  });
+});
+
+describe("ThreadMessage previews of very long messages", () => {
+  const textsOf = (tree: ReactElement) =>
+    collectElements(tree, (element) => element.type === "AppText").map(
+      (element) => (element.props as { children?: unknown }).children,
+    );
+  const previewMessage = (role: "user" | "assistant") =>
+    ({
+      id: "m-long",
+      role,
+      text: "the head",
+      textPreview: { fullLength: 48_000 },
+      createdAt: "2026-11-10T10:00:00.000Z",
+      streaming: false,
+    }) as unknown as ChatMessage;
+
+  it("shows the head with a control for the whole message, and copies the whole text", () => {
+    const tree = ThreadMessage({ environmentId, threadId, message: previewMessage("user") });
+    expect(textsOf(tree)).toContain("the head");
+    expect(textsOf(tree)).toContain("Show whole message (48,000 characters)");
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy).toHaveLength(1);
+    expect(typeof (copy[0]!.props as { readText?: unknown }).readText).toBe("function");
+  });
+
+  it("shows the whole text in place once loaded, and copies it as is", () => {
+    hoisted.messageText = {
+      status: "loaded",
+      text: "the whole text",
+      truncated: false,
+      fullLength: 14,
+      retry: () => {},
+      readWholeText: async () => "the whole text",
+    };
+    const tree = ThreadMessage({ environmentId, threadId, message: previewMessage("user") });
+    expect(textsOf(tree)).toContain("the whole text");
+    expect(textsOf(tree)).not.toContain("the head");
+    expect(
+      textsOf(tree).filter((text) => typeof text === "string" && text.startsWith("Show whole")),
+    ).toHaveLength(0);
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy[0]?.props).toMatchObject({ text: "the whole text", readText: undefined });
+  });
+
+  it("says when loading, offers a retry on failure, and says when the text is too long", () => {
+    hoisted.messageText = {
+      status: "loading",
+      text: "the head",
+      truncated: true,
+      fullLength: 48_000,
+      retry: () => {},
+      readWholeText: async () => "",
+    };
+    const loading = ThreadMessage({
+      environmentId,
+      threadId,
+      message: previewMessage("assistant"),
+    });
+    expect(textsOf(loading)).toContain(MESSAGE_TEXT_PREVIEW_COPY.loading);
+
+    const retry = vi.fn();
+    hoisted.messageText = { ...hoisted.messageText, status: "error", retry };
+    const failed = ThreadMessage({ environmentId, threadId, message: previewMessage("assistant") });
+    const retryButton = findPressables(failed).find((pressable) =>
+      pressableLabel(pressable)?.startsWith(MESSAGE_TEXT_PREVIEW_COPY.failed),
+    );
+    (retryButton!.props as { onPress: () => void }).onPress();
+    expect(retry).toHaveBeenCalledOnce();
+
+    hoisted.messageText = { ...hoisted.messageText, status: "loaded", text: "first million" };
+    const capped = ThreadMessage({ environmentId, threadId, message: previewMessage("assistant") });
+    expect(textsOf(capped)).toContain(MESSAGE_TEXT_PREVIEW_COPY.tooLong);
+  });
+
+  it("shows no control under a whole message", () => {
+    const tree = renderMessage([], { text: "short" });
+    expect(
+      textsOf(tree).filter((text) => typeof text === "string" && text.startsWith("Show whole")),
     ).toHaveLength(0);
   });
 });
