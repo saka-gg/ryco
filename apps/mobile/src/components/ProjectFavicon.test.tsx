@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 // shows the kept artwork while it reads it again.
 
 const hoisted = vi.hoisted(() => ({
+  /** Artwork saved on the device, by project (the saved query store stand-in). */
+  saved: new Map<string, string | null>(),
   phase: "connected" as string,
   api: undefined as unknown,
   runtime: {
@@ -60,6 +62,12 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 vi.mock("react-native", () => ({ View: "View" }));
+vi.mock("../rpc/savedProjectIcons", () => ({
+  peekSavedProjectIcon: () => undefined,
+  loadSavedProjectIcon: async (_environmentId: string, projectId: string) =>
+    hoisted.saved.has(projectId) ? hoisted.saved.get(projectId) : undefined,
+  saveProjectIcon: () => undefined,
+}));
 vi.mock("expo-image", () => ({ Image: "Image" }));
 vi.mock("./AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../lib/useThemeColor", () => ({ useThemeColor: () => "#000" }));
@@ -112,6 +120,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-15T09:00:00.000Z"));
   hoisted.phase = "connected";
+  hoisted.saved.clear();
   hoisted.runtime.slots = [];
   hoisted.runtime.memos = [];
   hoisted.runtime.effects = [];
@@ -173,5 +182,13 @@ describe("ProjectFavicon", () => {
 
     expect(render()).toBe(FIRST_ICON);
     expect(readIcon).toHaveBeenCalledOnce();
+  });
+
+  it("shows artwork saved on the device on a cold start, before its node answers", async () => {
+    hoisted.saved.set(PROJECT, FIRST_ICON);
+    hoisted.api = undefined;
+    hoisted.phase = "disconnected";
+    expect(render()).toBeNull();
+    await vi.waitFor(() => expect(render()).toBe(FIRST_ICON));
   });
 });

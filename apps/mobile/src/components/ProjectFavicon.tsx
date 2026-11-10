@@ -5,6 +5,11 @@ import {
 } from "@ryco/client-runtime/connection";
 import { useEnvironmentApi } from "../connection/useEnvironmentApi";
 import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
+import {
+  loadSavedProjectIcon,
+  peekSavedProjectIcon,
+  saveProjectIcon,
+} from "../rpc/savedProjectIcons";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { SymbolView } from "./AppSymbol";
 import { Image } from "expo-image";
@@ -65,12 +70,30 @@ export function ProjectFavicon(props: {
   // once the LRU drops the entry, the row keeps its icon.
   const [artwork, setArtwork] = useState<LatchedArtwork | null>(() => {
     const source = projectId
-      ? peekProjectIconSource(environmentId, projectId, revision)
+      ? (peekProjectIconSource(environmentId, projectId, revision) ??
+        peekSavedProjectIcon(environmentId, projectId, revision))
       : undefined;
     return source === undefined ? null : { key: requestKey, source };
   });
+  const known = artwork?.key === requestKey;
+  // The artwork kept on this device shows on a cold start, before (or without) the node.
   useEffect(() => {
-    if (!api || !projectId) return;
+    if (!projectId || known) return;
+    let current = true;
+    void loadSavedProjectIcon(environmentId, projectId, revision).then((source) => {
+      if (!current || source === undefined) return;
+      setArtwork((latched) =>
+        latched?.key === requestKey ? latched : { key: requestKey, source },
+      );
+    });
+    return () => {
+      current = false;
+    };
+  }, [environmentId, known, projectId, requestKey, revision]);
+  // A custom avatar's revision names its content: artwork known for it is never read again.
+  const settled = known && revision !== null;
+  useEffect(() => {
+    if (!api || !projectId || settled) return;
     // Answered from the cache while its entry is fresh, without a request;
     // otherwise read again, with the latched artwork on screen until the
     // answer replaces it. A read the node could not finish is not an answer:
@@ -78,6 +101,7 @@ export function ProjectFavicon(props: {
     let current = true;
     void readProjectIconSource(api, environmentId, projectId, revision).then(
       (source) => {
+        saveProjectIcon(environmentId, projectId, revision, source);
         if (current) setArtwork((latched) => latchArtwork(latched, requestKey, source));
       },
       () => undefined,
@@ -85,7 +109,7 @@ export function ProjectFavicon(props: {
     return () => {
       current = false;
     };
-  }, [api, environmentId, projectId, requestKey, revision]);
+  }, [api, environmentId, projectId, requestKey, revision, settled]);
   // Artwork the node already answered shows whether or not it is connected now:
   // the Hub keeps one node connected at a time, and every other node's rows
   // keep their icons. A row whose inputs just changed shows cached artwork for
@@ -94,12 +118,15 @@ export function ProjectFavicon(props: {
     artwork?.key === requestKey
       ? artwork.source
       : projectId
-        ? (peekProjectIconSource(environmentId, projectId, revision) ?? null)
+        ? (peekProjectIconSource(environmentId, projectId, revision) ??
+          peekSavedProjectIcon(environmentId, projectId, revision) ??
+          null)
         : null;
 
   return (
     <ProjectFaviconImage
       key={faviconUrl ?? "fallback"}
+      cacheKey={requestKey}
       faviconUrl={faviconUrl}
       open={props.open}
       projectTitle={props.projectTitle}
@@ -111,6 +138,7 @@ export function ProjectFavicon(props: {
 }
 
 function ProjectFaviconImage(props: {
+  readonly cacheKey: string;
   readonly faviconUrl: string | null;
   readonly open?: boolean;
   readonly projectTitle: string;
@@ -147,8 +175,11 @@ function ProjectFaviconImage(props: {
       {/* Favicon image (hidden until loaded) */}
       {props.faviconUrl ? (
         <Image
+          // Decoded once per row identity; never kept on disk by expo-image (it
+          // cannot be cleared per node): the device copy is the saved store's.
           source={{
             uri: props.faviconUrl,
+            cacheKey: props.cacheKey,
           }}
           accessibilityLabel={`${props.projectTitle} favicon`}
           style={{
@@ -158,7 +189,7 @@ function ProjectFaviconImage(props: {
             ...(showImage ? {} : { position: "absolute" as const, opacity: 0 }),
           }}
           contentFit="contain"
-          cachePolicy="none"
+          cachePolicy="memory"
           onLoad={() => {
             setStatus("loaded");
           }}
