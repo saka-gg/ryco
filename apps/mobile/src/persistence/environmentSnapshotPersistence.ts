@@ -67,6 +67,18 @@ import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshot
  */
 export const SNAPSHOT_WRITE_DEBOUNCE_MS = 2_000;
 export const SNAPSHOT_WRITE_MAX_WAIT_MS = 10_000;
+/**
+ * An environment written within the last `SNAPSHOT_BUSY_WINDOW_MS` and dirty
+ * again is busy (an agent streams into it): it is written at most once per
+ * `SNAPSHOT_BUSY_MAX_WAIT_MS`, after `SNAPSHOT_BUSY_DEBOUNCE_MS` of quiet. A
+ * capture re-serializes the streaming thread's content and hands the whole
+ * row (up to the per-environment byte cap) to SQLite, so while an agent runs
+ * this cuts that JS-thread work threefold; backgrounding still flushes at
+ * once, so nothing a person saw is lost when the app is suspended.
+ */
+export const SNAPSHOT_BUSY_WINDOW_MS = 60_000;
+export const SNAPSHOT_BUSY_DEBOUNCE_MS = 5_000;
+export const SNAPSHOT_BUSY_MAX_WAIT_MS = 30_000;
 const ROSTER_WRITE_DEBOUNCE_MS = 1_000;
 /**
  * Environments whose thread fragments are kept between captures. Fragments
@@ -147,6 +159,9 @@ export interface SnapshotPersistenceDeps {
   readonly contentCache?: ThreadContentCacheSetting;
   readonly debounceMs?: number;
   readonly maxWaitMs?: number;
+  /** Write window of a busy environment; defaults to the plain window when that is overridden. */
+  readonly busyDebounceMs?: number;
+  readonly busyMaxWaitMs?: number;
   readonly rosterDebounceMs?: number;
   readonly caps?: { readonly maxEntries: number; readonly maxBytes: number };
 }
@@ -209,6 +224,15 @@ function samePersistedSlices(left: PersistedSlices, right: PersistedSlices): boo
 export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) {
   const debounceMs = deps.debounceMs ?? SNAPSHOT_WRITE_DEBOUNCE_MS;
   const maxWaitMs = Math.max(debounceMs, deps.maxWaitMs ?? SNAPSHOT_WRITE_MAX_WAIT_MS);
+  const windowOverridden = deps.debounceMs !== undefined || deps.maxWaitMs !== undefined;
+  const busyDebounceMs =
+    deps.busyDebounceMs ?? (windowOverridden ? debounceMs : SNAPSHOT_BUSY_DEBOUNCE_MS);
+  const busyMaxWaitMs = Math.max(
+    busyDebounceMs,
+    deps.busyMaxWaitMs ?? (windowOverridden ? maxWaitMs : SNAPSHOT_BUSY_MAX_WAIT_MS),
+  );
+  /** When each environment's last capture started (`Date.now()`), for the busy window. */
+  const lastCapturedAt = new Map<EnvironmentId, number>();
   const rosterDebounceMs = deps.rosterDebounceMs ?? ROSTER_WRITE_DEBOUNCE_MS;
   const yieldToEventLoop = deps.yieldToEventLoop ?? yieldWithTimeout;
   const dirtyTimers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
@@ -339,6 +363,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     if (pending) clearTimeout(pending);
     dirtyTimers.delete(environmentId);
     dirtySince.delete(environmentId);
+    lastCapturedAt.set(environmentId, Date.now());
     void capture(environmentId).catch(warn("could not persist environment snapshot"));
   };
 
@@ -349,7 +374,10 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     dirtySince.set(environmentId, since);
     const pending = dirtyTimers.get(environmentId);
     if (pending) clearTimeout(pending);
-    const delayMs = Math.max(0, Math.min(debounceMs, since + maxWaitMs - now));
+    const busy = now - (lastCapturedAt.get(environmentId) ?? -Infinity) < SNAPSHOT_BUSY_WINDOW_MS;
+    const delayMs = busy
+      ? Math.max(0, Math.min(busyDebounceMs, since + busyMaxWaitMs - now))
+      : Math.max(0, Math.min(debounceMs, since + maxWaitMs - now));
     dirtyTimers.set(
       environmentId,
       setTimeout(() => captureDirty(environmentId), delayMs),
@@ -365,6 +393,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
 
   const purgeEnvironment = async (environmentId: EnvironmentId): Promise<void> => {
     serializers.delete(environmentId);
+    lastCapturedAt.delete(environmentId);
     const pending = dirtyTimers.get(environmentId);
     if (pending) {
       clearTimeout(pending);
@@ -446,10 +475,20 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   // marking the environment dirty (its detail snapshot, an older page of
   // history), so a change to an environment's message slices marks it too.
   const observedMessages = new Map<string, { readonly ids: unknown; readonly byId: unknown }>();
+  // The threads store changes on every event of every environment; most of
+  // those changes leave `environmentStateById` (or a given environment's
+  // state) as it was. Only environments whose state object changed are
+  // looked at, so a busy store costs O(1) per change for the others.
+  let observedEnvironments: Record<string, EnvironmentState> | null = null;
   const noticeMessageChanges = () => {
     const environments = deps.store.getState().environmentStateById;
+    const previous = observedEnvironments;
+    if (environments === previous) return;
+    observedEnvironments = environments;
     const included = contentEnabled();
-    for (const [environmentId, state] of Object.entries(environments)) {
+    for (const environmentId in environments) {
+      const state = environments[environmentId] as EnvironmentState;
+      if (previous !== null && previous[environmentId] === state) continue;
       const seen = observedMessages.get(environmentId);
       if (seen?.ids === state.messageIdsByThreadId && seen.byId === state.messageByThreadId) {
         continue;
@@ -653,6 +692,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     for (const timer of dirtyTimers.values()) clearTimeout(timer);
     dirtyTimers.clear();
     dirtySince.clear();
+    lastCapturedAt.clear();
     serializers.clear();
     observedMessages.clear();
     if (rosterTimer) clearTimeout(rosterTimer);

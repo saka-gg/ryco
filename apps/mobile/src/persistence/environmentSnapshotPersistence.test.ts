@@ -61,6 +61,7 @@ import {
   createSnapshotPersistenceRuntime,
   initializeMobileSnapshotPersistence,
   resetMobileSnapshotPersistenceForTests,
+  SNAPSHOT_BUSY_MAX_WAIT_MS,
   SNAPSHOT_WRITE_DEBOUNCE_MS,
   SNAPSHOT_WRITE_MAX_WAIT_MS,
   type ThreadContentCacheSetting,
@@ -878,6 +879,43 @@ describe("environment snapshot persistence", () => {
     runtime.markDirty(environmentId);
     await vi.advanceTimersByTimeAsync(500);
     expect(snapshots.has(environmentId)).toBe(true);
+    runtime.dispose();
+  });
+
+  it("writes a busy environment at most once per busy window", async () => {
+    const { db } = createFakeSnapshotDb();
+    const writes: number[] = [];
+    const save = db.saveEnvironmentSnapshot;
+    const runtime = createSnapshotPersistenceRuntime({
+      db: {
+        ...db,
+        saveEnvironmentSnapshot: async (input) => {
+          writes.push(Date.now());
+          await save(input);
+        },
+      },
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const environmentId = env("persist-busy-window");
+    const start = Date.now();
+    // An agent streams for a minute and a half: the projection changes every half second.
+    for (let elapsed = 0, step = 0; elapsed < 90_000; elapsed += 500, step += 1) {
+      useStore.getState().syncServerShellSnapshot(wireSnapshot(`busy-${step}`), environmentId);
+      runtime.markDirty(environmentId);
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    const offsets = writes.map((at) => at - start);
+    // The first write comes by the plain maximum wait; after that the
+    // environment is busy and is written once per busy maximum wait.
+    expect(offsets[0]).toBeLessThanOrEqual(SNAPSHOT_WRITE_MAX_WAIT_MS);
+    for (let index = 1; index < offsets.length; index += 1) {
+      expect(offsets[index]! - offsets[index - 1]!).toBeGreaterThanOrEqual(
+        SNAPSHOT_BUSY_MAX_WAIT_MS - 500,
+      );
+    }
+    expect(writes.length).toBeLessThanOrEqual(4);
     runtime.dispose();
   });
 
