@@ -6,6 +6,7 @@ export * from "./keyedQuery.ts";
 export * from "./newerNodeState.ts";
 export * from "./protocol.ts";
 export * from "./providerCatalogCache.ts";
+export * from "./configSectionCache.ts";
 export * from "./deviceRpcClient.ts";
 export * from "./environmentServerConfigs.ts";
 export * from "./gitActionRecovery.ts";

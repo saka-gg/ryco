@@ -245,6 +245,7 @@ describe("wsRpcClient config subscription", () => {
     expect(harness.inputOf(0)).toEqual({
       providerStatuses: "delta",
       knownProviderCatalogs: ["digest-a"],
+      knownConfigSections: [],
     });
 
     harness.attempts[0]!.listener(
@@ -257,12 +258,16 @@ describe("wsRpcClient config subscription", () => {
     providerCatalogCache.clear();
   });
 
-  it("names nothing on a page that holds no catalogs (and an old server's snapshot passes)", () => {
+  it("opts in with no catalogs on a page that holds none (and an old server's snapshot passes)", () => {
     providerCatalogCache.clear();
     const harness = makeHarness();
     const listener = vi.fn();
     harness.client.server.subscribeConfig(listener);
-    expect(harness.inputOf(0)).toEqual({ providerStatuses: "delta" });
+    expect(harness.inputOf(0)).toEqual({
+      providerStatuses: "delta",
+      knownProviderCatalogs: [],
+      knownConfigSections: [],
+    });
     const legacy = snapshotEvent([provider("codex", "a")]);
     harness.attempts[0]!.listener(legacy);
     expect(listener).toHaveBeenCalledWith(legacy);
@@ -289,6 +294,7 @@ describe("wsRpcClient config subscription", () => {
     expect(harness.inputOf(0)).toEqual({
       providerStatuses: "delta",
       knownProviderCatalogs: ["digest-a"],
+      knownConfigSections: [],
     });
     providerCatalogCache.clear();
   });
@@ -305,7 +311,11 @@ describe("wsRpcClient config subscription", () => {
 
       await vi.advanceTimersByTimeAsync(1);
       expect(harness.attempts).toHaveLength(1);
-      expect(harness.inputOf(0)).toEqual({ providerStatuses: "delta" });
+      expect(harness.inputOf(0)).toEqual({
+        providerStatuses: "delta",
+        knownProviderCatalogs: [],
+        knownConfigSections: [],
+      });
 
       // Later subscriptions are not held up by the same load either.
       harness.client.server.subscribeConfig(vi.fn());
@@ -348,7 +358,11 @@ describe("wsRpcClient config subscription", () => {
     expect(harness.attempts[0]!.unsubscribe).toHaveBeenCalled();
     expect(harness.attempts).toHaveLength(2);
     providerCatalogCache.put("digest-a", catalog("a"));
-    expect(harness.inputOf(1)).toEqual({ providerStatuses: "delta" });
+    expect(harness.inputOf(1)).toEqual({
+      providerStatuses: "delta",
+      knownProviderCatalogs: [],
+      knownConfigSections: [],
+    });
     providerCatalogCache.clear();
   });
 });

@@ -525,12 +525,36 @@ export const ServerConfigProviderCatalogs = Schema.Struct({
 });
 export type ServerConfigProviderCatalogs = typeof ServerConfigProviderCatalogs.Type;
 
+/**
+ * The parts of a config snapshot a client can hold by digest besides provider catalogs: they
+ * rarely change between a client's reconnects.
+ */
+export const ServerConfigSectionName = Schema.Literals(["settings", "keybindings"]);
+export type ServerConfigSectionName = typeof ServerConfigSectionName.Type;
+
+/**
+ * Section bookkeeping of a snapshot sent to a client that named the sections it holds
+ * (`knownConfigSections`): each section's digest, and the sections left out because the client
+ * holds them under that digest. A left-out section is sent as a placeholder (default settings,
+ * no keybindings) the client must replace before using the snapshot.
+ */
+export const ServerConfigSections = Schema.Struct({
+  digests: Schema.Struct({
+    settings: ServerProviderCatalogDigest,
+    keybindings: ServerProviderCatalogDigest,
+  }),
+  omitted: Schema.Array(ServerConfigSectionName),
+});
+export type ServerConfigSections = typeof ServerConfigSections.Type;
+
 export const ServerConfigStreamSnapshotEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("snapshot"),
   config: ServerConfig,
   /** Only for a client that sent `knownProviderCatalogs`; older servers never send it. */
   providerCatalogs: Schema.optionalKey(ServerConfigProviderCatalogs),
+  /** Only for a client that sent `knownConfigSections`; older servers never send it. */
+  configSections: Schema.optionalKey(ServerConfigSections),
 });
 export type ServerConfigStreamSnapshotEvent = typeof ServerConfigStreamSnapshotEvent.Type;
 
@@ -606,6 +630,14 @@ export const ServerSubscribeConfigInput = Schema.Struct({
    */
   knownProviderCatalogs: Schema.optional(
     Schema.Array(ServerProviderCatalogDigest).check(Schema.isMaxLength(64)),
+  ),
+  /**
+   * Digests of config sections (`ServerConfigSectionName`) the client already holds, possibly
+   * none: the snapshot then leaves those sections out and names every section's digest in
+   * `configSections`. Older servers ignore the field.
+   */
+  knownConfigSections: Schema.optional(
+    Schema.Array(ServerProviderCatalogDigest).check(Schema.isMaxLength(8)),
   ),
 });
 export type ServerSubscribeConfigInput = typeof ServerSubscribeConfigInput.Type;
