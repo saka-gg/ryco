@@ -32,6 +32,45 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.45",
+    date: "November 10, 2026",
+    dateTime: "2026-11-10",
+    summary:
+      "Claude Fable 5.2, Statistics costs from the same price list as Usage, a What's new dialog, and the coming iPhone app gains a desktop-style composer and conversation import.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.45`,
+    highlights: [
+      {
+        title: "Claude Fable 5.2",
+        summary:
+          "Fable 5.2 joins the model picker with Fast mode and a choice of 200k or 1M context, and choosing plain “fable” now means Fable 5.2. It shows up once Claude Code is v2.1.321 or newer.",
+      },
+      {
+        title: "Statistics costs you can trust",
+        summary:
+          "Settings → Statistics now prices usage with the same price list and custom prices as Usage, so current models such as Opus 5.5 and GPT-6 have a cost. Cache writes and Fast mode are billed at their own rates from now on.",
+      },
+      {
+        title: "What's new, in the app",
+        summary:
+          "Settings → About and the command palette open a What's new dialog, which also appears once after an update. Each GitHub release opens with the same notes.",
+      },
+      {
+        title: "A simpler app icon",
+        summary: "The app icon shows only the R mark.",
+      },
+      {
+        title: "A desktop-style composer on the phone",
+        summary:
+          "The iPhone app, still in development, gets a composer laid out like the desktop one, with provider tabs in the model picker and a tuning dial. A machine picker with status rings sits on every tab, and a chat keeps following a new turn without jumping when you scroll up.",
+      },
+      {
+        title: "More of Ryco on the phone",
+        summary:
+          "The iPhone app imports Codex and Claude Code conversations, copies projects between machines, edits project settings, and runs chats without a project, with goals and plan actions. It can also message a subagent, search inside a chat and resume after a usage limit.",
+      },
+    ],
+  },
+  {
     version: "0.1.44",
     date: "November 9, 2026",
     dateTime: "2026-11-09",
