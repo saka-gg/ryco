@@ -50,6 +50,7 @@ describe("Desktop workspace IPC boundary", () => {
       "cancelVerification",
       "verifyApproval",
       "publishThreadContent",
+      "publishThreadContentChanges",
       "getThreadContent",
       "getThreadContentCacheEnabled",
       "setThreadContentCacheEnabled",
@@ -82,6 +83,7 @@ describe("Desktop workspace IPC boundary", () => {
     const preload = source("preload.ts");
     for (const channel of [
       "publishThreadContent",
+      "publishThreadContentChanges",
       "getThreadContent",
       "getThreadContentCacheEnabled",
       "setThreadContentCacheEnabled",
@@ -376,6 +378,37 @@ describe("Desktop workspace state projections", () => {
           "thread content setting",
         );
       }
+    });
+
+    it("keeps a change to published content, and refuses one it cannot complete", async () => {
+      const { handlers, cache, scope } = setup();
+      await handlers.publishThreadContent(environmentId, threadsOf(["a", "b"]));
+      expect(
+        await handlers.publishThreadContentChanges(environmentId, {
+          order: ["a", "b"],
+          changed: { b: content("b", "new b") },
+        }),
+      ).toBe(true);
+      const kept = await cache.load(scope);
+      expect(Object.keys(kept)).toEqual(["a", "b"]);
+      expect(kept["b"]?.messages[0]?.text).toBe("new b");
+      expect(
+        await handlers.publishThreadContentChanges(environmentId, { order: ["z"], changed: {} }),
+      ).toBe(false);
+      for (const invalid of [
+        null,
+        [],
+        { order: "a", changed: {} },
+        { order: ["a"], changed: [] },
+        { order: [7], changed: {} },
+        { order: ["a", "a"], changed: {} },
+        { order: Array.from({ length: 1_025 }, (_, index) => `t${index}`), changed: {} },
+      ]) {
+        await expect(handlers.publishThreadContentChanges(environmentId, invalid)).rejects.toThrow(
+          "thread content",
+        );
+      }
+      await cache.dispose();
     });
 
     it("bounds what it keeps to the shared thread and size limits", async () => {

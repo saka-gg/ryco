@@ -4829,6 +4829,7 @@ function registerIpcHandlers(): void {
     DESKTOP_WORKSPACE_IPC.beginVerification,
     DESKTOP_WORKSPACE_IPC.cancelVerification,
     DESKTOP_WORKSPACE_IPC.verifyApproval,
+    DESKTOP_WORKSPACE_IPC.publishThreadContentChanges,
     DESKTOP_WORKSPACE_IPC.getThreadContent,
     DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled,
     DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled,
@@ -4880,6 +4881,13 @@ function registerIpcHandlers(): void {
         handlers.publishThreadContent(rawEnvironmentId, rawContent),
       ).catch(() => undefined);
     },
+  );
+  ipcMain.handle(
+    DESKTOP_WORKSPACE_IPC.publishThreadContentChanges,
+    (_event, rawEnvironmentId: unknown, rawChanges: unknown) =>
+      withDesktopWorkspace((handlers) =>
+        handlers.publishThreadContentChanges(rawEnvironmentId, rawChanges),
+      ).catch(() => false),
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContent, (_event, raw: unknown) =>
     withDesktopWorkspace((handlers) => handlers.getThreadContent(raw)),
@@ -5911,8 +5919,10 @@ async function selectDesktopBackendPort(
 }
 
 async function startDesktopComputerUse(): Promise<void> {
+  markDesktopStartupPhase("desktop.computer-use.start");
   try {
     const stack = await import("./computerUse/desktopStack.ts");
+    markDesktopStartupPhase("desktop.computer-use.loaded");
     registerComputerUseStackIpc = (runtime) => {
       stack.registerComputerUseIpc(runtime, () => mainWindow);
       stack.registerProjectBrowserIpc(runtime.embedded, () => mainWindow);
@@ -5938,6 +5948,7 @@ async function startDesktopComputerUse(): Promise<void> {
       },
     });
     await computerUseRuntime.start();
+    markDesktopStartupPhase("desktop.computer-use.ready");
   } catch {
     computerUseRuntime?.dispose();
     computerUseRuntime = null;
@@ -6144,8 +6155,10 @@ async function bootstrap(): Promise<void> {
   }
   // The backend is the critical path. Everything its bootstrap envelope needs
   // comes first, in parallel; windows, IPC and the rest follow its start.
-  // Computer use only feeds the envelope's bridge binding: it runs beside the
-  // port selection and the shell environment, and nothing else waits for it.
+  // Computer use feeds the envelope's bridge binding, which the backend reads
+  // once at start: it runs beside the port selection and the shell
+  // environment, and the envelope waits for whichever ends last. The
+  // `desktop.backend.envelope.*` marks show how long that is (tens of ms).
   const computerUseStart = startDesktopComputerUse();
   const windowCaptureLoad = loadDesktopWindowCapture();
   const selectedPort = await selectDesktopBackendPort(configuredBackendPort);
@@ -6188,7 +6201,10 @@ async function bootstrap(): Promise<void> {
     // window in the meantime.
     ensurePackagedBootstrapWindowOpen("pre-backend-bootstrap");
   }
-  await Promise.all([shellEnvironmentCapture, computerUseStart]);
+  await shellEnvironmentCapture;
+  markDesktopStartupPhase("desktop.backend.envelope.shell-ready");
+  await computerUseStart;
+  markDesktopStartupPhase("desktop.backend.envelope.ready");
   startBackend();
   prepareDesktopHostedIdentityResume();
   writeDesktopLogHeader("bootstrap backend start requested");

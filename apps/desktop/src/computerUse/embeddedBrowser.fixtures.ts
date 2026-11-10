@@ -224,7 +224,8 @@ export class FakeWebContents extends EventEmitter {
   });
   readonly capturePage = vi.fn(async () => ({
     resize: (_size: { width?: number; height?: number }) => ({
-      toDataURL: () => "data:image/png;base64,",
+      toBitmap: () => Buffer.alloc(4),
+      toJPEG: (_quality: number) => Buffer.alloc(0),
     }),
   }));
   readonly navigationHistory = {

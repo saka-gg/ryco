@@ -263,6 +263,8 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
    * default is the threads runtime's animation-frame scheduler.
    */
   readonly scheduleShellFrame?: (callback: () => void) => void;
+  /** How long buffered shell items may wait without a frame (see `fallbackDelayMs` of the batcher). */
+  readonly shellBatchFallbackDelayMs?: () => number;
   readonly onShellSnapshotReceived: (environmentId: EnvironmentId) => void;
   readonly onShellSnapshotCurrent: (environmentId: EnvironmentId) => void;
   readonly onShellSnapshotApplied: (environmentId: EnvironmentId) => void;
@@ -1661,6 +1663,9 @@ export function createEnvironmentConnectionSupervisor<
   >({
     apply: applyShellBatch,
     ...(input.scheduleShellFrame === undefined ? {} : { scheduleFrame: input.scheduleShellFrame }),
+    ...(input.shellBatchFallbackDelayMs === undefined
+      ? {}
+      : { fallbackDelayMs: input.shellBatchFallbackDelayMs }),
   });
   const flushShellEvents = () => shellBatcher.flush();
   const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) =>

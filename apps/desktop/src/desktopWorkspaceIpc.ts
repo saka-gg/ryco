@@ -130,8 +130,11 @@ export function projectDesktopWorkspaceState(
 /** What the handlers need of the Desktop thread content cache. */
 export type DesktopWorkspaceThreadContent = Pick<
   DesktopThreadContentCache,
-  "isEnabled" | "setEnabled" | "load" | "publish"
+  "isEnabled" | "setEnabled" | "load" | "publish" | "publishChanges"
 >;
+
+/** The most thread ids a change may list; the cache keeps far fewer. */
+const THREAD_CONTENT_CHANGES_MAX_ORDER = 1_024;
 
 /** For a workspace client without a content cache: nothing is kept, and the setting reads off. */
 const NO_THREAD_CONTENT: DesktopWorkspaceThreadContent = {
@@ -139,6 +142,7 @@ const NO_THREAD_CONTENT: DesktopWorkspaceThreadContent = {
   setEnabled: async () => undefined,
   load: async () => ({}),
   publish: async () => undefined,
+  publishChanges: async () => false,
 };
 
 /**
@@ -232,6 +236,31 @@ export function createDesktopWorkspaceIpcHandlers(
       const scope = threadContentScope(client.snapshot(), environment);
       // The cache bounds what it is handed to the shared policy: thread count and record size.
       if (scope !== null) await threadContent.publish(scope, raw);
+    },
+    publishThreadContentChanges: async (rawEnvironmentId: unknown, raw: unknown) => {
+      const environment = environmentId(rawEnvironmentId);
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("Desktop thread content is invalid.");
+      }
+      const input = raw as { readonly order?: unknown; readonly changed?: unknown };
+      if (
+        !Array.isArray(input.order) ||
+        input.order.length > THREAD_CONTENT_CHANGES_MAX_ORDER ||
+        !input.order.every((threadId) => boundedText(threadId)) ||
+        new Set(input.order).size !== input.order.length ||
+        typeof input.changed !== "object" ||
+        input.changed === null ||
+        Array.isArray(input.changed)
+      ) {
+        throw new Error("Desktop thread content is invalid.");
+      }
+      const scope = threadContentScope(client.snapshot(), environment);
+      if (scope === null) return false;
+      // The cache bounds what it is handed to the shared policy: thread count and record size.
+      return threadContent.publishChanges(scope, {
+        order: input.order as ReadonlyArray<string>,
+        changed: input.changed,
+      });
     },
     getThreadContent: async (
       rawEnvironmentId: unknown,

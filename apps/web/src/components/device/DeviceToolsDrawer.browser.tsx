@@ -189,4 +189,33 @@ describe("DeviceToolsDrawer", () => {
     await screen.getByRole("switch", { name: "Show element frames" }).click();
     await expect.poll(() => frames.mock.calls.at(-1)?.[0]).toBeNull();
   });
+
+  it("stops reading the overlay while the window is hidden and reads at once on return", async () => {
+    const { api } = fakeDevice("ios-simulator");
+    const setVisibility = (state: DocumentVisibilityState) => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    try {
+      const screen = await render(
+        <DeviceToolsDrawer
+          udid={UDID}
+          platform="ios-simulator"
+          canChange
+          api={api}
+          onFramesChange={() => {}}
+        />,
+      );
+      await screen.getByRole("switch", { name: "Show element frames" }).click();
+      await expect.poll(() => vi.mocked(api.describeUi).mock.calls.length).toBe(1);
+      setVisibility("hidden");
+      // Longer than the 2 s refresh: a hidden window reads nothing.
+      await new Promise((resolve) => setTimeout(resolve, 2_300));
+      expect(api.describeUi).toHaveBeenCalledTimes(1);
+      setVisibility("visible");
+      await expect.poll(() => vi.mocked(api.describeUi).mock.calls.length).toBe(2);
+    } finally {
+      Reflect.deleteProperty(document, "visibilityState");
+    }
+  });
 });

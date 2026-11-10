@@ -606,6 +606,111 @@ describe("hosted conversation cold start", () => {
     await setHostedReadCacheEnabled(false);
     hostedHubController.resetForTests();
   }, 30_000);
+  it("saves a streaming machine's record on the streaming throttle, and its turn's end soon after", async () => {
+    // A tenth of real time: throttle 750 ms -> 75 ms, streaming 8 s -> 800 ms,
+    // and 6 s of streaming stand for a minute.
+    const scale = 10;
+    const streamFor = async (
+      letter: string,
+      streamingThrottleMs: number,
+    ): Promise<{ writes: number; bytes: number; afterEndMs: number }> => {
+      hostedHubController.resetForTests();
+      setHostedReadCacheSaveTimingForTests({
+        throttleMs: 75,
+        idleTimeoutMs: 200,
+        streamingThrottleMs,
+      });
+      await setHostedReadCacheEnabled(true);
+      const vault = getHostedReadVault();
+      const write = vi.spyOn(vault, "write");
+      const threadId = ThreadId.make(`thread-stream-${letter}`);
+      const messageId = MessageId.make(`stream-${letter}-1`);
+      // A large conversation (about 400 KB as UTF-8) that streams on.
+      const base = "é".repeat(200_000);
+      const workspace = seedCachedWorkspace(letter, [
+        { id: threadId, messages: [fixtureMessage(`stream-${letter}-1`, base)] },
+      ]);
+      const { environmentId } = workspace;
+      const recordWrites = () => write.mock.calls.filter((call) => call[1] === environmentId);
+      await bootstrapAuthenticatedFixture(`stream-account-${letter}`, workspace.node);
+      await vi.waitFor(() => expect(recordWrites()).toHaveLength(1), { timeout: 8_000 });
+      await settleHostedReadCacheSavesForTests();
+      const setTurn = (state: "running" | "completed") =>
+        useStore.setState((current) => {
+          const environment = current.environmentStateById[environmentId]!;
+          return {
+            environmentStateById: {
+              ...current.environmentStateById,
+              [environmentId]: {
+                ...environment,
+                threadTurnStateById: {
+                  ...environment.threadTurnStateById,
+                  [threadId]: { latestTurn: { state } as never },
+                },
+              },
+            },
+          };
+        });
+      setTurn("running");
+      const startWrites = recordWrites().length;
+      const startedAt = performance.now();
+      let tick = 0;
+      while (performance.now() - startedAt < 6_000) {
+        tick += 1;
+        // One streamed token about every 33 ms of real time.
+        useStore.setState((current) => {
+          const environment = current.environmentStateById[environmentId]!;
+          return {
+            environmentStateById: {
+              ...current.environmentStateById,
+              [environmentId]: {
+                ...environment,
+                messageByThreadId: {
+                  ...environment.messageByThreadId,
+                  [threadId]: {
+                    [messageId]: fixtureMessage(`stream-${letter}-1`, `${base} ${tick}`, {
+                      streaming: true,
+                    }),
+                  },
+                },
+              },
+            },
+          };
+        });
+        await new Promise((resolve) => setTimeout(resolve, 33 / scale));
+      }
+      const streamed = recordWrites().slice(startWrites);
+      const bytes = streamed.reduce(
+        (total, call) => total + new TextEncoder().encode(JSON.stringify(call[2])).byteLength,
+        0,
+      );
+      // The turn ends: its last state is saved after the short throttle.
+      const writesAtEnd = recordWrites().length;
+      const endedAt = performance.now();
+      setTurn("completed");
+      await vi.waitFor(() => expect(recordWrites().length).toBeGreaterThan(writesAtEnd), {
+        timeout: 5_000,
+      });
+      const afterEndMs = (performance.now() - endedAt) * scale;
+      write.mockRestore();
+      hostedHubStore.setState({ accountStatus: "signing-out" });
+      await vi.waitFor(() => expect(readHostedReadCache().accountId).toBeNull());
+      useStore.getState().removeEnvironmentState(environmentId);
+      await setHostedReadCacheEnabled(false);
+      hostedHubController.resetForTests();
+      return { writes: streamed.length, bytes, afterEndMs };
+    };
+
+    const before = await streamFor("s", 75);
+    const after = await streamFor("t", 800);
+    console.info(
+      `[hosted read cache] streaming minute: before ${before.writes} saves / ${(before.bytes / 1e6).toFixed(1)} MB encrypted, after ${after.writes} saves / ${(after.bytes / 1e6).toFixed(1)} MB; turn end saved after ${Math.round(after.afterEndMs)} ms`,
+    );
+    expect(after.writes).toBeLessThanOrEqual(9);
+    expect(before.writes).toBeGreaterThan(after.writes * 3);
+    // The finished turn waits the short throttle, not what was left of the streaming one.
+    expect(after.afterEndMs).toBeLessThan(8_000);
+  }, 60_000);
   it("trims to the record budget by bytes, least recently visited first and the open thread last", async () => {
     hostedHubController.resetForTests();
     await setHostedReadCacheEnabled(true);

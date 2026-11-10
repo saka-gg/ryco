@@ -18,6 +18,8 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
+import { createVisibilityAwarePoller } from "~/lib/visibilityPolling";
+import { webAppLifecycle } from "~/platform/appLifecycle";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { errorMessage } from "./deviceControls";
@@ -140,11 +142,15 @@ export function DeviceToolsDrawer(props: {
           setOverlay(false);
         },
       );
-    void read();
-    const timer = setInterval(() => void read(), OVERLAY_REFRESH_MS);
+    // Paused while the window is hidden; reads at once when it shows again.
+    const poller = createVisibilityAwarePoller({
+      lifecycle: webAppLifecycle,
+      run: read,
+      resolveDelayMs: () => OVERLAY_REFRESH_MS,
+    });
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      poller.stop();
     };
   }, [api, onFramesChange, overlay, udid]);
   useEffect(() => () => onFramesChange(null), [onFramesChange]);

@@ -735,6 +735,12 @@ export type DesktopThreadContentProjectionMap = Readonly<
   Record<string, DesktopThreadContentProjection>
 >;
 
+/** An environment's thread content as a change to what main holds (see `publishDesktopThreadContentChanges`). */
+export interface DesktopThreadContentChanges {
+  readonly order: ReadonlyArray<string>;
+  readonly changed: DesktopThreadContentProjectionMap;
+}
+
 export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
@@ -1248,6 +1254,17 @@ export interface DesktopBridge {
     environmentId: EnvironmentId,
     content: DesktopThreadContentProjectionMap,
   ) => void;
+  /**
+   * Publishes only what changed: `order` lists every thread the environment's
+   * content keeps (least recently visited first), `changed` the content of
+   * those that differ from what main last confirmed. Resolves to whether main
+   * stored it; `false` (it lacked a thread left out) asks for every thread on
+   * the next publication. Absent in a Desktop build without it.
+   */
+  publishDesktopThreadContentChanges?: (
+    environmentId: EnvironmentId,
+    changes: DesktopThreadContentChanges,
+  ) => Promise<boolean>;
   getDesktopThreadContent?: (
     environmentId: EnvironmentId,
   ) => Promise<DesktopThreadContentProjectionMap>;

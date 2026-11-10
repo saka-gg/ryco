@@ -16,7 +16,12 @@ export interface EnvironmentEventBatcherDeps<Event> {
   readonly apply: (environmentId: EnvironmentId, events: ReadonlyArray<Event>) => void;
   readonly scheduleFrame?: (callback: () => void) => void;
   readonly scheduleFallback?: (callback: () => void, delayMs: number) => void;
-  readonly fallbackDelayMs?: number;
+  /**
+   * How long buffered events may wait without a frame, read when a run is
+   * scheduled: a client that knows its frames stopped (a hidden document) can
+   * wait longer and commit a larger batch.
+   */
+  readonly fallbackDelayMs?: number | (() => number);
   readonly maxPendingEvents?: number;
   /**
    * Flush before every thread-store mutation so buffered events keep their
@@ -50,6 +55,8 @@ export function createEnvironmentEventBatcher<Event>(
     deps.scheduleFallback ??
     ((callback: () => void, delayMs: number) => void setTimeout(callback, delayMs));
   const fallbackDelayMs = deps.fallbackDelayMs ?? ENVIRONMENT_EVENT_BATCH_FALLBACK_DELAY_MS;
+  const readFallbackDelayMs =
+    typeof fallbackDelayMs === "function" ? fallbackDelayMs : () => fallbackDelayMs;
   const maxPendingEvents = deps.maxPendingEvents ?? ENVIRONMENT_EVENT_BATCH_MAX_PENDING;
 
   let groups: Array<{ readonly environmentId: EnvironmentId; readonly events: Event[] }> = [];
@@ -108,7 +115,7 @@ export function createEnvironmentEventBatcher<Event>(
       if (generation === scheduledGeneration) flush();
     };
     scheduleFrame(run);
-    scheduleFallback(run, fallbackDelayMs);
+    scheduleFallback(run, readFallbackDelayMs());
   }
 
   function enqueue(environmentId: EnvironmentId, event: Event): void {

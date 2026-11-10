@@ -69,7 +69,16 @@ function openCache(
   return cache;
 }
 
-const cacheFile = (directory: string) => Path.join(directory, "thread-content-v1.enc");
+/** The single file of earlier versions, read once and replaced by per-environment files. */
+const legacyCacheFile = (directory: string) => Path.join(directory, "thread-content-v1.enc");
+/** The cache files in `directory`: one per environment (and the legacy file until replaced). */
+const cacheFiles = (directory: string) =>
+  FS.existsSync(directory)
+    ? FS.readdirSync(directory)
+        .filter((name) => /^thread-content-v\d.*\.enc$/u.test(name))
+        .map((name) => Path.join(directory, name))
+    : [];
+const hasCacheFiles = (directory: string) => cacheFiles(directory).length > 0;
 const settingsFile = (directory: string) => Path.join(directory, "thread-content-settings.json");
 
 const scope = (environmentId: string, accountId = "account-a"): DesktopThreadContentScope => ({
@@ -124,13 +133,14 @@ describe("Desktop thread content cache", () => {
     expect(threadIds(await reopened.load(scope("environment-1")))).toEqual(["a", "b"]);
     expect((await reopened.load(scope("environment-1")))["a"]).toEqual(thread("a"));
 
-    const stored = FS.readFileSync(cacheFile(directory), "utf8");
+    expect(cacheFiles(directory)).toHaveLength(1);
+    const stored = FS.readFileSync(cacheFiles(directory)[0]!, "utf8");
     expect(stored).not.toContain(SECRET_MARKER);
     expect(Buffer.from(stored.split("\n")[1] ?? "", "base64").toString("utf8")).not.toContain(
       SECRET_MARKER,
     );
     if (process.platform !== "win32") {
-      expect(FS.statSync(cacheFile(directory)).mode & 0o077).toBe(0);
+      expect(FS.statSync(cacheFiles(directory)[0]!).mode & 0o077).toBe(0);
     }
   });
 
@@ -171,7 +181,7 @@ describe("Desktop thread content cache encryption", () => {
 
     await cache.publish(scope("environment-1"), threads(["a"]));
     await cache.flush();
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
     expect(writeFile).not.toHaveBeenCalled();
     expect(await cache.load(scope("environment-1"))).toEqual({});
 
@@ -179,7 +189,7 @@ describe("Desktop thread content cache encryption", () => {
     available.value = true;
     await cache.publish(scope("environment-1"), threads(["a"]));
     await cache.flush();
-    expect(FS.existsSync(cacheFile(directory))).toBe(true);
+    expect(hasCacheFiles(directory)).toBe(true);
   });
 
   it("cannot read what it cannot decrypt, and a purge still removes it", async () => {
@@ -194,7 +204,7 @@ describe("Desktop thread content cache encryption", () => {
     const locked = openCache(directory, { protection });
     expect(await locked.load(scope("environment-1"))).toEqual({});
     await locked.purgeAccount("account-a");
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
   });
 
   it("does not leave a file behind when the content cannot be encrypted at write time", async () => {
@@ -205,7 +215,7 @@ describe("Desktop thread content cache encryption", () => {
     available.value = false;
 
     await expect(cache.flush()).rejects.toThrow("cannot be encrypted");
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
     expect(FS.existsSync(directory) ? FS.readdirSync(directory) : []).toEqual([]);
   });
 });
@@ -224,17 +234,17 @@ describe("Desktop thread content cache setting", () => {
     const cache = openCache(directory);
     await cache.publish(scope("environment-1"), threads(["a"]));
     await cache.flush();
-    expect(FS.existsSync(cacheFile(directory))).toBe(true);
+    expect(hasCacheFiles(directory)).toBe(true);
 
     await cache.setEnabled(false);
     expect(await cache.isEnabled()).toBe(false);
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
     expect(await cache.load(scope("environment-1"))).toEqual({});
 
     // Off stays off for new content and across restarts.
     await cache.publish(scope("environment-1"), threads(["a"]));
     await cache.flush();
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
     const reopened = openCache(directory);
     expect(await reopened.isEnabled()).toBe(false);
 
@@ -253,7 +263,7 @@ describe("Desktop thread content cache setting", () => {
 
     vi.advanceTimersByTime(60_000);
     await cache.flush();
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
     expect(writeFile).toHaveBeenCalledTimes(1);
     expect(JSON.parse(FS.readFileSync(settingsFile(directory), "utf8"))).toEqual({
       version: 1,
@@ -270,7 +280,7 @@ describe("Desktop thread content cache setting", () => {
     writeFile.mockRejectedValueOnce(new Error("disk unavailable"));
     await expect(cache.setEnabled(false)).rejects.toThrow("disk unavailable");
     expect(await cache.isEnabled()).toBe(false);
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
   });
 
   it("ignores a setting file it cannot understand", async () => {
@@ -395,7 +405,7 @@ describe("Desktop thread content cache purges", () => {
     const cache = await filled(directory);
     await cache.purgeAccount("account-a");
 
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
     expect(await cache.load(scope("env-1"))).toEqual({});
   });
 
@@ -407,7 +417,7 @@ describe("Desktop thread content cache purges", () => {
     expect(writeFile).not.toHaveBeenCalled();
 
     await cache.retainAccount("account-b");
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
   });
 
   it("writes a purge at once, including changes still waiting", async () => {
@@ -416,7 +426,7 @@ describe("Desktop thread content cache purges", () => {
     const cache = openCache(directory);
     await cache.publish(scope("env-1"), threads(["a"]));
     await cache.publish(scope("env-2"), threads(["b"]));
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
 
     await cache.purgeEnvironment(scope("env-1"));
     expect(writeFile).toHaveBeenCalledTimes(1);
@@ -434,7 +444,7 @@ describe("Desktop thread content cache purges", () => {
     await cache.purgeEnvironment(scope("elsewhere"));
     await cache.purgeAccount("account-b");
     expect(writeFile).not.toHaveBeenCalled();
-    expect(FS.existsSync(cacheFile(directory))).toBe(true);
+    expect(hasCacheFiles(directory)).toBe(true);
   });
 });
 
@@ -452,7 +462,7 @@ describe("Desktop thread content cache files", () => {
   });
   const seed = (directory: string, body: string) => {
     FS.mkdirSync(directory, { recursive: true });
-    FS.writeFileSync(cacheFile(directory), body);
+    FS.writeFileSync(legacyCacheFile(directory), body);
   };
 
   it("ignores files it cannot use and replaces them on the next write", async () => {
@@ -480,7 +490,7 @@ describe("Desktop thread content cache files", () => {
     const cache = openCache(directory);
     expect(await cache.load(scope("env-1"))).toEqual({});
     await cache.purgeAccount("account-a");
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
   });
 
   it("validates every record and thread it reads back", async () => {
@@ -538,6 +548,149 @@ describe("Desktop thread content cache files", () => {
   });
 });
 
+describe("Desktop thread content cache per-environment files", () => {
+  const legacyBody = (records: ReadonlyArray<unknown>) => {
+    const encrypted = fakeProtection().encryptString(
+      JSON.stringify({ version: 1, hubOrigin: HUB_ORIGIN, records }),
+    );
+    return `ryco-desktop-thread-content-v1\n${encrypted.toString("base64")}\n`;
+  };
+
+  it("rewrites only the file of the environment that changed", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    await cache.publish(scope("env-1"), threads(["a"]));
+    await cache.publish(scope("env-2"), threads(["b"]));
+    await cache.publish(scope("env-3"), threads(["c"]));
+    await cache.flush();
+    expect(cacheFiles(directory)).toHaveLength(3);
+    writeFile.mockClear();
+
+    await cache.publish(scope("env-2"), threads(["b", "b2"]));
+    await cache.flush();
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    const reopened = openCache(directory);
+    expect(threadIds(await reopened.load(scope("env-1")))).toEqual(["a"]);
+    expect(threadIds(await reopened.load(scope("env-2")))).toEqual(["b", "b2"]);
+    expect(threadIds(await reopened.load(scope("env-3")))).toEqual(["c"]);
+  });
+
+  it("removes the file of an environment dropped beyond the cap", async () => {
+    const directory = temporaryDirectory();
+    let clock = 0;
+    const cache = openCache(directory, { now: () => (clock += 1) });
+    for (const environment of ["env-1", "env-2", "env-3", "env-4"]) {
+      await cache.publish(scope(environment), threads(["a"]));
+    }
+    await cache.flush();
+    expect(cacheFiles(directory)).toHaveLength(DESKTOP_THREAD_CONTENT_CACHE_MAX_ENVIRONMENTS);
+    expect(await openCache(directory).load(scope("env-1"))).toEqual({});
+  });
+
+  it("moves the single file of earlier versions into per-environment files", async () => {
+    const directory = temporaryDirectory();
+    FS.mkdirSync(directory, { recursive: true });
+    FS.writeFileSync(
+      legacyCacheFile(directory),
+      legacyBody([
+        { accountId: "account-a", environmentId: "env-1", capturedAt: 1, content: threads(["a"]) },
+        { accountId: "account-a", environmentId: "env-2", capturedAt: 2, content: threads(["b"]) },
+      ]),
+    );
+    const cache = openCache(directory);
+    expect(threadIds(await cache.load(scope("env-1")))).toEqual(["a"]);
+
+    await cache.publish(scope("env-3"), threads(["c"]));
+    await cache.flush();
+    expect(FS.existsSync(legacyCacheFile(directory))).toBe(false);
+    expect(cacheFiles(directory)).toHaveLength(3);
+    const reopened = openCache(directory);
+    for (const [environment, name] of [
+      ["env-1", "a"],
+      ["env-2", "b"],
+      ["env-3", "c"],
+    ] as const) {
+      expect(threadIds(await reopened.load(scope(environment)))).toEqual([name]);
+    }
+  });
+
+  it("does not trust a file under another environment's name", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    await cache.publish(scope("env-1"), threads(["a"]));
+    await cache.publish(scope("env-2"), threads(["b"]));
+    await cache.flush();
+    const [first, second] = cacheFiles(directory);
+    FS.copyFileSync(first!, second!);
+    const reopened = openCache(directory);
+    const loaded = [
+      await reopened.load(scope("env-1")),
+      await reopened.load(scope("env-2")),
+    ].filter((content) => Object.keys(content).length > 0);
+    expect(loaded).toHaveLength(1);
+  });
+});
+
+describe("Desktop thread content cache changes", () => {
+  it("keeps saved threads the change leaves out and takes the changed ones", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    await cache.publish(scope("env-1"), threads(["a", "b"]));
+
+    expect(
+      await cache.publishChanges(scope("env-1"), {
+        order: ["b", "a", "c"],
+        changed: { a: thread("a", "updated a"), c: thread("c") },
+      }),
+    ).toBe(true);
+    const content = await cache.load(scope("env-1"));
+    expect(threadIds(content)).toEqual(["b", "a", "c"]);
+    expect(content["a"]).toEqual(thread("a", "updated a"));
+    expect(content["b"]).toEqual(thread("b"));
+
+    // Threads no longer listed are dropped.
+    expect(await cache.publishChanges(scope("env-1"), { order: ["c"], changed: {} })).toBe(true);
+    expect(threadIds(await cache.load(scope("env-1")))).toEqual(["c"]);
+  });
+
+  it("refuses a change that leaves out a thread it does not hold, and changes nothing", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    await cache.publish(scope("env-1"), threads(["a"]));
+    expect(
+      await cache.publishChanges(scope("env-1"), { order: ["a", "unknown"], changed: {} }),
+    ).toBe(false);
+    expect(threadIds(await cache.load(scope("env-1")))).toEqual(["a"]);
+  });
+
+  it("validates the changed threads and drops those the policy refuses", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    expect(
+      await cache.publishChanges(scope("env-1"), {
+        order: ["a", "broken"],
+        changed: { a: thread("a"), broken: { messages: [{ id: 1 }] } },
+      }),
+    ).toBe(true);
+    expect(threadIds(await cache.load(scope("env-1")))).toEqual(["a"]);
+  });
+
+  it("stores nothing while the cache is off or encryption is unavailable", async () => {
+    const available = { value: false };
+    const directory = temporaryDirectory();
+    const locked = openCache(directory, { protection: fakeProtection(available) });
+    expect(
+      await locked.publishChanges(scope("env-1"), { order: ["a"], changed: { a: thread("a") } }),
+    ).toBe(false);
+    available.value = true;
+    await locked.setEnabled(false);
+    expect(
+      await locked.publishChanges(scope("env-1"), { order: ["a"], changed: { a: thread("a") } }),
+    ).toBe(false);
+    expect(await locked.load(scope("env-1"))).toEqual({});
+  });
+});
+
 describe("Desktop thread content cache writes", () => {
   function fakeClock() {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
@@ -552,11 +705,11 @@ describe("Desktop thread content cache writes", () => {
     expect(threadIds(await cache.load(scope("env-1")))).toEqual(["a"]);
     vi.advanceTimersByTime(1_999);
     await cache.load(scope("env-1"));
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
 
     vi.advanceTimersByTime(1);
     await cache.flush();
-    expect(FS.existsSync(cacheFile(directory))).toBe(true);
+    expect(hasCacheFiles(directory)).toBe(true);
     expect(writeFile).toHaveBeenCalledTimes(1);
   });
 
@@ -573,7 +726,8 @@ describe("Desktop thread content cache writes", () => {
 
     vi.advanceTimersByTime(2_000);
     await cache.flush();
-    expect(writeFile).toHaveBeenCalledTimes(1);
+    // One write for each environment's file.
+    expect(writeFile).toHaveBeenCalledTimes(2);
     const reopened = openCache(directory);
     expect(threadIds(await reopened.load(scope("env-1")))).toEqual(["e"]);
     expect(threadIds(await reopened.load(scope("env-2")))).toEqual(["z"]);
@@ -607,7 +761,7 @@ describe("Desktop thread content cache writes", () => {
     const directory = temporaryDirectory();
     const cache = openCache(directory);
     await cache.publish(scope("env-1"), threads(["a"]));
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
 
     await cache.dispose();
     expect(threadIds(await openCache(directory).load(scope("env-1")))).toEqual(["a"]);
@@ -624,7 +778,7 @@ describe("Desktop thread content cache writes", () => {
     await cache.publish(scope("env-1"), threads(["a"]));
     const hooks = process.listeners("exit").filter((listener) => !hooksBefore.has(listener));
     expect(hooks).toHaveLength(1);
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
 
     hooks[0]!(0);
     expect(threadIds(await openCache(directory).load(scope("env-1")))).toEqual(["a"]);
@@ -643,7 +797,7 @@ describe("Desktop thread content cache writes", () => {
 
     await expect(cache.flush()).rejects.toThrow("disk unavailable");
     expect(threadIds(await cache.load(scope("env-1")))).toEqual(["a"]);
-    expect(FS.existsSync(cacheFile(directory))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
 
     await cache.flush();
     expect(threadIds(await openCache(directory).load(scope("env-1")))).toEqual(["a"]);

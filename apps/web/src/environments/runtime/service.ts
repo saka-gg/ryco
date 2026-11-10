@@ -133,7 +133,8 @@ import {
   hostedEnvironmentConnectionGeneration,
   type HostedConnectionFence,
 } from "./hostedEnvironmentConnection";
-import { webFrameScheduler, webSocket } from "../../platform";
+import { webSocket } from "../../platform";
+import { readStreamBatchFallbackDelayMs, scheduleStreamBatchFrame } from "./streamBatchTiming";
 import { directNodeBrowserFrames } from "./nodeBrowserFrames";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
 /** Desktop-only, and off the boot path: loaded by the first Hub machine connection. */
@@ -269,6 +270,7 @@ function getEnvironmentSupervisor() {
       applyEnvironmentThreadDetailEvent(event as OrchestrationEvent, environmentId),
     stateSink: environmentStateSink,
     scheduleShellFrame: scheduleStreamBatchFrame,
+    shellBatchFallbackDelayMs: readStreamBatchFallbackDelayMs,
     onShellSnapshotReceived: (environmentId) => {
       if (environmentId === getPrimaryKnownEnvironment()?.environmentId) {
         markStartupPhase("primary-shell-snapshot-received");
@@ -719,19 +721,6 @@ function applyRecoveredEventBatch(
   getEnvironmentSupervisor().reconcileThreadDetailSubscriptionEvictionForEnvironment(environmentId);
 }
 
-/**
- * Schedules a stream batch's commit (thread-detail events, shell items). A
- * hidden document paints nothing and throttles frames and timers, so it only
- * coalesces the current task's burst instead of waiting for a frame.
- */
-function scheduleStreamBatchFrame(callback: () => void): void {
-  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-    queueMicrotask(callback);
-    return;
-  }
-  webFrameScheduler.scheduleFrame(callback);
-}
-
 // Thread-detail events arrive one WebSocket message each (a streaming delta
 // every ~32 ms per active thread, bursts on replay). Batch them per animation
 // frame so N messages become one store commit and one round of derived UI
@@ -741,6 +730,7 @@ function scheduleStreamBatchFrame(callback: () => void): void {
 const threadDetailEventBatcher = createEnvironmentEventBatcher<OrchestrationEvent>({
   apply: (environmentId, events) => applyRecoveredEventBatch(events, environmentId),
   scheduleFrame: scheduleStreamBatchFrame,
+  fallbackDelayMs: readStreamBatchFallbackDelayMs,
 });
 
 export function applyEnvironmentThreadDetailEvent(

@@ -1316,7 +1316,7 @@ describe("memory budget", () => {
     const browser = newBrowser();
     const tab = await browser.open("https://example.com/", false, signal(), "project");
     const { contents } = fakeTab(tab.id);
-    await expect(browser.capture(tab.id)).resolves.toBe("data:image/png;base64,");
+    await expect(browser.capture(tab.id)).resolves.toBe("data:image/jpeg;base64,");
     expect(contents.getBackgroundThrottling()).toBe(false);
     await advance(BROWSER_PREVIEW_HOLD_MS - 1);
     expect(contents.getBackgroundThrottling()).toBe(false);
@@ -1330,7 +1330,7 @@ describe("memory budget", () => {
     expect(fresh.getBackgroundThrottling()).toBe(false);
     expect(suspended(browser, tab.id)).toBe(false);
     await flush();
-    await expect(browser.capture(tab.id)).resolves.toBe("data:image/png;base64,");
+    await expect(browser.capture(tab.id)).resolves.toBe("data:image/jpeg;base64,");
     expect(fresh.capturePage).toHaveBeenCalledTimes(1);
   });
 
@@ -1349,8 +1349,28 @@ describe("memory budget", () => {
     await expect(browser.capture(tab.id)).rejects.toThrow("This browser tab is reloading.");
     await advance(1);
     // The preview shows whatever the page has painted so far.
-    await expect(browser.capture(tab.id)).resolves.toBe("data:image/png;base64,");
+    await expect(browser.capture(tab.id)).resolves.toBe("data:image/jpeg;base64,");
     expect(fresh.capturePage).toHaveBeenCalledTimes(1);
+  });
+
+  it("capture encodes a JPEG only when the page's pixels changed", async () => {
+    fakeTime();
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    let pixels = Buffer.from([1, 2, 3, 4]);
+    const toJPEG = vi.fn((_quality: number) => Buffer.from(pixels));
+    contents.capturePage.mockImplementation(async () => ({
+      resize: () => ({ toBitmap: () => pixels, toJPEG }),
+    }));
+    const first = await browser.capture(tab.id);
+    expect(first).toBe(`data:image/jpeg;base64,${Buffer.from([1, 2, 3, 4]).toString("base64")}`);
+    // A still page: the same URL, nothing encoded.
+    await expect(browser.capture(tab.id)).resolves.toBe(first);
+    expect(toJPEG).toHaveBeenCalledOnce();
+    pixels = Buffer.from([5, 6, 7, 8]);
+    await expect(browser.capture(tab.id)).resolves.not.toBe(first);
+    expect(toJPEG).toHaveBeenCalledTimes(2);
   });
 
   it("capture waits for the first frame of a hidden page it unthrottles", async () => {
@@ -1363,7 +1383,7 @@ describe("memory budget", () => {
     const throttling = vi.spyOn(contents, "setBackgroundThrottling");
     const capturing = browser.capture(tab.id);
     await advance(50);
-    await expect(capturing).resolves.toBe("data:image/png;base64,");
+    await expect(capturing).resolves.toBe("data:image/jpeg;base64,");
     expect(contents.capturePage).toHaveBeenCalledTimes(2);
     expect(throttling.mock.calls).toEqual([[false]]);
   });
@@ -1379,7 +1399,7 @@ describe("memory budget", () => {
     const throttling = vi.spyOn(contents, "setBackgroundThrottling");
     const capturing = browser.capture(tab.id);
     await advance(50);
-    await expect(capturing).resolves.toBe("data:image/png;base64,");
+    await expect(capturing).resolves.toBe("data:image/jpeg;base64,");
     // Throttling and unthrottling it again shows it.
     expect(throttling.mock.calls).toEqual([[true], [false]]);
     expect(contents.getBackgroundThrottling()).toBe(false);
