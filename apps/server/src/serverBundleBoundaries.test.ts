@@ -801,7 +801,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    expect(bytes).toBeLessThan(7_231_000);
+    // 7.233013 MB on 2026-11-10 with unchanged answers for file trees, file reads, local
+    // changes, comparisons and preview chunks (+2,013 B, measured 7.231780 MB): their request
+    // and result fields and the tree listing's revision hash.
+    expect(bytes).toBeLessThan(7_233_013);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
