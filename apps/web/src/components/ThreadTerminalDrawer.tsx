@@ -84,6 +84,7 @@ import {
 } from "../terminalStateStore";
 import {
   rememberTerminalDimensions,
+  returnPreparedTerminalOpen,
   takePreparedTerminalOpen,
   terminalLaunchKey,
   type TerminalDimensions,
@@ -876,6 +877,12 @@ export function TerminalViewport({
     let openGeneration = 0;
     /** An open asked for the history after `appliedCursor`; the view holds still until it answers. */
     let awaitingHistoryDelta = false;
+    /** A full open still in flight; handed to the next mount if this one ends before it answers. */
+    let fullOpenInFlight: {
+      readonly promise: Promise<TerminalSessionSnapshot>;
+      readonly dimensions: TerminalDimensions;
+      readonly createdAt: number;
+    } | null = null;
     const openTerminal = async (options?: { readonly resync?: boolean }) => {
       const generation = ++openGeneration;
       try {
@@ -901,7 +908,8 @@ export function TerminalViewport({
           rows: activeTerminal.rows,
         };
         lastSentDimensionsRef.current = openDimensions;
-        const snapshot = await (prepared?.promise ??
+        const opening =
+          prepared?.promise ??
           api.terminal.open({
             threadId,
             terminalId,
@@ -911,8 +919,18 @@ export function TerminalViewport({
             ...(runtimeEnv ? { env: runtimeEnv } : {}),
             ...(snippetRequest ? { requireCurrentWorkspace: true } : {}),
             ...(sinceCursor ? { sinceCursor } : {}),
-          }));
+          });
+        fullOpenInFlight =
+          sinceCursor === undefined && !snippetRequest
+            ? {
+                promise: opening,
+                dimensions: openDimensions,
+                createdAt: prepared?.createdAt ?? Date.now(),
+              }
+            : null;
+        const snapshot = await opening;
         if (disposed || generation !== openGeneration) return;
+        fullOpenInFlight = null;
         awaitingHistoryDelta = false;
         hydratedSnapshot = snapshot;
         const historyDelta = isTerminalSnapshotDeltaFor(snapshot, sinceCursor);
@@ -972,6 +990,7 @@ export function TerminalViewport({
         }
       } catch (err) {
         if (disposed || generation !== openGeneration) return;
+        fullOpenInFlight = null;
         // A failed resync or delta open keeps applying live events over the
         // scrollback the view already shows, starting with those it held while
         // the open was in flight (an idle shell may send nothing to flush them).
@@ -1129,6 +1148,17 @@ export function TerminalViewport({
       lastAppliedTerminalEventIdRef.current = 0;
       lastSentDimensionsRef.current = null;
       unsubscribeTerminalEvents();
+      // Unmounted before the full open answered: the next mount takes the same answer. Handed
+      // back before this pane's hold goes, so the output stays held from the open's snapshot on.
+      if (fullOpenInFlight && !keepView) {
+        returnPreparedTerminalOpen({
+          environmentId,
+          threadId,
+          terminalId,
+          launchKey,
+          ...fullOpenInFlight,
+        });
+      }
       releaseOutput?.();
       window.clearTimeout(fitTimer);
       inputDisposable.dispose();

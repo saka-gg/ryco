@@ -165,13 +165,16 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
     rows: dimensions.rows,
     env: input.launch.runtimeEnv,
   });
-  const entry: PreparedTerminalOpen = {
+  registerPreparedTerminalOpen(key, {
     launchKey,
     dimensions,
     promise,
     createdAt: Date.now(),
     releaseOutput,
-  };
+  });
+}
+
+function registerPreparedTerminalOpen(key: string, entry: PreparedTerminalOpen): void {
   preparedTerminalOpens.set(key, entry);
   const discard = () => {
     if (preparedTerminalOpens.get(key) !== entry) return;
@@ -179,9 +182,45 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
     entry.releaseOutput();
   };
   // A failed prepare must not be handed out; the terminal opens on its own.
-  promise.catch(discard);
+  entry.promise.catch(discard);
   // Nobody took it in time: a later surface opens on its own and holds the output itself.
-  setTimeout(discard, PREPARED_TERMINAL_OPEN_TTL_MS);
+  setTimeout(discard, Math.max(0, entry.createdAt + PREPARED_TERMINAL_OPEN_TTL_MS - Date.now()));
+}
+
+/**
+ * Hands a full open that is still in flight back to the next mount of the same terminal. A
+ * terminal that unmounts before its answer (a pane focus change, React's development double
+ * run) would otherwise make its successor download the whole history again. The output stays
+ * held from the original open's snapshot on, so the successor replays what arrived meanwhile.
+ */
+export function returnPreparedTerminalOpen(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly terminalId: string;
+  readonly launchKey: string;
+  readonly dimensions: TerminalDimensions;
+  readonly promise: Promise<TerminalSessionSnapshot>;
+  readonly createdAt: number;
+}): void {
+  if (Date.now() - input.createdAt >= PREPARED_TERMINAL_OPEN_TTL_MS) return;
+  const key = preparedTerminalKey(input.environmentId, input.threadId, input.terminalId);
+  const existing = preparedTerminalOpens.get(key);
+  if (existing) {
+    preparedTerminalOpens.delete(key);
+    existing.releaseOutput();
+  }
+  const releaseOutput =
+    readEnvironmentApi(input.environmentId)?.terminal.attachOutput?.({
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+    }) ?? (() => undefined);
+  registerPreparedTerminalOpen(key, {
+    launchKey: input.launchKey,
+    dimensions: input.dimensions,
+    promise: input.promise,
+    createdAt: input.createdAt,
+    releaseOutput,
+  });
 }
 
 /** Hands a matching, fresh prepared open to the terminal that mounts. */
@@ -193,6 +232,7 @@ export function takePreparedTerminalOpen(input: {
 }): {
   readonly promise: Promise<TerminalSessionSnapshot>;
   readonly dimensions: TerminalDimensions;
+  readonly createdAt: number;
 } | null {
   const key = preparedTerminalKey(input.environmentId, input.threadId, input.terminalId);
   const entry = preparedTerminalOpens.get(key);
@@ -206,7 +246,7 @@ export function takePreparedTerminalOpen(input: {
   ) {
     return null;
   }
-  return { promise: entry.promise, dimensions: entry.dimensions };
+  return { promise: entry.promise, dimensions: entry.dimensions, createdAt: entry.createdAt };
 }
 
 export function resetPreparedTerminalOpensForTests(): void {
