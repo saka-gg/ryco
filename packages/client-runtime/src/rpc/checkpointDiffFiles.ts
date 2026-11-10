@@ -98,9 +98,12 @@ export function createCheckpointDiffFilePatches(options: CheckpointDiffFilePatch
     { input: CheckpointDiffInput; index: CheckpointDiffFileIndex; files: Map<number, string> }
   >();
   let flushScheduled = false;
+  const listeners = new Set<() => void>();
 
-  const set = (key: string, state: CheckpointDiffFilePatchState) =>
+  const set = (key: string, state: CheckpointDiffFilePatchState) => {
     appAtomRegistry.set(patchAtom(key), state);
+    for (const listener of listeners) listener();
+  };
   const get = (key: string) => appAtomRegistry.get(patchAtom(key));
 
   const retain = (key: string, patch: string) => {
@@ -237,6 +240,12 @@ export function createCheckpointDiffFilePatches(options: CheckpointDiffFilePatch
 
   return {
     filePatchAtom: (key: string) => patchAtom(key) as Atom.Atom<CheckpointDiffFilePatchState>,
+    readFilePatch: (key: string): CheckpointDiffFilePatchState => get(key),
+    /** Called after any file's state changed (a view over many files re-reads them). */
+    subscribe: (listener: () => void): (() => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     filePatchKey: keyOf,
     loadFilePatch,
     /** Drops every held patch (tests, sign-out). */

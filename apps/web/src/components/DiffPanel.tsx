@@ -85,6 +85,13 @@ import { usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import {
+  fileIndexedRenderKey,
+  pendingDiffFileOf,
+  shouldReadDiffFileByFile,
+  useFileIndexedDiff,
+} from "./diffPanel/fileIndexedDiff";
+import { PendingDiffFile } from "./diffPanel/PendingDiffFile";
+import {
   diffFileReference,
   diffLineSelection,
   fileLineSelectionRange,
@@ -179,7 +186,12 @@ const EMPTY_PARSED_DIFF_CONTENT: ParsedDiffContent = { patch: null, files: [] };
 const DIFF_PANEL_PARSE_SCOPE = "diff-panel";
 
 function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
-  return fileDiff.cacheKey ?? `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
+  // A diff read file by file keeps one key per file, loaded or not (D6).
+  return (
+    fileIndexedRenderKey(fileDiff) ??
+    fileDiff.cacheKey ??
+    `${fileDiff.prevName ?? "none"}:${fileDiff.name}`
+  );
 }
 
 function getDiffCollapseIconClassName(fileDiff: FileDiffMetadata): string {
@@ -367,18 +379,45 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     }
     return `conversation:${orderedTurnDiffSummaries.map((summary) => summary.turnId).join(",")}`;
   }, [orderedTurnDiffSummaries, selectedTurn]);
-  const activeCheckpointDiffQuery = useCheckpointDiff({
-    environmentId: activeThread?.environmentId ?? null,
-    threadId: activeThreadId,
-    fromTurnCount: activeCheckpointRange?.fromTurnCount ?? null,
-    toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
-    ignoreWhitespace: diffIgnoreWhitespace,
-    cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
-    // Each completed turn yields a new conversation key; the superseded
-    // full-range patch is dropped instead of being retained forever.
-    cacheSlot: selectedTurn ? null : "conversation",
-    enabled: isGitRepo && !comparing && !reviewingLocal,
-  });
+  // Large diffs (by the turns' own line counts) list their files first and load each
+  // file's patch near the viewport (D6); smaller ones keep their one request.
+  const readsDiffFileByFile = useMemo(
+    () => shouldReadDiffFileByFile(selectedTurn ? [selectedTurn] : orderedTurnDiffSummaries),
+    [orderedTurnDiffSummaries, selectedTurn],
+  );
+  const checkpointDiffInput = useMemo(
+    () => ({
+      environmentId: activeThread?.environmentId ?? null,
+      threadId: activeThreadId,
+      fromTurnCount: activeCheckpointRange?.fromTurnCount ?? null,
+      toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
+      ignoreWhitespace: diffIgnoreWhitespace,
+      cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
+      // Each completed turn yields a new conversation key; the superseded
+      // full-range patch is dropped instead of being retained forever.
+      cacheSlot: selectedTurn ? null : "conversation",
+      fileIndex: readsDiffFileByFile,
+      enabled: isGitRepo && !comparing && !reviewingLocal,
+    }),
+    [
+      activeCheckpointRange?.fromTurnCount,
+      activeCheckpointRange?.toTurnCount,
+      activeThread?.environmentId,
+      activeThreadId,
+      comparing,
+      conversationCacheScope,
+      diffIgnoreWhitespace,
+      isGitRepo,
+      readsDiffFileByFile,
+      reviewingLocal,
+      selectedTurn,
+    ],
+  );
+  const activeCheckpointDiffQuery = useCheckpointDiff(checkpointDiffInput);
+  const fileIndexedDiff = useFileIndexedDiff(
+    checkpointDiffInput,
+    comparing || reviewingLocal ? null : activeCheckpointDiffQuery.data,
+  );
   const selectedTurnCheckpointDiff = selectedTurn
     ? activeCheckpointDiffQuery.data?.diff
     : undefined;
@@ -461,6 +500,19 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     // Parsing does not depend on the theme: the worker pool drops its highlight
     // caches itself when the theme changes, so a theme toggle never re-parses.
     const parseScope = DIFF_PANEL_PARSE_SCOPE;
+    // Read file by file: the files are parsed one by one as they arrive (D6).
+    if (fileIndexedDiff && !comparing && !reviewingLocal) {
+      return {
+        content:
+          fileIndexedDiff.files.length === 0
+            ? EMPTY_PARSED_DIFF_CONTENT
+            : {
+                patch: { kind: "files", files: fileIndexedDiff.files },
+                files: fileIndexedDiff.files,
+              },
+        pendingParse: null,
+      };
+    }
     const normalizedPatch = typeof selectedPatch === "string" ? selectedPatch : "";
     if (normalizedPatch.length === 0) {
       activeDiffParser.parse("", parseScope);
@@ -524,6 +576,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     reviewingLocal,
     comparisonRevision,
     conversationCacheScope,
+    fileIndexedDiff,
     localChanges.data,
     localScope,
     selectedPatch,
@@ -661,9 +714,40 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     anchors: hunkAnchors,
     enabled: diffOpen && !isPhonePresentation,
   });
+  // Read file by file: a file not loaded yet has hunks nobody can see, so
+  // previous/next hunk and a search load the rest of the files first (D6).
+  const pendingDiffFileCount = fileIndexedDiff?.pendingCount ?? 0;
+  const requestAllDiffFiles = fileIndexedDiff?.requestAll;
+  const [queuedHunkStep, setQueuedHunkStep] = useState<1 | -1 | null>(null);
+  const goToHunk = hunkNavigation.go;
+  const goToDiffHunk = useCallback(
+    (direction: 1 | -1) => {
+      if (pendingDiffFileCount === 0) {
+        goToHunk(direction);
+        return;
+      }
+      requestAllDiffFiles?.();
+      setQueuedHunkStep(direction);
+    },
+    [goToHunk, pendingDiffFileCount, requestAllDiffFiles],
+  );
+  useEffect(() => {
+    if (queuedHunkStep === null || pendingDiffFileCount > 0) return;
+    setQueuedHunkStep(null);
+    // The loaded files' rows render before the step measures them.
+    void nextFrame().then(() => goToHunk(queuedHunkStep));
+  }, [goToHunk, pendingDiffFileCount, queuedHunkStep]);
+  const diffSearchActive = diffFind.active;
+  useEffect(() => {
+    if (diffSearchActive && pendingDiffFileCount > 0) requestAllDiffFiles?.();
+  }, [diffSearchActive, pendingDiffFileCount, requestAllDiffFiles]);
+  const diffFilesLoadingNotice =
+    fileIndexedDiff && pendingDiffFileCount > 0 && (diffSearchActive || queuedHunkStep !== null)
+      ? `Loading ${fileIndexedDiff.fileCount - pendingDiffFileCount} of ${fileIndexedDiff.fileCount} files…`
+      : null;
   const findSurface = useDiffFindSurface({
     onFind: diffFind.focusFind,
-    onHunk: hunkNavigation.go,
+    onHunk: goToDiffHunk,
     // The frozen phone tier keeps today's bar: no find key.
     enabled: !isPhonePresentation && renderablePatch?.kind === "files",
     scope: activeThread
@@ -682,7 +766,10 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     diffOpen && !isPhonePresentation,
   );
   // Totals describe this patch, not the checkout's status.
-  const patchTotals = useMemo(() => diffPatchTotals(renderableFiles), [renderableFiles]);
+  const patchTotals = useMemo(
+    () => fileIndexedDiff?.totals ?? diffPatchTotals(renderableFiles),
+    [fileIndexedDiff?.totals, renderableFiles],
+  );
   const listedFileKeys = useMemo(
     () => filteredFileEntries.map(({ fileDiff }) => buildFileDiffRenderKey(fileDiff)),
     [filteredFileEntries],
@@ -1304,14 +1391,19 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                     window.requestAnimationFrame(findSurface.focus);
                   }}
                 />
+                {diffFilesLoadingNotice ? (
+                  <p role="status" className="px-3 pb-1 text-[11px] text-muted-foreground">
+                    {diffFilesLoadingNotice}
+                  </p>
+                ) : null}
                 {isPhonePresentation ? null : (
                   <DiffReviewToolbar
                     fileTreeOpen={fileTreeOpen}
                     onFileTreeOpenChange={setFileTreeOpen}
                     totals={patchTotals}
-                    canPreviousHunk={hunkNavigation.canPrevious}
-                    canNextHunk={hunkNavigation.canNext}
-                    onHunk={hunkNavigation.go}
+                    canPreviousHunk={hunkNavigation.canPrevious || pendingDiffFileCount > 0}
+                    canNextHunk={hunkNavigation.canNext || pendingDiffFileCount > 0}
+                    onHunk={goToDiffHunk}
                     allCollapsed={listedFileKeys.length === 0 ? null : allListedFilesCollapsed}
                     onToggleCollapseAll={toggleAllListedFilesCollapsed}
                   />
@@ -1368,6 +1460,25 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
                           const fileKey = buildFileDiffRenderKey(fileDiff);
                           const themedFileKey = `${fileKey}:${resolvedTheme}`;
                           const collapsed = collapsedDiffFileKeys.has(fileKey);
+                          const pendingFile = pendingDiffFileOf(fileDiff);
+                          if (pendingFile) {
+                            return (
+                              <div
+                                key={fileKey}
+                                data-diff-file-path={filePath}
+                                data-diff-file-index={fileIndex}
+                                className="diff-render-file mb-2 first:mt-2 last:mb-0"
+                              >
+                                <PendingDiffFile
+                                  pending={pendingFile}
+                                  path={filePath}
+                                  collapsed={collapsed}
+                                  onToggleCollapsed={() => toggleDiffFileCollapsed(fileKey)}
+                                  onNeeded={() => fileIndexedDiff?.request([fileDiff])}
+                                />
+                              </div>
+                            );
+                          }
                           const filePick =
                             fileReferencePicker.pick?.fileKey === fileKey
                               ? fileReferencePicker.pick
