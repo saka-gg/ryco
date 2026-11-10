@@ -801,7 +801,12 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    expect(bytes).toBeLessThan(7_231_000);
+    // 7.252 MB on 2026-11-10 with the node's shared thread list (+20.7 KB, measured 7.251141 MB):
+    // the in-memory shell every reconnect, push alert, Hub cache and Agent Control read now share
+    // instead of rebuilding it from SQLite (13.2 KB), its changed-since resume index, payload-free
+    // replay headers in the event store (2.8 KB) and the per-subscription resend filter (1.5 KB);
+    // the Hub cache's own mirror and the per-event read table it replaces are gone.
+    expect(bytes).toBeLessThan(7_252_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
