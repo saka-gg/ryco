@@ -149,18 +149,27 @@ export class ProjectSearchContentError extends Schema.TaggedError<ProjectSearchC
   },
 ) {}
 
+/**
+ * `knownVersion`: the `version` the client holds; a node whose file still has
+ * it answers `unchanged` with empty `contents`. Older nodes ignore the field
+ * and send the file.
+ */
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+  knownVersion: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
 export const ProjectReadFileResult = Schema.Struct({
   relativePath: TrimmedNonEmptyString,
+  /** Empty when `unchanged`. */
   contents: Schema.String,
   version: TrimmedNonEmptyString,
   encoding: ProjectFileEncoding,
   lineEnding: ProjectFileLineEnding,
+  /** The file is still `knownVersion`: keep the contents already held. */
+  unchanged: Schema.optional(Schema.Literal(true)),
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
 
@@ -173,7 +182,10 @@ export class ProjectReadFileError extends Schema.TaggedError<ProjectReadFileErro
 ) {}
 
 /** The file `projects.subscribeFileChanges` watches: the same path a `projects.readFile` names. */
-export const ProjectWatchFileInput = ProjectReadFileInput;
+export const ProjectWatchFileInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+});
 export type ProjectWatchFileInput = typeof ProjectWatchFileInput.Type;
 
 /**
@@ -293,14 +305,30 @@ export class ProjectReadFileChunkError extends Schema.TaggedError<ProjectReadFil
   },
 ) {}
 
+const PROJECT_LISTING_REVISION_MAX_LENGTH = 128;
+
 export const ProjectListEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  /**
+   * The `revision` of the listing the client holds. A node whose listing still
+   * has it answers `unchanged` with no entries. Older nodes ignore the field
+   * and send the listing; they never send a `revision`, so a client never has
+   * one to send them.
+   */
+  knownRevision: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_LISTING_REVISION_MAX_LENGTH)),
+  ),
 });
 export type ProjectListEntriesInput = typeof ProjectListEntriesInput.Type;
 
 export const ProjectListEntriesResult = Schema.Struct({
+  /** Empty when `unchanged`. Entries carry no `parentPath`: it derives from `path`. */
   entries: Schema.Array(ProjectEntry),
   truncated: Schema.Boolean,
+  /** Identifies this listing's content; absent from older nodes. */
+  revision: Schema.optional(TrimmedNonEmptyString),
+  /** The listing is still `knownRevision`: keep the entries already held. */
+  unchanged: Schema.optional(Schema.Literal(true)),
 });
 export type ProjectListEntriesResult = typeof ProjectListEntriesResult.Type;
 

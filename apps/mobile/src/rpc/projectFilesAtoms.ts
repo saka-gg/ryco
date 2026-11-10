@@ -19,7 +19,9 @@ import type {
 } from "@ryco/contracts";
 import { KEY_SEP } from "@ryco/client-runtime/rpc";
 import {
+  listEntriesSince,
   normalizeWorkspaceFileSearchQuery,
+  readFileSince,
   WORKSPACE_FILE_SEARCH_LIMIT,
 } from "@ryco/client-runtime/state/files";
 
@@ -34,7 +36,8 @@ import {
 
 // Listings and search results tolerate a short window of staleness (the provider
 // invalidation flush and pull-to-refresh cover real changes); file contents do
-// not, so a remount always re-reads the file it is about to render.
+// not, so a remount always re-reads the file it is about to render (sending the
+// version it holds, so an unchanged file is not sent again).
 const LIST_ENTRIES_STALE_TIME_MS = 15_000;
 const READ_FILE_STALE_TIME_MS = 0;
 const SEARCH_ENTRIES_STALE_TIME_MS = 15_000;
@@ -75,10 +78,10 @@ export interface ProjectListEntriesInput {
   readonly enabled?: boolean;
 }
 
-export const projectListEntriesQuery = defineQuery<
+export const projectListEntriesQuery: ProjectFilesQuery<
   ProjectListEntriesInput,
   ProjectListEntriesResult
->({
+> = defineQuery<ProjectListEntriesInput, ProjectListEntriesResult>({
   label: "listEntries",
   staleTime: LIST_ENTRIES_STALE_TIME_MS,
   retainedKeyLimit: PROJECT_LIST_ENTRIES_RETAINED_KEY_LIMIT,
@@ -86,11 +89,14 @@ export const projectListEntriesQuery = defineQuery<
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}`,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  // Sends the held listing's revision: an unchanged tree costs about a hundred bytes.
   run: (input) =>
     runWithRetry(() =>
-      projectsClient(input.environmentId as EnvironmentId).listEntries({
-        cwd: input.cwd as string,
-      }),
+      listEntriesSince(
+        projectsClient(input.environmentId as EnvironmentId).listEntries,
+        input.cwd as string,
+        projectListEntriesQuery.getSnapshot(projectListEntriesQuery.keyOf(input)).data,
+      ),
     ),
 });
 
@@ -105,26 +111,29 @@ export interface ProjectReadFileInput {
   readonly enabled?: boolean;
 }
 
-export const projectReadFileQuery = defineQuery<ProjectReadFileInput, ProjectReadFileResult>({
-  label: "readFile",
-  staleTime: READ_FILE_STALE_TIME_MS,
-  retainedKeyLimit: PROJECT_READ_FILE_RETAINED_KEY_LIMIT,
-  isEnabled: (input) =>
-    (input.enabled ?? true) &&
-    input.environmentId !== null &&
-    input.cwd !== null &&
-    input.relativePath !== null,
-  buildKey: (input) =>
-    `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.relativePath}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  run: (input) =>
-    runWithRetry(() =>
-      projectsClient(input.environmentId as EnvironmentId).readFile({
-        cwd: input.cwd as string,
-        relativePath: input.relativePath as string,
-      }),
-    ),
-});
+export const projectReadFileQuery: ProjectFilesQuery<ProjectReadFileInput, ProjectReadFileResult> =
+  defineQuery<ProjectReadFileInput, ProjectReadFileResult>({
+    label: "readFile",
+    staleTime: READ_FILE_STALE_TIME_MS,
+    retainedKeyLimit: PROJECT_READ_FILE_RETAINED_KEY_LIMIT,
+    isEnabled: (input) =>
+      (input.enabled ?? true) &&
+      input.environmentId !== null &&
+      input.cwd !== null &&
+      input.relativePath !== null,
+    buildKey: (input) =>
+      `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.relativePath}`,
+    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+    // Sends the held version: re-reading an unchanged file costs about a hundred bytes.
+    run: (input) =>
+      runWithRetry(() =>
+        readFileSince(
+          projectsClient(input.environmentId as EnvironmentId).readFile,
+          { cwd: input.cwd as string, relativePath: input.relativePath as string },
+          projectReadFileQuery.getSnapshot(projectReadFileQuery.keyOf(input)).data,
+        ),
+      ),
+  });
 
 // ---------------------------------------------------------------------------
 // Read file binary (raster image preview)
@@ -249,6 +258,24 @@ export function invalidateProjectFilesForCheckout(
 ): void {
   projectFilesCache.refreshMatching(
     (parts) => parts[1] === environmentId && (cwd === null || parts[2] === cwd),
+  );
+}
+
+/**
+ * The open file changed on disk (its watch said so): read it again now,
+ * dropping a read already in flight, which may predate the change.
+ */
+export function refreshProjectReadFile(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+): void {
+  projectFilesCache.refreshMatching(
+    (parts) =>
+      parts[0] === "readFile" &&
+      parts[1] === environmentId &&
+      parts[2] === cwd &&
+      parts[3] === relativePath,
   );
 }
 

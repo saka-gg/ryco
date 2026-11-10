@@ -490,12 +490,16 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
         });
       }
 
+      const version = fileVersion(bytes);
+      const unchanged = input.knownVersion === version;
       return {
         relativePath: target.relativePath,
-        contents: normalizeLineEndings(contents),
-        version: fileVersion(bytes),
+        // The client holds these bytes already: the answer carries no text.
+        contents: unchanged ? "" : normalizeLineEndings(contents),
+        version,
         encoding: hasUtf8Bom ? "utf8-bom" : "utf8",
         lineEnding: detectLineEnding(contents),
+        ...(unchanged ? { unchanged: true as const } : {}),
       };
     },
   );

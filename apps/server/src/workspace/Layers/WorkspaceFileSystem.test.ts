@@ -339,6 +339,34 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
 
+    it.effect("answers unchanged when the client already holds the file's version (D4)", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const text = "export const value = 1;\n".repeat(20_000);
+        yield* writeTextFile(cwd, "src/big.ts", text);
+
+        const first = yield* workspaceFileSystem.readFile({ cwd, relativePath: "src/big.ts" });
+        const again = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "src/big.ts",
+          knownVersion: first.version,
+        });
+        expect(again).toEqual({ ...first, contents: "", unchanged: true });
+        expect(JSON.stringify(first).length).toBeGreaterThan(480_000);
+        expect(JSON.stringify(again).length).toBeLessThan(200);
+
+        yield* writeTextFile(cwd, "src/big.ts", `${text}// edited\n`);
+        const edited = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "src/big.ts",
+          knownVersion: first.version,
+        });
+        expect(edited.unchanged).toBeUndefined();
+        expect(edited.contents.endsWith("// edited\n")).toBe(true);
+      }),
+    );
+
     it.effect("normalizes UTF-8 BOM and CRLF files while retaining their format metadata", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem;
