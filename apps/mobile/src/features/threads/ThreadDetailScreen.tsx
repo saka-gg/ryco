@@ -120,6 +120,7 @@ import {
   selectServerFollowUpQueueSupported,
   selectThreadFollowUpQueue,
   shouldQueueFollowUpOnServer,
+  readQueueThreadView,
   followUpQueueEditAttachments,
   followUpQueueEditOf,
   withoutFollowUpQueueEditAttachment,
@@ -237,6 +238,7 @@ import {
   endThreadOutboxSteer,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
+  beginThreadOutboxForegroundDispatch,
   getThreadOutboxMovingMessageId,
   holdThreadOutboxForInterrupt,
   isThreadOutboxDispatchPending,
@@ -306,7 +308,16 @@ import {
 } from "@ryco/client-runtime/state/user-input";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { mobileSecretRequestCards } from "./secretRequestCardModel";
-import { sendThreadTurn } from "./sendThreadTurn";
+import { resolveThreadSendAction, sendThreadTurn } from "./sendThreadTurn";
+import { startOptimisticDispatch } from "./optimisticSend";
+import {
+  mergeRestoredDraft,
+  removeOptimisticUserMessage,
+  failOptimisticUserMessage,
+  takeFailedOptimisticUserMessages,
+  useIsOptimisticUserMessage,
+  type OptimisticUserMessage,
+} from "../../state/optimisticUserMessages";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
   clearThreadGoal,
@@ -500,12 +511,17 @@ function TimelineRow(props: {
 }) {
   const { entry, onForkFromMessage, onEditFromMessage, onUndoFileChangesOfReply, forkReply } =
     props;
+  const pending = useIsOptimisticUserMessage(
+    scopedThreadKey(scopeThreadRef(props.environmentId, props.threadId)),
+    entry.kind === "message" && entry.message.role === "user" ? entry.message.id : "",
+  );
   if (entry.kind === "message") {
     const message = (
       <ThreadMessage
         environmentId={props.environmentId}
         threadId={props.threadId}
         message={entry.message}
+        pending={pending}
         turnHtmlRenders={props.turnHtmlRenders}
         onForkFromHere={
           onForkFromMessage ? () => onForkFromMessage(forkReply ?? entry.message) : undefined
@@ -662,7 +678,11 @@ export function ThreadDetailScreen(props: {
   const [actionBusy, setActionBusy] = useState(false);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [stagedModelSelection, setStagedModelSelection] = useState<ModelSelection | null>(null);
-  const [sendBusy, setSendBusy] = useState(false);
+  // A send whose answer the composer waits for (an enqueue, a queue edit, a goal), and the
+  // optimistic dispatches still on their way behind a free composer.
+  const [sendWaitBusy, setSendBusy] = useState(false);
+  const [sendBusyCount, setSendBusyCount] = useState(0);
+  const sendBusy = sendWaitBusy || sendBusyCount > 0;
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>([]);
   // The attachments as they are now, for a redirect that waited on its declines.
   const attachmentsRef = useRef(attachments);
@@ -774,6 +794,42 @@ export function ThreadDetailScreen(props: {
     [environmentId, outboxMessages, threadId],
   );
   const outboxThreadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
+  // A failed optimistic send gives its draft back: into the composer while this screen shows,
+  // otherwise kept until it shows again (the composer's text is this screen's own).
+  const screenMountedRef = useRef(false);
+  const restoreDrafts = (drafts: ReadonlyArray<OptimisticUserMessage["draft"]>) => {
+    const composer = composerRef.current;
+    const merged = mergeRestoredDraft(drafts, {
+      prompt: composer?.getText() ?? "",
+      attachments: attachmentsRef.current,
+    });
+    composer?.setText(merged.prompt);
+    setAttachments(merged.attachments);
+  };
+  const restoreFailedSend = (entry: OptimisticUserMessage, error: string) => {
+    // After the composer's own clear of the send, which lands a few microtasks after it.
+    setTimeout(() => {
+      if (!screenMountedRef.current) {
+        failOptimisticUserMessage(outboxThreadKey, entry.message.id, error);
+        return;
+      }
+      removeOptimisticUserMessage(outboxThreadKey, entry.message.id);
+      restoreDrafts([entry.draft]);
+      setSendError(error);
+    }, 0);
+  };
+  useEffect(() => {
+    screenMountedRef.current = true;
+    const failed = takeFailedOptimisticUserMessages(outboxThreadKey);
+    if (failed.length > 0) {
+      restoreDrafts(failed.map((entry) => entry.draft));
+      setSendError(failed.at(-1)?.error ?? "Failed to send message.");
+    }
+    return () => {
+      screenMountedRef.current = false;
+    };
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per thread shown; the restore reads refs and stable setters.
+  }, [outboxThreadKey]);
   // "Edit from here" of this thread, from the question until the node's verdict. Kept per
   // thread outside this screen, so leaving and coming back neither forgets nor ends it.
   const revertPhase = useSyncExternalStore(
@@ -2364,9 +2420,12 @@ export function ThreadDetailScreen(props: {
 
     // A notification reply queues behind approvals still waiting: the turn they belong to is not
     // over, even where its row already reads completed (a provider that ends the message first).
+    // A send of this device still on its way counts too: its turn is about to start, and a
+    // second one queues behind it instead of racing it (`beginThreadOutboxForegroundDispatch`).
     const threadBusy =
       currentThread.latestTurn?.state === "running" ||
-      (notificationReply && pendingApprovals.length > 0);
+      (notificationReply && pendingApprovals.length > 0) ||
+      isThreadOutboxDispatchPending(outboxThreadKey);
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
     // and until it does `threadBusy` is read from a CACHED latestTurn — the
     // same window wave 2's review closed for the outbox drain. A send inside
@@ -2448,6 +2507,105 @@ export function ThreadDetailScreen(props: {
       return "steer" as const;
     };
 
+    const dispatchTurn = (extra: {
+      readonly setThreadError: (threadId: ThreadId, error: string | null) => void;
+      readonly messageId?: MessageId;
+      readonly createdAt?: string;
+      readonly onBeforeTurnStart?: () => void;
+    }) =>
+      executeSendTurn({
+        providerDriver: threadProviderDriver,
+        sourceProviderDriver: currentThread.session?.provider ?? null,
+        claudeCacheReview: mobileClaudeCacheReview,
+        skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
+        confirmStopBackgroundWork: mobileConfirmStopBackgroundWork,
+        // The retained detail subscription already holds what the Claude
+        // resume review reads; a send it clears skips the window read.
+        readSubscribedClaudeReviewState: () =>
+          selectSubscribedClaudeReviewState(
+            useStore.getState(),
+            scopeThreadRef(environmentId, threadId),
+          ),
+        assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
+          createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+        ),
+        api: ensureEnvironmentApi(environmentId),
+        thread: {
+          threadId,
+          isFirstMessage: currentThread.messages.length === 0,
+          isServerThread: true,
+          isLocalDraftThread: false,
+          activeThreadBranch: currentThread.branch,
+          worktreePath: currentThread.worktreePath,
+          createdAt: currentThread.createdAt,
+        },
+        composer: {
+          prompt: text,
+          images: attachments,
+          selectedModelSelection: modelSelection,
+          selectedModel: modelSelection.model,
+          hasSelectedModel: true,
+        },
+        project: {
+          projectId: currentThread.projectId,
+          projectCwd: currentProject?.cwd ?? "",
+        },
+        settings: {
+          runtimeMode: currentThread.runtimeMode,
+          interactionMode: currentThread.interactionMode,
+          tokenMode,
+        },
+        title: currentThread.title,
+        clearDraft: () => {},
+        restoreDraft: () => {},
+        ...extra,
+      });
+
+    // A plain send to an idle thread shows at once and frees the composer; the dispatch runs
+    // behind it (`startOptimisticDispatch`). Every other route still waits for its answer.
+    const route = resolveThreadSendAction({
+      threadBusy,
+      connected,
+      serverQueue,
+      serverQueueWaiting,
+    });
+    if (route === "dispatch" && !notificationReply) {
+      const messageId = newMessageId();
+      const createdAt = new Date().toISOString();
+      setSendBusyCount((count) => count + 1);
+      void startOptimisticDispatch({
+        threadKey: outboxThreadKey,
+        messageId,
+        createdAt,
+        outgoingText: composeOutgoingPrompt({ prompt: text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+        prompt: text,
+        attachments,
+        beginForegroundDispatch: () =>
+          beginThreadOutboxForegroundDispatch({
+            threadKey: outboxThreadKey,
+            messageId,
+            readView: () =>
+              readQueueThreadView(useStore.getState(), scopeThreadRef(environmentId, threadId)),
+          }),
+        dispatch: ({ onBeforeTurnStart, reportError }) =>
+          dispatchTurn({
+            messageId,
+            createdAt,
+            onBeforeTurnStart,
+            setThreadError: (_id, error) => reportError(error),
+          }),
+        onFailed: restoreFailedSend,
+        onSettled: (dispatched) => {
+          setSendBusyCount((count) => Math.max(0, count - 1));
+          // Messages queued behind it may go once its turn starts.
+          if (dispatched) runOutboxDrain();
+        },
+      });
+      setAttachments([]);
+      setAttachmentError(null);
+      return true;
+    }
+
     return runWhileBusy(setSendBusy, async () => {
       const sent = await sendThreadTurn(
         {
@@ -2501,54 +2659,7 @@ export function ThreadDetailScreen(props: {
             }
             return true;
           },
-          dispatch: () =>
-            executeSendTurn({
-              providerDriver: threadProviderDriver,
-              sourceProviderDriver: currentThread.session?.provider ?? null,
-              claudeCacheReview: mobileClaudeCacheReview,
-              skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
-              confirmStopBackgroundWork: mobileConfirmStopBackgroundWork,
-              // The retained detail subscription already holds what the Claude
-              // resume review reads; a send it clears skips the window read.
-              readSubscribedClaudeReviewState: () =>
-                selectSubscribedClaudeReviewState(
-                  useStore.getState(),
-                  scopeThreadRef(environmentId, threadId),
-                ),
-              assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
-                createMobileConnectionRegistry().driver.supervisor.read(environmentId),
-              ),
-              api: ensureEnvironmentApi(environmentId),
-              thread: {
-                threadId,
-                isFirstMessage: currentThread.messages.length === 0,
-                isServerThread: true,
-                isLocalDraftThread: false,
-                activeThreadBranch: currentThread.branch,
-                worktreePath: currentThread.worktreePath,
-                createdAt: currentThread.createdAt,
-              },
-              composer: {
-                prompt: text,
-                images: attachments,
-                selectedModelSelection: modelSelection,
-                selectedModel: modelSelection.model,
-                hasSelectedModel: true,
-              },
-              project: {
-                projectId: currentThread.projectId,
-                projectCwd: currentProject?.cwd ?? "",
-              },
-              settings: {
-                runtimeMode: currentThread.runtimeMode,
-                interactionMode: currentThread.interactionMode,
-                tokenMode,
-              },
-              title: currentThread.title,
-              clearDraft: () => {},
-              restoreDraft: () => {},
-              setThreadError: (_id, error) => setSendError(error),
-            }),
+          dispatch: () => dispatchTurn({ setThreadError: (_id, error) => setSendError(error) }),
         },
       );
       // The composer clears its own text on success; the attachment rows live
@@ -2561,7 +2672,6 @@ export function ThreadDetailScreen(props: {
       return sent;
     });
   };
-
   const runAction = (action: () => Promise<void>, failureTitle = "Could not do that") =>
     runWhileBusy(setActionBusy, async () => {
       try {
