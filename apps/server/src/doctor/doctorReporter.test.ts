@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { makeTerminalDoctorReporter } from "./doctorReporter.ts";
+import { makeJsonLinesDoctorReporter, makeTerminalDoctorReporter } from "./doctorReporter.ts";
 
 const drive = (tty: boolean) => {
   const output: Array<string> = [];
@@ -35,5 +35,27 @@ describe("doctorReporter", () => {
     expect(text.split("\r\u001b[2K")).toHaveLength(41);
     expect(text).toContain("Removing superseded history: scanned 40 of 40\nA warning\n");
     expect(text.endsWith("Checking the copy...\n")).toBe(true);
+  });
+});
+
+describe("makeJsonLinesDoctorReporter", () => {
+  it("writes one JSON object per line and marks the swap", () => {
+    const lines: string[] = [];
+    const reporter = makeJsonLinesDoctorReporter((line) => lines.push(line));
+    Effect.runSync(
+      Effect.all([
+        reporter.phase("Removing superseded history"),
+        reporter.progress("scanned 10 of 20 events", 0.5),
+        reporter.phase("Swapping the compacted copy in", "swap"),
+        reporter.note("Done."),
+      ]),
+    );
+    expect(lines.map((line) => JSON.parse(line))).toEqual([
+      { type: "phase", text: "Removing superseded history" },
+      { type: "progress", text: "scanned 10 of 20 events", fraction: 0.5 },
+      { type: "phase", text: "Swapping the compacted copy in", step: "swap" },
+      { type: "note", text: "Done." },
+    ]);
+    expect(lines.every((line) => line.endsWith("\n"))).toBe(true);
   });
 });

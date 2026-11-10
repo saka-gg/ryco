@@ -8,6 +8,7 @@ import { Context, Effect, FileSystem, Layer, Option, Schema, Semaphore } from "e
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
+  type DatabaseCompactionStatus,
   type DatabaseStorageReport,
   ProjectId,
   StorageCleanupPreview,
@@ -18,6 +19,7 @@ import {
   StorageSnapshot,
   type StorageEntry,
   type StorageRetentionPolicy,
+  type StartDatabaseCompactionResult,
 } from "@ryco/contracts";
 import { resolveStorageRetentionPolicy, retentionDue } from "@ryco/shared/storageRetention";
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
@@ -40,6 +42,8 @@ import {
   type ProviderSessionDirectoryShape,
 } from "../provider/Services/ProviderSessionDirectory.ts";
 import { TerminalManager, type TerminalManagerShape } from "../terminal/Services/Manager.ts";
+import { isTerminalWorking } from "../terminal/terminalActivity.ts";
+import { AgentWorkActivity } from "../orchestration/AgentWorkActivity.ts";
 import {
   WorkspaceAccessPolicy,
   type WorkspaceAccessPolicyShape,
@@ -163,6 +167,11 @@ export function makeStorageService(deps: {
   recordCheckoutRemoval?: (checkoutPath: string) => Effect.Effect<void>;
   /** The node's database (size, free space, compaction, backups); every scan page carries it. */
   readDatabase?: Effect.Effect<DatabaseStorageReport>;
+  /** One-click compaction (`databaseCompaction.ts`). Absent: unavailable. */
+  databaseCompaction?: {
+    readonly status: Effect.Effect<DatabaseCompactionStatus, StorageError>;
+    readonly start: Effect.Effect<StartDatabaseCompactionResult, StorageError>;
+  };
   /** Removes one listed database backup (the owner's click). Absent: unavailable. */
   removeDatabaseBackup?: (
     name: string,
@@ -1626,11 +1635,16 @@ export function makeStorageService(deps: {
           new StorageError({ detail: "Database backups cannot be removed on this node." }),
         )
       : deps.removeDatabaseBackup(name);
+  const unavailableCompaction = Effect.fail(
+    new StorageError({ detail: "One-click compaction is not available on this node." }),
+  );
   return {
     scan,
     preview,
     execute,
     removeDatabaseBackup,
+    databaseCompactionStatus: deps.databaseCompaction?.status ?? unavailableCompaction,
+    startDatabaseCompaction: deps.databaseCompaction?.start ?? unavailableCompaction,
     runRetention,
     purgePending,
     createTemporaryDirectory,
@@ -1681,6 +1695,38 @@ export const StorageServiceLive = Layer.effect(
     const scope = yield* Effect.scope;
     const databaseConfig = yield* ServerConfig;
     const loadBackupList = Effect.promise(() => import("./databaseBackupList.ts"));
+    const loadCompaction = Effect.promise(() => import("./databaseCompaction.ts"));
+    const agentWork = yield* Effect.serviceOption(AgentWorkActivity);
+    const terminalManager = yield* TerminalManager;
+    const restartSensitive = yield* RestartSensitiveWork;
+    const processStartedAtMs = Date.now() - process.uptime() * 1000;
+    const compactionStatus = Effect.gen(function* () {
+      const compaction = yield* loadCompaction;
+      const runner = compaction.compactionRunner({
+        mode: databaseConfig.mode,
+        serviceLabel: process.env.RYCO_SERVICE_LABEL,
+        platform: process.platform,
+      });
+      const busy = yield* compaction.compactionBusyReasons({
+        // Unknown counts as working: never stop the server on a guess.
+        agentWork: Option.isSome(agentWork)
+          ? Effect.map(
+              Effect.all([agentWork.value.interruptible, agentWork.value.restartInterruptible]),
+              ([now, next]) => now || next,
+            )
+          : Effect.succeed(true),
+        busyTerminals: terminalManager.listDiagnostics.pipe(
+          Effect.map((list) => list.some(isTerminalWorking)),
+          Effect.orElseSucceed(() => true),
+        ),
+        restartSensitiveWork: restartSensitive.count,
+      });
+      const lastRun = yield* compaction.readLastCompactionRun({
+        stateDir: databaseConfig.stateDir,
+        processStartedAtMs,
+      });
+      return { runner, busy, lastRun } satisfies DatabaseCompactionStatus;
+    });
     const service = makeStorageService({
       recordCheckoutRemoval,
       runInBackground: (work) =>
@@ -1698,10 +1744,35 @@ export const StorageServiceLive = Layer.effect(
           Effect.option,
         ),
       ]).pipe(
-        Effect.map(([report, backups]) =>
-          backups._tag === "Some" ? { ...report, backups: backups.value } : report,
-        ),
+        Effect.map(([report, backups]) => ({
+          ...report,
+          ...(backups._tag === "Some" ? { backups: backups.value } : {}),
+          oneClickCompaction: true,
+        })),
       ),
+      databaseCompaction: {
+        status: compactionStatus,
+        start: Effect.gen(function* () {
+          const status = yield* compactionStatus;
+          if (status.runner !== "service") {
+            return {
+              started: false,
+              detail:
+                status.runner === "desktop"
+                  ? "The desktop app runs the compaction."
+                  : "Stop this server and run the doctor command instead.",
+            };
+          }
+          if (status.busy.length > 0) return { started: false, detail: status.busy.join(" ") };
+          const compaction = yield* loadCompaction;
+          return yield* compaction.startServiceCompaction({
+            stateDir: databaseConfig.stateDir,
+            baseDir: databaseConfig.baseDir,
+            devUrl: databaseConfig.devUrl?.href ?? null,
+            now: new Date(),
+          });
+        }),
+      },
       removeDatabaseBackup: (name) =>
         loadBackupList.pipe(
           Effect.flatMap((backups) => backups.removeDatabaseBackup(databaseConfig.dbPath, name)),

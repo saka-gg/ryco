@@ -36,5 +36,15 @@ export function makeStorageHandlers(ctx: WsRpcContext) {
         WS_METHODS.storageRemoveDatabaseBackup,
         service((storage) => storage.removeDatabaseBackup(input.name)),
       ),
+    [WS_METHODS.storageDatabaseCompactionStatus]: () =>
+      ctx.ownerEffect(
+        WS_METHODS.storageDatabaseCompactionStatus,
+        service((storage) => storage.databaseCompactionStatus),
+      ),
+    [WS_METHODS.storageStartDatabaseCompaction]: () =>
+      ctx.ownerEffect(
+        WS_METHODS.storageStartDatabaseCompaction,
+        service((storage) => storage.startDatabaseCompaction),
+      ),
   });
 }

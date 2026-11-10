@@ -21,6 +21,9 @@ import {
   StoragePreviewInput,
   StorageExecuteInput,
   StorageRemoveDatabaseBackupInput,
+  DatabaseCompactionStatus,
+  DatabaseCompactionStatusInput,
+  StartDatabaseCompactionResult,
   StorageRemoveDatabaseBackupResult,
   StorageSnapshot,
   StorageCleanupPreview,
@@ -501,6 +504,8 @@ export const WS_METHODS = {
   storagePreview: "storage.preview",
   storageExecute: "storage.execute",
   storageRemoveDatabaseBackup: "storage.removeDatabaseBackup",
+  storageDatabaseCompactionStatus: "storage.databaseCompactionStatus",
+  storageStartDatabaseCompaction: "storage.startDatabaseCompaction",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -2091,6 +2096,23 @@ export const WsStorageRemoveDatabaseBackupRpc = Rpc.make(WS_METHODS.storageRemov
   error: Schema.Union([StorageError, AuthRpcError]),
 });
 
+export const WsStorageDatabaseCompactionStatusRpc = Rpc.make(
+  WS_METHODS.storageDatabaseCompactionStatus,
+  {
+    payload: DatabaseCompactionStatusInput,
+    success: DatabaseCompactionStatus,
+    error: Schema.Union([StorageError, AuthRpcError]),
+  },
+);
+export const WsStorageStartDatabaseCompactionRpc = Rpc.make(
+  WS_METHODS.storageStartDatabaseCompaction,
+  {
+    payload: DatabaseCompactionStatusInput,
+    success: StartDatabaseCompactionResult,
+    error: Schema.Union([StorageError, AuthRpcError]),
+  },
+);
+
 export const WsGitCreateWorktreeForProjectRpc = Rpc.make(WS_METHODS.gitCreateWorktreeForProject, {
   payload: GitCreateWorktreeForProjectInput,
   success: GitCreateWorktreeForProjectOutput,
@@ -2914,6 +2936,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsStoragePreviewRpc
   | typeof WsStorageExecuteRpc
   | typeof WsStorageRemoveDatabaseBackupRpc
+  | typeof WsStorageDatabaseCompactionStatusRpc
+  | typeof WsStorageStartDatabaseCompactionRpc
   | typeof WsGitCreateWorktreeForProjectRpc
   | typeof WsGitFindWorktreeForOriginRpc
   | typeof WsGitArchiveWorktreeRpc
@@ -3160,6 +3184,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsStoragePreviewRpc,
   WsStorageExecuteRpc,
   WsStorageRemoveDatabaseBackupRpc,
+  WsStorageDatabaseCompactionStatusRpc,
+  WsStorageStartDatabaseCompactionRpc,
   WsGitCreateWorktreeForProjectRpc,
   WsGitFindWorktreeForOriginRpc,
   WsGitArchiveWorktreeRpc,

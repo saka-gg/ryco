@@ -6,6 +6,7 @@
  * @module doctor/doctorRun
  */
 import type { EventEmitter } from "node:events";
+import { writeFile } from "node:fs/promises";
 
 import { Console, Effect, type LogLevel, type Option, References } from "effect";
 import { Prompt } from "effect/cli";
@@ -32,7 +33,7 @@ import {
   silentDoctorReporter,
 } from "./DatabaseDoctor.ts";
 import { databaseOwnerLockOwnership, nodeServiceControl } from "./doctorOwnership.ts";
-import { makeTerminalDoctorReporter } from "./doctorReporter.ts";
+import { makeJsonLinesDoctorReporter, makeTerminalDoctorReporter } from "./doctorReporter.ts";
 import { doctorApplyCommand } from "./doctorSuggestion.ts";
 import { findFileHolders } from "./fileHolders.ts";
 import { freeBytesOnVolume } from "./sqliteSwap.ts";
@@ -44,6 +45,10 @@ export interface DoctorFlags {
   readonly estimate: boolean;
   readonly thorough: boolean;
   readonly restartService: boolean;
+  /** Progress as JSON lines on stderr (`makeJsonLinesDoctorReporter`). */
+  readonly progressJson?: boolean;
+  /** Also write the `--json` result document here (`--result-file`). */
+  readonly resultFile?: Option.Option<string>;
 }
 
 export interface DoctorRunInput {
@@ -222,19 +227,28 @@ export const runDoctor = (input: DoctorRunInput) =>
     const { flags, config, logLevel } = input;
     const deps = input;
     const platform = nodeServicePlatform();
-    const reporter = flags.json
-      ? { ...silentDoctorReporter, end: Effect.void }
-      : makeTerminalDoctorReporter({
-          tty: process.stderr.isTTY === true,
-          write: (text) => {
-            try {
-              process.stderr.write(text);
-            } catch {
-              // Best effort: a write a closed terminal or a full disk refuses must not end the
-              // run before its finalizers (see interruptOnHangup).
-            }
-          },
-        });
+    const writeStderr = (text: string) => {
+      try {
+        process.stderr.write(text);
+      } catch {
+        // Best effort, as below.
+      }
+    };
+    const reporter = flags.progressJson
+      ? makeJsonLinesDoctorReporter(writeStderr)
+      : flags.json
+        ? { ...silentDoctorReporter, end: Effect.void }
+        : makeTerminalDoctorReporter({
+            tty: process.stderr.isTTY === true,
+            write: (text) => {
+              try {
+                process.stderr.write(text);
+              } catch {
+                // Best effort: a write a closed terminal or a full disk refuses must not end the
+                // run before its finalizers (see interruptOnHangup).
+              }
+            },
+          });
     const ports: DoctorPorts = {
       ownership: databaseOwnerLockOwnership,
       service: nodeServiceControl(platform, nodeServiceLabel(config.baseDir, defaultBaseDir())),
@@ -250,6 +264,20 @@ export const runDoctor = (input: DoctorRunInput) =>
       stateDir: config.stateDir,
       rerunCommand: doctorRerunCommand(config),
     };
+    const resultFile =
+      flags.resultFile !== undefined && flags.resultFile._tag === "Some"
+        ? flags.resultFile.value
+        : null;
+    /** The `--apply` outcome: printed, and written to `--result-file` too. */
+    const report = (document: object, text: string) =>
+      Effect.gen(function* () {
+        if (resultFile !== null) {
+          yield* Effect.promise(() =>
+            writeFile(resultFile, `${JSON.stringify(document)}\n`).catch(() => undefined),
+          );
+        }
+        yield* Console.log(flags.json ? deps.emitJson(document) : text);
+      });
     const run = Effect.gen(function* () {
       const inspection = yield* inspectDatabase(target, { estimate: flags.estimate }, ports);
       yield* reporter.end;
@@ -264,13 +292,9 @@ export const runDoctor = (input: DoctorRunInput) =>
       if (!flags.json) yield* Console.log(`${formatDoctorInspection(inspection, true)}\n`);
       const refusal = (message: string) =>
         Effect.gen(function* () {
-          yield* Console.log(
-            flags.json
-              ? deps.emitJson({
-                  inspection,
-                  result: { status: "refused", exitCode: 2, message },
-                })
-              : `Not run: ${message}`,
+          yield* report(
+            { inspection, result: { status: "refused", exitCode: 2, message } },
+            `Not run: ${message}`,
           );
           process.exitCode = 2;
         });
@@ -305,9 +329,7 @@ export const runDoctor = (input: DoctorRunInput) =>
         ),
       );
       yield* reporter.end;
-      yield* Console.log(
-        flags.json ? deps.emitJson({ inspection, result }) : formatDoctorResult(result),
-      );
+      yield* report({ inspection, result }, formatDoctorResult(result));
       if (result.exitCode !== 0) process.exitCode = result.exitCode;
     });
     return yield* run.pipe(

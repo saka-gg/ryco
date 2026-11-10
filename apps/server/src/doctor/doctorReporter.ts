@@ -59,3 +59,20 @@ export function makeTerminalDoctorReporter(input: {
     end: Effect.sync(closeLine),
   };
 }
+
+/**
+ * `--progress-json`: one JSON object per line on stderr, for a program that runs the doctor and
+ * shows its progress (the desktop app's one-click compaction): `{"type":"phase","text":…,
+ * "step"?:"swap"}`, `{"type":"progress","text":…,"fraction":…|null}`, `{"type":"note","text":…}`.
+ * A run is cancellable (SIGTERM) until the `swap` phase.
+ */
+export function makeJsonLinesDoctorReporter(write: (line: string) => void): TerminalDoctorReporter {
+  const emit = (value: object) => Effect.sync(() => write(`${JSON.stringify(value)}\n`));
+  return {
+    phase: (text, step) =>
+      emit(step === undefined ? { type: "phase", text } : { type: "phase", text, step }),
+    progress: (text, fraction) => emit({ type: "progress", text, fraction }),
+    note: (text) => emit({ type: "note", text }),
+    end: Effect.void,
+  };
+}
