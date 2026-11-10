@@ -691,6 +691,76 @@ describe("Desktop thread content cache changes", () => {
   });
 });
 
+describe("Desktop saved task lists", () => {
+  const taskList = (title: string) => ({
+    version: 1,
+    readAt: 7,
+    tasks: [
+      {
+        taskId: `task-${title}`,
+        revision: 1,
+        title,
+        notes: "",
+        priority: "normal",
+        dueAt: null,
+        projectId: null,
+        links: [],
+        files: [],
+        state: "todo",
+        createdAt: "2026-10-10T00:00:00.000Z",
+        updatedAt: "2026-10-10T00:00:00.000Z",
+        status: "todo",
+        delegations: [],
+      },
+    ],
+  });
+
+  it("keeps a machine's task list across restarts, encrypted, without conversations", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    expect(await cache.publishTasks(scope("env-1"), taskList(SECRET_MARKER))).toBe(true);
+    await cache.flush();
+    for (const file of cacheFiles(directory)) {
+      expect(FS.readFileSync(file, "utf8")).not.toContain(SECRET_MARKER);
+    }
+    const reopened = openCache(directory);
+    expect((await reopened.loadTasks(scope("env-1")))?.tasks.map((task) => task.title)).toEqual([
+      SECRET_MARKER,
+    ]);
+    expect(await reopened.load(scope("env-1"))).toEqual({});
+  });
+
+  it("keeps conversations and the task list apart in one record", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    await cache.publish(scope("env-1"), threads(["a"]));
+    await cache.publishTasks(scope("env-1"), taskList("first"));
+    await cache.publish(scope("env-1"), threads(["a", "b"]));
+    expect((await cache.loadTasks(scope("env-1")))?.tasks[0]?.title).toBe("first");
+    await cache.publishTasks(scope("env-1"), null);
+    expect(threadIds(await cache.load(scope("env-1")))).toEqual(["a", "b"]);
+    expect(await cache.loadTasks(scope("env-1"))).toBeNull();
+    await cache.flush();
+    expect(cacheFiles(directory)).toHaveLength(1);
+  });
+
+  it("drops task lists with the setting, a purge, and refuses unreadable ones", async () => {
+    const directory = temporaryDirectory();
+    const cache = openCache(directory);
+    expect(await cache.publishTasks(scope("env-1"), { version: 2, readAt: 1, tasks: [] })).toBe(
+      false,
+    );
+    await cache.publishTasks(scope("env-1"), taskList("kept"));
+    await cache.publishTasks(scope("env-2"), taskList("other"));
+    await cache.purgeEnvironment(scope("env-2"));
+    expect(await cache.loadTasks(scope("env-2"))).toBeNull();
+    await cache.setEnabled(false);
+    expect(await cache.loadTasks(scope("env-1"))).toBeNull();
+    expect(await cache.publishTasks(scope("env-1"), taskList("off"))).toBe(false);
+    expect(hasCacheFiles(directory)).toBe(false);
+  });
+});
+
 describe("Desktop thread content cache writes", () => {
   function fakeClock() {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });

@@ -130,7 +130,7 @@ export function projectDesktopWorkspaceState(
 /** What the handlers need of the Desktop thread content cache. */
 export type DesktopWorkspaceThreadContent = Pick<
   DesktopThreadContentCache,
-  "isEnabled" | "setEnabled" | "load" | "publish" | "publishChanges"
+  "isEnabled" | "setEnabled" | "load" | "publish" | "publishChanges" | "publishTasks" | "loadTasks"
 >;
 
 /** The most thread ids a change may list; the cache keeps far fewer. */
@@ -143,6 +143,8 @@ const NO_THREAD_CONTENT: DesktopWorkspaceThreadContent = {
   load: async () => ({}),
   publish: async () => undefined,
   publishChanges: async () => false,
+  publishTasks: async () => false,
+  loadTasks: async () => null,
 };
 
 /**
@@ -275,6 +277,20 @@ export function createDesktopWorkspaceIpcHandlers(
         { content: await threadContent.load(scope) },
         new Set(snapshot.threads.map((thread) => String(thread.id))),
       );
+    },
+    publishTaskList: async (rawEnvironmentId: unknown, raw: unknown) => {
+      const environment = environmentId(rawEnvironmentId);
+      if (raw !== null && (typeof raw !== "object" || Array.isArray(raw))) {
+        throw new Error("Desktop task list is invalid.");
+      }
+      const scope = threadContentScope(client.snapshot(), environment);
+      // The cache decodes and bounds the list to the shared saved-task-list limits.
+      return scope === null ? false : threadContent.publishTasks(scope, raw);
+    },
+    getTaskList: async (rawEnvironmentId: unknown) => {
+      const environment = environmentId(rawEnvironmentId);
+      const scope = threadContentScope(client.snapshot(), environment);
+      return scope === null ? null : threadContent.loadTasks(scope);
     },
     getThreadContentCacheEnabled: async () => threadContent.isEnabled(),
     setThreadContentCacheEnabled: async (raw: unknown) => {

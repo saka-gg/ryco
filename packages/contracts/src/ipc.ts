@@ -1268,6 +1268,16 @@ export interface DesktopBridge {
   getDesktopThreadContent?: (
     environmentId: EnvironmentId,
   ) => Promise<DesktopThreadContentProjectionMap>;
+  /**
+   * A machine's last read task list, kept beside its recent conversations
+   * (same setting, same purges), so the Tasks page paints it before the
+   * machine answers. `list` is the shared saved-task-list shape
+   * (`@ryco/client-runtime/state/tasks/savedTaskList`), `null` removes it.
+   * Resolves to whether it was kept. Absent in a Desktop build without it.
+   */
+  publishDesktopTaskList?: (environmentId: EnvironmentId, list: unknown) => Promise<boolean>;
+  /** The kept task list (untrusted until decoded), or null. */
+  getDesktopTaskList?: (environmentId: EnvironmentId) => Promise<unknown>;
   getDesktopThreadContentCacheEnabled?: () => Promise<boolean>;
   /** Turning the cache off deletes what it holds. Resolves to the setting now in effect. */
   setDesktopThreadContentCacheEnabled?: (enabled: boolean) => Promise<boolean>;

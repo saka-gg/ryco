@@ -51,6 +51,8 @@ describe("Desktop workspace IPC boundary", () => {
       "verifyApproval",
       "publishThreadContent",
       "publishThreadContentChanges",
+      "publishTaskList",
+      "getTaskList",
       "getThreadContent",
       "getThreadContentCacheEnabled",
       "setThreadContentCacheEnabled",
@@ -408,6 +410,47 @@ describe("Desktop workspace state projections", () => {
           "thread content",
         );
       }
+      await cache.dispose();
+    });
+
+    it("keeps a machine's task list beside its conversations and serves it back", async () => {
+      const { handlers, cache, scope } = setup();
+      const list = {
+        version: 1,
+        readAt: 5,
+        tasks: [
+          {
+            taskId: "task-1",
+            revision: 1,
+            title: "Saved task",
+            notes: "",
+            priority: "normal",
+            dueAt: null,
+            projectId: null,
+            links: [],
+            files: [],
+            state: "todo",
+            createdAt: "2026-10-10T00:00:00.000Z",
+            updatedAt: "2026-10-10T00:00:00.000Z",
+            status: "todo",
+            delegations: [],
+          },
+        ],
+      };
+      expect(await handlers.publishTaskList(environmentId, list)).toBe(true);
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      expect((await handlers.getTaskList(environmentId))?.tasks.map((task) => task.title)).toEqual([
+        "Saved task",
+      ]);
+      expect(Object.keys(await cache.load(scope))).toEqual([threadId]);
+      // Unreadable lists are refused; null removes the kept one.
+      expect(await handlers.publishTaskList(environmentId, { version: 9 })).toBe(false);
+      for (const invalid of [[], "list", 3]) {
+        await expect(handlers.publishTaskList(environmentId, invalid)).rejects.toThrow("task list");
+      }
+      expect(await handlers.publishTaskList(environmentId, null)).toBe(true);
+      expect(await handlers.getTaskList(environmentId)).toBeNull();
+      expect(Object.keys(await cache.load(scope))).toEqual([threadId]);
       await cache.dispose();
     });
 
