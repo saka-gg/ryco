@@ -11,9 +11,7 @@ import {
 } from "@ryco/contracts";
 import {
   createContext,
-  lazy,
   memo,
-  Suspense,
   use,
   useCallback,
   useEffect,
@@ -146,6 +144,7 @@ import {
 import { BrowserElementChip, FileReferenceChip } from "./FileReferenceChip";
 import { deriveDisplayedUserMessageForTier } from "~/lib/userMessageDisplay";
 import { cn } from "~/lib/utils";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@ryco/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
@@ -157,15 +156,21 @@ import {
 } from "../../rpc/useActivityPayloadOutput";
 
 // Only a very long message the window sent as its head loads these (see MessageTextPreview.tsx).
-const LazyMessageTextPreview = lazy(() => import("./MessageTextPreview"));
-/** A previewed message's control, or with `toCopyText` its whole-text copy button. */
+const LazyMessageTextPreview = preloadableLazy(() =>
+  import("./MessageTextPreview").then((module) => module.default),
+);
+/**
+ * A previewed message's control, or with `toCopyText` its whole-text copy
+ * button. Nothing shows until the chunk is there; a failed load leaves the
+ * preview as it is (the row's text stays readable).
+ */
 function MessageTextPreviewSlot(props: ComponentProps<typeof LazyMessageTextPreview>) {
-  return (
-    <Suspense fallback={null}>
-      <LazyMessageTextPreview {...props} />
-    </Suspense>
-  );
+  const ready = useLazyComponentReady(LazyMessageTextPreview, true, {
+    onLoadError: ignoreLoadError,
+  });
+  return ready ? <LazyMessageTextPreview {...props} /> : null;
 }
+const ignoreLoadError = () => undefined;
 
 const userMessageCopyText = (text: string) =>
   deriveDisplayedUserMessageContext(text).copyText ?? text;
