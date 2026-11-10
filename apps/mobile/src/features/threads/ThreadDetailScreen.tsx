@@ -416,6 +416,8 @@ import { useForkSheetState } from "./useForkSheetState";
 import {
   nextThreadMessageAnchorStep,
   resolveOpenThreadNavigation,
+  THREAD_LIST_ESTIMATED_ROW_SIZE,
+  threadListRowType,
   type ThreadListRow,
 } from "./threadTimelineList";
 
@@ -3737,6 +3739,9 @@ export function ThreadDetailScreen(props: {
               listProps={{
                 renderItem: renderItem,
                 keyExtractor: (row) => row.id,
+                // Size hints per row kind (threadTimelineList.ts).
+                getItemType: threadListRowType,
+                estimatedItemSize: THREAD_LIST_ESTIMATED_ROW_SIZE,
                 alignItemsAtEnd: true,
                 initialScrollAtEnd: true,
                 // Following keeps the end from any distance; reading back, the rows on screen stay put.
