@@ -246,6 +246,10 @@
       "types": "./src/state/tasks/index.ts",
       "import": "./src/state/tasks/index.ts"
     },
+    "./state/tasks/savedTaskList": {
+      "types": "./src/state/tasks/savedTaskList.ts",
+      "import": "./src/state/tasks/savedTaskList.ts"
+    },
     "./state/dailyRecap": {
       "types": "./src/state/dailyRecap/index.ts",
       "import": "./src/state/dailyRecap/index.ts"

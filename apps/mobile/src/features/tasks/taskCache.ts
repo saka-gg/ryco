@@ -13,7 +13,11 @@ import {
   whenPreferencesHydrated,
 } from "../../state/preferencesStore";
 import { onTaskCachePurge, TASK_CACHE_INDEX_KEY, TASK_CACHE_KEY_PREFIX } from "./taskCacheKeys";
-import { decodeTaskCache, encodeTaskCache } from "./taskCacheModel";
+import {
+  applySavedTaskList,
+  encodeSavedTaskList,
+  parseSavedTaskList,
+} from "@ryco/client-runtime/state/tasks/savedTaskList";
 
 /**
  * The phone keeps each machine's last read task list so an offline machine's
@@ -36,7 +40,7 @@ let installed = false;
 
 /**
  * The machine's tasks on screen are this device's copy, not a read in this
- * session: possibly cut short (`TASK_CACHE_MAX_TASKS`), so a task missing from
+ * session: possibly cut short (`SAVED_TASK_LIST_MAX_TASKS`), so a task missing from
  * it is unknown rather than deleted.
  */
 export function isOfflineTaskCopy(environmentId: EnvironmentId): boolean {
@@ -65,7 +69,7 @@ const enabled = () => isPreferencesHydrated() && isThreadContentCacheEnabled();
 
 async function write(environmentId: EnvironmentId, state: LocalTasksEnvironmentState) {
   if (!enabled() || state.readAt === null) return;
-  const encoded = encodeTaskCache(Object.values(state.tasks), state.readAt);
+  const encoded = encodeSavedTaskList(Object.values(state.tasks), state.readAt);
   if (encoded === null) {
     await mobileKV.removeItem(KEY_PREFIX + environmentId);
     return;
@@ -140,15 +144,9 @@ export async function hydrateTaskCache(environmentId: EnvironmentId): Promise<vo
   if (!enabled()) return;
   const before = selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId);
   if (before.readAt !== null) return;
-  const stored = decodeTaskCache(await mobileKV.getItem(KEY_PREFIX + environmentId));
-  if (stored === null || stored.tasks.length === 0) return;
-  const now = selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId);
-  // A live read landed meanwhile: it is newer than any copy.
-  if (now.readAt !== null) return;
-  useLocalTasksStore.getState().applyList(environmentId, stored.tasks, {
-    since: now.writeEpoch,
-    readAt: stored.readAt,
-  });
+  const stored = parseSavedTaskList(await mobileKV.getItem(KEY_PREFIX + environmentId));
+  // A live read that landed meanwhile is newer than any copy: nothing is applied.
+  if (stored === null || !applySavedTaskList(useLocalTasksStore, environmentId, stored)) return;
   hydratedAt.set(environmentId, stored.readAt);
   writtenFrom.set(
     environmentId,

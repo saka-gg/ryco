@@ -55,6 +55,15 @@ const connections: LocalTasksConnections = {
  * connection, re-read when it comes back and when the window regains focus.
  */
 export function retainLocalTasksFor(environmentId: EnvironmentId): () => void {
+  // The Desktop paints the machine's saved list until its first read lands.
+  if (window.desktopBridge?.getDesktopTaskList) {
+    void import("~/platform/desktopTaskListCache")
+      .then((cache) => {
+        cache.installDesktopTaskListCache();
+        return cache.hydrateDesktopTaskList(environmentId);
+      })
+      .catch(() => undefined);
+  }
   return retainConnectedLocalTasks(environmentId, {
     connections,
     threads: useStore,

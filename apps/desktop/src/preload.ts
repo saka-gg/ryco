@@ -361,6 +361,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.send(DESKTOP_WORKSPACE_IPC.publishThreadContent, environmentId, content),
   publishDesktopThreadContentChanges: (environmentId, changes) =>
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.publishThreadContentChanges, environmentId, changes),
+  publishDesktopTaskList: (environmentId, list) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.publishTaskList, environmentId, list),
+  getDesktopTaskList: (environmentId) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getTaskList, environmentId),
   getDesktopThreadContent: (environmentId) =>
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getThreadContent, environmentId),
   getDesktopThreadContentCacheEnabled: () =>

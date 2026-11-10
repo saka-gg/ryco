@@ -4671,6 +4671,8 @@ function registerIpcHandlers(): void {
     DESKTOP_WORKSPACE_IPC.cancelVerification,
     DESKTOP_WORKSPACE_IPC.verifyApproval,
     DESKTOP_WORKSPACE_IPC.publishThreadContentChanges,
+    DESKTOP_WORKSPACE_IPC.publishTaskList,
+    DESKTOP_WORKSPACE_IPC.getTaskList,
     DESKTOP_WORKSPACE_IPC.getThreadContent,
     DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled,
     DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled,
@@ -4729,6 +4731,16 @@ function registerIpcHandlers(): void {
       withDesktopWorkspace((handlers) =>
         handlers.publishThreadContentChanges(rawEnvironmentId, rawChanges),
       ).catch(() => false),
+  );
+  ipcMain.handle(
+    DESKTOP_WORKSPACE_IPC.publishTaskList,
+    (_event, rawEnvironmentId: unknown, rawList: unknown) =>
+      withDesktopWorkspace((handlers) => handlers.publishTaskList(rawEnvironmentId, rawList)).catch(
+        () => false,
+      ),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getTaskList, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.getTaskList(raw)).catch(() => null),
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContent, (_event, raw: unknown) =>
     withDesktopWorkspace((handlers) => handlers.getThreadContent(raw)),

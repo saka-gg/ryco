@@ -13,6 +13,8 @@ export const DESKTOP_WORKSPACE_IPC = {
   verifyApproval: "desktop:workspace-verify-approval",
   publishThreadContent: "desktop:workspace-publish-thread-content",
   publishThreadContentChanges: "desktop:workspace-publish-thread-content-changes",
+  publishTaskList: "desktop:workspace-publish-task-list",
+  getTaskList: "desktop:workspace-get-task-list",
   getThreadContent: "desktop:workspace-get-thread-content",
   getThreadContentCacheEnabled: "desktop:workspace-get-thread-content-cache-enabled",
   setThreadContentCacheEnabled: "desktop:workspace-set-thread-content-cache-enabled",

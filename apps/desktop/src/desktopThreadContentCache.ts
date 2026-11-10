@@ -12,6 +12,11 @@ import {
   trimContentToBudget,
   utf8ByteLength,
 } from "@ryco/client-runtime/state/threads/threadContentCachePolicy";
+import {
+  boundSavedTaskList,
+  decodeSavedTaskList,
+  type SavedTaskList,
+} from "@ryco/client-runtime/state/tasks/savedTaskList";
 import type { WorkspaceMetadataCache } from "@ryco/client-runtime/state/workspace";
 
 import type { DesktopSecretProtection } from "./protectedRecordStore.ts";
@@ -52,6 +57,8 @@ interface StoredRecord extends DesktopThreadContentScope {
   readonly capturedAt: number;
   /** Thread content, least recently visited first. */
   readonly content: DesktopThreadContent;
+  /** The machine's last read task list (display only), when one was kept. */
+  readonly tasks?: SavedTaskList;
 }
 
 function isBoundedId(value: unknown): value is string {
@@ -147,7 +154,10 @@ function readStoredRecord(value: unknown): StoredRecord | null {
     capturedAt: Number(record.capturedAt),
   };
   const content = boundContent(envelope, record.content);
-  return Object.keys(content).length === 0 ? null : { ...envelope, content };
+  const tasks = record.tasks === undefined ? null : decodeSavedTaskList(record.tasks);
+  const hasTasks = tasks !== null && tasks.tasks.length > 0;
+  if (Object.keys(content).length === 0 && !hasTasks) return null;
+  return { ...envelope, content, ...(hasTasks ? { tasks } : {}) };
 }
 
 /** How many threads a stored record claims to hold, before validation. */
@@ -179,6 +189,14 @@ export interface DesktopThreadContentCache {
     scope: DesktopThreadContentScope,
     changes: { readonly order: ReadonlyArray<string>; readonly changed: unknown },
   ) => Promise<boolean>;
+  /**
+   * Replaces the machine's saved task list (`SavedTaskList`, untrusted) kept
+   * beside its conversations, under the same setting and purges. Resolves to
+   * whether it was kept; `null` removes it.
+   */
+  readonly publishTasks: (scope: DesktopThreadContentScope, raw: unknown) => Promise<boolean>;
+  /** The machine's saved task list, or null (none, or the cache is off). */
+  readonly loadTasks: (scope: DesktopThreadContentScope) => Promise<SavedTaskList | null>;
   readonly purgeEnvironment: (scope: DesktopThreadContentScope) => Promise<void>;
   readonly purgeAccount: (accountId: string) => Promise<void>;
   /** Forgets every account's content but this one's: an identity change drops the previous account's. */
@@ -552,21 +570,32 @@ export function createDesktopThreadContentCache(input: {
   const replace = async (
     scope: DesktopThreadContentScope,
     capturedAt: number,
-    content: DesktopThreadContent,
+    update: { readonly content: DesktopThreadContent } | { readonly tasks: SavedTaskList | null },
   ): Promise<void> => {
     const key = recordKey(scope);
     const existing = await read();
+    const saved = existing.find((record) => recordKey(record) === key);
     const others = existing.filter(
       (record) => record.accountId === scope.accountId && recordKey(record) !== key,
     );
-    if (Object.keys(content).length === 0) {
+    // Conversations and the task list are published apart; each keeps the other.
+    const content = "content" in update ? update.content : (saved?.content ?? {});
+    const tasks = "tasks" in update ? update.tasks : (saved?.tasks ?? null);
+    const keepsTasks = tasks !== null && tasks.tasks.length > 0;
+    if (Object.keys(content).length === 0 && !keepsTasks) {
       if (others.length < existing.length) await commit(others, "deferred");
       return;
     }
     await commit(
       [
         ...others,
-        { accountId: scope.accountId, environmentId: scope.environmentId, capturedAt, content },
+        {
+          accountId: scope.accountId,
+          environmentId: scope.environmentId,
+          capturedAt,
+          content,
+          ...(keepsTasks ? { tasks } : {}),
+        },
       ].slice(-DESKTOP_THREAD_CONTENT_CACHE_MAX_ENVIRONMENTS),
       "deferred",
     );
@@ -597,7 +626,9 @@ export function createDesktopThreadContentCache(input: {
       exclusive(async () => {
         if (!(await accepts(scope))) return;
         const capturedAt = now();
-        await replace(scope, capturedAt, boundContent({ ...scope, capturedAt }, content));
+        await replace(scope, capturedAt, {
+          content: boundContent({ ...scope, capturedAt }, content),
+        });
       }),
     publishChanges: (scope, changes) =>
       exclusive(async () => {
@@ -632,10 +663,26 @@ export function createDesktopThreadContentCache(input: {
         }
         const capturedAt = now();
         const bounded = boundEntries({ ...scope, capturedAt }, threads);
-        await replace(scope, capturedAt, bounded);
+        await replace(scope, capturedAt, { content: bounded });
         // The sender keeps what it listed; a thread the budget dropped here
         // must travel again with the next change.
         return Object.keys(bounded).length === threads.length;
+      }),
+    publishTasks: (scope, raw) =>
+      exclusive(async () => {
+        if (!(await accepts(scope))) return false;
+        const decoded = raw === null ? null : decodeSavedTaskList(raw);
+        if (raw !== null && decoded === null) return false;
+        // Bounded again: the same limits as the copy the phone keeps.
+        const tasks = decoded === null ? null : boundSavedTaskList(decoded.tasks, decoded.readAt);
+        await replace(scope, now(), { tasks });
+        return tasks !== null || raw === null;
+      }),
+    loadTasks: (scope) =>
+      exclusive(async () => {
+        if (!(await enabled())) return null;
+        const key = recordKey(scope);
+        return (await read()).find((record) => recordKey(record) === key)?.tasks ?? null;
       }),
     purgeEnvironment: (scope) =>
       exclusive(() => {
