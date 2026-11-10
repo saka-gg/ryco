@@ -29,7 +29,11 @@ import { readThreadAlertPermission } from "../threadAlerts";
 import { backgroundAlertsSupport } from "./backgroundAlertsModel";
 import { ensureMobilePushKeyCustody, readMobileRycoPush } from "./pushKeyCustody";
 import { createPushKeyStore } from "./pushKeyStore";
-import { createEarlierInstallKeyMemo, createHubRemovalMarker } from "./pushMemos";
+import {
+  createEarlierInstallKeyMemo,
+  createHubRemovalMarker,
+  createNodeRegistrationsMemo,
+} from "./pushMemos";
 
 /** APNs answers a registration within seconds; past this the token counts as unavailable. */
 const DEVICE_TOKEN_TIMEOUT_MS = 30_000;
@@ -143,6 +147,7 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
     },
     hubRemoval: createHubRemovalMarker(mobileKV),
     earlierInstallKey: createEarlierInstallKeyMemo(mobileKV),
+    nodeRegistrations: createNodeRegistrationsMemo(mobileKV),
     notifications: { readPermission: readThreadAlertPermission, readDeviceToken },
     app: {
       // The same test thread alerts use: whenever they would defer to push,

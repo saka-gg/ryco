@@ -17,8 +17,30 @@ import { THREAD_ALERT_KINDS } from "../../state/settings/threadNotificationPrefe
 /** Every kind the app's own alerts know; the node drops action kinds for a viewer. */
 export const BACKGROUND_ALERT_KINDS: ReadonlyArray<PushAlertKind> = THREAD_ALERT_KINDS;
 
-/** The node holds `foreground` for 45 seconds; the app repeats it well inside that. */
+/**
+ * How often the app repeats `foreground` to a node that does not say how long it holds it: such a
+ * node holds it 45 seconds, and the app repeats it well inside that.
+ */
 export const PUSH_PRESENCE_REFRESH_MS = 30_000;
+/** The slowest the app repeats `foreground`, for a node that holds it long enough (90 s today). */
+export const PUSH_PRESENCE_LONG_REFRESH_MS = 40_000;
+
+/**
+ * How often to repeat `foreground` to a node: within half of the hold it announces
+ * (`PushDeviceStatus.foregroundHoldMs`), at most every {@link PUSH_PRESENCE_LONG_REFRESH_MS}; a
+ * node that announces none gets {@link PUSH_PRESENCE_REFRESH_MS}, as before.
+ */
+export function pushPresenceRefreshMs(foregroundHoldMs: number | null | undefined): number {
+  if (foregroundHoldMs == null) return PUSH_PRESENCE_REFRESH_MS;
+  return Math.max(1_000, Math.min(PUSH_PRESENCE_LONG_REFRESH_MS, Math.floor(foregroundHoldMs / 2)));
+}
+
+/**
+ * A registration a node confirmed is not sent again on each connect (the app asks with its
+ * presence whether the node still holds it), but at least this often, so the node's 30-day
+ * expiry and a changed role on the node never catch it out.
+ */
+export const PUSH_REGISTRATION_REFRESH_MS = 24 * 60 * 60_000;
 /** A Hub without push is asked again at most this often, on a foreground or a settings visit. */
 export const HUB_PUSH_CAPABILITY_RECHECK_MS = 60 * 60_000;
 /** A Hub that could not be reached is asked again after this, at the next trigger. */

@@ -14,6 +14,25 @@ import { pushKeyOf } from "./pushKeyStore";
 /** The account whose Hub registration was turned off but not removed yet. */
 export const HUB_REMOVAL_OWED_KEY = "ryco.push.hubRemovalOwed.v1";
 
+/** The push registration each node last confirmed (`BackgroundAlertsPorts.nodeRegistrations`). */
+export const NODE_REGISTRATIONS_KEY = "ryco.push.nodeRegistrations.v1";
+
+/**
+ * What nodes confirmed, so a connect after a restart asks with its presence instead of
+ * registering again. Holds machine ids, the enrollment id and the key id: nothing secret.
+ */
+export function createNodeRegistrationsMemo(
+  kv: Pick<KVService, "getItem" | "setItem" | "removeItem">,
+) {
+  return {
+    read: () => kv.getItem(NODE_REGISTRATIONS_KEY),
+    write: (value: string | null): Promise<void> =>
+      value === null
+        ? kv.removeItem(NODE_REGISTRATIONS_KEY)
+        : kv.setItem(NODE_REGISTRATIONS_KEY, value),
+  };
+}
+
 /**
  * A node drops a registration nobody refreshed for 30 days, so an earlier
  * installation's key needs retiring no longer than that.

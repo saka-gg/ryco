@@ -41,8 +41,8 @@ receive push.
 - The node takes the enrollment and role from the channel's verified grant, never from the payload, so
   a device can only register itself.
 - One registration per enrollment, at most 64 per node, kept in `hub-push.json` beside the node's Hub
-  identity state. The app registers again on every connect; a registration nobody refreshed for 30
-  days is dropped. Leaving the Hub erases them; a revoked enrollment is dropped at once.
+  identity state. A registration nobody refreshed for 30 days is dropped; the app sends it again on
+  a connect unless that node confirmed exactly this registration (below), and at least daily. Leaving the Hub erases them; a revoked enrollment is dropped at once.
 - A viewer never gets approval, input or plan alerts: it cannot act on them.
 - `push.setPresence` answers the device's registration as the node holds it, without writing it, so
   the app registers again only when the node lost it (it left its Hub, or dropped it). Older nodes
@@ -52,8 +52,12 @@ receive push.
   hold its public half, and a device wrongly named would register again on its next connect. A
   reinstalled app uses it to retire the key its earlier installation left (below). Older nodes
   ignore the public key and remove only the caller's own registration.
-- `foreground` holds for 45 seconds unless repeated. While it holds, the node sends that device
-  nothing: the app's own local alerts cover the screen, including leaving out the thread on screen.
+- `foreground` holds for 90 seconds unless repeated (45 seconds on older nodes). Every status answer
+  announces it as `foregroundHoldMs`; the app repeats `foreground` within half of the announced hold,
+  at most every 40 seconds, and every 30 seconds to a node that announces none. While it holds, the
+  node sends that device nothing: the app's own local alerts cover the screen, including leaving out
+  the thread on screen. Only `background` leaves the app: a Notification Center pull or the app
+  switcher peek (`inactive`) keeps it in front, for presence and local alerts alike.
 
 **With the Hub** — `PUT /api/native/push/registration` with the native session: platform, APNs token,
 `production` or `sandbox`, and the app's bundle id. One registration per device enrollment; the latest
@@ -169,9 +173,13 @@ when the Hub can send to this build's bundle id:
    shares its keychain group (both added by `plugins/withIosNotificationServiceExtension.cjs`);
 2. the app records its enrollment id and the sound setting with the key, for the extension;
 3. it reads the APNs token, registers it with the Hub, then calls `push.registerDevice` once on every
-   Hub channel each time it connects, and `push.setPresence` while it is in front. A node's answer is
-   kept for that connection: an older node or a channel that cannot receive push is asked again on
-   the next connect, a failure after a minute or on the next foreground;
+   Hub channel each time it connects, and `push.setPresence` while it is in front. A node whose
+   presence answer confirmed exactly this registration (same key, enrollment, kinds, sound and Live
+   Activity setting; kept in the app's storage across restarts) is not registered again on a
+   connect: the presence the connect sends anyway asks whether it still holds it, and a node that
+   says otherwise, a change of setting, or a confirmation older than a day registers again. A
+   node's answer is kept for that connection: an older node or a channel that cannot receive push is
+   asked again on the next connect, a failure after a minute or on the next foreground;
 4. once the Hub took the token and a node reports `hubDelivery: available` for a kind, the app stops
    posting its own background alert of that kind for that machine, so the two never double up. In
    front nothing changes. A node reports `offline` from its start until its first delivered signal;
