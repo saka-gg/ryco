@@ -33,55 +33,17 @@ import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
 import { useAnyOverlayOpen } from "./overlayPresence";
 import {
+  anchoredToastManager,
+  toastManager,
+  type ThreadToastData,
+  type ToastId,
+} from "./toastManager";
+import {
   buildVisibleToastLayout,
   shouldHideCollapsedToastContent,
   shouldRenderThreadScopedToast,
 } from "./toast.logic";
 
-export type ThreadToastData = {
-  threadRef?: ScopedThreadRef | null;
-  threadId?: ThreadId | null;
-  leadingIcon?: ReactNode;
-  tooltipStyle?: boolean;
-  onClose?: (() => void) | undefined;
-  dismissAfterVisibleMs?: number;
-  /**
-   * A notice that can wait (an update is available, say): it stays out of
-   * sight while a modal dialog or a picker popup is open, rather than covering
-   * it, and shows once none is. Leave it off for errors and for news about
-   * what the user just did. Time it with `dismissAfterVisibleMs`, not
-   * `timeout`, so it does not run out while it waits.
-   */
-  deferWhileOverlayOpen?: boolean;
-  hideCopyButton?: boolean;
-  secondaryActionProps?: ComponentPropsWithoutRef<"button">;
-  secondaryActionVariant?:
-    | "default"
-    | "destructive"
-    | "destructive-outline"
-    | "ghost"
-    | "link"
-    | "outline"
-    | "secondary";
-  /** Optional extra body shown after toggling “Show details” (e.g. a list of pending RPCs). */
-  expandableContent?: ReactNode;
-  expandableLabels?: { expand?: string; collapse?: string };
-  /** When set with `expandableContent`, the summary + label act as one text disclosure (no separate chevron row). */
-  expandableDescriptionTrigger?: boolean;
-  actionLayout?: "inline" | "stacked-end";
-  actionVariant?:
-    | "default"
-    | "destructive"
-    | "destructive-outline"
-    | "ghost"
-    | "link"
-    | "outline"
-    | "secondary";
-};
-
-const toastManager = Toast.createToastManager<ThreadToastData>();
-const anchoredToastManager = Toast.createToastManager<ThreadToastData>();
-type ToastId = ReturnType<typeof toastManager.add>;
 const threadToastVisibleTimeoutRemainingMs = new Map<ToastId, number>();
 
 const TOAST_ICONS = {
@@ -1038,6 +1000,7 @@ function AnchoredToasts() {
 export { stackedThreadToast } from "./toastHelpers";
 export type { StackedThreadToastOptions } from "./toastHelpers";
 
+export type { ThreadToastData };
 export {
   ToastProvider,
   type ToastPosition,

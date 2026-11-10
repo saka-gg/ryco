@@ -11,7 +11,8 @@ import { readHostedWorkspaceState } from "./hostedHub/hostedConnectionCoordinato
 import { isHostedHubMode } from "./env";
 import { selectSidebarThreadSummaryByRef, selectProjectByRef, useStore } from "./store";
 import { newCommandId } from "./lib/utils";
-import { stackedThreadToast, toastManager } from "./components/ui/toast";
+import { stackedThreadToast } from "./components/ui/toastHelpers";
+import { toastManager } from "./components/ui/toastManager";
 
 const labels = {
   archive: "Thread archived",

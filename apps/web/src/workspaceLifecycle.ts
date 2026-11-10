@@ -22,7 +22,8 @@ import {
 import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { create } from "zustand";
 
-import { stackedThreadToast, toastManager } from "./components/ui/toast";
+import { stackedThreadToast } from "./components/ui/toastHelpers";
+import { toastManager } from "./components/ui/toastManager";
 import { readEnvironmentApi } from "./environmentApi";
 import { buildProjectsPageLocation } from "./projectsRoute";
 import { undoThreadDeletes } from "./threadDeleteUndo";

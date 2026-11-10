@@ -1,5 +1,5 @@
 import { nodeMutationLeaseIsCurrent } from "@ryco/client-runtime/authorization/nodeMutationLease";
-import { toastManager } from "../components/ui/toast";
+import { toastManager } from "../components/ui/toastManager";
 import { resolveNewDraftModelSelection } from "@ryco/client-runtime/state/settings";
 import { ensureEnvironmentApi } from "../environmentApi";
 import { isHostedHubMode } from "../env";

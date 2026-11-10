@@ -31,7 +31,7 @@ import {
 } from "~/rpc/serverState";
 import { updateEnvironmentServerSettings } from "~/environments/runtime";
 import { useSettingsEditingScope, useSettingsTarget } from "~/settingsTarget";
-import { toastManager } from "~/components/ui/toast";
+import { toastManager } from "~/components/ui/toastManager";
 import { useSyncExternalStoreSelector } from "./useSyncExternalStoreSelector";
 import {
   __resetClientSettingsPersistenceForTests,

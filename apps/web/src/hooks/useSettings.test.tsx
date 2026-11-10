@@ -10,7 +10,7 @@ const { localApi, addToast } = vi.hoisted(() => ({
   addToast: vi.fn(),
 }));
 vi.mock("~/localApi", () => ({ ensureLocalApi: () => localApi }));
-vi.mock("~/components/ui/toast", () => ({ toastManager: { add: addToast } }));
+vi.mock("~/components/ui/toastManager", () => ({ toastManager: { add: addToast } }));
 vi.mock("~/environments/runtime", () => ({ updateEnvironmentServerSettings: vi.fn() }));
 
 import {

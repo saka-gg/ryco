@@ -3,7 +3,7 @@
 import type { ToastManagerAddOptions } from "@base-ui/react/toast";
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 
-import type { ThreadToastData } from "./toast";
+import type { ThreadToastData } from "./toastManager";
 
 export type StackedThreadToastOptions = {
   type: "error" | "warning" | "success" | "info" | "loading";
