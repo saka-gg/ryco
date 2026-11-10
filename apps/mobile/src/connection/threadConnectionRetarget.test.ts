@@ -268,7 +268,7 @@ describe("thread connection retarget decision", () => {
 
     expect(forAccount("signed-out")).toEqual({ kind: "degraded", reason: "signed-out" });
     expect(forAccount("session-expired")).toEqual({ kind: "degraded", reason: "signed-out" });
-    expect(forAccount("unavailable")).toEqual({ kind: "degraded", reason: "signed-out" });
+    expect(forAccount("unavailable")).toEqual({ kind: "degraded", reason: "hub-unreachable" });
     expect(forAccount("authenticating")).toEqual({ kind: "wait" });
     expect(forAccount("signing-out")).toEqual({ kind: "wait" });
   });

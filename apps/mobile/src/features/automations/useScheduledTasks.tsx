@@ -15,8 +15,10 @@ import {
   type ScheduledList,
 } from "./scheduledModel";
 import {
+  loadSavedScheduled,
   requestScheduled,
   useDismissedScheduleProposals,
+  useSavedScheduleEnvironments,
   useScheduledEntries,
 } from "./scheduledRuntime";
 
@@ -25,6 +27,7 @@ export interface ScheduledMachine {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly name: string }>;
+  readonly connected: boolean;
 }
 
 /**
@@ -32,16 +35,21 @@ export interface ScheduledMachine {
  * connected now and whose Agent Control is not turned off (the automation centre is part of
  * it). A machine whose config has not arrived yet is asked anyway; its node decides.
  */
-export function useScheduledMachines(): ReadonlyArray<ScheduledMachine> {
+export function useScheduledMachines(
+  options: { readonly includeOffline?: boolean } = {},
+): ReadonlyArray<ScheduledMachine> {
   const machines = useTaskMachines();
   const configs = useEnvironmentServerConfigs();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  // A machine not connected yet shows while its saved schedules stand in for it.
+  const saved = useSavedScheduleEnvironments();
+  const includeOffline = options.includeOffline === true;
   return useMemo(
     () =>
       machines
         .filter(
           (machine) =>
-            machine.connected &&
+            (machine.connected || includeOffline || saved.has(machine.environmentId)) &&
             configs.get(machine.environmentId)?.settings.agentControl.enabled !== false,
         )
         .map((machine) => ({
@@ -50,8 +58,9 @@ export function useScheduledMachines(): ReadonlyArray<ScheduledMachine> {
           projects: excludeChatProjects(
             projects.filter((project) => project.environmentId === machine.environmentId),
           ).map((project) => ({ id: project.id, name: project.name })),
+          connected: machine.connected,
         })),
-    [configs, machines, projects],
+    [configs, includeOffline, machines, projects, saved],
   );
 }
 
@@ -87,6 +96,24 @@ export function useScheduledTasks(input: {
   readonly active: boolean;
 }): ScheduledTasks {
   const machines = useScheduledMachines();
+  // Every machine's saved schedules are looked up (once), connected or not.
+  const everyMachine = useScheduledMachines({ includeOffline: true });
+  const everyCheckoutKey = everyMachine
+    .flatMap((machine) =>
+      machine.projects.map((project) => `${machine.environmentId}:${project.id}`),
+    )
+    .join("|");
+  useEffect(() => {
+    loadSavedScheduled(
+      everyMachine.flatMap((machine) =>
+        machine.projects.map((project) => ({
+          environmentId: machine.environmentId,
+          projectId: project.id,
+        })),
+      ),
+    );
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by the checkouts' ids
+  }, [everyCheckoutKey]);
   const checkouts = useMemo<ReadonlyArray<ScheduledCheckoutRef>>(
     () =>
       machines.flatMap((machine) =>
@@ -106,10 +133,21 @@ export function useScheduledTasks(input: {
   // Queue changes re-read the projects they concern (`scheduledRuntime`); this sweep catches
   // what moves without a proposal (a run that starts without asking) every few minutes.
   const sweep = Math.floor(nowMs / SWEEP_MS);
+  // A machine that connects is read at once (its saved schedules showed until then).
+  const connectedKey = machines
+    .filter((machine) => machine.connected)
+    .map((machine) => machine.environmentId)
+    .join("|");
   useEffect(() => {
-    if (input.active) requestScheduled(checkouts);
+    // Only a connected machine can answer; the others show what was saved.
+    if (input.active) {
+      const connected = new Set(
+        machines.filter((machine) => machine.connected).map((machine) => machine.environmentId),
+      );
+      requestScheduled(checkouts.filter((checkout) => connected.has(checkout.environmentId)));
+    }
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed by the checkouts' ids
-  }, [input.active, checkoutsKey, sweep]);
+  }, [input.active, checkoutsKey, connectedKey, sweep]);
   const state = useScheduledEntries();
   const queuesById = useAgentControlStore((store) => store.queueByEnvironmentId);
   const dismissed = useDismissedScheduleProposals((store) => store.ids);
@@ -135,7 +173,15 @@ export function useScheduledTasks(input: {
     checkouts,
     loading: state.loading,
     nowMs,
-    refresh: () => requestScheduled(checkouts, { fresh: true }),
+    refresh: () => {
+      const connected = new Set(
+        machines.filter((machine) => machine.connected).map((machine) => machine.environmentId),
+      );
+      requestScheduled(
+        checkouts.filter((checkout) => connected.has(checkout.environmentId)),
+        { fresh: true },
+      );
+    },
   };
 }
 

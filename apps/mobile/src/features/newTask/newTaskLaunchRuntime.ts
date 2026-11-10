@@ -1,5 +1,9 @@
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
+import {
+  isArchivedThreadStub,
+  waitForStoreCondition,
+  type AppState,
+} from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
@@ -13,13 +17,14 @@ import {
 import { delegateTaskChatStart, preflightTaskChatStart } from "../tasks/taskChatStart";
 import type { NewTaskLaunchDeps } from "./newTaskLaunch";
 
-async function waitForAuthoritative(read: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 12_000;
-  while (Date.now() < deadline) {
-    if (read()) return;
-    await new Promise((resolve) => setTimeout(resolve, 75));
+/** How long a launch waits for the node to confirm what it created through the shell stream. */
+const AUTHORITATIVE_WAIT_MS = 12_000;
+
+/** Resolves the moment the shell stream shows it (a store subscription, never a poll). */
+async function waitForAuthoritative(read: (state: AppState) => boolean, label: string) {
+  if (!(await waitForStoreCondition({ ready: read, timeoutMs: AUTHORITATIVE_WAIT_MS }))) {
+    throw new Error(`${label} was not confirmed`);
   }
-  throw new Error(`${label} was not confirmed`);
 }
 
 /** Whether the node shows the thread with its first turn under way (not merely created). */
@@ -53,14 +58,12 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
       freshChatIds: () => ({ projectId: newProjectId(), turnCommandId: newCommandId() }),
       waitForProject: (projectId) =>
         waitForAuthoritative(
-          () =>
-            selectProjectByRef(useStore.getState(), scopeProjectRef(environmentId, projectId)) !==
-            undefined,
+          (state) =>
+            selectProjectByRef(state, scopeProjectRef(environmentId, projectId)) !== undefined,
           "Project",
         ),
       waitForThread: ({ threadId, worktreeId: expectedWorktreeId }) =>
-        waitForAuthoritative(() => {
-          const state = useStore.getState();
+        waitForAuthoritative((state) => {
           const ref = scopeThreadRef(environmentId, threadId);
           if (!selectThreadExistsByRef(state, ref)) return false;
           if (expectedWorktreeId === undefined) return true;

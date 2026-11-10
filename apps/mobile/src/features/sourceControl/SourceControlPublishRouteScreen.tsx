@@ -1,8 +1,5 @@
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import type {
-  SourceControlProviderDiscoveryItem,
-  SourceControlRepositoryVisibility,
-} from "@ryco/contracts";
+import type { SourceControlRepositoryVisibility } from "@ryco/contracts";
 import {
   getPublishProviderReadiness,
   isPublishRepositoryPathComplete,
@@ -20,7 +17,8 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { OptionRow } from "../../components/OptionRow";
 import { SegmentedControl } from "../../components/SegmentedControl";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
-import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
+import { sourceControlDiscoveryQuery } from "../../rpc/sourceControlAtoms";
+import { useMobileQuery } from "../../rpc/useMobileQuery";
 import { LoadingRow, PillButton, SectionTitle, ToolTextField } from "./gitToolsParts";
 import { useSourceControlTarget, type SourceControlRouteParams } from "./useSourceControlTarget";
 
@@ -34,41 +32,28 @@ export function SourceControlPublishRouteScreen(props: PublishRouteProps) {
   const navigation = useNavigation();
   const target = useSourceControlTarget(props.route.params);
   const { environmentId, cwd, mutable } = target;
-  const [providers, setProviders] =
-    useState<ReadonlyArray<SourceControlProviderDiscoveryItem> | null>(null);
-  const [provider, setProvider] = useState<PublishProviderKind>("github");
+  const [chosenProvider, setChosenProvider] = useState<PublishProviderKind | null>(null);
   const [repository, setRepository] = useState("");
   const [edited, setEdited] = useState(false);
   const [visibility, setVisibility] = useState<SourceControlRepositoryVisibility>("private");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const api = useEnvironmentApi(environmentId);
-
-  useEffect(() => {
-    const server = api?.server;
-    if (!server) return;
-    let cancelled = false;
-    void server.discoverSourceControl({ cached: true }).then(
-      (result) => {
-        if (cancelled) return;
-        setProviders(result.sourceControlProviders);
-        const firstReady = PUBLISH_PROVIDER_OPTIONS.find(
-          (option) =>
-            getPublishProviderReadiness({
-              provider: option.value,
-              sourceControlProviders: result.sourceControlProviders,
-            }).ready,
-        );
-        if (firstReady) setProvider(firstReady.value);
-      },
-      (cause: unknown) => {
-        if (!cancelled) setError(errorMessageOr(cause, "Hosts could not be checked."));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+  const discovery = useMobileQuery(sourceControlDiscoveryQuery, { environmentId }, environmentId);
+  const providers = discovery.data?.sourceControlProviders ?? null;
+  const discoveryError = discovery.error
+    ? errorMessageOr(discovery.error, "Hosts could not be checked.")
+    : null;
+  // The first host the node is signed in to, until the reader picks one.
+  const provider =
+    chosenProvider ??
+    PUBLISH_PROVIDER_OPTIONS.find(
+      (option) =>
+        getPublishProviderReadiness({
+          provider: option.value,
+          sourceControlProviders: providers ?? [],
+        }).ready,
+    )?.value ??
+    "github";
 
   const accounts = useMemo(() => publishAccountsByProvider(providers ?? []), [providers]);
   const readiness = getPublishProviderReadiness({
@@ -105,7 +90,7 @@ export function SourceControlPublishRouteScreen(props: PublishRouteProps) {
       contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 48 }}
     >
       <SectionTitle>Host</SectionTitle>
-      {!providers && !error ? <LoadingRow label="Checking hosts…" /> : null}
+      {!providers && !error && !discoveryError ? <LoadingRow label="Checking hosts…" /> : null}
       {providers ? (
         <View className="gap-2">
           {PUBLISH_PROVIDER_OPTIONS.map((candidate) => {
@@ -122,7 +107,7 @@ export function SourceControlPublishRouteScreen(props: PublishRouteProps) {
                 selected={candidate.value === provider}
                 disabled={!candidateReadiness.ready}
                 onPress={() => {
-                  setProvider(candidate.value);
+                  setChosenProvider(candidate.value);
                   setEdited(false);
                 }}
               />
@@ -153,7 +138,9 @@ export function SourceControlPublishRouteScreen(props: PublishRouteProps) {
         Creates {repository.trim() || option.pathPlaceholder} on {option.host}, adds it as origin
         and pushes the current branch.
       </Text>
-      {error ? <ErrorBanner message={error} /> : null}
+      {(error ?? discoveryError) ? (
+        <ErrorBanner message={(error ?? discoveryError) as string} />
+      ) : null}
       <PillButton
         label="Publish"
         symbol="square.and.arrow.up"

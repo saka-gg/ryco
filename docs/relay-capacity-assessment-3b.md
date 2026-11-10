@@ -178,6 +178,13 @@ entry changes. Boot restore runs only in a visible tab; hidden tabs restore noth
 become visible, so the tabs of one browser do not each wake the same machines. Warm leases are
 never demanded, so they add nothing to the reconnect burst after a Hub restart.
 
+The phone app uses a stagger step of 150 ms. The step orders one client's upgrades (the machine in
+view first); it was never what keeps a shared address under the bucket, since even 750 ms refills
+less than one token. One phone is one client and spends at most 3 of its address's 20 tokens per
+wake, so the shorter step changes none of the rows above; it only stops three machines from taking
+1.5 s longer to load than one. Home on the phone also asks for all machines the bound allows at
+once (up to 3) instead of one after another, which is the same "Warm foreground maximum" row.
+
 Wave 3b's mobile scopes do not own the web simulator preview, so leases do not reduce the existing
 web screenshot fallback and must not be counted as if they did. The general invariant is still
 important: merely retaining a cached environment connection must not start unrelated high-volume

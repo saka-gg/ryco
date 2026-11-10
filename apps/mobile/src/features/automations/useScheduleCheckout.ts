@@ -20,6 +20,7 @@ import { useEnvironmentServerConfigs } from "../../state/environmentServerConfig
 import { selectProjectsAcrossEnvironments, useStore } from "../../state/threadsRuntime";
 import { useShallow } from "zustand/react/shallow";
 import {
+  loadSavedScheduled,
   requestScheduled,
   useDismissedScheduleProposals,
   useScheduledEntries,
@@ -85,6 +86,8 @@ export function useScheduleCheckout(
     return () => clearInterval(timer);
   }, []);
   useEffect(() => {
+    // The saved schedules show at once; a connected machine reads them again behind.
+    loadSavedScheduled([{ environmentId, projectId }]);
     if (connected) requestScheduled([{ environmentId, projectId }], { fresh: true });
   }, [connected, environmentId, projectId]);
   const state = useScheduledEntries();

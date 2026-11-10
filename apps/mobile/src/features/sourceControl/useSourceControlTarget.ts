@@ -1,12 +1,12 @@
-import type { VcsStatusResult } from "@ryco/contracts";
 import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import { WorktreeId } from "@ryco/contracts/worktree";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect } from "react";
 
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { errorMessageOr } from "../../lib/errorMessage";
 import { firstRouteParam } from "../../lib/routeParams";
 import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
+import { isLiveAnswer, vcsStatusQuery } from "../../rpc/sourceControlAtoms";
+import { useMobileQuery } from "../../rpc/useMobileQuery";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
@@ -76,41 +76,38 @@ export function useSourceControlTarget(params: SourceControlRouteParams) {
 export type SourceControlTarget = ReturnType<typeof useSourceControlTarget>;
 
 /**
- * The checkout's live Git status: one read, then the node's status stream
- * (which also answers after a reconnect).
+ * The checkout's Git status: the last answer kept on this device at once,
+ * then one read and the node's status stream (which also answers after a
+ * reconnect). `live` is false while only a saved answer shows: actions wait
+ * for the node's own.
  */
 export function useVcsStatus(target: Pick<SourceControlTarget, "environmentId" | "cwd">) {
   const api = useEnvironmentApi(target.environmentId);
-  const [status, setStatus] = useState<VcsStatusResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const { environmentId, cwd } = target;
+  const input = { environmentId, cwd };
+  const read = useMobileQuery(vcsStatusQuery, input, environmentId);
+  const cacheKey = vcsStatusQuery.keyOf(input);
 
   useEffect(() => {
-    if (!api || !environmentId || !cwd) return;
-    void readVcsStatus(environmentId, cwd, setStatus, setError);
-    return api.vcs.onStatus({ cwd }, setStatus, {
-      onResubscribe: () => void readVcsStatus(environmentId, cwd, setStatus, setError),
-    });
-  }, [api, cwd, environmentId]);
+    if (!api || cacheKey === null || !cwd) return;
+    return api.vcs.onStatus(
+      { cwd },
+      (status) => vcsStatusQuery.writeData(cacheKey, () => status, { live: true }),
+      { onResubscribe: () => vcsStatusQuery.refresh(cacheKey) },
+    );
+  }, [api, cacheKey, cwd]);
 
-  const refresh = () =>
-    environmentId && cwd
-      ? readVcsStatus(environmentId, cwd, setStatus, setError)
-      : Promise.resolve();
+  const refetch = read.refetch;
+  const refresh = useCallback(async () => {
+    await refetch();
+  }, [refetch]);
 
-  return { status, error, connected: api !== undefined, refresh };
-}
-
-async function readVcsStatus(
-  environmentId: EnvironmentId,
-  cwd: string,
-  setStatus: (status: VcsStatusResult) => void,
-  setError: (error: string | null) => void,
-): Promise<void> {
-  setError(null);
-  try {
-    setStatus(await ensureEnvironmentApi(environmentId).vcs.refreshStatus({ cwd }));
-  } catch (cause) {
-    setError(errorMessageOr(cause, "Git status could not be read."));
-  }
+  return {
+    status: read.data,
+    error: read.error === null ? null : errorMessageOr(read.error, "Git status could not be read."),
+    connected: api !== undefined,
+    live: isLiveAnswer(read),
+    refreshing: read.isFetching,
+    refresh,
+  };
 }

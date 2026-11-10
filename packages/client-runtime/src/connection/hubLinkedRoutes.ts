@@ -12,6 +12,15 @@
  * answer is skipped this time. The relay's credentials never reach a direct
  * address, and the linked bearer never reaches the relay.
  *
+ * An attempt must not wait long for an address that is not there: away from
+ * the tailnet a linked address answers nothing at all, and the machine's relay
+ * connection would start only after the whole check timeout, on every launch
+ * and every return to the app. An attempt therefore gives each address a short
+ * time to answer, and leaves out one that recently did not. Nothing is lost by
+ * that: the route upgrader keeps checking the machine's addresses with the
+ * full timeout (on an interval, a network change and a resume) and moves the
+ * connection onto a direct route as soon as one answers.
+ *
  * Its own subpath: the route code loads with a Hub machine's first connection,
  * never with the app's first paint.
  *
@@ -71,6 +80,8 @@ export interface HubLinkedRoutesPorts {
   readonly nowMs?: () => number;
   /** Test seam: {@link LINKED_ROUTE_ATTEMPT_DEADLINE_MS}. */
   readonly attemptDeadlineMs?: number;
+  /** Test seam: {@link LINKED_ROUTE_ATTEMPT_CHECK_TIMEOUT_MS}. */
+  readonly attemptCheckTimeoutMs?: number;
 }
 
 export interface HubLinkedRouteAttempt {
@@ -88,6 +99,24 @@ class LinkedRouteRefused extends Error {}
  * answers its descriptor and then stalls must not hold the machine up.
  */
 export const LINKED_ROUTE_ATTEMPT_DEADLINE_MS = 5_000;
+
+/**
+ * How long a connection attempt waits for a linked address to answer with its
+ * descriptor before it takes the next route or the relay. A reachable address
+ * (LAN, an established tailnet) answers well within it; a slower one is found
+ * by the upgrader's check, which allows {@link ROUTE_CHECK_TIMEOUT_MS}.
+ */
+export const LINKED_ROUTE_ATTEMPT_CHECK_TIMEOUT_MS = 800;
+
+/**
+ * How long connection attempts leave out an address that did not answer. The
+ * upgrader's check, which is what brings a connection back onto the address,
+ * ends the wait early when the address answers and proves the machine's key.
+ */
+export const LINKED_ROUTE_UNANSWERED_SKIP_MS = 10 * 60_000;
+
+/** How long after the upgrader's check proved an address an attempt allows it the full check time. */
+export const LINKED_ROUTE_PROVEN_ALLOWANCE_MS = 30_000;
 
 /** Run `work` with a signal that aborts with `signal` or after `ms`; `null` once it did. */
 async function withDeadline<A>(
@@ -117,6 +146,18 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
   const nowMs = ports.nowMs ?? Date.now;
   /** Addresses that refused the bearer or the proof; each waits for its link to change. */
   const refused = new Set<string>();
+  /** Addresses that did not answer, and when; attempts leave them out for a while. */
+  const unanswered = new Map<string, number>();
+  /**
+   * Addresses the upgrader's check just saw answer and prove the key. The
+   * attempt that check asks for allows them the same time the check did, so an
+   * address that answers slower than an attempt's short check is not found by
+   * the upgrader only to be given up by the attempt.
+   */
+  const provenAt = new Map<string, number>();
+  const noteAnswer = (key: string, result: RouteCheckResult | undefined) => {
+    if (result?.kind === "timeout" || result?.kind === "unreachable") unanswered.set(key, nowMs());
+  };
 
   const routesFor = (hubEnvironmentId: EnvironmentId): ReadonlyArray<EnvironmentRoute> =>
     linkedDirectRoutes({
@@ -161,7 +202,12 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
         const proof = await withDeadline(signal, ROUTE_CHECK_TIMEOUT_MS, (deadline) =>
           prove(route, deadline),
         );
-        if (proof === "proven") return;
+        if (proof === "proven") {
+          unanswered.delete(key);
+          provenAt.set(key, nowMs());
+          return;
+        }
+        provenAt.delete(key);
         if (proof === "refused") {
           refused.add(key);
           onRefused?.();
@@ -169,6 +215,14 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
         results.set(key, proof === null ? { kind: "timeout" } : { kind: "unreachable" });
       }),
     );
+    // A check that was called off says nothing about its addresses.
+    if (!signal.aborted) {
+      for (const route of routes) {
+        if (route.kind !== "direct") continue;
+        const key = environmentRouteKey(route);
+        noteAnswer(key, results.get(key));
+      }
+    }
     return results;
   };
 
@@ -205,12 +259,31 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
       signal: AbortSignal,
       onRefused?: () => void,
     ): Promise<HubLinkedRouteAttempt | null> {
-      const routes = routesFor(hubEnvironmentId);
+      const startedAt = nowMs();
+      const routes = routesFor(hubEnvironmentId).filter((route) => {
+        const unansweredAt = unanswered.get(environmentRouteKey(route));
+        return (
+          unansweredAt === undefined || startedAt - unansweredAt >= LINKED_ROUTE_UNANSWERED_SKIP_MS
+        );
+      });
       if (routes.length === 0) return null;
-      const results = await checkDescriptors(routes, signal);
+      const justProven = routes.some((route) => {
+        const at = provenAt.get(environmentRouteKey(route));
+        return at !== undefined && startedAt - at < LINKED_ROUTE_PROVEN_ALLOWANCE_MS;
+      });
+      const results = await checkEnvironmentRoutes({
+        routes,
+        fetchDescriptorId: ports.fetchDescriptorId,
+        signal,
+        timeoutMs: justProven
+          ? ROUTE_CHECK_TIMEOUT_MS
+          : (ports.attemptCheckTimeoutMs ?? LINKED_ROUTE_ATTEMPT_CHECK_TIMEOUT_MS),
+      });
       for (const route of routes) {
         if (route.kind !== "direct" || signal.aborted) continue;
-        const result = results.get(environmentRouteKey(route));
+        const key = environmentRouteKey(route);
+        const result = results.get(key);
+        noteAnswer(key, result);
         if (result === undefined || !routeCheckAccepted(route, result)) continue;
         try {
           const attempt = await withDeadline(
@@ -218,7 +291,10 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
             ports.attemptDeadlineMs ?? LINKED_ROUTE_ATTEMPT_DEADLINE_MS,
             (deadline) => attemptOver(route, deadline),
           );
-          if (attempt !== null) return attempt;
+          if (attempt !== null) {
+            unanswered.delete(key);
+            return attempt;
+          }
         } catch (error) {
           // A refused bearer or identity waits for the link to change; an
           // unreachable address is simply skipped this time.
@@ -235,12 +311,16 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
       for (const record of ports.listLinkedRecords()) {
         if (record.hubLink?.hubEnvironmentId === hubEnvironmentId) {
           refused.delete(record.httpBaseUrl);
+          unanswered.delete(record.httpBaseUrl);
+          provenAt.delete(record.httpBaseUrl);
         }
       }
     },
     /** Forget a removed address's hold, whichever machine it belonged to. */
     forgetRefusal(httpBaseUrl: string): void {
       refused.delete(httpBaseUrl);
+      unanswered.delete(httpBaseUrl);
+      provenAt.delete(httpBaseUrl);
     },
   };
 }

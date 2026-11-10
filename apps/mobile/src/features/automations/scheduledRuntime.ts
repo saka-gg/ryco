@@ -11,15 +11,22 @@ import {
   type AutomationCommandDraft,
 } from "@ryco/client-runtime/state/automations/commands";
 import {
+  automationCheckoutKey,
+  checkoutAutomationCounts,
   createAutomationCountsLoader,
   type AutomationCheckoutRef,
+  type AutomationCountsEntry,
   type AutomationCountsState,
 } from "@ryco/client-runtime/state/automations/projectCounts";
 import type { AgentControlProposalId, EnvironmentId } from "@ryco/contracts";
+import { AutomationCentreSnapshot } from "@ryco/contracts/automation-centre";
 import { useSyncExternalStore } from "react";
 import { create } from "zustand";
 
 import { readEnvironmentApi } from "../../connection/environmentApi";
+import { registerEnvironmentDevicePurge } from "../../persistence/environmentDevicePurge";
+import { awaitSavedQueryStore } from "../../rpc/savedQueries";
+import { schemaSavedQueryCodec } from "../../rpc/savedQueryCodec";
 import { uuidv4 } from "../../lib/uuid";
 import { useAgentControlStore } from "../../state/agentControlRuntime";
 import { readEnvironmentMutationReady } from "../../state/environmentMutationReady";
@@ -44,9 +51,138 @@ function readSnapshot(checkout: AutomationCheckoutRef) {
 const loader = createAutomationCountsLoader({ readSnapshot });
 const requestIds = createAutomationRequestIds(uuidv4);
 
-/** Every checkout's snapshot read so far, by `automationCheckoutKey`. */
+// ---------------------------------------------------------------------------
+// Saved snapshots: each checkout's last answer is kept on the device (the saved
+// query store, under its rules) and shown until the node answers, or while it
+// cannot. A saved entry carries `fetchedAt: 0`; every action still goes to the
+// node, which decides.
+// ---------------------------------------------------------------------------
+
+const SAVED_SNAPSHOT = schemaSavedQueryCodec(AutomationCentreSnapshot, 1);
+const savedKeyOf = (key: string) => `automations\u0000${key}`;
+let savedEntries: ReadonlyMap<string, AutomationCountsEntry> = new Map();
+const savedLookedUp = new Set<string>();
+/** The snapshot object last handed to the store per checkout: each answer is saved once. */
+const savedSnapshots = new Map<string, unknown>();
+const savedListeners = new Set<() => void>();
+const publishSaved = (next: ReadonlyMap<string, AutomationCountsEntry>) => {
+  savedEntries = next;
+  for (const listener of savedListeners) listener();
+};
+
+/** Reads the saved snapshot of each checkout not looked up yet. */
+export function loadSavedScheduled(checkouts: ReadonlyArray<AutomationCheckoutRef>): void {
+  for (const checkout of checkouts) {
+    const key = automationCheckoutKey(checkout.environmentId, checkout.projectId);
+    if (savedLookedUp.has(key)) continue;
+    savedLookedUp.add(key);
+    void awaitSavedQueryStore()
+      .then((store) => store?.load(checkout.environmentId, savedKeyOf(key), SAVED_SNAPSHOT.version))
+      .then((saved) => {
+        if (!saved || !savedLookedUp.has(key)) return;
+        const snapshot = SAVED_SNAPSHOT.decode(saved.payload);
+        if (snapshot === null) return;
+        const next = new Map(savedEntries);
+        next.set(key, {
+          status: "ready",
+          snapshot,
+          counts: checkoutAutomationCounts({
+            projectId: checkout.projectId,
+            snapshot,
+            nowMs: Date.now(),
+          }),
+          fetchedAt: 0,
+        });
+        publishSaved(next);
+      })
+      .catch(() => undefined);
+  }
+}
+
+// Each live answer is saved (and replaces the saved entry).
+loader.subscribe(() => {
+  for (const [key, entry] of loader.getState().entries) {
+    if (entry.status !== "ready" || savedSnapshots.get(key) === entry.snapshot) continue;
+    savedSnapshots.set(key, entry.snapshot);
+    const environmentId = key.split("\u0000")[0] as EnvironmentId;
+    const snapshot = entry.snapshot;
+    void awaitSavedQueryStore().then((store) =>
+      store?.save(environmentId, savedKeyOf(key), SAVED_SNAPSHOT.version, () =>
+        SAVED_SNAPSHOT.encode(snapshot),
+      ),
+    );
+  }
+});
+
+// Forgetting a node (or its device data) forgets its saved schedules here too.
+registerEnvironmentDevicePurge((environmentId) => {
+  const prefix = `${environmentId}\u0000`;
+  for (const key of [...savedLookedUp]) if (key.startsWith(prefix)) savedLookedUp.delete(key);
+  for (const key of [...savedSnapshots.keys()]) {
+    if (key.startsWith(prefix)) savedSnapshots.delete(key);
+  }
+  publishSaved(new Map([...savedEntries].filter(([key]) => !key.startsWith(prefix))));
+});
+
+const subscribeEntries = (listener: () => void) => {
+  const unsubscribeLoader = loader.subscribe(listener);
+  savedListeners.add(listener);
+  return () => {
+    unsubscribeLoader();
+    savedListeners.delete(listener);
+  };
+};
+
+let merged: {
+  readonly live: AutomationCountsState;
+  readonly saved: ReadonlyMap<string, AutomationCountsEntry>;
+  readonly state: AutomationCountsState;
+} | null = null;
+
+/** The node's answers, with the saved one standing in where none (or no usable one) came yet. */
+function readEntries(): AutomationCountsState {
+  const live = loader.getState();
+  if (merged?.live === live && merged.saved === savedEntries) return merged.state;
+  let state = live;
+  if (savedEntries.size > 0) {
+    const entries = new Map(savedEntries);
+    for (const [key, entry] of live.entries) {
+      if (entry.status === "ready" || !entries.has(key)) entries.set(key, entry);
+    }
+    state = { entries, loading: live.loading };
+  }
+  merged = { live, saved: savedEntries, state };
+  return state;
+}
+
+/** Every checkout's snapshot read so far (or saved on this device), by `automationCheckoutKey`. */
 export function useScheduledEntries(): AutomationCountsState {
-  return useSyncExternalStore(loader.subscribe, loader.getState, loader.getState);
+  return useSyncExternalStore(subscribeEntries, readEntries, readEntries);
+}
+
+let savedEnvironments: {
+  readonly entries: ReadonlyMap<string, AutomationCountsEntry>;
+  readonly set: ReadonlySet<string>;
+} | null = null;
+
+function readSavedEnvironments(): ReadonlySet<string> {
+  if (savedEnvironments?.entries !== savedEntries) {
+    const set = new Set([...savedEntries.keys()].map((key) => key.split("\u0000")[0] ?? ""));
+    savedEnvironments = { entries: savedEntries, set };
+  }
+  return savedEnvironments.set;
+}
+
+const subscribeSaved = (listener: () => void) => {
+  savedListeners.add(listener);
+  return () => {
+    savedListeners.delete(listener);
+  };
+};
+
+/** Environments with a saved snapshot: listed even before they connect. */
+export function useSavedScheduleEnvironments(): ReadonlySet<string> {
+  return useSyncExternalStore(subscribeSaved, readSavedEnvironments, readSavedEnvironments);
 }
 
 /** The checkouts the open screens list: a queue change re-reads the ones it concerns. */

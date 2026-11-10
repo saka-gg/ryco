@@ -129,7 +129,12 @@ vi.mock("../../rpc/pullRequestAtoms", () => ({
   pullRequestDiffQuery: "diff",
   pullRequestListQuery: "list",
 }));
+vi.mock("../../rpc/sourceControlAtoms", () => ({ sourceControlProviderMirror: "provider" }));
 vi.mock("../../rpc/useMobileQuery", () => ({
+  useSavedMirror: (_mirror: unknown, _input: unknown, live: unknown) => ({
+    data: live,
+    savedAt: null,
+  }),
   useMobileQuery: (query: string, input: Record<string, unknown>) => {
     hoisted.reads.push({ query, input });
     return {
@@ -140,6 +145,7 @@ vi.mock("../../rpc/useMobileQuery", () => ({
       isLoading: false,
       isFetching: false,
       error: null,
+      savedAt: null,
       refetch: async () => ({ data: null }),
     };
   },

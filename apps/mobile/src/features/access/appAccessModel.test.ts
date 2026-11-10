@@ -41,6 +41,40 @@ describe("authoritative app access", () => {
     ).toEqual({ status: "unlocked", via: "hosted-session" });
   });
 
+  it("opens the saved workspace on a retained Hub sign-in, before either plane has decided", () => {
+    expect(
+      deriveAppAccess({
+        ...complete,
+        hostedHydrated: false,
+        directHydrated: false,
+        hostedSessionRetained: true,
+      }),
+    ).toEqual({ status: "unlocked", via: "hosted-session" });
+    // Offline: the launch check settled without a session answer.
+    expect(deriveAppAccess({ ...complete, hostedSessionRetained: true })).toEqual({
+      status: "unlocked",
+      via: "hosted-session",
+    });
+    expect(deriveAppAccess({ ...complete, hostedSessionRetained: false })).toEqual({
+      status: "locked",
+    });
+  });
+
+  it("keeps the launch surface until the saved workspace was read, then opens with it", () => {
+    const granted = { ...complete, directCredentialReadable: true, hostedSessionRevalidated: true };
+    expect(deriveAppAccess({ ...granted, savedWorkspaceRead: false })).toEqual({
+      status: "hydrating",
+    });
+    expect(deriveAppAccess({ ...granted, savedWorkspaceRead: true })).toEqual({
+      status: "unlocked",
+      via: "both",
+    });
+    // A device with no grant is not held back by it.
+    expect(deriveAppAccess({ ...complete, savedWorkspaceRead: false })).toEqual({
+      status: "locked",
+    });
+  });
+
   it("upgrades an early single-plane unlock when the other plane joins", () => {
     const early = deriveAppAccess({
       ...complete,

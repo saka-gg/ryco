@@ -278,6 +278,7 @@ export function writeEnvironmentServerConfig(
   type: ServerConfigStreamEvent["type"] = "snapshot",
 ): void {
   if (configs.get(environmentId) === config) return;
+  savedConfigs.delete(config);
   updateSources.set(config, toServerConfigUpdateSource(type));
   const next = new Map(configs);
   next.set(environmentId, config);
@@ -289,6 +290,40 @@ export function writeEnvironmentServerConfig(
     recordReportedThreadCapabilities(environmentId, capabilities, configAutoSettleRule(config));
   emit();
   if (capabilitiesChanged) emitThreadCapabilities();
+}
+
+// ---------------------------------------------------------------------------
+// Saved configs: a config kept on the device from an earlier session, shown
+// until the node's own arrives (the model and provider pickers, settings and
+// capabilities render at cold start instead of waiting for the node). A saved
+// config never states thread capabilities (only a live answer does) and any
+// live write replaces it.
+// ---------------------------------------------------------------------------
+
+const savedConfigs = new WeakSet<ServerConfig>();
+
+/**
+ * Shows a config saved on the device for an environment with no config yet.
+ * Returns whether it was shown (a live config always wins).
+ */
+export function writeSavedEnvironmentServerConfig(
+  environmentId: EnvironmentId,
+  config: ServerConfig,
+): boolean {
+  if (configs.has(environmentId)) return false;
+  savedConfigs.add(config);
+  updateSources.set(config, "snapshot");
+  const next = new Map(configs);
+  next.set(environmentId, config);
+  configs = next;
+  emit();
+  return true;
+}
+
+/** Whether the environment's current config is a saved one, not yet replaced by the node's. */
+export function isEnvironmentServerConfigSaved(environmentId: EnvironmentId): boolean {
+  const config = configs.get(environmentId);
+  return config !== undefined && savedConfigs.has(config);
 }
 
 export function patchEnvironmentServerSettings(

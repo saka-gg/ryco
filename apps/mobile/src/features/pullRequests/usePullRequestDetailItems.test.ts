@@ -39,6 +39,7 @@ vi.mock("../../connection/hostedConnectionScopes", () => ({
 }));
 vi.mock("../../rpc/pullRequestAtoms", () => ({}));
 vi.mock("../../rpc/useMobileQuery", () => ({}));
+vi.mock("../../rpc/sourceControlAtoms", () => ({}));
 vi.mock("../../state/threadsRuntime", () => ({}));
 
 import { usePullRequestDetailItems } from "./usePullRequestData";
@@ -67,6 +68,7 @@ function render(tab: "conversation" | "checks" = "conversation") {
     isLoading: false,
     isFetching: false,
     error: null,
+    savedAt: null,
     refetch: async () => ({ data }),
   });
   return usePullRequestDetailItems({

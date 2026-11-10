@@ -1,4 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
+import { hostedBrowserRevalidated } from "@ryco/client-runtime/authorization";
 import { useShallow } from "zustand/react/shallow";
 
 import { useHostedHubStore, useMobileHostedConnectionsStore } from "../../hostedHub/state";
@@ -20,7 +21,12 @@ export interface HostedDemandCandidate {
 export interface HostedDemandCandidates {
   /** The account, session and Space the demand belongs to; null signed out. */
   readonly authority: string | null;
-  /** This lifecycle revalidated access and the directory is ready. */
+  /**
+   * This lifecycle revalidated access and the directory is ready. It does not
+   * wait for the selected machine: a browser that only synchronizes that one
+   * is as current for every other machine (`hostedBrowserRevalidated`), so the
+   * others connect beside it instead of after it.
+   */
   readonly current: boolean;
   readonly candidates: ReadonlyArray<HostedDemandCandidate>;
 }
@@ -37,7 +43,7 @@ export function useHostedDemandCandidates(): HostedDemandCandidates {
         state.accountStatus === "authenticated" && state.account !== null
           ? JSON.stringify([state.account.id, state.session?.id, state.session?.activeSpaceId])
           : null,
-      current: state.browserStatus === "current" && state.directoryStatus === "ready",
+      current: hostedBrowserRevalidated(state.browserStatus) && state.directoryStatus === "ready",
       nodes: state.nodes,
     })),
   );

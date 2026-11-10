@@ -61,6 +61,7 @@ import {
   createSnapshotPersistenceRuntime,
   initializeMobileSnapshotPersistence,
   resetMobileSnapshotPersistenceForTests,
+  SNAPSHOT_BUSY_MAX_WAIT_MS,
   SNAPSHOT_WRITE_DEBOUNCE_MS,
   SNAPSHOT_WRITE_MAX_WAIT_MS,
   type ThreadContentCacheSetting,
@@ -73,7 +74,10 @@ function createFakeSnapshotDb() {
     { schemaVersion: number; payload: string; updatedAt: number }
   >();
   let roster: { schemaVersion: number; payload: string } | null = null;
-  const pullRequestReads = new Map<string, { schemaVersion: number; payload: string }>();
+  const savedQueries = new Map<
+    string,
+    { schemaVersion: number; payload: string; payloadBytes: number; updatedAt: number }
+  >();
   const db: SnapshotDb = {
     loadEnvironmentSnapshot: async (environmentId) => {
       const row = snapshots.get(environmentId);
@@ -99,8 +103,8 @@ function createFakeSnapshotDb() {
     },
     removeEnvironmentSnapshot: async (environmentId) => {
       snapshots.delete(environmentId);
-      for (const key of pullRequestReads.keys()) {
-        if (key.startsWith(`${environmentId}\u0000`)) pullRequestReads.delete(key);
+      for (const key of savedQueries.keys()) {
+        if (key.startsWith(`${environmentId}\u0000`)) savedQueries.delete(key);
       }
     },
     listEnvironmentSnapshotStats: async () =>
@@ -115,23 +119,37 @@ function createFakeSnapshotDb() {
     },
     clearAll: async () => {
       snapshots.clear();
-      pullRequestReads.clear();
+      savedQueries.clear();
       roster = null;
     },
-    loadPullRequestRead: async (environmentId, key) =>
-      pullRequestReads.get(`${environmentId}\u0000${key}`) ?? null,
-    savePullRequestRead: async (input) => {
-      pullRequestReads.set(`${input.environmentId}\u0000${input.key}`, {
+    loadSavedQuery: async (environmentId, key) =>
+      savedQueries.get(`${environmentId}\u0000${key}`) ?? null,
+    saveSavedQuery: async (input) => {
+      savedQueries.set(`${input.environmentId}\u0000${input.key}`, {
         schemaVersion: input.schemaVersion,
         payload: input.payload,
+        payloadBytes: input.payloadBytes,
+        updatedAt: input.updatedAt,
       });
     },
-    pullRequestReadBytes: async () => 0,
-    clearPullRequestReads: async () => {
-      pullRequestReads.clear();
+    listSavedQueryStats: async () =>
+      [...savedQueries.entries()].map(([id, row]) => {
+        const [environmentId = "", key = ""] = id.split("\u0000");
+        return { environmentId, key, payloadBytes: row.payloadBytes, updatedAt: row.updatedAt };
+      }),
+    removeSavedQueries: async (entries) => {
+      for (const entry of entries) savedQueries.delete(`${entry.environmentId}\u0000${entry.key}`);
+    },
+    savedQueryBytes: async () => 0,
+    removeSavedQueriesBelowVersion: async (minimum) => {
+      for (const [key, row] of savedQueries)
+        if (row.schemaVersion < minimum) savedQueries.delete(key);
+    },
+    clearSavedQueries: async () => {
+      savedQueries.clear();
     },
   };
-  return { db, snapshots, pullRequestReads, getRoster: () => roster };
+  return { db, snapshots, savedQueries, getRoster: () => roster };
 }
 
 function wireSnapshot(projectId: string): OrchestrationShellSnapshot {
@@ -868,6 +886,43 @@ describe("environment snapshot persistence", () => {
     runtime.dispose();
   });
 
+  it("writes a busy environment at most once per busy window", async () => {
+    const { db } = createFakeSnapshotDb();
+    const writes: number[] = [];
+    const save = db.saveEnvironmentSnapshot;
+    const runtime = createSnapshotPersistenceRuntime({
+      db: {
+        ...db,
+        saveEnvironmentSnapshot: async (input) => {
+          writes.push(Date.now());
+          await save(input);
+        },
+      },
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const environmentId = env("persist-busy-window");
+    const start = Date.now();
+    // An agent streams for a minute and a half: the projection changes every half second.
+    for (let elapsed = 0, step = 0; elapsed < 90_000; elapsed += 500, step += 1) {
+      useStore.getState().syncServerShellSnapshot(wireSnapshot(`busy-${step}`), environmentId);
+      runtime.markDirty(environmentId);
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    const offsets = writes.map((at) => at - start);
+    // The first write comes by the plain maximum wait; after that the
+    // environment is busy and is written once per busy maximum wait.
+    expect(offsets[0]).toBeLessThanOrEqual(SNAPSHOT_WRITE_MAX_WAIT_MS);
+    for (let index = 1; index < offsets.length; index += 1) {
+      expect(offsets[index]! - offsets[index - 1]!).toBeGreaterThanOrEqual(
+        SNAPSHOT_BUSY_MAX_WAIT_MS - 500,
+      );
+    }
+    expect(writes.length).toBeLessThanOrEqual(4);
+    runtime.dispose();
+  });
+
   it("flushes pending captures when the app goes to the background", async () => {
     const { db, snapshots } = createFakeSnapshotDb();
     let background: () => void = () => undefined;
@@ -1161,28 +1216,28 @@ describe("environment snapshot persistence", () => {
       runtime.dispose();
     });
 
-    it("removes saved pull requests when the setting is turned off, and with an environment's row", async () => {
-      const { db, pullRequestReads } = createFakeSnapshotDb();
+    it("removes saved screen answers when the setting is turned off, and with an environment's row", async () => {
+      const { db, savedQueries } = createFakeSnapshotDb();
       const first = env("persist-pr-purge-1");
       const setting = createFakeContentSetting(true);
       const runtime = contentRuntime(db, setting.setting);
       const save = (environmentId: string, key: string) =>
-        db.savePullRequestRead({
+        db.saveSavedQuery({
           environmentId,
           key,
           schemaVersion: 1,
           payload: "{}",
+          payloadBytes: 2,
           updatedAt: 1,
-          keep: 40,
         });
       await save(first, "detail-1");
       await save("other", "detail-2");
       await runtime.purgeEnvironment(first);
-      expect([...pullRequestReads.keys()]).toEqual(["other\u0000detail-2"]);
+      expect([...savedQueries.keys()]).toEqual(["other\u0000detail-2"]);
 
       setting.set(false);
       await vi.advanceTimersByTimeAsync(0);
-      expect(pullRequestReads.size).toBe(0);
+      expect(savedQueries.size).toBe(0);
       runtime.dispose();
     });
 

@@ -19,6 +19,13 @@ export const SPLASH_ACCESS_DECISION_WAIT_MS = 800;
  */
 export const HOSTED_LAUNCH_DECISION_DEADLINE_MS = 8_000;
 
+/**
+ * How long an unlocked workspace waits behind the launch surface for the saved
+ * workspace to be read from storage, so it opens with its threads instead of
+ * an empty list. The read normally takes a fraction of this.
+ */
+export const SAVED_WORKSPACE_READ_WAIT_MS = 1_500;
+
 let decided = false;
 const listeners = new Set<() => void>();
 

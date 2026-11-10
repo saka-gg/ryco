@@ -23,6 +23,7 @@ export function threadStatusTone(statusLabel: ThreadHeaderModel["statusLabel"]):
       return "ready";
     case "Archived":
     case "Offline":
+    case "Stopping":
       return "muted";
   }
 }

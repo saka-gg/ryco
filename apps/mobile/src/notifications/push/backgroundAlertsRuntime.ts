@@ -1,5 +1,9 @@
 import { getHostedHubApi, hostedHubStore } from "@ryco/client-runtime/authorization";
 import {
+  resolveLaunchAccountStatus,
+  subscribeHubLaunchState,
+} from "../../hostedHub/retainedSessionAccess";
+import {
   createBackgroundAlerts,
   type BackgroundAlerts,
   type BackgroundAlertsAccount,
@@ -50,7 +54,11 @@ function adaptConnection(connection: EnvironmentConnection): BackgroundAlertsCon
 
 function readAccount(): BackgroundAlertsAccount {
   const state = hostedHubStore.getState();
-  if (state.accountStatus === "signed-out") return { status: "signed-out" };
+  // Until the launch check has answered, the store's starting `signed-out` is
+  // no sign-out: what is owed to the account must not be dropped on it.
+  if (resolveLaunchAccountStatus(state.accountStatus) === "signed-out") {
+    return { status: "signed-out" };
+  }
   if (state.accountStatus !== "authenticated" || state.account === null) {
     return { status: "pending" };
   }
@@ -114,9 +122,11 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
       read: readAccount,
       subscribe: (listener) => {
         const unsubscribeHub = hostedHubStore.subscribe(listener);
+        const unsubscribeLaunch = subscribeHubLaunchState(listener);
         const unsubscribeEnrollment = subscribeMobileNativeE2eeEnrollment(listener);
         return () => {
           unsubscribeHub();
+          unsubscribeLaunch();
           unsubscribeEnrollment();
         };
       },

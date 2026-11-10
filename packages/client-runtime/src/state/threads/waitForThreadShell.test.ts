@@ -3,7 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { AppState } from "./store.ts";
 import type { ThreadShell } from "./types.ts";
-import { waitForThreadShell, type ThreadShellSource } from "./waitForThreadShell.ts";
+import {
+  waitForStoreCondition,
+  waitForThreadShell,
+  type ThreadShellSource,
+} from "./waitForThreadShell.ts";
 
 const environmentId = EnvironmentId.make("environment-local");
 const threadId = ThreadId.make("fork-thread");
@@ -97,5 +101,31 @@ describe("waitForThreadShell", () => {
     expect(store.listeners).toBe(0);
     // A late shell after settling changes nothing.
     store.set(stateWith({ worktreeId: null }));
+  });
+});
+
+describe("waitForStoreCondition", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("resolves on the store change that satisfies it, and lets go of the store", async () => {
+    const store = fakeStore(stateWith(null));
+    const waiting = waitForStoreCondition({
+      ready: (state) => state.activeEnvironmentId === null,
+      timeoutMs: 1_000,
+      store,
+    });
+    expect(store.listeners).toBe(1);
+    store.set({ ...stateWith(null), activeEnvironmentId: null } as AppState);
+    await expect(waiting).resolves.toBe(true);
+    expect(store.listeners).toBe(0);
+  });
+
+  it("resolves false on timeout", async () => {
+    vi.useFakeTimers();
+    const store = fakeStore(stateWith(null));
+    const waiting = waitForStoreCondition({ ready: () => false, timeoutMs: 50, store });
+    vi.advanceTimersByTime(50);
+    await expect(waiting).resolves.toBe(false);
+    expect(store.listeners).toBe(0);
   });
 });

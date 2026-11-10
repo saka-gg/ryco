@@ -82,6 +82,7 @@ function makeSupervisor(
     readonly threadWindowActivityPayloads?: "preview";
     readonly disconnectSavedEnvironment?: (environmentId: EnvironmentId) => Promise<void>;
     readonly applyThreadDetailEvent?: (environmentId: EnvironmentId, event: unknown) => void;
+    readonly savedEnvironmentConnectConcurrency?: number;
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
@@ -116,6 +117,9 @@ function makeSupervisor(
     isSavedEnvironmentAwaitingRepair: overrides.isSavedEnvironmentAwaitingRepair,
     disconnectSavedEnvironment: overrides.disconnectSavedEnvironment ?? (() => Promise.resolve()),
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
+    ...(overrides.savedEnvironmentConnectConcurrency === undefined
+      ? {}
+      : { savedEnvironmentConnectConcurrency: overrides.savedEnvironmentConnectConcurrency }),
     subscribeBrowserResume: (listener: (reason: string) => void) => {
       resume = listener;
       return () => {
@@ -524,6 +528,34 @@ describe("saved environment retry", () => {
     settle.get(hungA)?.(connectionA);
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts.get(hungA)).toBe(2);
+    stop();
+  });
+
+  it("connects a reachable environment beside hung ones when the platform asks for more slots", async () => {
+    const hungA = "env-hung-a" as EnvironmentId;
+    const hungB = "env-hung-b" as EnvironmentId;
+    const reachable = "env-reachable" as EnvironmentId;
+    const attempted: EnvironmentId[] = [];
+    const { supervisor } = makeSupervisor(
+      (record) => {
+        attempted.push(record.environmentId);
+        return record.environmentId === reachable
+          ? Promise.resolve(connectionFor(record))
+          : new Promise<EnvironmentConnection>(() => undefined);
+      },
+      {
+        savedEnvironmentConnectConcurrency: 3,
+        records: [
+          { environmentId: hungA, lastConnectedAt: "2026-10-03T00:00:02.000Z" },
+          { environmentId: hungB, lastConnectedAt: "2026-10-03T00:00:01.000Z" },
+          { environmentId: reachable, lastConnectedAt: "2026-10-03T00:00:00.000Z" },
+        ],
+      },
+    );
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    // No wait for the hung attempts' timeout: all three start at once.
+    expect(attempted).toEqual([hungA, hungB, reachable]);
     stop();
   });
 

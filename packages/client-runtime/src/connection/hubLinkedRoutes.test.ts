@@ -5,7 +5,11 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { decodeBase64Url, encodeBase64Url } from "../relay/base64url.ts";
 import type { SavedEnvironmentRecord } from "./catalog.ts";
-import { createHubLinkedRoutes, type HubLinkedRoutesPorts } from "./hubLinkedRoutes.ts";
+import {
+  createHubLinkedRoutes,
+  LINKED_ROUTE_UNANSWERED_SKIP_MS,
+  type HubLinkedRoutesPorts,
+} from "./hubLinkedRoutes.ts";
 
 const HUB = "env_hub" as EnvironmentId;
 const DIRECT = "env-direct" as EnvironmentId;
@@ -142,5 +146,102 @@ describe("a Hub machine's linked routes", () => {
     const pacedResults = await paced.checkRoutes(paced.routesFor(HUB), signal());
     expect(pacedResults.get("https://studio.tail1.ts.net")).toEqual({ kind: "unreachable" });
     expect(paced.routesFor(HUB)).toHaveLength(1);
+  });
+
+  it("gives a silent address a short time on an attempt, then leaves it out until it answers", async () => {
+    let now = NOW;
+    // "silent" never answers (a tailnet address away from the tailnet), "down" refuses at once.
+    let address: "silent" | "down" | "up" = "silent";
+    const fetchDescriptorId = vi.fn((_: string, abort: AbortSignal) => {
+      if (address === "up") return Promise.resolve(DIRECT);
+      if (address === "down") return Promise.reject(new Error("refused"));
+      return new Promise<EnvironmentId>((_resolve, reject) => {
+        abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    });
+    const routes = createHubLinkedRoutes(
+      ports({ fetchDescriptorId, attemptCheckTimeoutMs: 20, nowMs: () => now }),
+    );
+    // Away from the tailnet: the attempt waits only the short check, then takes the relay.
+    await expect(routes.resolve(HUB, signal())).resolves.toBeNull();
+    expect(fetchDescriptorId).toHaveBeenCalledTimes(1);
+    // The next attempts do not ask the address at all.
+    await expect(routes.resolve(HUB, signal())).resolves.toBeNull();
+    expect(fetchDescriptorId).toHaveBeenCalledTimes(1);
+    // The upgrader still checks it, and its proof brings the address back for attempts.
+    address = "up";
+    expect(routes.routesFor(HUB)).toHaveLength(1);
+    await routes.checkRoutes(routes.routesFor(HUB), signal());
+    await expect(routes.resolve(HUB, signal())).resolves.toMatchObject({
+      routeKey: "https://studio.tail1.ts.net",
+    });
+
+    // Without an upgrader check, the address is asked again once the wait has passed.
+    address = "down";
+    await routes.checkRoutes(routes.routesFor(HUB), signal());
+    fetchDescriptorId.mockClear();
+    await expect(routes.resolve(HUB, signal())).resolves.toBeNull();
+    expect(fetchDescriptorId).not.toHaveBeenCalled();
+    address = "up";
+    now += LINKED_ROUTE_UNANSWERED_SKIP_MS;
+    await expect(routes.resolve(HUB, signal())).resolves.not.toBeNull();
+  });
+
+  it("allows an address the upgrader just proved the full check time on the next attempt", async () => {
+    vi.useFakeTimers({ now: NOW });
+    try {
+      // The address answers when the test opens the gate, however long that takes.
+      let open: (() => void) | null = null;
+      const fetchDescriptorId = vi.fn(
+        (_: string, abort: AbortSignal) =>
+          new Promise<EnvironmentId>((resolve, reject) => {
+            open = () => resolve(DIRECT);
+            abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          }),
+      );
+      const routes = createHubLinkedRoutes(
+        ports({ fetchDescriptorId, attemptCheckTimeoutMs: 20, nowMs: () => Date.now() }),
+      );
+      // Too slow for an attempt's short check.
+      const first = routes.resolve(HUB, signal());
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(first).resolves.toBeNull();
+      expect(fetchDescriptorId).toHaveBeenCalledTimes(1);
+
+      // The upgrader's check waits longer, and sees it answer and prove the key.
+      const check = routes.checkRoutes(routes.routesFor(HUB), signal());
+      await vi.advanceTimersByTimeAsync(100);
+      open!();
+      await check;
+
+      // The attempt that follows waits as long as the check did.
+      let settled = false;
+      const second = routes.resolve(HUB, signal()).then((attempt) => {
+        settled = true;
+        return attempt;
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(false);
+      open!();
+      await expect(second).resolves.toMatchObject({ routeKey: "https://studio.tail1.ts.net" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not hold a called-off attempt against its address", async () => {
+    const abort = new AbortController();
+    const fetchDescriptorId = vi.fn(
+      (_: string, signal: AbortSignal) =>
+        new Promise<EnvironmentId>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        }),
+    );
+    const routes = createHubLinkedRoutes(ports({ fetchDescriptorId }));
+    const attempt = routes.resolve(HUB, abort.signal);
+    abort.abort();
+    await expect(attempt).resolves.toBeNull();
+    fetchDescriptorId.mockImplementation(async () => DIRECT);
+    await expect(routes.resolve(HUB, signal())).resolves.not.toBeNull();
   });
 });

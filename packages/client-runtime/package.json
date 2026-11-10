@@ -46,6 +46,10 @@
       "types": "./src/rpc/index.ts",
       "import": "./src/rpc/index.ts"
     },
+    "./rpc/serverConfigForDevice": {
+      "types": "./src/rpc/serverConfigForDevice.ts",
+      "import": "./src/rpc/serverConfigForDevice.ts"
+    },
     "./rpc/shellSnapshotAssembly": {
       "types": "./src/rpc/shellSnapshotAssembly.ts",
       "import": "./src/rpc/shellSnapshotAssembly.ts"
@@ -85,6 +89,10 @@
     "./deviceVideo": {
       "types": "./src/deviceVideo/index.ts",
       "import": "./src/deviceVideo/index.ts"
+    },
+    "./connection/threadNavigationIntent": {
+      "types": "./src/connection/threadNavigationIntent.ts",
+      "import": "./src/connection/threadNavigationIntent.ts"
     },
     "./connection/hubLinkedRoutes": {
       "types": "./src/connection/hubLinkedRoutes.ts",

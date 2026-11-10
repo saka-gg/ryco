@@ -20,11 +20,7 @@ import {
 } from "@ryco/shared/retiredFeatures";
 import { useStore as useZustandStore } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  LegendList,
-  type LegendListRef,
-  type LegendListRenderItemProps,
-} from "@legendapp/list/react-native";
+import { type LegendListRef, type LegendListRenderItemProps } from "@legendapp/list/react-native";
 import { CommonActions, StackActions, useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import {
@@ -144,6 +140,7 @@ import {
   restartInterruptionNotice,
   threadForkBoundaryQuote,
   threadForkReplyExcerpt,
+  waitForStoreCondition,
   type ChatMessage,
   type ProposedPlan,
 } from "@ryco/client-runtime/state/threads";
@@ -212,7 +209,6 @@ import {
   isStreamHapticsEnabled,
   usePreferences,
 } from "../../state/preferencesStore";
-import { useThreadStreamHaptics } from "./threadStreamHaptics";
 import { FloatingThreadControl } from "./FloatingThreadControl";
 import { ImageGalleryProvider } from "./ImageGalleryModal";
 import {
@@ -262,7 +258,9 @@ import {
   modelSelectionsEqual,
   summarizeQueuedThreadMessage,
 } from "../../state/threadOutboxModel";
-import { useThreadTimeline } from "../../state/threadTimeline";
+import { useThreadTimelineOf } from "../../state/threadTimeline";
+import { createThreadChromeSelector, createThreadSummaryChromeSelector } from "./threadChromeModel";
+import { ThreadFeedList } from "./ThreadFeedList";
 import {
   selectEnvironmentHydratedFromCacheAt,
   selectProjectByRef,
@@ -306,7 +304,16 @@ import {
 } from "@ryco/client-runtime/state/user-input";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { mobileSecretRequestCards } from "./secretRequestCardModel";
-import { sendThreadTurn } from "./sendThreadTurn";
+import { resolveThreadSendAction, sendThreadTurn } from "./sendThreadTurn";
+import { startOptimisticDispatch } from "./optimisticSend";
+import { useFailedSendRestore } from "./useFailedSendRestore";
+import {
+  displayedThreadTitle,
+  threadStopping,
+  type PendingRename,
+  type PendingStop,
+} from "./optimisticThreadActionsModel";
+import { useIsOptimisticUserMessage } from "../../state/optimisticUserMessages";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
   clearThreadGoal,
@@ -407,7 +414,6 @@ import {
 import { ForkOriginRow } from "./ForkOriginRow";
 import { useForkSheetState } from "./useForkSheetState";
 import {
-  createThreadListRowAnnotator,
   nextThreadMessageAnchorStep,
   resolveOpenThreadNavigation,
   type ThreadListRow,
@@ -420,6 +426,10 @@ const NO_PENDING_FOLLOW_UPS: ReadonlyArray<PendingFollowUpAdd> = [];
 const NO_FIND_MESSAGES: ReadonlyArray<ThreadFindMessage> = [];
 const NO_ARTIFACT_MESSAGES: ReadonlyArray<ChatMessage> = [];
 const SERVER_QUEUE_EDIT_IN_PROGRESS = "Save or cancel the message you are editing first.";
+/** How long a rename's new title is shown before the node's own title, whatever it says. */
+const RENAME_ECHO_WAIT_MS = 15_000;
+/** The clock the anchor's rows are built with: their positions do not depend on it. */
+const ANCHOR_ROWS_CLOCK = new Date(0).toISOString();
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
 
@@ -447,13 +457,10 @@ async function guardPlanImplementation(
 
 /** Resolves once the node's new thread reached this device (a few seconds at most). */
 async function waitForThreadInStore(environmentId: EnvironmentId, threadId: ThreadId) {
-  const deadline = Date.now() + 12_000;
-  while (Date.now() < deadline) {
-    if (selectThreadExistsByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  await waitForStoreCondition({
+    ready: (state) => selectThreadExistsByRef(state, scopeThreadRef(environmentId, threadId)),
+    timeoutMs: 12_000,
+  });
 }
 
 /** Sends what a `/goal` message asked for (a plan that changes something). */
@@ -500,12 +507,17 @@ function TimelineRow(props: {
 }) {
   const { entry, onForkFromMessage, onEditFromMessage, onUndoFileChangesOfReply, forkReply } =
     props;
+  const pending = useIsOptimisticUserMessage(
+    scopedThreadKey(scopeThreadRef(props.environmentId, props.threadId)),
+    entry.kind === "message" && entry.message.role === "user" ? entry.message.id : "",
+  );
   if (entry.kind === "message") {
     const message = (
       <ThreadMessage
         environmentId={props.environmentId}
         threadId={props.threadId}
         message={entry.message}
+        pending={pending}
         turnHtmlRenders={props.turnHtmlRenders}
         onForkFromHere={
           onForkFromMessage ? () => onForkFromMessage(forkReply ?? entry.message) : undefined
@@ -662,7 +674,11 @@ export function ThreadDetailScreen(props: {
   const [actionBusy, setActionBusy] = useState(false);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [stagedModelSelection, setStagedModelSelection] = useState<ModelSelection | null>(null);
-  const [sendBusy, setSendBusy] = useState(false);
+  // A send whose answer the composer waits for (an enqueue, a queue edit, a goal), and the
+  // optimistic dispatches still on their way behind a free composer.
+  const [sendWaitBusy, setSendBusy] = useState(false);
+  const [sendBusyCount, setSendBusyCount] = useState(0);
+  const sendBusy = sendWaitBusy || sendBusyCount > 0;
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>([]);
   // The attachments as they are now, for a redirect that waited on its declines.
   const attachmentsRef = useRef(attachments);
@@ -718,19 +734,12 @@ export function ThreadDetailScreen(props: {
     selectEnvironmentHydratedFromCacheAt(state, environmentId),
   );
 
-  const built = useThreadTimeline(environmentId, threadId);
-  useThreadStreamHaptics(
-    `${environmentId}:${threadId}`,
-    built?.timeline,
-    isStreamHapticsEnabled(preferences),
-  );
   // A task sent from New Task opens here before the node shows it: the launch
   // carries it (setup stages, failure, Retry, Edit task) until the thread has
   // messages of its own.
   const launchKey = newTaskLaunchKey(environmentId, threadId);
   const newTaskLaunch = useNewTaskLaunchStore((state) => state.launchesByKey[launchKey]);
   const worktreeLaunch = useWorktreeLaunchStore((state) => state.launchesByKey[launchKey]);
-  const threadHasMessages = (built?.timeline.length ?? 0) > 0;
   // Capability-routed file attachments: capability + direct HTTP base enable the
   // streaming upload path; without either, only the legacy image dataUrl flow.
   const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);
@@ -746,11 +755,25 @@ export function ThreadDetailScreen(props: {
     // when rows appear or leave.
     [attachments, fileUploadRecords],
   );
+  // The thread as the chrome reads it: a streamed delta keeps the object (`sameThreadChrome`),
+  // so it re-renders the feed (`ThreadFeedList`) and not this whole screen.
+  const [selectThreadChrome] = useState(createThreadChromeSelector);
   const thread = useStore((state) =>
-    selectThreadByRef(state, scopeThreadRef(environmentId, threadId)),
+    selectThreadChrome(selectThreadByRef(state, scopeThreadRef(environmentId, threadId))),
+  );
+  // The chrome's timeline: approvals, questions and row positions. The feed builds its own from
+  // the live thread.
+  const built = useThreadTimelineOf(environmentId, threadId, thread);
+  const threadHasMessages = (built?.timeline.length ?? 0) > 0;
+  const [selectSummaryChrome] = useState(() =>
+    createThreadSummaryChromeSelector<
+      NonNullable<ReturnType<typeof selectSidebarThreadSummaryByRef>>
+    >(),
   );
   const sidebarThread = useStore((state) =>
-    selectSidebarThreadSummaryByRef(state, scopeThreadRef(environmentId, threadId)),
+    selectSummaryChrome(
+      selectSidebarThreadSummaryByRef(state, scopeThreadRef(environmentId, threadId)),
+    ),
   );
   const threadDetailLoaded = useStore((state) =>
     selectThreadDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
@@ -774,6 +797,13 @@ export function ThreadDetailScreen(props: {
     [environmentId, outboxMessages, threadId],
   );
   const outboxThreadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
+  const restoreFailedSend = useFailedSendRestore({
+    threadKey: outboxThreadKey,
+    composer: composerRef,
+    attachments: attachmentsRef,
+    setAttachments,
+    setSendError,
+  });
   // "Edit from here" of this thread, from the question until the node's verdict. Kept per
   // thread outside this screen, so leaving and coming back neither forgets nor ends it.
   const revertPhase = useSyncExternalStore(
@@ -1128,6 +1158,12 @@ export function ThreadDetailScreen(props: {
       worktree,
     ],
   );
+  // A rename on its way: the new title shows until the node's title moves off the old one.
+  const [pendingRename, setPendingRename] = useState<
+    (PendingRename & { readonly key: string }) | null
+  >(null);
+  const activePendingRename = pendingRename?.key === outboxThreadKey ? pendingRename : null;
+  const headerTitle = displayedThreadTitle(headerModel?.title, activePendingRename);
 
   // The capability gates key off the DRIVER, not the instance id, so resolve the
   // thread's provider instance through the server config first. A null/lagging
@@ -2364,9 +2400,12 @@ export function ThreadDetailScreen(props: {
 
     // A notification reply queues behind approvals still waiting: the turn they belong to is not
     // over, even where its row already reads completed (a provider that ends the message first).
+    // A send of this device still on its way counts too: its turn is about to start, and a
+    // second one queues behind it instead of racing it (`beginThreadOutboxForegroundDispatch`).
     const threadBusy =
       currentThread.latestTurn?.state === "running" ||
-      (notificationReply && pendingApprovals.length > 0);
+      (notificationReply && pendingApprovals.length > 0) ||
+      isThreadOutboxDispatchPending(outboxThreadKey);
     // Wave 3a: the socket opens one RTT before the live shell snapshot lands,
     // and until it does `threadBusy` is read from a CACHED latestTurn — the
     // same window wave 2's review closed for the outbox drain. A send inside
@@ -2448,6 +2487,94 @@ export function ThreadDetailScreen(props: {
       return "steer" as const;
     };
 
+    const dispatchTurn = (extra: {
+      readonly setThreadError: (threadId: ThreadId, error: string | null) => void;
+      readonly messageId?: MessageId;
+      readonly createdAt?: string;
+      readonly onBeforeTurnStart?: () => void;
+    }) =>
+      executeSendTurn({
+        providerDriver: threadProviderDriver,
+        sourceProviderDriver: currentThread.session?.provider ?? null,
+        claudeCacheReview: mobileClaudeCacheReview,
+        skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
+        confirmStopBackgroundWork: mobileConfirmStopBackgroundWork,
+        // The retained detail subscription already holds what the Claude
+        // resume review reads; a send it clears skips the window read.
+        readSubscribedClaudeReviewState: () =>
+          selectSubscribedClaudeReviewState(
+            useStore.getState(),
+            scopeThreadRef(environmentId, threadId),
+          ),
+        assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
+          createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+        ),
+        api: ensureEnvironmentApi(environmentId),
+        thread: {
+          threadId,
+          isFirstMessage: currentThread.messages.length === 0,
+          isServerThread: true,
+          isLocalDraftThread: false,
+          activeThreadBranch: currentThread.branch,
+          worktreePath: currentThread.worktreePath,
+          createdAt: currentThread.createdAt,
+        },
+        composer: {
+          prompt: text,
+          images: attachments,
+          selectedModelSelection: modelSelection,
+          selectedModel: modelSelection.model,
+          hasSelectedModel: true,
+        },
+        project: {
+          projectId: currentThread.projectId,
+          projectCwd: currentProject?.cwd ?? "",
+        },
+        settings: {
+          runtimeMode: currentThread.runtimeMode,
+          interactionMode: currentThread.interactionMode,
+          tokenMode,
+        },
+        title: currentThread.title,
+        clearDraft: () => {},
+        restoreDraft: () => {},
+        ...extra,
+      });
+
+    // A plain send to an idle thread shows at once and frees the composer; the dispatch runs
+    // behind it (`startOptimisticDispatch`). Every other route still waits for its answer.
+    const route = resolveThreadSendAction({
+      threadBusy,
+      connected,
+      serverQueue,
+      serverQueueWaiting,
+    });
+    if (route === "dispatch" && !notificationReply) {
+      setSendBusyCount((count) => count + 1);
+      void startOptimisticDispatch({
+        threadRef: scopeThreadRef(environmentId, threadId),
+        outgoingText: composeOutgoingPrompt({ prompt: text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+        prompt: text,
+        attachments,
+        dispatch: ({ messageId, createdAt, onBeforeTurnStart, reportError }) =>
+          dispatchTurn({
+            messageId,
+            createdAt,
+            onBeforeTurnStart,
+            setThreadError: (_id, error) => reportError(error),
+          }),
+        onFailed: restoreFailedSend,
+        onSettled: (dispatched) => {
+          setSendBusyCount((count) => Math.max(0, count - 1));
+          // Messages queued behind it may go once its turn starts.
+          if (dispatched) runOutboxDrain();
+        },
+      });
+      setAttachments([]);
+      setAttachmentError(null);
+      return true;
+    }
+
     return runWhileBusy(setSendBusy, async () => {
       const sent = await sendThreadTurn(
         {
@@ -2501,54 +2628,7 @@ export function ThreadDetailScreen(props: {
             }
             return true;
           },
-          dispatch: () =>
-            executeSendTurn({
-              providerDriver: threadProviderDriver,
-              sourceProviderDriver: currentThread.session?.provider ?? null,
-              claudeCacheReview: mobileClaudeCacheReview,
-              skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
-              confirmStopBackgroundWork: mobileConfirmStopBackgroundWork,
-              // The retained detail subscription already holds what the Claude
-              // resume review reads; a send it clears skips the window read.
-              readSubscribedClaudeReviewState: () =>
-                selectSubscribedClaudeReviewState(
-                  useStore.getState(),
-                  scopeThreadRef(environmentId, threadId),
-                ),
-              assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
-                createMobileConnectionRegistry().driver.supervisor.read(environmentId),
-              ),
-              api: ensureEnvironmentApi(environmentId),
-              thread: {
-                threadId,
-                isFirstMessage: currentThread.messages.length === 0,
-                isServerThread: true,
-                isLocalDraftThread: false,
-                activeThreadBranch: currentThread.branch,
-                worktreePath: currentThread.worktreePath,
-                createdAt: currentThread.createdAt,
-              },
-              composer: {
-                prompt: text,
-                images: attachments,
-                selectedModelSelection: modelSelection,
-                selectedModel: modelSelection.model,
-                hasSelectedModel: true,
-              },
-              project: {
-                projectId: currentThread.projectId,
-                projectCwd: currentProject?.cwd ?? "",
-              },
-              settings: {
-                runtimeMode: currentThread.runtimeMode,
-                interactionMode: currentThread.interactionMode,
-                tokenMode,
-              },
-              title: currentThread.title,
-              clearDraft: () => {},
-              restoreDraft: () => {},
-              setThreadError: (_id, error) => setSendError(error),
-            }),
+          dispatch: () => dispatchTurn({ setThreadError: (_id, error) => setSendError(error) }),
         },
       );
       // The composer clears its own text on success; the attachment rows live
@@ -2561,7 +2641,6 @@ export function ThreadDetailScreen(props: {
       return sent;
     });
   };
-
   const runAction = (action: () => Promise<void>, failureTitle = "Could not do that") =>
     runWhileBusy(setActionBusy, async () => {
       try {
@@ -2588,10 +2667,9 @@ export function ThreadDetailScreen(props: {
         entries: built?.timeline ?? [],
         runningTurnId,
         expandedFoldIds,
-        // Running folds deliberately use a stable "Working…" label. Sampling
-        // the clock only when the timeline changes avoids rebuilding the whole
-        // virtualized list every second for a duration that is not displayed.
-        now: new Date().toISOString(),
+        // Only the rows' positions are read here (a link's anchor); the feed shows them with
+        // their own clock (`ThreadFeedList`).
+        now: ANCHOR_ROWS_CLOCK,
       }),
     [built?.timeline, expandedFoldIds, runningTurnId],
   );
@@ -2603,9 +2681,20 @@ export function ThreadDetailScreen(props: {
   const agentRunning =
     !cachedView.headerForcedOffline &&
     (thread?.latestTurn?.state === "running" || thread?.session?.status === "running");
-  const runningSince = agentRunning
-    ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
-    : null;
+  // A Stop on its way (`threadStopping`): the turn shows as stopping until the node ends it.
+  const runningTurnKey = thread?.session?.activeTurnId ?? thread?.latestTurn?.turnId ?? null;
+  const [pendingStop, setPendingStop] = useState<(PendingStop & { readonly key: string }) | null>(
+    null,
+  );
+  const stopping = threadStopping({
+    pending: pendingStop?.key === outboxThreadKey ? pendingStop : null,
+    running: agentRunning,
+    activeTurnId: runningTurnKey,
+  });
+  const runningSince =
+    agentRunning && !stopping
+      ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
+      : null;
   // Whether the feed follows its end as messages arrive (t3code's live follow): only the
   // reader's own drag stops it; reaching the end again, or "jump to latest", resumes it.
   // Kept per chat: a retargeted screen starts out following the new chat's end.
@@ -2742,7 +2831,6 @@ export function ThreadDetailScreen(props: {
 
   // Fork eligibility and the anchored message live outside the timeline; they go onto the rows
   // so LegendList re-renders the rows they change (it never re-renders on a new renderItem).
-  const [annotateRows] = useState(createThreadListRowAnnotator);
   // The plan the settled latest turn proposed and nobody implemented: Implement is offered on it
   // while the chat can take a turn (the shared rule web's plan follow-up reads).
   const latestTurnSettled = thread
@@ -2775,22 +2863,19 @@ export function ThreadDetailScreen(props: {
     share: (plan) => planHandlersRef.current?.share(plan),
   }));
   const highlightedMessageId = messageAnchor?.messageId ?? null;
-  const listRows = useMemo(
-    () =>
-      annotateRows(timelineRows, {
-        forkableMessageIds,
-        editableMessageIds,
-        undoableMessageIds,
-        highlightedMessageId,
-        actionablePlanId,
-      }),
+  const feedFlags = useMemo(
+    () => ({
+      forkableMessageIds,
+      editableMessageIds,
+      undoableMessageIds,
+      highlightedMessageId,
+      actionablePlanId,
+    }),
     [
       actionablePlanId,
-      annotateRows,
       editableMessageIds,
       forkableMessageIds,
       highlightedMessageId,
-      timelineRows,
       undoableMessageIds,
     ],
   );
@@ -3055,24 +3140,30 @@ export function ThreadDetailScreen(props: {
   const mutationBusy = actionBusy || cachedView.actionsDisabled;
 
   const stopTurn = () => {
+    if (stopping) return;
+    const session = selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(environmentId, threadId),
+    )?.session;
     // Stop means stop: hold the queue before the turn can settle, and undo only if the
     // interrupt never reached the server. A node that keeps the follow-up queue holds its own
     // in the same batch.
-    const held = holdThreadOutboxForInterrupt(
-      outboxThreadKey,
-      selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))?.session
-        ?.activeTurnId ?? null,
-    );
+    const held = holdThreadOutboxForInterrupt(outboxThreadKey, session?.activeTurnId ?? null);
     const holdQueue = serverFollowUpQueueSupported;
-    void runAction(async () => {
+    // The turn shows as stopping at once; the node's answer (the turn ends) takes over.
+    const pending = { key: outboxThreadKey, turnId: runningTurnKey };
+    setPendingStop(pending);
+    void (async () => {
       try {
         await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId, { holdQueue });
       } catch (error) {
         held.undo();
-        throw error;
+        setPendingStop((current) => (current === pending ? null : current));
+        Alert.alert("Could not stop", actionFailureMessage(error));
+        return;
       }
       offerToStopDelegatedTasks(environmentId, threadId);
-    });
+    })();
   };
   const compactNow = () => {
     if (!headerModel?.compactAction || headerModel.compactAction.disabled) return;
@@ -3108,31 +3199,58 @@ export function ThreadDetailScreen(props: {
         shouldArchive,
         (command) =>
           command.type === "thread.archive"
-            ? sidebarUndo.archive({ environmentId, threadId }, command.commandId, {
-                currentRoute: () => {
-                  const state = navigation.getState();
-                  return state?.routes[state.index]?.key ?? null;
+            ? sidebarUndo.archive(
+                { environmentId, threadId },
+                command.commandId,
+                {
+                  currentRoute: () => {
+                    const state = navigation.getState();
+                    return state?.routes[state.index]?.key ?? null;
+                  },
+                  shouldLeave: () => navigation.canGoBack(),
+                  leave: async () => {
+                    const state = navigation.getState();
+                    const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
+                    navigation.goBack();
+                    return fallbackKey;
+                  },
+                  reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
                 },
-                shouldLeave: () => navigation.canGoBack(),
-                leave: async () => {
-                  const state = navigation.getState();
-                  const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
-                  navigation.goBack();
-                  return fallbackKey;
-                },
-                reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
-              })
+                // Back to the list at once; the Undo notice is up, and a failure reopens it.
+                { leaveBeforeAck: true },
+              )
             : sidebarUndo.dispatch({ environmentId, threadId }, command),
       );
     });
   // Android has no native text prompt: its rename is a small sheet (kept per chat, like the others).
   const [renameSheetFor, setRenameSheetFor] = useState<string | null>(null);
   const renameSheetVisible = renameSheetFor === outboxThreadKey;
-  const saveThreadTitle = (title: string) =>
-    void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title));
+  // The new title shows at once; the node's title moving off the old one ends the overlay.
+  const saveThreadTitle = (title: string) => {
+    if (!headerModel || title.trim().length === 0) return;
+    const pending = { key: outboxThreadKey, from: headerModel.title, to: title.trim() };
+    setPendingRename(pending);
+    void (async () => {
+      try {
+        await renameThread(ensureEnvironmentApi(environmentId), threadId, title);
+        // The overlay ends with the node's echo (or after a while; the header shows any other
+        // title the node sets meanwhile, `displayedThreadTitle`).
+        await waitForStoreCondition({
+          ready: (state) =>
+            selectThreadByRef(state, scopeThreadRef(environmentId, threadId))?.title.trim() ===
+            pending.to,
+          timeoutMs: RENAME_ECHO_WAIT_MS,
+        });
+        setPendingRename((current) => (current === pending ? null : current));
+      } catch (error) {
+        setPendingRename((current) => (current === pending ? null : current));
+        Alert.alert("Could not rename", actionFailureMessage(error));
+      }
+    })();
+  };
   const renameCurrentThread = () => {
-    if (!headerModel) return;
-    const current = headerModel.title;
+    if (!headerModel || headerTitle === null) return;
+    const current = headerTitle;
     const save = (value: string | undefined) => {
       const title = resolveThreadRename(current, value);
       if (title !== null) saveThreadTitle(title);
@@ -3228,8 +3346,8 @@ export function ThreadDetailScreen(props: {
             ),
           ),
   });
-  const pillTitle = headerModel?.title ?? null;
-  const pillStatus = headerModel?.statusLabel ?? null;
+  const pillTitle = headerTitle;
+  const pillStatus = stopping ? "Stopping" : (headerModel?.statusLabel ?? null);
   const pillProject = headerModel?.projectLabel ?? null;
   const pillWorktree = headerModel?.worktreeLabel ?? null;
   const pillBranch = headerModel?.branchLabel ?? null;
@@ -3281,7 +3399,7 @@ export function ThreadDetailScreen(props: {
             environmentId,
             projectId: thread.projectId,
             link: { kind: "thread", threadId },
-            linkLabel: `Chat: ${headerModel.title}`,
+            linkLabel: `Chat: ${headerTitle ?? headerModel.title}`,
             openDetails: (taskEnvironmentId, taskId) =>
               navigation.navigate("TaskDetail", { environmentId: taskEnvironmentId, taskId }),
           });
@@ -3436,7 +3554,7 @@ export function ThreadDetailScreen(props: {
   // Delete: the node trashes the chat and purges it shortly after, with its attachments and
   // terminal history.
   const deleteCurrentThread = () => {
-    const title = headerModel?.title ?? "this chat";
+    const title = headerTitle ?? "this chat";
     Alert.alert(
       `Delete "${title}"?`,
       "The chat, its attachments and its terminal history are removed for good.",
@@ -3608,61 +3726,64 @@ export function ThreadDetailScreen(props: {
       <HtmlRenderFullScreenProvider>
         <ImageGalleryProvider>
           <View className="min-h-0 flex-1">
-            <LegendList
-              ref={listRef}
-              data={listRows}
-              renderItem={renderItem}
-              keyExtractor={(row) => row.id}
-              alignItemsAtEnd
-              initialScrollAtEnd
-              // Following keeps the end from any distance; reading back, the rows on screen stay put.
-              {...feedEndMaintenance}
-              keyboardDismissMode="interactive"
-              keyboardShouldPersistTaps="handled"
-              contentInsetAdjustmentBehavior="never"
-              // The header floats over the feed: the first message starts under it (and under any
-              // banner), and scrolls up beneath its glass.
-              contentContainerStyle={{ paddingBottom: 10 }}
-              scrollIndicatorInsets={{ top: feedTopInset }}
-              // Room under the newest message whenever the floating status capsule shows.
-              ListFooterComponent={
-                floatingCapsuleShown ? (
+            <ThreadFeedList
+              listRef={listRef}
+              environmentId={environmentId}
+              threadId={threadId}
+              runningTurnId={runningTurnId}
+              expandedFoldIds={expandedFoldIds}
+              flags={feedFlags}
+              streamHapticsEnabled={isStreamHapticsEnabled(preferences)}
+              listProps={{
+                renderItem: renderItem,
+                keyExtractor: (row) => row.id,
+                alignItemsAtEnd: true,
+                initialScrollAtEnd: true,
+                // Following keeps the end from any distance; reading back, the rows on screen stay put.
+                ...feedEndMaintenance,
+                keyboardDismissMode: "interactive",
+                keyboardShouldPersistTaps: "handled",
+                contentInsetAdjustmentBehavior: "never",
+                // The header floats over the feed: the first message starts under it (and under any
+                // banner), and scrolls up beneath its glass.
+                contentContainerStyle: { paddingBottom: 10 },
+                scrollIndicatorInsets: { top: feedTopInset },
+                // Room under the newest message whenever the floating status capsule shows.
+                ListFooterComponent: floatingCapsuleShown ? (
                   <View style={{ height: FLOATING_CONTROL_CLEARANCE }} />
-                ) : null
-              }
-              onStartReached={loadOlderMessages}
-              onStartReachedThreshold={0.35}
-              onScroll={onFeedScroll}
-              onScrollBeginDrag={onFeedScrollBeginDrag}
-              onScrollEndDrag={onFeedScrollEndDrag}
-              onMomentumScrollBegin={onFeedMomentumScrollBegin}
-              onMomentumScrollEnd={onFeedMomentumScrollEnd}
-              scrollEventThrottle={64}
-              // A spacer the list measures (unlike contentContainerStyle padding), so following
-              // the end and anchoring still add up.
-              ListHeaderComponent={
-                <>
-                  <View style={{ height: feedTopInset }} />
-                  {messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      disabled={messageHistoryLoad?.status === "loading"}
-                      onPress={loadOlderMessages}
-                      className="items-center px-4 py-3"
-                    >
-                      <Text className="text-xs text-muted-foreground">
-                        {messageHistoryLoad?.status === "loading"
-                          ? "Loading earlier history…"
-                          : messageHistoryLoad?.status === "error"
-                            ? "Retry earlier history"
-                            : "Load earlier history"}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </>
-              }
-              ListEmptyComponent={
-                launchView ? (
+                ) : null,
+                onStartReached: loadOlderMessages,
+                onStartReachedThreshold: 0.35,
+                onScroll: onFeedScroll,
+                onScrollBeginDrag: onFeedScrollBeginDrag,
+                onScrollEndDrag: onFeedScrollEndDrag,
+                onMomentumScrollBegin: onFeedMomentumScrollBegin,
+                onMomentumScrollEnd: onFeedMomentumScrollEnd,
+                scrollEventThrottle: 64,
+                // A spacer the list measures (unlike contentContainerStyle padding), so following
+                // the end and anchoring still add up.
+                ListHeaderComponent: (
+                  <>
+                    <View style={{ height: feedTopInset }} />
+                    {messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        disabled={messageHistoryLoad?.status === "loading"}
+                        onPress={loadOlderMessages}
+                        className="items-center px-4 py-3"
+                      >
+                        <Text className="text-xs text-muted-foreground">
+                          {messageHistoryLoad?.status === "loading"
+                            ? "Loading earlier history…"
+                            : messageHistoryLoad?.status === "error"
+                              ? "Retry earlier history"
+                              : "Load earlier history"}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </>
+                ),
+                ListEmptyComponent: launchView ? (
                   <NewTaskLaunchCard
                     view={launchView}
                     onRetry={() => {
@@ -3701,8 +3822,8 @@ export function ThreadDetailScreen(props: {
                       }
                     />
                   </View>
-                )
-              }
+                ),
+              }}
             />
             {/* The header's glass floats over the feed: a fade under it keeps the title and
                 the buttons readable while messages scroll beneath. */}
@@ -3989,7 +4110,7 @@ export function ThreadDetailScreen(props: {
       <ThreadComposer
         ref={composerRef}
         shrink={composerShrink.binding}
-        running={headerModel?.moreActions.includes("stop") === true}
+        running={headerModel?.moreActions.includes("stop") === true && !stopping}
         onStop={mutationBusy ? undefined : stopTurn}
         goalAvailable={thread !== undefined}
         onOpenSideChat={
@@ -4164,7 +4285,7 @@ export function ThreadDetailScreen(props: {
       {headerModel ? (
         <ThreadRenameSheet
           visible={renameSheetVisible}
-          currentTitle={headerModel.title}
+          currentTitle={headerTitle ?? headerModel.title}
           onClose={() => setRenameSheetFor(null)}
           onSave={saveThreadTitle}
         />

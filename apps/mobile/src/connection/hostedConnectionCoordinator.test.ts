@@ -513,7 +513,7 @@ describe("mobile hosted connection coordinator", () => {
     });
   });
 
-  it("wakes the foreground at once and the other retained nodes at least 750 ms apart", async () => {
+  it("wakes the foreground at once and the other retained nodes a stagger step apart", async () => {
     viewThread(nodeA);
     await vi.advanceTimersByTimeAsync(10);
     viewThread(nodeB);

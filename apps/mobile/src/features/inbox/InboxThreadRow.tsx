@@ -58,6 +58,8 @@ function statusTextClassName(state: InboxThreadState): string {
 export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly row: InboxThreadRowModel;
   readonly onPress: () => void;
+  /** A finger went down: the thread may be about to open (Home prefetches it). */
+  readonly onPressIn?: (() => void) | undefined;
   readonly onLongPress?: (() => void) | undefined;
   /** Name the delegating chat on a child listed on its own; its parent's group already does. */
   readonly showParent?: boolean;
@@ -91,6 +93,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       onPress={props.onPress}
+      onPressIn={props.onPressIn}
       onLongPress={props.onLongPress}
       className="gap-2 rounded-2xl bg-card px-3.5 py-3 active:bg-card-alt"
     >

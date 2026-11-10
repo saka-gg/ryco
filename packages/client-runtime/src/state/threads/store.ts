@@ -1794,6 +1794,21 @@ function buildLatestTurn(params: {
     params.previous?.turnId === params.turnId
       ? params.previous.sourceProposedPlan
       : params.sourceProposedPlan;
+  // An event that leaves the turn as it was keeps its object: the thread derived from it, and
+  // every view selecting it, stay as they are (a streamed delta would otherwise re-render them).
+  const previous = params.previous;
+  if (
+    previous !== null &&
+    previous.turnId === params.turnId &&
+    previous.state === params.state &&
+    previous.requestedAt === params.requestedAt &&
+    previous.startedAt === params.startedAt &&
+    previous.completedAt === params.completedAt &&
+    previous.assistantMessageId === params.assistantMessageId &&
+    previous.sourceProposedPlan === resolvedPlan
+  ) {
+    return previous;
+  }
   return {
     turnId: params.turnId,
     state: params.state,

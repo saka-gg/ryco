@@ -55,12 +55,13 @@ export function SourceControlCommitRouteScreen(props: CommitRouteProps) {
   const navigation = useNavigation();
   const target = useSourceControlTarget(props.route.params);
   const { environmentId, cwd, mutable } = target;
-  const { status } = useVcsStatus(target);
+  const { status, live } = useVcsStatus(target);
   const [message, setMessage] = useState("");
   const [action, setAction] = useState<CommitChoice["action"]>("commit");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const choices = commitChoices(status, mutable);
+  // A saved status shows what was true: committing waits for the node's own.
+  const choices = commitChoices(status, mutable && live);
   const chosen = choices.find((choice) => choice.action === action);
   const fileCount = status ? status.workingTree.files.length : 0;
 

@@ -151,33 +151,37 @@ describe("snapshotDb", () => {
     expect((await db.listEnvironmentSnapshotStats())[0]?.payloadBytes).toBe(shellOnly.length);
   });
 
-  it("keeps the newest pull request reads per environment and removes them with its snapshot", async () => {
+  it("stores saved answers per environment and removes them with its snapshot", async () => {
     const db = createSnapshotDb(openNodeSqliteHandle);
-    const save = (environmentId: string, key: string, updatedAt: number, keep = 2) =>
-      db.savePullRequestRead({
+    const save = (environmentId: string, key: string, updatedAt: number) =>
+      db.saveSavedQuery({
         environmentId,
         key,
         schemaVersion: 1,
         payload: `{"k":"${key}"}`,
+        payloadBytes: payloadByteLength(`{"k":"${key}"}`),
         updatedAt,
-        keep,
       });
     await save("env-1", "a", 1);
+    await save("env-1", "a", 5);
     await save("env-1", "b", 2);
-    await save("env-1", "c", 3);
     await save("env-2", "a", 1);
-    expect(await db.loadPullRequestRead("env-1", "a")).toBeNull();
-    expect(await db.loadPullRequestRead("env-1", "c")).toEqual({
+    expect(await db.loadSavedQuery("env-1", "a")).toEqual({
       schemaVersion: 1,
-      payload: '{"k":"c"}',
+      payload: '{"k":"a"}',
+      updatedAt: 5,
     });
-    expect(await db.pullRequestReadBytes("env-1")).toBe(2 * payloadByteLength('{"k":"b"}'));
+    expect(await db.savedQueryBytes("env-1")).toBe(2 * payloadByteLength('{"k":"a"}'));
+    expect((await db.listSavedQueryStats()).length).toBe(3);
+
+    await db.removeSavedQueries([{ environmentId: "env-1", key: "b" }]);
+    expect(await db.loadSavedQuery("env-1", "b")).toBeNull();
 
     await db.removeEnvironmentSnapshot("env-1");
-    expect(await db.loadPullRequestRead("env-1", "c")).toBeNull();
-    expect(await db.loadPullRequestRead("env-2", "a")).not.toBeNull();
+    expect(await db.loadSavedQuery("env-1", "a")).toBeNull();
+    expect(await db.loadSavedQuery("env-2", "a")).not.toBeNull();
 
-    await db.clearPullRequestReads();
-    expect(await db.loadPullRequestRead("env-2", "a")).toBeNull();
+    await db.clearSavedQueries();
+    expect(await db.loadSavedQuery("env-2", "a")).toBeNull();
   });
 });
