@@ -25,6 +25,11 @@ export interface CheckpointDiffInput {
    * this because every completed turn produces a new full-range key.
    */
   readonly cacheSlot?: string | null;
+  /**
+   * Read the diff's file list only (D6): a node that can answers with
+   * `fileView.files` and an empty `diff`; an older one sends the whole diff.
+   */
+  readonly fileIndex?: boolean;
   readonly enabled?: boolean;
 }
 
@@ -51,17 +56,20 @@ export function checkpointDiffCacheKey(input: CheckpointDiffInput): string {
     input.toTurnCount,
     input.ignoreWhitespace,
     input.cacheScope ?? null,
+    ...(input.fileIndex ? ["file-index"] : []),
   ]);
 }
 
 export function decodeCheckpointDiffRequest(
   input: CheckpointDiffInput,
 ): Option.Option<DecodedCheckpointDiffRequest> {
+  const fileView = input.fileIndex ? { fileView: { kind: "index" } } : {};
   if (input.fromTurnCount === 0) {
     return Schema.decodeUnknownOption(OrchestrationGetFullThreadDiffInput)({
       threadId: input.threadId,
       toTurnCount: input.toTurnCount,
       ignoreWhitespace: input.ignoreWhitespace,
+      ...fileView,
     }).pipe(Option.map((fields) => ({ kind: "fullThreadDiff" as const, input: fields })));
   }
 
@@ -70,6 +78,7 @@ export function decodeCheckpointDiffRequest(
     fromTurnCount: input.fromTurnCount,
     toTurnCount: input.toTurnCount,
     ignoreWhitespace: input.ignoreWhitespace,
+    ...fileView,
   }).pipe(Option.map((fields) => ({ kind: "turnDiff" as const, input: fields })));
 }
 

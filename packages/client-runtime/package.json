@@ -62,6 +62,10 @@
       "types": "./src/rpc/workspaceFileRead.ts",
       "import": "./src/rpc/workspaceFileRead.ts"
     },
+    "./rpc/checkpointDiffFiles": {
+      "types": "./src/rpc/checkpointDiffFiles.ts",
+      "import": "./src/rpc/checkpointDiffFiles.ts"
+    },
     "./rpc/projectFileWatch": {
       "types": "./src/rpc/projectFileWatch.ts",
       "import": "./src/rpc/projectFileWatch.ts"

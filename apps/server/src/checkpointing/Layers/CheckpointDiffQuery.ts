@@ -46,6 +46,18 @@ const make = Effect.gen(function* () {
     CHECKPOINT_DIFF_CACHE_MAX_ENTRIES,
     CHECKPOINT_DIFF_CACHE_MAX_BYTES,
   );
+  /** Patches split per file, keyed like `diffCache` (so never stale), most recent last. */
+  const splitPatches = new Map<string, unknown>();
+  // The file view loads on its first use, outside the server's boot chunks.
+  const fileView = Effect.fn("CheckpointDiffQuery.fileView")(function* (
+    cacheKey: string,
+    diff: string,
+    request: NonNullable<Parameters<CheckpointDiffQueryShape["getTurnDiff"]>[0]["fileView"]>,
+    commits: { readonly fromCommitOid: string; readonly toCommitOid: string },
+  ) {
+    const module = yield* Effect.promise(() => import("../turnDiffFileView.ts"));
+    return module.answerFileView(splitPatches, cacheKey, diff, request, commits);
+  });
 
   const getTurnDiff: CheckpointDiffQueryShape["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -160,12 +172,24 @@ const make = Effect.gen(function* () {
         diff = computed;
       }
 
-      const turnDiff: OrchestrationGetTurnDiffResultType = {
-        threadId: input.threadId,
-        fromTurnCount: input.fromTurnCount,
-        toTurnCount: input.toTurnCount,
-        diff,
-      };
+      // A file view sends the list, or some files' patches, instead of the whole diff (D6).
+      const turnDiff: OrchestrationGetTurnDiffResultType = input.fileView
+        ? {
+            threadId: input.threadId,
+            fromTurnCount: input.fromTurnCount,
+            toTurnCount: input.toTurnCount,
+            diff: "",
+            fileView: yield* fileView(cacheKey, diff, input.fileView, {
+              fromCommitOid,
+              toCommitOid,
+            }),
+          }
+        : {
+            threadId: input.threadId,
+            fromTurnCount: input.fromTurnCount,
+            toTurnCount: input.toTurnCount,
+            diff,
+          };
       if (!isTurnDiffResult(turnDiff)) {
         return yield* new CheckpointInvariantError({
           operation,
@@ -185,6 +209,7 @@ const make = Effect.gen(function* () {
       fromTurnCount: 0,
       toTurnCount: input.toTurnCount,
       ignoreWhitespace: input.ignoreWhitespace ?? true,
+      ...(input.fileView ? { fileView: input.fileView } : {}),
     }).pipe(Effect.map((result): OrchestrationGetFullThreadDiffResult => result));
 
   return {
