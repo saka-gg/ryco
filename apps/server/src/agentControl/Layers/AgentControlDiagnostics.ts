@@ -246,10 +246,7 @@ const makeAgentControlDiagnostics = Effect.gen(function* () {
               projectId: scope.projectId,
               threadId,
               occurredAt: event.occurredAt,
-              providerAttributed:
-                event.commandId?.startsWith("provider:") === true ||
-                event.metadata.providerTurnId !== undefined ||
-                event.metadata.providerItemId !== undefined,
+              providerAttributed: event.providerAttributed,
             },
           ];
         },

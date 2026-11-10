@@ -12,6 +12,7 @@ import {
   type ThreadUsageLimit,
 } from "@ryco/contracts";
 import {
+  USAGE_LIMIT_RESUME_GRACE_MS,
   USAGE_LIMIT_RESUME_MESSAGE,
   applicableUsageLimit,
   usageLimitAutoResumeBlocker,
@@ -19,7 +20,7 @@ import {
   usageLimitResumeIds,
   usageLimitSnoozeCommandId,
 } from "@ryco/shared/usageLimit";
-import { Cause, Clock, Duration, Effect, Exit, Layer, Option, Schedule } from "effect";
+import { Cause, Clock, Duration, Effect, Exit, Layer, Option, Queue, Stream } from "effect";
 
 import type { PersistenceSqlError, ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import {
@@ -47,7 +48,13 @@ const RESET_FILL_WINDOW_MS = 6 * 3_600_000;
 const MIN_SNOOZE_MS = 60_000;
 /** Transient dispatch failures are retried this often per command id, then given up. */
 const MAX_TRANSIENT_ATTEMPTS = 5;
-const SWEEP_INTERVAL = Duration.seconds(30);
+/** Re-check cadence while a thread could be resumed soon (busy, waiting on a request, retrying). */
+const ACTIVE_SWEEP_MS = 30_000;
+/**
+ * The longest the loop sleeps. New limits and settings changes wake it at once; this is the safety
+ * net for anything else a sweep reads (provider availability, a per-thread override).
+ */
+const IDLE_SWEEP_MS = 10 * 60_000;
 
 export type UsageLimitRecoveryAction =
   | {
@@ -156,6 +163,49 @@ export function planUsageLimitRecovery(input: {
     }
   }
   return actions;
+}
+
+/**
+ * How long until another sweep can change anything, after one ran at `nowMs`: the earliest reset
+ * (plus the resume grace) or snooze end among the limited threads, `ACTIVE_SWEEP_MS` while one
+ * waits on something only polling sees (a running turn, a pending request, an unavailable
+ * provider, a retry), and null when nothing is due by time (a new limit or a settings change
+ * wakes the loop).
+ */
+export function nextUsageLimitSweepDelayMs(input: {
+  readonly candidates: ReadonlyArray<UsageLimitRecoveryCandidate>;
+  readonly settings: Pick<ServerSettings, "autoResumeLimitedThreads">;
+  readonly enabledInstanceIds: ReadonlySet<ProviderInstanceId>;
+  readonly retrying: boolean;
+  readonly nowMs: number;
+}): number | null {
+  let delay: number | null = input.retrying ? ACTIVE_SWEEP_MS : null;
+  const consider = (ms: number) => {
+    const bounded = Math.max(1_000, ms);
+    delay = delay === null ? bounded : Math.min(delay, bounded);
+  };
+  for (const { thread, delegatedReturnTerminal } of input.candidates) {
+    const limit = applicableUsageLimit(thread);
+    if (limit === null || delegatedReturnTerminal) continue;
+    const blocker = usageLimitAutoResumeBlocker({
+      thread,
+      nodeSetting: input.settings.autoResumeLimitedThreads,
+      nowMs: input.nowMs,
+    });
+    const resetMs = limit.resetAt === null ? Number.NaN : Date.parse(limit.resetAt);
+    if (blocker === "before-reset" && Number.isFinite(resetMs)) {
+      consider(resetMs + USAGE_LIMIT_RESUME_GRACE_MS - input.nowMs);
+    } else if (blocker === "snoozed" && thread.snoozedUntil) {
+      consider(Date.parse(thread.snoozedUntil) - input.nowMs);
+    } else if (
+      blocker === "busy" ||
+      blocker === "pending-request" ||
+      (blocker === null && !input.enabledInstanceIds.has(limit.providerInstanceId))
+    ) {
+      consider(ACTIVE_SWEEP_MS);
+    }
+  }
+  return delay;
 }
 
 /** `E` is the union of the storage and dispatch errors the sweep may hit. */
@@ -287,7 +337,7 @@ export const makeUsageLimitRecovery = <E>(deps: UsageLimitRecoveryDeps<E>) =>
 
     const runSweep = Effect.gen(function* () {
       const threadIds = yield* deps.listLimitedThreadIds();
-      if (threadIds.length === 0) return;
+      if (threadIds.length === 0) return null;
       const nowMs = yield* Clock.currentTimeMillis;
       const settings = yield* deps.getSettings;
       const providers = yield* deps.getProviders;
@@ -321,6 +371,16 @@ export const makeUsageLimitRecovery = <E>(deps: UsageLimitRecoveryDeps<E>) =>
           yield* settleApply(action);
         }
       }
+      // A resume or snooze this sweep dispatched changes the thread: look again soon.
+      return actions.some((action) => action.kind !== "fill-reset")
+        ? ACTIVE_SWEEP_MS
+        : nextUsageLimitSweepDelayMs({
+            candidates,
+            settings,
+            enabledInstanceIds,
+            retrying: transientFailures.size > 0,
+            nowMs,
+          });
     });
 
     const sweep: UsageLimitRecoveryShape["sweep"] = () =>
@@ -331,7 +391,7 @@ export const makeUsageLimitRecovery = <E>(deps: UsageLimitRecoveryDeps<E>) =>
             ? Effect.interrupt
             : Effect.logWarning("usage-limit recovery sweep failed; retrying", {
                 cause: Cause.pretty(cause),
-              }),
+              }).pipe(Effect.as(ACTIVE_SWEEP_MS)),
         ),
       );
 
@@ -375,13 +435,31 @@ export const UsageLimitRecoveryLive = Layer.effect(
   Effect.gen(function* () {
     const recovery = yield* makeUsageLimitRecoveryLive;
     const startup = yield* ServerRuntimeStartup;
+    const engine = yield* OrchestrationEngineService;
+    const settings = yield* ServerSettingsService;
+    // A new limit or a settings change (auto-resume, snoozing) wakes the loop at once.
+    const wake = yield* Queue.sliding<void>(1);
+    const signal = Queue.offer(wake, undefined).pipe(Effect.asVoid);
+    yield* Effect.forkScoped(
+      engine.streamDomainEvents.pipe(
+        Stream.filter((event) => event.type === "thread.usage-limit-set"),
+        Stream.runForEach(() => signal),
+      ),
+    );
+    yield* Effect.forkScoped(settings.streamChanges.pipe(Stream.runForEach(() => signal)));
+    // Sleeps until the next sweep can change something (`nextUsageLimitSweepDelayMs`).
+    const loop = Effect.forever(
+      Effect.gen(function* () {
+        const delayMs = yield* recovery.sweep();
+        yield* Effect.raceFirst(
+          Effect.sleep(Duration.millis(Math.min(delayMs ?? IDLE_SWEEP_MS, IDLE_SWEEP_MS))),
+          Queue.take(wake),
+        );
+      }),
+    );
     yield* Effect.forkScoped(
       startup.awaitCommandReady.pipe(
-        Effect.andThen(
-          Effect.suspend(() => recovery.sweep()).pipe(
-            Effect.repeat(Schedule.spaced(SWEEP_INTERVAL)),
-          ),
-        ),
+        Effect.andThen(loop),
         Effect.catchCause((cause) =>
           Cause.hasInterruptsOnly(cause)
             ? Effect.interrupt

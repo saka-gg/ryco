@@ -102,12 +102,7 @@ const orchestration = {
         aggregateId: projectId,
         occurredAt,
         commandId: null,
-        metadata: {},
-        payload: {
-          secret: "never-leak-secret",
-          path: "/private/worktree",
-          requestBody: "raw request body",
-        },
+        providerAttributed: false,
       })),
     ),
 } as unknown as OrchestrationEngineShape;

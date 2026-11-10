@@ -20,6 +20,7 @@ import type { Effect, Scope, Stream } from "effect";
 
 import type { OrchestrationCommandAdmissionError, OrchestrationDispatchError } from "../Errors.ts";
 import type { OrchestrationEventStoreError } from "../../persistence/Errors.ts";
+import type { OrchestrationEventSummary } from "../../persistence/Services/OrchestrationEventStore.ts";
 
 /**
  * OrchestrationEngineShape - Service API for orchestration command and event flow.
@@ -106,7 +107,7 @@ export interface OrchestrationEngineShape {
   readonly readRecentEvents?: (input: {
     readonly since: string;
     readonly limit: number;
-  }) => Effect.Effect<ReadonlyArray<OrchestrationEvent>, OrchestrationEventStoreError>;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationEventSummary>, OrchestrationEventStoreError>;
 
   /**
    * Dispatch a validated orchestration command.

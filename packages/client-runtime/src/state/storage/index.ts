@@ -122,5 +122,25 @@ export function createStorageManagementController(input: {
         });
         return { result, preview: null, snapshot: null };
       }),
+    /**
+     * Removes one database backup the last scan listed (the owner's click on its row; nothing
+     * removes backups on its own). The scan's list drops it; its space shows at the next scan.
+     */
+    removeDatabaseBackup: (name: string) =>
+      run(async (client) => {
+        await client.storage.removeDatabaseBackup({ name });
+        const snapshot = state.snapshot;
+        const database = snapshot?.database;
+        if (!snapshot || !database?.backups) return {};
+        return {
+          snapshot: {
+            ...snapshot,
+            database: {
+              ...database,
+              backups: database.backups.filter((backup) => backup.name !== name),
+            },
+          },
+        };
+      }),
   };
 }

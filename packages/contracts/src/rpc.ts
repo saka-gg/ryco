@@ -20,6 +20,8 @@ import {
   StorageScanInput,
   StoragePreviewInput,
   StorageExecuteInput,
+  StorageRemoveDatabaseBackupInput,
+  StorageRemoveDatabaseBackupResult,
   StorageSnapshot,
   StorageCleanupPreview,
   StorageCleanupResult,
@@ -499,6 +501,7 @@ export const WS_METHODS = {
   storageScan: "storage.scan",
   storagePreview: "storage.preview",
   storageExecute: "storage.execute",
+  storageRemoveDatabaseBackup: "storage.removeDatabaseBackup",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -2083,6 +2086,12 @@ export const WsStorageExecuteRpc = Rpc.make(WS_METHODS.storageExecute, {
   error: Schema.Union([StorageError, AuthRpcError]),
 });
 
+export const WsStorageRemoveDatabaseBackupRpc = Rpc.make(WS_METHODS.storageRemoveDatabaseBackup, {
+  payload: StorageRemoveDatabaseBackupInput,
+  success: StorageRemoveDatabaseBackupResult,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+
 export const WsGitCreateWorktreeForProjectRpc = Rpc.make(WS_METHODS.gitCreateWorktreeForProject, {
   payload: GitCreateWorktreeForProjectInput,
   success: GitCreateWorktreeForProjectOutput,
@@ -2911,6 +2920,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsStorageScanRpc
   | typeof WsStoragePreviewRpc
   | typeof WsStorageExecuteRpc
+  | typeof WsStorageRemoveDatabaseBackupRpc
   | typeof WsGitCreateWorktreeForProjectRpc
   | typeof WsGitFindWorktreeForOriginRpc
   | typeof WsGitArchiveWorktreeRpc
@@ -3157,6 +3167,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsStorageScanRpc,
   WsStoragePreviewRpc,
   WsStorageExecuteRpc,
+  WsStorageRemoveDatabaseBackupRpc,
   WsGitCreateWorktreeForProjectRpc,
   WsGitFindWorktreeForOriginRpc,
   WsGitArchiveWorktreeRpc,

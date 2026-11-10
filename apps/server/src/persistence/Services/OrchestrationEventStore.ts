@@ -15,6 +15,19 @@ import type { Effect, Stream } from "effect";
 
 import type { OrchestrationEventStoreError } from "../Errors.ts";
 
+/** An event without its payload, for operational listings (`readRecent`). */
+export interface OrchestrationEventSummary {
+  readonly sequence: number;
+  readonly eventId: OrchestrationEvent["eventId"];
+  readonly type: OrchestrationEvent["type"];
+  readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+  readonly aggregateId: string;
+  readonly occurredAt: string;
+  readonly commandId: string | null;
+  /** A provider command or provider turn/item metadata produced it. */
+  readonly providerAttributed: boolean;
+}
+
 /**
  * An event without its payload (see `readEventHeadersPage`). `payload` carries only the ids a
  * project, workspace or thread removal names and a relocation's paths, where the event has them.
@@ -183,11 +196,14 @@ export interface OrchestrationEventStoreShape {
     readonly streamId: string;
   }) => Effect.Effect<number, OrchestrationEventStoreError>;
 
-  /** Newest-first bounded operational read. Callers must authorization-filter aggregates. */
+  /**
+   * Newest-first bounded operational read of event summaries (no payloads) since a time. Callers
+   * must authorization-filter aggregates.
+   */
   readonly readRecent?: (input: {
     readonly since: string;
     readonly limit: number;
-  }) => Effect.Effect<ReadonlyArray<OrchestrationEvent>, OrchestrationEventStoreError>;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationEventSummary>, OrchestrationEventStoreError>;
 
   /**
    * Read all events from the beginning of the stream.

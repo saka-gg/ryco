@@ -158,6 +158,7 @@ import Migration0099, {
 import Migration0100 from "./Migrations/100_EventRetention.ts";
 import Migration0101, { ensureProjectImportsTable } from "./Migrations/101_ProjectImports.ts";
 import Migration0102, { ensureAutomationHookTables } from "./Migrations/102_AutomationHooks.ts";
+import Migration0103 from "./Migrations/103_EventLogTurnStartIndex.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -271,6 +272,7 @@ export const migrationEntries = [
   [100, "EventRetention", Migration0100],
   [101, "ProjectImports", Migration0101],
   [102, "AutomationHooks", Migration0102],
+  [103, "EventLogTurnStartIndex", Migration0103],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -900,6 +902,8 @@ const compatibilityRepairs = [
   { key: "event-retention", since: 100, run: () => Migration0100 },
   { key: "project-imports", since: 101, run: () => repairProjectImportsTable() },
   { key: "automation-hooks", since: 102, run: () => repairAutomationHookTables() },
+  // 103 again when another branch recorded 103 (or a later id) first; it is idempotent.
+  { key: "event-log-turn-start-index", since: 103, run: () => Migration0103 },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

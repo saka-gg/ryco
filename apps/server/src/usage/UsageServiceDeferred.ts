@@ -4,26 +4,20 @@
  * The pipeline (`UsageService.ts`: the transcript and OpenCode readers, the scan cache and
  * pricing) is about 110 KB of bundled code that most boots never run. It is loaded with
  * `import()` when the first summary is read, so it stays off the boot path
- * (serverBundleBoundaries.test.ts). Users who opened usage before still get fresh rates before
- * their next visit: shortly after boot, a node that has downloaded rates loads the pipeline,
- * which refreshes them if they are stale.
+ * (serverBundleBoundaries.test.ts). Nothing runs at boot: the price list is refreshed when Usage
+ * or Statistics is first read (stale-while-revalidate, `UsageService.ts`), not 30 s after every
+ * start as before.
  *
  * @module UsageServiceDeferred
  */
 import { UsageReadError } from "@ryco/contracts";
-import { Cause, Deferred, Duration, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
+import { Cause, Deferred, Effect, Exit, type FileSystem, Layer, type Path, Scope } from "effect";
 import type { HttpClient } from "effect/http";
 
-import { ServerConfig } from "../config.ts";
+import type { ServerConfig } from "../config.ts";
 import type { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import type { ServerSettingsService } from "../serverSettings.ts";
-import type { UsageServiceOptions } from "./UsageService.ts";
-import {
-  USAGE_RATES_WARM_DELAY_MS,
-  UsageService,
-  type UsageServiceShape,
-  usageRatesCachePath,
-} from "./UsageServiceTag.ts";
+import { UsageService, type UsageServiceShape } from "./UsageServiceTag.ts";
 
 /** The services the pipeline is built with, captured when this layer is built. */
 type UsageServiceServices =
@@ -36,9 +30,11 @@ type UsageServiceServices =
 
 /** What this layer needs from the lazily loaded `UsageService.ts`. */
 export interface UsageServiceModule {
-  readonly makeUsageService: (
-    options: UsageServiceOptions,
-  ) => Effect.Effect<UsageServiceShape, never, UsageServiceServices | Scope.Scope>;
+  readonly makeUsageService: () => Effect.Effect<
+    UsageServiceShape,
+    never,
+    UsageServiceServices | Scope.Scope
+  >;
 }
 
 const loadUsageServiceModule = (): Promise<UsageServiceModule> => import("./UsageService.ts");
@@ -53,17 +49,11 @@ export const makeUsageServiceDeferred = Effect.fnUntraced(function* (
 ) {
   const services = yield* Effect.context<UsageServiceServices>();
   const scope = yield* Effect.scope;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const config = yield* ServerConfig;
 
   let built: Deferred.Deferred<UsageServiceShape, UsageReadError> | null = null;
-  const build = (
-    done: Deferred.Deferred<UsageServiceShape, UsageReadError>,
-    options: UsageServiceOptions,
-  ) =>
+  const build = (done: Deferred.Deferred<UsageServiceShape, UsageReadError>) =>
     Effect.promise(() => load()).pipe(
-      Effect.flatMap((module) => module.makeUsageService(options)),
+      Effect.flatMap((module) => module.makeUsageService()),
       Effect.provideContext(services),
       Scope.provide(scope),
       Effect.catchCause((cause) =>
@@ -85,34 +75,19 @@ export const makeUsageServiceDeferred = Effect.fnUntraced(function* (
     );
   // Starting the build is uninterruptible, so a caller interrupted right after claiming it
   // cannot leave later callers waiting for a build that never started.
-  const service = (options: UsageServiceOptions) =>
-    Effect.uninterruptibleMask((restore) =>
-      Effect.suspend(() => {
-        if (built !== null) return restore(Deferred.await(built));
-        const done = Deferred.makeUnsafe<UsageServiceShape, UsageReadError>();
-        built = done;
-        return Effect.forkIn(build(done, options), scope).pipe(
-          Effect.andThen(restore(Deferred.await(done))),
-        );
-      }),
-    );
-  // A summary refreshes stale rates itself, so the pipeline it loads skips its own warm-up.
-  const serviceForSummary = service({ ratesWarmDelayMs: null });
-
-  // Users who opened usage before get fresh rates before their next visit: the pipeline this
-  // loads refreshes stale rates at once.
-  yield* Effect.sleep(Duration.millis(USAGE_RATES_WARM_DELAY_MS)).pipe(
-    Effect.andThen(fileSystem.exists(usageRatesCachePath(path, config.stateDir))),
-    Effect.flatMap((exists) => (exists ? service({ ratesWarmDelayMs: 0 }) : Effect.void)),
-    Effect.catchCause(() => Effect.void),
-    Effect.forkIn(scope),
+  const service = Effect.uninterruptibleMask((restore) =>
+    Effect.suspend(() => {
+      if (built !== null) return restore(Deferred.await(built));
+      const done = Deferred.makeUnsafe<UsageServiceShape, UsageReadError>();
+      built = done;
+      return Effect.forkIn(build(done), scope).pipe(Effect.andThen(restore(Deferred.await(done))));
+    }),
   );
-
   return UsageService.of({
-    readSummary: (input) => Effect.flatMap(serviceForSummary, (usage) => usage.readSummary(input)),
+    readSummary: (input) => Effect.flatMap(service, (usage) => usage.readSummary(input)),
     // Statistics stay readable when the pipeline cannot load: their buckets are just unpriced.
     priceStatistics: (snapshot) =>
-      Effect.flatMap(serviceForSummary, (usage) => usage.priceStatistics(snapshot)).pipe(
+      Effect.flatMap(service, (usage) => usage.priceStatistics(snapshot)).pipe(
         Effect.catchCause((cause) =>
           Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(snapshot),
         ),

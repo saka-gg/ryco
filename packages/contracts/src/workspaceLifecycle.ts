@@ -121,6 +121,13 @@ export const WorkspaceDiskUsageInput = Schema.Struct({
   projectId: ProjectId,
   /** Measure again instead of answering from the node's recent measurements. */
   refresh: Schema.optional(Schema.Boolean),
+  /**
+   * Answer at once: from the last measurement however old (its `measuredAt` says when), or
+   * unmeasured for a checkout never measured, each marked `measuring` while a newer one runs in
+   * the background; read again to get it. Without it the node waits for every measurement (older
+   * clients). Older nodes ignore it and wait.
+   */
+  allowStale: Schema.optional(Schema.Boolean),
 });
 export type WorkspaceDiskUsageInput = typeof WorkspaceDiskUsageInput.Type;
 
@@ -138,6 +145,11 @@ export const WorkspaceDiskUsage = Schema.Struct({
   /** Unreadable entries or the time limit cut the measurement short: a lower bound. */
   partial: Schema.Boolean,
   measuredAt: IsoDateTime,
+  /**
+   * A newer measurement is running: `bytes` is the previous one (or null when there is none
+   * yet). Only for `allowStale` reads; absent otherwise and from older nodes.
+   */
+  measuring: Schema.optional(Schema.Boolean),
 });
 export type WorkspaceDiskUsage = typeof WorkspaceDiskUsage.Type;
 

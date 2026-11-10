@@ -19,7 +19,10 @@ const KEPT = [
   "idx_orch_events_stream_version",
 ];
 
-/** Explicitly created (non-automatic) indexes on the two orchestration tables. */
+/** Added by a later migration (103), not one 093 is about. */
+const LATER = new Set(["idx_orch_events_thread_turn_starts"]);
+
+/** Explicitly created (non-automatic) indexes on the two orchestration tables, 093's own. */
 const orchestrationIndexes = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<{ readonly name: string }>`
@@ -28,7 +31,7 @@ const orchestrationIndexes = Effect.gen(function* () {
       AND tbl_name IN ('orchestration_events', 'orchestration_command_receipts')
     ORDER BY name
   `;
-  return rows.map((row) => row.name);
+  return rows.map((row) => row.name).filter((name) => !LATER.has(name));
 });
 
 it.layer(NodeSqliteClient.layerMemory())("093 drop unused orchestration indexes", (it) => {

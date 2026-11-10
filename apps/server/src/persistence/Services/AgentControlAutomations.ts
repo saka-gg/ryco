@@ -87,6 +87,14 @@ export interface AgentControlAutomationRepositoryShape {
     readonly expectedRevision: number;
     readonly expectedCancelled: boolean;
   }) => Effect.Effect<boolean, AgentControlAutomationRepositoryError>;
+  /**
+   * The earliest `nextRunAt` among the schedules `claimDue` could claim once it passes: enabled,
+   * not cancelled or quarantined, and without a run in flight. Null when there is none.
+   */
+  readonly nextDueAt?: () => Effect.Effect<
+    IsoDateTime | null,
+    AgentControlAutomationRepositoryError
+  >;
   readonly claimDue: (input: {
     readonly now: IsoDateTime;
     readonly limit: number;

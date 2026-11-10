@@ -73,7 +73,7 @@ import {
 } from "../Services/EventLogCompaction.ts";
 import { SqliteReadClient } from "../SqliteReadClient.ts";
 import { compactionStateKey, readCompactionState } from "./EventLogCompactionState.ts";
-import { runRetentionPass } from "./EventLogRetention.ts";
+import { adaptDeleteBatchSize, runRetentionPass } from "./EventLogRetention.ts";
 
 /**
  * The largest selection window when selection runs on the main connection (no read worker):
@@ -149,16 +149,6 @@ export const receiptPageQuery = (client: SqlClient.SqlClient, afterRowid: number
     ORDER BY rowid
     LIMIT ${rows}
   `;
-
-const adaptBatchSize = (
-  size: number,
-  elapsedMs: number,
-  batch: EventLogCompactionPassOptions["deleteBatch"],
-) => {
-  if (elapsedMs > batch.targetMs * 2) return Math.max(batch.min, Math.floor(size / 2));
-  if (elapsedMs < batch.targetMs / 2) return Math.min(batch.max, Math.ceil(size * 1.5));
-  return size;
-};
 
 export interface EventLogCompactionDeps {
   /** Statistics' per-thread reader; retention keeps deleted threads' events without it. */
@@ -404,7 +394,7 @@ export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
                       { firstSequence: batch[0]?.sequence, events: batch.length },
                     );
                   }
-                  batchSize = adaptBatchSize(batchSize, elapsedMs, options.deleteBatch);
+                  batchSize = adaptDeleteBatchSize(batchSize, elapsedMs, options.deleteBatch);
                   yield* pauseAfter(elapsedMs);
                 }
               }
@@ -499,7 +489,7 @@ export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
                     mainThreadMs += elapsedMs;
                     maxBatchMs = Math.max(maxBatchMs, elapsedMs);
                     receiptBatchDurationsMs.push(elapsedMs);
-                    receiptBatchSize = adaptBatchSize(receiptBatchSize, elapsedMs, {
+                    receiptBatchSize = adaptDeleteBatchSize(receiptBatchSize, elapsedMs, {
                       ...options.deleteBatch,
                       max: Math.max(1, receipts.deleteBatch),
                     });
@@ -527,6 +517,8 @@ export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
                 compactedThroughSequence: cursor,
                 overTime,
                 readThreadUsage: deps.readThreadUsage,
+                reader,
+                batchTiming: options.deleteBatch,
                 afterBatch: (elapsedMs) =>
                   Effect.suspend(() => {
                     mainThreadMs += elapsedMs;

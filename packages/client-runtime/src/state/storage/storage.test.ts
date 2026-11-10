@@ -98,3 +98,35 @@ describe("node storage request lifecycle", () => {
     expect(f.execute).not.toHaveBeenCalled();
   });
 });
+
+describe("database backup removal", () => {
+  it("removes one listed backup and drops it from the scan", async () => {
+    const backup = (name: string, newest: boolean) => ({
+      name,
+      kind: "before" as const,
+      fromSchema: 95,
+      toSchema: 100,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      bytes: 1_000,
+      newest,
+    });
+    const withBackups = {
+      ...snapshot,
+      database: { backups: [backup("new", true), backup("old", false)] },
+    } as unknown as StorageSnapshot;
+    const removeDatabaseBackup = vi.fn(async () => ({ freedBytes: 1_000 }));
+    const client = {
+      storage: { scan: vi.fn(async () => withBackups), removeDatabaseBackup },
+    } as unknown as WsRpcClient;
+    const controller = createStorageManagementController({
+      readClient: () => client,
+      canManage: () => true,
+    });
+    await controller.scan();
+    await controller.removeDatabaseBackup("old");
+    expect(removeDatabaseBackup).toHaveBeenCalledWith({ name: "old" });
+    expect(
+      controller.getSnapshot().snapshot?.database?.backups?.map((entry) => entry.name),
+    ).toEqual(["new"]);
+  });
+});

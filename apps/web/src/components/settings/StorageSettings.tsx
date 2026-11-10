@@ -397,7 +397,11 @@ function StorageEditor({
             </SettingsBlock>
           ) : null}
           {state.snapshot.database ? (
-            <DatabaseStorageRows database={state.snapshot.database} />
+            <DatabaseStorageRows
+              database={state.snapshot.database}
+              busy={busy}
+              onRemoveBackup={(name) => void controller.removeDatabaseBackup(name)}
+            />
           ) : null}
         </>
       )}
@@ -498,7 +502,15 @@ function compactionStatus(compaction: DatabaseStorageReport["compaction"]): stri
  * The node's database, from the last scan, inside the storage card. Kept in this module: it is
  * part of the lazy settings chunk, so the app shell's static graph does not grow.
  */
-function DatabaseStorageRows({ database }: { database: DatabaseStorageReport }) {
+function DatabaseStorageRows({
+  database,
+  busy,
+  onRemoveBackup,
+}: {
+  database: DatabaseStorageReport;
+  busy: boolean;
+  onRemoveBackup: (name: string) => void;
+}) {
   const value = (text: string) => (
     <span className="text-xs tabular-nums text-muted-foreground">{text}</span>
   );
@@ -556,6 +568,82 @@ function DatabaseStorageRows({ database }: { database: DatabaseStorageReport }) 
         control={value(formatBytes(database.reclaimableBytes))}
       />
       {database.doctor?.recommended ? <DatabaseDoctorRow database={database} /> : null}
+      {database.backups && database.backups.length > 0 ? (
+        <DatabaseBackupRows backups={database.backups} busy={busy} onRemove={onRemoveBackup} />
+      ) : null}
+    </>
+  );
+}
+
+const schemaLabel = (schema: number) => `v${String(schema).padStart(3, "0")}`;
+
+/**
+ * The database's backups, each removable by the owner's click (with a confirm step); the node
+ * never removes them for that reason on its own. Only nodes that list them can remove them.
+ */
+function DatabaseBackupRows({
+  backups,
+  busy,
+  onRemove,
+}: {
+  backups: NonNullable<DatabaseStorageReport["backups"]>;
+  busy: boolean;
+  onRemove: (name: string) => void;
+}) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const total = backups.reduce((sum, backup) => sum + backup.bytes, 0);
+  return (
+    <>
+      <SettingsRow
+        title="Database backups"
+        description="Copies taken before upgrades, to undo one. The newest three of each kind are kept; removing one frees its space."
+        control={
+          <span className="text-xs tabular-nums text-muted-foreground">{formatBytes(total)}</span>
+        }
+      />
+      {backups.map((backup) => (
+        <SettingsRow
+          key={backup.name}
+          title={
+            backup.kind === "manual"
+              ? `Manual backup (${schemaLabel(backup.fromSchema)})`
+              : `Before upgrade ${schemaLabel(backup.fromSchema)} → ${schemaLabel(backup.toSchema ?? backup.fromSchema)}`
+          }
+          description={`${new Date(backup.createdAt).toLocaleString()} · ${formatBytes(backup.bytes)}${
+            backup.newest ? " · the way back from the latest upgrade" : ""
+          }`}
+          control={
+            confirming === backup.name ? (
+              <span className="flex gap-1.5">
+                <Button size="xs" variant="outline" onClick={() => setConfirming(null)}>
+                  Keep
+                </Button>
+                <Button
+                  size="xs"
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirming(null);
+                    onRemove(backup.name);
+                  }}
+                >
+                  Remove backup
+                </Button>
+              </span>
+            ) : (
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={busy}
+                aria-label={`Remove backup from ${new Date(backup.createdAt).toLocaleString()}`}
+                onClick={() => setConfirming(backup.name)}
+              >
+                Remove
+              </Button>
+            )
+          }
+        />
+      ))}
     </>
   );
 }

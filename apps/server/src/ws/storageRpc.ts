@@ -31,5 +31,10 @@ export function makeStorageHandlers(ctx: WsRpcContext) {
         WS_METHODS.storageExecute,
         service((storage) => storage.execute(ctx.storagePrincipalKey, input.token)),
       ),
+    [WS_METHODS.storageRemoveDatabaseBackup]: (input) =>
+      ctx.ownerEffect(
+        WS_METHODS.storageRemoveDatabaseBackup,
+        service((storage) => storage.removeDatabaseBackup(input.name)),
+      ),
   });
 }
