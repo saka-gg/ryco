@@ -2119,6 +2119,208 @@ describe("HostedHubApi account credential management", () => {
       },
     ]);
   });
+
+  /* ---------------------------------------------- profile, sessions, email code */
+
+  const PROFILE = {
+    username: "ada",
+    usernameNeedsChange: false,
+    usernameChangedAt: null,
+    usernameChangeAvailableAt: 1_752_800_000_000,
+    displayName: "Ada",
+    createdAt: 1_752_710_400_000,
+  } as const;
+
+  const ACCOUNT_SESSION = {
+    id: "asess_aaaaaaaaaaaaaaaaaaaaaa",
+    kind: "browser",
+    clientLabel: "Chrome on macOS",
+    method: "passkey",
+    createdAt: 1_752_710_400_000,
+    lastSeenAt: 1_752_710_500_000,
+    expiresAt: 1_752_796_800_000,
+    current: true,
+  } as const;
+
+  it("reads the profile and ignores members it does not know", async () => {
+    const { api, requests, reply } = await authenticated();
+    reply({ ...PROFILE, avatarUrl: "https://example.test/a.png", nested: { future: true } });
+
+    const profile = await api.getAccountProfile();
+    expect(profile).toEqual(PROFILE);
+    // Unknown members are dropped, not carried into the client's value.
+    expect(profile).not.toHaveProperty("avatarUrl");
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/profile");
+    expect(request.init).toMatchObject({
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+  });
+
+  it("answers null for the profile and sessions reads on a Hub without those routes", async () => {
+    const { api, reply } = await authenticated();
+    reply({ error: "not_found" }, 404);
+
+    await expect(api.getAccountProfile()).resolves.toBeNull();
+    await expect(api.listAccountSessions()).resolves.toBeNull();
+  });
+
+  it("does not turn other read failures into an unsupported Hub", async () => {
+    const { api, reply } = await authenticated();
+    reply({ error: "unavailable" }, 503);
+
+    await expect(api.getAccountProfile()).rejects.toMatchObject({ status: 503 });
+    await expect(api.listAccountSessions()).rejects.toMatchObject({ status: 503 });
+  });
+
+  it("rejects a malformed profile", async () => {
+    const { api, reply } = await authenticated();
+    for (const payload of [
+      [],
+      { ...PROFILE, username: "" },
+      { ...PROFILE, username: "a".repeat(65) },
+      { ...PROFILE, usernameNeedsChange: "false" },
+      { ...PROFILE, usernameChangedAt: "yesterday" },
+      { ...PROFILE, usernameChangeAvailableAt: 1.5 },
+      { ...PROFILE, displayName: 7 },
+      { ...PROFILE, displayName: "x".repeat(201) },
+      { ...PROFILE, createdAt: null },
+    ]) {
+      reply(payload);
+      await expect(api.getAccountProfile()).rejects.toMatchObject({ code: "invalid_response" });
+    }
+  });
+
+  it("renames the account with session-bound CSRF and returns the new profile", async () => {
+    const { api, requests, reply } = await authenticated();
+    reply({ profile: { ...PROFILE, username: "ada_l", extra: "ignored" } });
+
+    await expect(api.changeUsername("ada_l")).resolves.toEqual({ ...PROFILE, username: "ada_l" });
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/username");
+    expect(request.init).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(headersOf(request.init).get("X-Ryco-CSRF")).toBe("csrf-canary");
+    expect(JSON.parse(String(request.init?.body))).toEqual({ username: "ada_l" });
+
+    reply({ profile: { ...PROFILE, username: 42 } });
+    await expect(api.changeUsername("ada_l")).rejects.toMatchObject({ code: "invalid_response" });
+    // The profile has to be under `profile`, not the bare body.
+    reply({ ...PROFILE });
+    await expect(api.changeUsername("ada_l")).rejects.toMatchObject({ code: "invalid_response" });
+    reply({ error: "conflict" }, 409);
+    await expect(api.changeUsername("grace")).rejects.toMatchObject({
+      code: "conflict",
+      status: 409,
+    });
+  });
+
+  it("lists sessions, bounding labels and ignoring members it does not know", async () => {
+    const { api, requests, reply } = await authenticated();
+    reply({
+      sessions: [
+        { ...ACCOUNT_SESSION, userAgent: "raw-user-agent-canary" },
+        {
+          ...ACCOUNT_SESSION,
+          id: "asess_bbbbbbbbbbbbbbbbbbbbbb",
+          kind: "native",
+          clientLabel: "L".repeat(200),
+          method: null,
+          current: false,
+        },
+      ],
+      cursor: "future",
+    });
+
+    const sessions = await api.listAccountSessions();
+    expect(sessions).toEqual([
+      ACCOUNT_SESSION,
+      {
+        ...ACCOUNT_SESSION,
+        id: "asess_bbbbbbbbbbbbbbbbbbbbbb",
+        kind: "native",
+        clientLabel: "L".repeat(80),
+        method: null,
+        current: false,
+      },
+    ]);
+    expect(JSON.stringify(sessions)).not.toContain("raw-user-agent-canary");
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/sessions");
+    expect(request.init).toMatchObject({ method: "GET", cache: "no-store" });
+  });
+
+  it("rejects a malformed sessions list", async () => {
+    const { api, reply } = await authenticated();
+    for (const payload of [
+      {},
+      { sessions: "none" },
+      { sessions: [{ ...ACCOUNT_SESSION, id: "" }] },
+      { sessions: [{ ...ACCOUNT_SESSION, kind: "tablet" }] },
+      { sessions: [{ ...ACCOUNT_SESSION, current: "yes" }] },
+      { sessions: [{ ...ACCOUNT_SESSION, lastSeenAt: null }] },
+      { sessions: [ACCOUNT_SESSION, { ...ACCOUNT_SESSION, clientLabel: 1 }] },
+    ]) {
+      reply(payload);
+      await expect(api.listAccountSessions()).rejects.toMatchObject({ code: "invalid_response" });
+    }
+  });
+
+  it("ends one session or every other one with session-bound CSRF", async () => {
+    const { api, requests, reply } = await authenticated();
+
+    reply({ revoked: true });
+    await expect(api.revokeAccountSession(ACCOUNT_SESSION.id)).resolves.toBeUndefined();
+    reply({ revokedCount: 3 });
+    await expect(api.revokeOtherAccountSessions()).resolves.toBe(3);
+
+    expect(requests.slice(-2).map(({ input }) => input)).toEqual([
+      "/api/account/sessions/revoke",
+      "/api/account/sessions/revoke-others",
+    ]);
+    for (const request of requests.slice(-2)) {
+      expect(request.init).toMatchObject({ method: "POST", credentials: "same-origin" });
+      expect(headersOf(request.init).get("X-Ryco-CSRF")).toBe("csrf-canary");
+    }
+    expect(requests.slice(-2).map((request) => JSON.parse(String(request.init?.body)))).toEqual([
+      { sessionId: ACCOUNT_SESSION.id },
+      {},
+    ]);
+
+    reply({ ok: true });
+    await expect(api.revokeAccountSession(ACCOUNT_SESSION.id)).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+    for (const revokedCount of [-1, 1.5, "3", undefined]) {
+      reply({ revokedCount });
+      await expect(api.revokeOtherAccountSessions()).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+    }
+  });
+
+  it("confirms an email address with the mailed code", async () => {
+    const { api, requests, reply } = await authenticated();
+    reply({ email: { address: "ada@example.test", verified: true } });
+
+    await expect(api.confirmEmailVerificationCode("123456")).resolves.toBeUndefined();
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/email/verification/confirm");
+    expect(request.init).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(headersOf(request.init).get("X-Ryco-CSRF")).toBe("csrf-canary");
+    expect(JSON.parse(String(request.init?.body))).toEqual({ code: "123456" });
+    // The code goes in the body, never the URL.
+    expect(String(request.input)).not.toContain("123456");
+
+    // A confirmation that does not leave the address verified is not one.
+    for (const payload of [{ email: { verified: false } }, { email: null }, {}]) {
+      reply(payload);
+      await expect(api.confirmEmailVerificationCode("123456")).rejects.toMatchObject({
+        code: "invalid_response",
+      });
+    }
+  });
 });
 
 /** In-memory bearer credentials mirroring a native (DPoP) adapter. */

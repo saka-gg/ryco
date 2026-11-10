@@ -951,10 +951,43 @@ encrypted browser channel is drawn quietly, and a fallen-back channel always rea
 connection". Its popover holds the role and full status, an unconfirmed delivery to acknowledge, the
 session verification code, and **Manage devices**, which opens the device directory. Switching nodes
 is opening another node's thread from the inbox, or a node from that directory; hosted Settings
-chooses which node it edits with its own **Switch device** control. Signing out and installing or
-updating the app live on the account page, one **Account** entry away in the sidebar footer, and a
-node that failed to connect offers **Manage devices** and **Sign out** on its own page. The phone
+chooses which node it edits with its own **Switch device** control. The sidebar footer names the
+signed-in account and opens its pages; signing out is in the Hub bar's account menu, installing or
+updating the app is on **Sessions & devices**, and a node that failed to connect offers
+**Manage devices** and **Sign out** on its own page. The phone
 presentation keeps its connection pill and sheet.
+
+## Account pages
+
+Every signed-in Hub page carries the same bar: **Nodes** and **Account**, and an account menu named
+after the signed-in account. The account has four pages, each with its own address:
+
+| Page               | Address               | What it holds                                                                                           |
+| ------------------ | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| Profile            | `/account`            | Username, email address, deleting the account                                                           |
+| Sign-in & security | `/account/security`   | Passkeys, password, two-factor authentication, recovery codes, connected GitHub account                 |
+| Sessions & devices | `/account/devices`    | Where the account is signed in, encrypted native devices, this browser's saved copy, installing the app |
+| Appearance         | `/account/appearance` | This browser's theme                                                                                    |
+
+An account is named by one username: lowercase letters, numbers and underscores, 3 to 32 characters.
+Invitation redemption and first-owner setup ask for it, and Profile can change it; after a change
+the Hub holds the new name for 14 days. An account created before usernames is asked to choose one
+and is shown by its old display name until it does.
+
+Changing the email address mails a six-digit code and a link to the new address. The Hub keeps one
+address per account: the new one replaces the old one at once and is marked unverified until the
+code is entered on Profile or the link is opened.
+
+**Sessions & devices** lists each live sign-in with a coarse label the Hub recorded when it started
+(a browser and operating system family, never a raw user agent), how it signed in and when it was
+last active. Any other session can be ended on its own, or all others at once. Ending the current
+one is signing out.
+
+Ryco Desktop reaches the same pages from **Settings → Hub → Manage account**, which opens them in
+the browser, and the hosted workspace's sidebar footer names the signed-in account and opens Profile.
+
+The profile, the session list and the email code are separate Hub routes. Against a Hub that does
+not serve one of them the page leaves that part out and the rest works as before.
 
 ## First-owner and node onboarding
 
@@ -963,8 +996,10 @@ first-owner setup. An unavailable, malformed, or failed response hides the setup
 leaving passkey sign-in and invitation redemption available. Successful owner setup hides the
 action immediately. The Hub remains authoritative for permanent bootstrap completion.
 
-An authenticated owner can start **Enroll node** from the node directory after running `ryco hub
-enroll` on the intended node. The owner enters the short device code, then compares the displayed
+A signed-in account with no node lands on the node directory, which explains the three steps to the
+first one. **Enroll node** opens a guide: it shows how to start linking from Ryco Desktop or from a
+terminal (with the commands for this Hub's address), then takes the short device code that
+`ryco hub enroll` or Desktop shows. The owner compares the displayed
 label, platform, client version, algorithm, expiry, and public-key fingerprint with the node or a
 trusted operator channel before approving or denying. Approval creates the owner's explicit node
 grant; the directory reports the node offline until its outbound connector polls the result and

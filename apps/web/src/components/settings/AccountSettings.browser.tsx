@@ -40,6 +40,8 @@ import {
   PASSKEY_SESSION_REQUIRED_CODE,
   STEP_UP_REQUIRED_CODE,
   type HostedAccountCommitted,
+  type HostedAccountProfile,
+  type HostedAccountSession,
   type HostedAccountE2eeDevice,
   type HostedAccountRefused,
   type HostedAddPasskeyCommitted,
@@ -56,7 +58,8 @@ import {
 } from "../../hostedHub/state";
 import { resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
 import { hostedHubApi } from "../../hostedHub/api";
-import { AccountSettingsPanel } from "./AccountSettings";
+import { useAccountProfileStore } from "../../hostedHub/accountProfile";
+import { AccountSettingsPanel, type AccountSettingsGroup } from "./AccountSettings";
 import {
   STEP_UP_INFERRED_ATTEMPT_LIMIT,
   STEP_UP_UNRESOLVED_MESSAGE,
@@ -128,6 +131,32 @@ function passkey(overrides: Partial<HostedHubPasskey> = {}): HostedHubPasskey {
     backupState: true,
     revokedAt: null,
     revocationReasonCode: null,
+    ...overrides,
+  };
+}
+
+function profile(overrides: Partial<HostedAccountProfile> = {}): HostedAccountProfile {
+  return {
+    username: "ada",
+    usernameNeedsChange: false,
+    usernameChangedAt: null,
+    usernameChangeAvailableAt: null,
+    displayName: "Ada",
+    createdAt: 1_700_000_000_000,
+    ...overrides,
+  };
+}
+
+function accountSession(overrides: Partial<HostedAccountSession> = {}): HostedAccountSession {
+  return {
+    id: "asess_current",
+    kind: "browser",
+    clientLabel: "Chrome on macOS",
+    method: "passkey",
+    createdAt: 1_700_000_000_000,
+    lastSeenAt: 1_700_000_500_000,
+    expiresAt: 1_800_000_000_000,
+    current: true,
     ...overrides,
   };
 }
@@ -315,6 +344,26 @@ function pressBackdrop(): void {
   }
 }
 
+/** One rendered settings section, to scope a query to it. */
+function settingsSection(title: string) {
+  const element = document.querySelector(`[data-settings-section="${title}"]`);
+  if (!(element instanceof HTMLElement)) throw new Error(`Expected a "${title}" section.`);
+  return page.elementLocator(element);
+}
+
+/**
+ * The status line a committed email request shows on a Hub without mail: it
+ * says *accepted*, never *sent* — a committed request is not a delivered one.
+ */
+const EMAIL_ACCEPTED_UNDELIVERED = /Request accepted\. No message is delivered/i;
+
+/** Open the address form of the Email section and ask for a code. */
+async function requestEmailCode(address: string): Promise<void> {
+  await page.getByRole("button", { name: "Add email" }).click();
+  await page.getByRole("textbox", { name: "Email address" }).fill(address);
+  await page.getByRole("button", { name: "Send code" }).click();
+}
+
 type Mounted = Awaited<ReturnType<typeof render>> & {
   cleanup?: () => Promise<void>;
   unmount?: () => Promise<void>;
@@ -324,8 +373,8 @@ describe("AccountSettingsPanel", () => {
   let mounted: Mounted | null = null;
   let clipboard: Array<string> = [];
 
-  const mount = async () => {
-    mounted = await render(<AccountSettingsPanel />);
+  const mount = async (group?: AccountSettingsGroup) => {
+    mounted = await render(<AccountSettingsPanel {...(group ? { group } : {})} />);
     return mounted;
   };
 
@@ -376,6 +425,12 @@ describe("AccountSettingsPanel", () => {
     vi.spyOn(hostedHubController, "refreshAccountSecurity").mockResolvedValue();
     vi.spyOn(hostedHubController, "refreshExternalIdentityConfiguration").mockResolvedValue();
     vi.spyOn(hostedHubApi, "getPendingExternalIdentity").mockResolvedValue({ status: "none" });
+    // The profile and sessions reads are plain reads too. By default this Hub
+    // predates both routes, so every test that is not about them sees the panel
+    // without them; the tests that are about them stub a real answer.
+    useAccountProfileStore.setState(useAccountProfileStore.getInitialState(), true);
+    vi.spyOn(hostedHubApi, "getAccountProfile").mockResolvedValue(null);
+    vi.spyOn(hostedHubApi, "listAccountSessions").mockResolvedValue(null);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
@@ -583,7 +638,7 @@ describe("AccountSettingsPanel", () => {
     await expect.element(page.getByRole("button", { name: "Set password" })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Set up" })).toBeVisible();
     await expect
-      .element(page.getByRole("button", { name: "Delete the fallback password" }))
+      .element(page.getByRole("button", { name: "Remove the password" }))
       .not.toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Turn off two-factor authentication" }))
@@ -601,9 +656,7 @@ describe("AccountSettingsPanel", () => {
     });
 
     await expect.element(page.getByRole("button", { name: "Change", exact: true })).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "Delete the fallback password" }))
-      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Remove the password" })).toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "Turn off two-factor authentication" }))
       .toBeVisible();
@@ -611,7 +664,9 @@ describe("AccountSettingsPanel", () => {
       .element(page.getByRole("button", { name: "Set password" }))
       .not.toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Set up" })).not.toBeInTheDocument();
-    await expect.element(page.getByText(/Verified · ada@example\.com/)).toBeVisible();
+    const email = settingsSection("Email");
+    await expect.element(email.getByText("ada@example.com")).toBeVisible();
+    await expect.element(email.getByText("Verified", { exact: true })).toBeVisible();
   });
 
   it("hides credential mutations until the Hub security state is known", async () => {
@@ -627,7 +682,7 @@ describe("AccountSettingsPanel", () => {
       .element(page.getByRole("button", { name: "Change", exact: true }))
       .not.toBeInTheDocument();
     await expect
-      .element(page.getByRole("button", { name: "Delete the fallback password" }))
+      .element(page.getByRole("button", { name: "Remove the password" }))
       .not.toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Set up" })).not.toBeInTheDocument();
     await expect
@@ -812,8 +867,7 @@ describe("AccountSettingsPanel", () => {
       .element(page.getByRole("textbox", { name: "Authenticator code" }))
       .not.toBeInTheDocument();
 
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
 
     await expect.element(page.getByText("Confirm the email change")).toBeVisible();
     expect(attempts).toEqual([{ email: "ada@example.com" }]);
@@ -826,9 +880,12 @@ describe("AccountSettingsPanel", () => {
       { email: "ada@example.com", totpCode: "123456" },
     ]);
     await expect.element(page.getByText("Confirm the email change")).not.toBeInTheDocument();
-    await expect.element(page.getByText(/Request accepted by the Hub/i)).toBeVisible();
-    // The address has reached the Hub; it does not stay in the field afterwards.
-    await expect.element(page.getByRole("textbox", { name: "Email address" })).toHaveValue("");
+    await expect.element(page.getByText(EMAIL_ACCEPTED_UNDELIVERED)).toBeVisible();
+    // The address has reached the Hub; the field that held it does not stay on
+    // screen afterwards, one stray press away from sending it again.
+    await expect
+      .element(page.getByRole("textbox", { name: "Email address" }))
+      .not.toBeInTheDocument();
   });
 
   it("re-prompts on a rejected code instead of reporting success", async () => {
@@ -839,8 +896,7 @@ describe("AccountSettingsPanel", () => {
     });
 
     await mount();
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
     await expect.element(page.getByText("Confirm the email change")).toBeVisible();
 
     await page.getByRole("textbox", { name: "Authenticator code" }).fill("111111");
@@ -851,13 +907,13 @@ describe("AccountSettingsPanel", () => {
     // a bare `forbidden` — so the retry copy must also concede that the code may
     // not be the obstacle at all.
     await expect.element(page.getByText(/may not be about the code at all/i)).toBeVisible();
-    await expect.element(page.getByText(/Request accepted by the Hub/i)).not.toBeInTheDocument();
+    await expect.element(page.getByText(EMAIL_ACCEPTED_UNDELIVERED)).not.toBeInTheDocument();
 
     await page.getByRole("textbox", { name: "Authenticator code" }).fill("654321");
     await page.getByRole("button", { name: "Confirm code" }).click();
 
     expect(codes).toEqual([undefined, "111111", "654321"]);
-    await expect.element(page.getByText(/Request accepted by the Hub/i)).toBeVisible();
+    await expect.element(page.getByText(EMAIL_ACCEPTED_UNDELIVERED)).toBeVisible();
   });
 
   it("never opens a step-up prompt for a session the Hub accepts", async () => {
@@ -866,10 +922,9 @@ describe("AccountSettingsPanel", () => {
     );
 
     await mount();
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
 
-    await expect.element(page.getByText(/Request accepted by the Hub/i)).toBeVisible();
+    await expect.element(page.getByText(EMAIL_ACCEPTED_UNDELIVERED)).toBeVisible();
     await expect
       .element(page.getByRole("textbox", { name: "Authenticator code" }))
       .not.toBeInTheDocument();
@@ -888,15 +943,14 @@ describe("AccountSettingsPanel", () => {
     );
 
     await mount();
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
 
     await expect.element(page.getByText("That address was not accepted.")).toBeVisible();
     await settle();
     await expect
       .element(page.getByRole("textbox", { name: "Authenticator code" }))
       .not.toBeInTheDocument();
-    await expect.element(page.getByText(/Request accepted by the Hub/i)).not.toBeInTheDocument();
+    await expect.element(page.getByText(EMAIL_ACCEPTED_UNDELIVERED)).not.toBeInTheDocument();
   });
 
   it("does not offer a step-up out of the passkey-session gate, on an action that has one", async () => {
@@ -967,8 +1021,7 @@ describe("AccountSettingsPanel", () => {
     });
 
     await mount();
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
     await expect.element(page.getByText("Confirm the email change")).toBeVisible();
 
     await page.getByRole("textbox", { name: "Authenticator code" }).fill("123456");
@@ -987,7 +1040,7 @@ describe("AccountSettingsPanel", () => {
     await settle();
     // An aborted operation leaves the store idle with no error — byte for byte
     // what a commit looks like. It must not be reported as one.
-    await expect.element(page.getByText(/Request accepted by the Hub/i)).not.toBeInTheDocument();
+    await expect.element(page.getByText(EMAIL_ACCEPTED_UNDELIVERED)).not.toBeInTheDocument();
   });
 
   it("stops asking for a code once an inferred step-up refusal has been refused to its limit", async () => {
@@ -1003,8 +1056,7 @@ describe("AccountSettingsPanel", () => {
     });
 
     await mount();
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
     await expect.element(page.getByText("Confirm the email change")).toBeVisible();
 
     for (let attempt = 0; attempt < STEP_UP_INFERRED_ATTEMPT_LIMIT; attempt += 1) {
@@ -1032,8 +1084,7 @@ describe("AccountSettingsPanel", () => {
     });
 
     await mount();
-    await page.getByRole("textbox", { name: "Email address" }).fill("ada@example.com");
-    await page.getByRole("button", { name: "Send verification" }).click();
+    await requestEmailCode("ada@example.com");
     await expect.element(page.getByText("Confirm the email change")).toBeVisible();
 
     // The demand for a code is this client's guess, not the Hub's answer, so the
@@ -1066,7 +1117,7 @@ describe("AccountSettingsPanel", () => {
     await page.getByRole("button", { name: "Cancel" }).click();
 
     expect(abort).toHaveBeenCalled();
-    await expect.element(page.getByText("Set a fallback password")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Set a password")).not.toBeInTheDocument();
 
     // Reopening must not hand the abandoned plaintext back.
     await page.getByRole("button", { name: "Set password" }).click();
@@ -1403,7 +1454,6 @@ describe("AccountSettingsPanel", () => {
     const persisted = await persistedStorageSnapshot();
     expect(persisted).not.toContain(TOTP_SECRET);
     expect(window.location.href).not.toContain(TOTP_SECRET);
-
     await page.getByRole("button", { name: "Cancel" }).click();
 
     expect(hostedHubStore.getState().totpEnrollment).toBeNull();
@@ -1463,12 +1513,214 @@ describe("AccountSettingsPanel", () => {
     expect(hostedRecoveryCodeDisplayStore.getState().leased).toBe(false);
   });
 
+  /* ------------------------------------------------------ profile + sessions */
+
+  it("changes the username and shows the new handle", async () => {
+    vi.mocked(hostedHubApi.getAccountProfile).mockResolvedValue(profile());
+    const change = vi
+      .spyOn(hostedHubApi, "changeUsername")
+      .mockResolvedValue(profile({ username: "ada_l" }));
+
+    await mount("profile");
+    await expect.element(page.getByText("@ada", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Change username" }).click();
+    const field = page.getByLabelText("New username");
+    await expect.element(field).toHaveValue("ada");
+    await field.clear();
+    // Typed the way a person might; the field keeps only what a username can hold.
+    await field.fill("@Ada_L");
+    await expect.element(field).toHaveValue("ada_l");
+    await page.getByRole("button", { name: "Save" }).click();
+
+    expect(change).toHaveBeenCalledWith("ada_l");
+    await expect.element(page.getByText("@ada_l", { exact: true })).toBeVisible();
+    await expect.element(page.getByLabelText("New username")).not.toBeInTheDocument();
+  });
+
+  it("keeps the username form open with the Hub's reason when the name is taken", async () => {
+    vi.mocked(hostedHubApi.getAccountProfile).mockResolvedValue(profile());
+    vi.spyOn(hostedHubApi, "changeUsername").mockRejectedValue(
+      new HostedHubApiError("conflict", 409),
+    );
+
+    await mount("profile");
+    await page.getByRole("button", { name: "Change username" }).click();
+    const field = page.getByLabelText("New username");
+    await field.clear();
+    await field.fill("grace");
+    await page.getByRole("button", { name: "Save" }).click();
+
+    await expect.element(page.getByText("That username is taken.")).toBeVisible();
+    await expect.element(field).toHaveValue("grace");
+    // The refused name is not shown as the account's handle.
+    await expect.element(page.getByText("@grace", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("@ada", { exact: true })).toBeVisible();
+  });
+
+  it("asks an account that predates usernames to choose one", async () => {
+    vi.mocked(hostedHubApi.getAccountProfile).mockResolvedValue(
+      profile({ username: "legacy_abcdefgh", usernameNeedsChange: true }),
+    );
+
+    await mount("profile");
+    await expect.element(page.getByText("Choose your username")).toBeVisible();
+    await expect.element(page.getByText("Not chosen yet")).toBeVisible();
+    // The machine-assigned name is never presented as the account's handle.
+    await expect.element(page.getByText(/legacy_abcdefgh/)).not.toBeInTheDocument();
+
+    await page.getByRole("button", { name: "Choose username" }).click();
+    await expect.element(page.getByLabelText("New username")).toHaveValue("");
+  });
+
+  it("hides the username row and the sessions list on a Hub without those routes", async () => {
+    // Both reads resolve `null` (the default stub): a Hub older than the profile
+    // and sessions surface. That is "this Hub has no such page", not a failure.
+    await mount();
+    await expect.element(page.getByText("No email address")).toBeVisible();
+    expect(hostedHubApi.getAccountProfile).toHaveBeenCalled();
+    expect(hostedHubApi.listAccountSessions).toHaveBeenCalled();
+    await settle();
+    await expect.element(settingsSection("Profile").getByText("Ada")).toBeVisible();
+    await expect.element(page.getByText("Username", { exact: true })).not.toBeInTheDocument();
+    await expect.element(page.getByText("Where you're signed in")).not.toBeInTheDocument();
+    await expect.element(page.getByText(/Could not load/)).not.toBeInTheDocument();
+    await expect.element(page.getByText("Encrypted devices")).toBeVisible();
+  });
+
+  it("shows only the sections of the group it is given", async () => {
+    await mount("security");
+    await expect.element(page.getByText("Passkeys on this account")).toBeVisible();
+    expect(document.querySelector('[data-settings-section="Profile"]')).toBeNull();
+    expect(document.querySelector('[data-settings-section="Email"]')).toBeNull();
+    expect(document.querySelector('[data-settings-section="Encrypted devices"]')).toBeNull();
+    expect(document.querySelector('[data-settings-section="Delete account"]')).toBeNull();
+  });
+
+  it("lists where the account is signed in and ends other sessions on request", async () => {
+    const others = [
+      accountSession({
+        id: "asess_firefox",
+        clientLabel: "Firefox on Linux",
+        method: "password",
+        current: false,
+      }),
+      accountSession({
+        id: "asess_phone",
+        kind: "native",
+        clientLabel: null,
+        method: null,
+        current: false,
+      }),
+    ];
+    vi.mocked(hostedHubApi.listAccountSessions).mockResolvedValue([accountSession(), ...others]);
+    const revoke = vi.spyOn(hostedHubApi, "revokeAccountSession").mockResolvedValue();
+    const revokeOthers = vi.spyOn(hostedHubApi, "revokeOtherAccountSessions").mockResolvedValue(2);
+
+    await mount("devices");
+    const sessions = settingsSection("Where you're signed in");
+    await expect.element(sessions.getByText("Chrome on macOS")).toBeVisible();
+    await expect.element(sessions.getByText("This device")).toBeVisible();
+    await expect.element(sessions.getByText("Firefox on Linux")).toBeVisible();
+    await expect.element(sessions.getByText("Ryco app")).toBeVisible();
+    // Ending this session is signing out, which lives in the account menu.
+    await expect
+      .element(page.getByRole("button", { name: "Sign out Chrome on macOS" }))
+      .not.toBeInTheDocument();
+
+    const reads = vi.mocked(hostedHubApi.listAccountSessions).mock.calls.length;
+    await page.getByRole("button", { name: "Sign out Firefox on Linux" }).click();
+    expect(revoke).toHaveBeenCalledWith("asess_firefox");
+    await expect
+      .poll(() => vi.mocked(hostedHubApi.listAccountSessions).mock.calls.length)
+      .toBeGreaterThan(reads);
+
+    await page.getByRole("button", { name: "Sign out everywhere else" }).click();
+    await expect.element(page.getByText("Sign out everywhere else?")).toBeVisible();
+    expect(revokeOthers, "opening the confirmation must not end anything").not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "Sign out the others" }).click();
+    expect(revokeOthers).toHaveBeenCalledTimes(1);
+    await expect.element(page.getByText("Sign out everywhere else?")).not.toBeInTheDocument();
+  });
+
+  it("confirms a new email address with the mailed code", async () => {
+    hostedAccountStore.setState({
+      security: {
+        passwordConfigured: false,
+        totpEnrolled: false,
+        emailDeliveryConfigured: true,
+        email: null,
+        externalIdentities: [],
+      },
+      securityStatus: "ready",
+    });
+    const request = vi
+      .spyOn(hostedHubController, "requestEmailVerification")
+      .mockImplementation(async () => committed());
+    const confirm = vi
+      .spyOn(hostedHubApi, "confirmEmailVerificationCode")
+      .mockRejectedValueOnce(new HostedHubApiError("invalid_request", 400))
+      .mockResolvedValueOnce();
+    const refresh = vi.mocked(hostedHubController.refreshAccountSecurity);
+
+    await mount("profile");
+    await requestEmailCode("ada@example.com");
+    expect(request).toHaveBeenCalledWith({ email: "ada@example.com" });
+    await expect.element(page.getByText(/We sent a code to ada@example\.com/)).toBeVisible();
+
+    const code = page.getByRole("textbox", { name: "Verification code" });
+    const verify = page.getByRole("button", { name: "Verify" });
+    await code.fill("12345");
+    await expect.element(verify).toBeDisabled();
+    await code.fill("111111");
+    await verify.click();
+    expect(confirm).toHaveBeenLastCalledWith("111111");
+    await expect.element(page.getByText(/That code is not right/)).toBeVisible();
+    await expect.element(code).toHaveValue("");
+    expect(refresh).not.toHaveBeenCalledWith({ force: true });
+
+    await code.fill("654321");
+    await verify.click();
+    expect(confirm).toHaveBeenLastCalledWith("654321");
+    await expect.poll(() => refresh.mock.calls).toContainEqual([{ force: true }]);
+    await expect
+      .element(page.getByRole("textbox", { name: "Verification code" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("offers the code form and a resend for an address the Hub still has unverified", async () => {
+    hostedAccountStore.setState({
+      security: {
+        passwordConfigured: false,
+        totpEnrolled: false,
+        emailDeliveryConfigured: true,
+        email: { address: "ada@example.com", verified: false },
+        externalIdentities: [],
+      },
+      securityStatus: "ready",
+    });
+    const request = vi
+      .spyOn(hostedHubController, "requestEmailVerification")
+      .mockImplementation(async () => committed());
+
+    await mount("profile");
+    const email = settingsSection("Email");
+    await expect.element(email.getByText("Unverified", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("textbox", { name: "Verification code" })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Change email" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Resend code" }).click();
+    expect(request).toHaveBeenCalledWith({ email: "ada@example.com" });
+  });
+
   /* ------------------------------------------------------------------ copy */
 
   it("says that email verification currently delivers nothing", async () => {
     await mount();
-    await expect.element(page.getByText("No mail will arrive yet")).toBeVisible();
-    await expect.element(page.getByText(/no mail transport configured/i)).toBeVisible();
+    await expect.element(page.getByText("This Hub cannot send email yet")).toBeVisible();
+    await expect.element(page.getByText(/accepted but not delivered/i)).toBeVisible();
+    await expect
+      .element(page.getByText(/Do not rely on email to get back into the account/i))
+      .toBeVisible();
   });
 
   it("does not show the no-delivery warning when account email is configured", async () => {
@@ -1484,20 +1736,28 @@ describe("AccountSettingsPanel", () => {
     });
 
     await mount();
-    await expect.element(page.getByText("No mail will arrive yet")).not.toBeInTheDocument();
-    await expect
-      .element(page.getByText(/Used for account recovery after verification/i))
-      .toBeVisible();
+    // The section itself is there — this is the warning missing, not the row.
+    await expect.element(page.getByText("No email address")).toBeVisible();
+    await expect.element(page.getByText("This Hub cannot send email yet")).not.toBeInTheDocument();
   });
 
   it("never presents a fallback credential as the equal of a passkey", async () => {
+    // The design carries the rule by placement rather than by a sentence: the
+    // passkeys come first, the password and the recovery codes after them, and
+    // the copy of both describes them as what you use when a passkey is not
+    // there.
     await mount();
+    const order = Array.from(document.querySelectorAll("[data-settings-section]")).map((section) =>
+      section.getAttribute("data-settings-section"),
+    );
+    const passkeys = order.indexOf("Passkeys");
+    expect(passkeys, "the passkeys section is missing").toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("Password")).toBeGreaterThan(passkeys);
+    expect(order.indexOf("Recovery codes")).toBeGreaterThan(passkeys);
     await expect
-      .element(page.getByText(/A password is a fallback, not an equal of a passkey/i))
+      .element(page.getByText(/password where a passkey is not available/i))
       .toBeVisible();
-    await expect
-      .element(page.getByText(/They are a last resort, not a substitute for one/i))
-      .toBeVisible();
+    await expect.element(page.getByText(/if you lose your passkeys/i)).toBeVisible();
   });
 
   it("reports a revoked credential rather than hiding it", async () => {

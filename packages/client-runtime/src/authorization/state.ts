@@ -1164,6 +1164,8 @@ class HostedHubController {
   async redeemInvitation(input: {
     readonly secret: string;
     readonly displayName: string;
+    /** The account's public handle; a Hub that knows it names the account by it. */
+    readonly username?: string;
     readonly passkeyLabel: string | null;
   }): Promise<void> {
     return this.#registerAccount((signal) => getHostedHubApi().redeemInvitation(input, signal));
@@ -1172,6 +1174,8 @@ class HostedHubController {
   async bootstrapOwner(input: {
     readonly credential: string;
     readonly displayName: string;
+    /** The account's public handle; a Hub that knows it names the account by it. */
+    readonly username?: string;
     readonly passkeyLabel: string | null;
   }): Promise<void> {
     return this.#registerAccount((signal) => getHostedHubApi().bootstrapOwner(input, signal));

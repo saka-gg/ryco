@@ -24,6 +24,7 @@ const ALL_ROUTES: readonly HubRoute[] = [
   { kind: "nodes-enroll" },
   { kind: "account", section: "overview" },
   { kind: "account", section: "security" },
+  { kind: "account", section: "devices" },
   { kind: "account", section: "appearance" },
 ];
 

@@ -1,7 +1,7 @@
 import "../../index.css";
 
 import { EnvironmentId } from "@ryco/contracts";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { StrictMode, type ReactNode } from "react";
@@ -49,6 +49,7 @@ import {
   resetHubRoutesForTests,
 } from "../../hostedHub/hubRoutes";
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
+import { useAccountProfileStore } from "../../hostedHub/accountIdentity";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { selectEnvironmentState, useStore } from "../../store";
 import { HostedHubRoot } from "./HostedHubRoot";
@@ -164,6 +165,11 @@ beforeEach(() => {
   });
   vi.spyOn(hostedHubApi, "getPendingExternalIdentity").mockResolvedValue({ status: "none" });
   vi.spyOn(hostedHubController, "refreshExternalIdentityConfiguration").mockResolvedValue();
+  // The account chrome reads the profile; by default this Hub predates it, so
+  // the account is named by its display name. Sessions likewise.
+  useAccountProfileStore.setState(useAccountProfileStore.getInitialState(), true);
+  vi.spyOn(hostedHubApi, "getAccountProfile").mockResolvedValue(null);
+  vi.spyOn(hostedHubApi, "listAccountSessions").mockResolvedValue(null);
 });
 
 afterEach(async () => {
@@ -347,7 +353,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     });
   });
 
-  it("replaces GitHub account completion with the unified workspace after linked login", async () => {
+  it("replaces GitHub account completion with the signed-in home after linked login", async () => {
     window.history.replaceState(null, "", "/sign-up");
     useHostedHubStore.setState({
       accountStatus: "authenticated",
@@ -355,6 +361,29 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       session,
       directoryStatus: "ready",
       nodes: [],
+    });
+
+    mounted = await render(<HostedHubRoot />);
+
+    await vi.waitFor(() => {
+      expect(window.location.pathname).toBe("/");
+    });
+    // Home for an account with no machine is the page that adds the first one,
+    // not an empty workspace.
+    await expect
+      .element(page.getByRole("heading", { name: "Add your first machine" }))
+      .toBeVisible();
+    expect(document.querySelector('[data-slot="sidebar-wrapper"]')).toBeNull();
+  });
+
+  it("opens the unified workspace at home once the account has a machine", async () => {
+    window.history.replaceState(null, "", "/sign-up");
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      nodes: [node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator")],
     });
 
     mounted = await render(<HostedHubRoot />);
@@ -563,7 +592,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect
       .element(page.getByLabelText("Invitation code"))
       .toHaveAttribute("type", "password");
-    await expect.element(page.getByLabelText("Display name")).toBeVisible();
+    await expect.element(page.getByLabelText("Username")).toBeVisible();
     await expect.element(page.getByLabelText(/Passkey label/)).toBeVisible();
     await expect.element(page.getByLabelText("Invitation code")).toHaveFocus();
 
@@ -583,13 +612,18 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
 
     await page.getByRole("button", { name: "Set up first owner" }).click();
     await page.getByLabelText("Bootstrap credential").fill("bootstrap-sensitive-browser-canary");
-    await page.getByLabelText("Display name").fill("Ada");
+    // Typed the way a person might; the field keeps only what a username holds.
+    await page.getByLabelText("Username").fill("Ada.L");
+    await expect.element(page.getByLabelText("Username")).toHaveValue("adal");
     await page.getByLabelText(/Passkey label/).fill("Primary");
     await page.getByRole("button", { name: "Create owner and passkey" }).click();
 
+    // The username names the account; a Hub that predates usernames still
+    // receives it as the display name.
     expect(bootstrapOwner).toHaveBeenCalledWith({
       credential: "bootstrap-sensitive-browser-canary",
-      displayName: "Ada",
+      username: "adal",
+      displayName: "adal",
       passkeyLabel: "Primary",
     });
     await expect.element(page.getByLabelText("Bootstrap credential")).toHaveValue("");
@@ -1124,7 +1158,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
 
     expect(lookup).toHaveBeenCalledWith("SECR-ETCANARY123", expect.any(AbortSignal));
     await expect
-      .element(page.getByRole("heading", { name: "Review node enrollment" }))
+      .element(page.getByRole("heading", { name: "Is this your machine?" }))
       .toBeVisible();
     await expect.element(page.getByText("Trusted studio")).toBeVisible();
     await expect.element(page.getByText(`SHA256:${"a".repeat(43)}`)).toBeVisible();
@@ -1135,7 +1169,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
 
     await page.getByRole("button", { name: "Approve node" }).click();
     expect(approve).toHaveBeenCalledWith("SECR-ETCANARY123", expect.any(AbortSignal));
-    await expect.element(page.getByRole("heading", { name: "Node approved" })).toBeVisible();
+    await expect.element(page.getByRole("heading", { name: "Machine added" })).toBeVisible();
   });
 
   it("requires confirmation before denying and hides enrollment from non-owners", async () => {
@@ -1433,6 +1467,7 @@ describe("hosted Hub routes", () => {
   });
 
   it("reaches the account page from the sidebar footer and signs out there on desktop", async () => {
+    await page.viewport(1_280, 720);
     // Without a connection menu the account's own actions live on its page,
     // one entry away from anywhere in the desktop workspace. The frozen phone
     // tier keeps them in its connection sheet and this page as it was.
@@ -1450,19 +1485,151 @@ describe("hosted Hub routes", () => {
         <SidebarChromeFooter />
       </SidebarProvider>,
     );
-    await page.getByRole("button", { name: "Account" }).click();
+    // The entry names the account it opens.
+    await page.getByRole("button", { name: "Account: Ada" }).click();
     expect(window.location.pathname).toBe("/account");
     await mounted.unmount();
 
     mounted = await render(<HostedHubRoot />);
-    await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
-    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect.element(page.getByRole("heading", { name: "Profile", level: 1 })).toBeVisible();
+    await page.getByRole("button", { name: "Account menu for Ada" }).click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click();
     expect(signOut).toHaveBeenCalledOnce();
 
     await page.viewport(390, 844);
     await vi.waitFor(() => expect(getPresentationTier()).toBe("phone"));
-    await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
+    await expect.element(page.getByRole("heading", { name: "Profile", level: 1 })).toBeVisible();
+    // The frozen phone tier has no Hub bar, so no account menu and no sign-out here.
+    await expect
+      .element(page.getByRole("button", { name: "Account menu for Ada" }))
+      .not.toBeInTheDocument();
     await expect.element(page.getByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+
+  it("lists every account page and sign-out in the account menu", async () => {
+    // The account menu lives in the desktop Hub bar.
+    await page.viewport(1_280, 720);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [],
+    });
+    vi.mocked(hostedHubApi.getAccountProfile).mockResolvedValue({
+      username: "ada",
+      usernameNeedsChange: false,
+      usernameChangedAt: null,
+      usernameChangeAvailableAt: null,
+      displayName: "Ada",
+      createdAt: 1,
+    });
+    const signOut = vi.spyOn(hostedHubController, "signOut").mockResolvedValue();
+    navigateHub({ kind: "nodes" }, { replace: true });
+    mounted = await render(<HostedHubRoot />);
+
+    // Once the profile is read the menu names the account by its username.
+    const trigger = page.getByRole("button", { name: "Account menu for @ada" });
+    await trigger.click();
+    const items = page.getByRole("menuitem");
+    await vi.waitFor(() => {
+      expect(items.elements().map((item) => item.textContent?.trim())).toEqual([
+        "Profile",
+        "Sign-in & security",
+        "Sessions & devices",
+        "Appearance",
+        "Sign out",
+      ]);
+    });
+    await userEvent.keyboard("{Escape}");
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+
+    for (const [label, pathname] of [
+      ["Profile", "/account"],
+      ["Sign-in & security", "/account/security"],
+      ["Sessions & devices", "/account/devices"],
+      ["Appearance", "/account/appearance"],
+    ] as const) {
+      await page.getByRole("button", { name: "Account menu for @ada" }).click();
+      await page.getByRole("menuitem", { name: label }).click();
+      await vi.waitFor(() => expect(window.location.pathname, label).toBe(pathname));
+      await expect.element(page.getByRole("heading", { name: label, level: 1 })).toBeVisible();
+    }
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it("shows where the account is signed in on the sessions and devices page", async () => {
+    await page.viewport(1_280, 720);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [],
+    });
+    vi.mocked(hostedHubApi.listAccountSessions).mockResolvedValue([
+      {
+        id: "asess_current",
+        kind: "browser",
+        clientLabel: "Chrome on macOS",
+        method: "passkey",
+        createdAt: 1,
+        lastSeenAt: 2,
+        expiresAt: 3,
+        current: true,
+      },
+    ]);
+    navigateHubPathname("/account/devices", { replace: true });
+    mounted = await render(<HostedHubRoot />);
+
+    await expect
+      .element(page.getByRole("heading", { name: "Sessions & devices", level: 1 }))
+      .toBeVisible();
+    await expect.element(page.getByText("Where you're signed in")).toBeVisible();
+    await expect.element(page.getByText("Chrome on macOS")).toBeVisible();
+    await expect.element(page.getByText("This device")).toBeVisible();
+    await expect.element(page.getByText("Instant reopening")).toBeVisible();
+    // Credentials live on their own page, not here.
+    await expect.element(page.getByText("Passkeys on this account")).not.toBeInTheDocument();
+  });
+
+  it("leaves a sign-in address for home once a password sign-in succeeds", async () => {
+    vi.spyOn(hostedHubApi, "startPasswordLogin").mockResolvedValue({
+      status: "factor_required",
+      attemptId: "login_aaaaaaaaaaaaaaaaaaaaaa",
+      attemptSecret: "A".repeat(43),
+      factor: "email_code",
+      issuedAt: 1,
+      expiresAt: 2,
+    } as never);
+    vi.spyOn(hostedHubApi, "finishPasswordLogin").mockResolvedValue(publicIdentity);
+    vi.spyOn(hostedHubController, "adoptPublicBrowserIdentity").mockImplementation(async () => {
+      useHostedHubStore.setState({
+        accountStatus: "authenticated",
+        account,
+        session,
+        directoryStatus: "ready",
+        browserStatus: "current",
+        nodes: [],
+      });
+    });
+    mounted = await render(<HostedHubRoot />);
+
+    await page.getByRole("button", { name: "Other ways to sign in" }).click();
+    expect(window.location.pathname).toBe("/sign-in/password");
+    await page.getByLabelText("Username or verified email").fill("ada");
+    await page.getByLabelText("Password").fill("password-sensitive-browser-canary");
+    await page.getByRole("button", { name: "Continue" }).click();
+    await page.getByLabelText("Email code").fill("123456");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+
+    // A reload must not land on a sign-in form for an account already in use.
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/"));
+    await expect
+      .element(page.getByRole("heading", { name: "Add your first machine" }))
+      .toBeVisible();
   });
 });
 
@@ -1492,7 +1659,7 @@ describe("hosted thread alerts", () => {
     const mountedAlerts = alerts();
 
     navigateHub({ kind: "account", section: "overview" });
-    await expect.element(page.getByRole("heading", { name: "Account" })).toBeVisible();
+    await expect.element(page.getByRole("heading", { name: "Profile", level: 1 })).toBeVisible();
     expect(alerts()).toBe(mountedAlerts);
 
     navigateHub({ kind: "nodes" });

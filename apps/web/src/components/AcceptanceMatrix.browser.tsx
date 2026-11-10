@@ -421,14 +421,14 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
       await waitForTierAttribute("phone");
       await page.getByRole("button", { name: "Redeem invitation" }).click();
       await page.getByLabelText("Invitation code").fill("rotation-invitation-probe");
-      await page.getByLabelText("Display name").fill("Rotation Ada");
+      await page.getByLabelText("Username").fill("rotation_ada");
 
       await page.viewport(780, 700);
       await waitForTierAttribute("desktop");
       await expect
         .element(page.getByLabelText("Invitation code"))
         .toHaveValue("rotation-invitation-probe");
-      await expect.element(page.getByLabelText("Display name")).toHaveValue("Rotation Ada");
+      await expect.element(page.getByLabelText("Username")).toHaveValue("rotation_ada");
       expectNoDocumentHorizontalOverflow(780);
 
       await page.viewport(700, 900);
@@ -436,7 +436,7 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
       await expect
         .element(page.getByLabelText("Invitation code"))
         .toHaveValue("rotation-invitation-probe");
-      await expect.element(page.getByLabelText("Display name")).toHaveValue("Rotation Ada");
+      await expect.element(page.getByLabelText("Username")).toHaveValue("rotation_ada");
       expectNoDocumentHorizontalOverflow(700);
     } finally {
       await page.viewport(1_280, 720);

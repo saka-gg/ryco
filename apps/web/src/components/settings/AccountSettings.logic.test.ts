@@ -338,15 +338,15 @@ describe("account posture", () => {
   });
 
   it("escalates only on the one input the client can actually read", () => {
-    expect(accountPosture([], "ready")?.variant).toBe("error");
-    expect(accountPosture([passkey()], "ready")?.variant).toBe("warning");
+    expect(accountPosture([], "ready")?.variant).toBe("warning");
+    expect(accountPosture([passkey()], "ready")?.variant).toBe("info");
     expect(
       accountPosture([passkey({ id: "pkey_a" }), passkey({ id: "pkey_b" })], "ready"),
     ).toBeNull();
   });
 
   it("treats revoked credentials as absent", () => {
-    expect(accountPosture([passkey({ revokedAt: 2 })], "ready")?.variant).toBe("error");
+    expect(accountPosture([passkey({ revokedAt: 2 })], "ready")?.variant).toBe("warning");
   });
 
   it("has no positive state, because a green claim would need facts the client cannot see", () => {

@@ -196,6 +196,42 @@ export interface HostedAccountSecurity {
 }
 
 /**
+ * The signed-in account's profile, read from `GET /api/account/profile`.
+ *
+ * `usernameNeedsChange` is `true` for an account that still carries the
+ * machine-assigned name it was migrated with; `usernameChangeAvailableAt` is
+ * the epoch-ms instant the next rename is allowed, or `null` when one is
+ * allowed now.
+ */
+export interface HostedAccountProfile {
+  readonly username: string;
+  readonly usernameNeedsChange: boolean;
+  readonly usernameChangedAt: number | null;
+  readonly usernameChangeAvailableAt: number | null;
+  readonly displayName: string;
+  readonly createdAt: number;
+}
+
+/**
+ * One live sign-in of the account, from `GET /api/account/sessions`.
+ *
+ * `clientLabel` is a coarse description the Hub recorded when the session was
+ * created ("Chrome on macOS", "Ryco native app"); it is never a raw user-agent.
+ * `method` is how the session was started (`passkey`, `password`, …) or `null`
+ * when the Hub has no record.
+ */
+export interface HostedAccountSession {
+  readonly id: string;
+  readonly kind: "browser" | "native";
+  readonly clientLabel: string | null;
+  readonly method: string | null;
+  readonly createdAt: number;
+  readonly lastSeenAt: number;
+  readonly expiresAt: number;
+  readonly current: boolean;
+}
+
+/**
  * A started TOTP enrolment.
  *
  * **Both members are secret key material.** `secretBase32` is the shared key and
