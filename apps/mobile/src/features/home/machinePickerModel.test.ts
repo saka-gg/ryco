@@ -5,7 +5,6 @@ import {
   buildMachinePickerModel,
   combinedMachineTone,
   fallbackMachineFacts,
-  MACHINE_KIND_SYMBOL,
   machinePickerFactsOf,
   machineTone,
   relativeSeen,
@@ -53,21 +52,6 @@ describe("machine tone", () => {
     expect(combinedMachineTone(["connecting"])).toBe("connecting");
     expect(combinedMachineTone(["offline", "offline"])).toBe("offline");
     expect(combinedMachineTone([])).toBe("offline");
-  });
-});
-
-describe("machine kind symbols", () => {
-  it("draws every kind with its own SF Symbol", () => {
-    expect(MACHINE_KIND_SYMBOL).toEqual({
-      laptop: "laptopcomputer",
-      desktop: "desktopcomputer",
-      "mini-pc": "macmini",
-      workstation: "macpro.gen3",
-      server: "server.rack",
-      cloud: "cloud",
-      linux: "terminal",
-      windows: "pc",
-    });
   });
 });
 

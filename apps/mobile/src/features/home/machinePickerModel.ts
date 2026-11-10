@@ -4,12 +4,12 @@ import type {
   ExecutionEnvironmentDescriptor,
   ServerConfig,
 } from "@ryco/contracts";
-import {
-  inferEnvironmentMachineKind,
-  resolveEnvironmentMachineKind,
-} from "@ryco/shared/environmentIcon";
-
 import type { InboxEnvironment } from "../inbox/inboxModel";
+import {
+  MACHINE_KIND_SYMBOL,
+  type MachineSymbol,
+  resolveMachineKind,
+} from "../nodes/machineKindModel";
 
 // The machine picker at the top left of a tab: which machine the list is
 // narrowed to, drawn as the machine's kind with a ring for how it is
@@ -20,20 +20,6 @@ export type MachineTone = "connected" | "connecting" | "offline";
 
 /** How the phone reaches a machine: its own paired socket, or through the Hub. */
 export type MachineReach = "direct" | "hub";
-
-/** The SF Symbol each machine kind is drawn with. */
-export const MACHINE_KIND_SYMBOL = {
-  laptop: "laptopcomputer",
-  desktop: "desktopcomputer",
-  "mini-pc": "macmini",
-  workstation: "macpro.gen3",
-  server: "server.rack",
-  cloud: "cloud",
-  linux: "terminal",
-  windows: "pc",
-} as const satisfies Record<EnvironmentMachineKind, string>;
-
-export type MachineSymbol = (typeof MACHINE_KIND_SYMBOL)[EnvironmentMachineKind];
 
 /** "All machines" in the popover. */
 export const ALL_MACHINES_SYMBOL = "square.grid.2x2";
@@ -169,7 +155,11 @@ function detailLine(
 
 /** What the picker shows for a machine it has no other facts about. */
 export function fallbackMachineFacts(label: string): MachinePickerFacts {
-  return { kind: inferEnvironmentMachineKind(undefined, label), reach: "hub", lastSeenAt: null };
+  return {
+    kind: resolveMachineKind({ label, config: null, descriptor: null, catalogKind: null }),
+    reach: "hub",
+    lastSeenAt: null,
+  };
 }
 
 /**
@@ -275,11 +265,7 @@ export interface MachinePickerFactSources {
   readonly hubLastSeen: ReadonlyMap<EnvironmentId, number>;
 }
 
-/**
- * A machine's kind, reach and last-seen time. The kind is the machine's own
- * choice first: the desktop's icon setting, then its platform hint, then a
- * guess from its OS and name (`resolveEnvironmentMachineKind`).
- */
+/** A machine's kind (by the phone's one rule, `resolveMachineKind`), reach and last-seen time. */
 export function machinePickerFactsOf(
   sources: MachinePickerFactSources,
   environmentId: EnvironmentId,
@@ -288,11 +274,12 @@ export function machinePickerFactsOf(
   const direct = sources.direct.get(environmentId);
   const config = sources.configs.get(environmentId) ?? direct?.serverConfig ?? null;
   const catalog = sources.catalog.get(environmentId);
-  const descriptor = config?.environment ?? direct?.descriptor ?? null;
-  const kind =
-    config !== null || descriptor !== null
-      ? resolveEnvironmentMachineKind(config, descriptor)
-      : (catalog?.iconKind ?? inferEnvironmentMachineKind(undefined, label));
+  const kind = resolveMachineKind({
+    label,
+    config,
+    descriptor: direct?.descriptor ?? null,
+    catalogKind: catalog?.iconKind ?? null,
+  });
   if (direct) {
     return {
       kind,
