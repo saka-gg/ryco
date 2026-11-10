@@ -8,9 +8,12 @@ import {
   publishStoredHubSession,
   readHubSessionConfirmedAt,
   readStoredHubSession,
-  resetStoredHubSessionForTests,
+  resetHubLaunchStateForTests,
+  resolveLaunchAccountStatus,
+  isHubLaunchCheckSettled,
+  publishHubLaunchCheckSettled,
   RETAINED_SESSION_ACCESS_WINDOW_MS,
-  subscribeStoredHubSession,
+  subscribeHubLaunchState,
   watchHubSessionConfirmation,
 } from "./retainedSessionAccess";
 
@@ -175,19 +178,87 @@ describe("the Hub's confirmation stamp", () => {
   });
 });
 
-describe("the stored-session read", () => {
+describe("the launch state the hosted runtime publishes", () => {
   it("is unknown until published and notifies on a change only", () => {
-    resetStoredHubSessionForTests();
+    resetHubLaunchStateForTests();
     expect(readStoredHubSession()).toBeNull();
+    expect(isHubLaunchCheckSettled()).toBe(false);
     const listener = vi.fn();
-    const stop = subscribeStoredHubSession(listener);
+    const stop = subscribeHubLaunchState(listener);
     publishStoredHubSession(true);
     publishStoredHubSession(true);
     expect(readStoredHubSession()).toBe(true);
     expect(listener).toHaveBeenCalledTimes(1);
+    publishHubLaunchCheckSettled(true);
+    publishHubLaunchCheckSettled(false);
+    expect(isHubLaunchCheckSettled()).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(2);
     stop();
     publishStoredHubSession(false);
-    expect(listener).toHaveBeenCalledTimes(1);
-    resetStoredHubSessionForTests();
+    expect(listener).toHaveBeenCalledTimes(2);
+    resetHubLaunchStateForTests();
+  });
+
+  it("reads the store's starting signed-out as no answer until the Hub was asked", () => {
+    const checking = { storedSession: true, check: "pending" } as const;
+    expect(resolveLaunchAccountStatus("signed-out", checking)).toBe("authenticating");
+    // The stored-session read itself has not settled yet either.
+    expect(resolveLaunchAccountStatus("signed-out", { ...checking, storedSession: null })).toBe(
+      "authenticating",
+    );
+    // Nothing stored: nothing is being checked, the device is signed out.
+    expect(resolveLaunchAccountStatus("signed-out", { ...checking, storedSession: false })).toBe(
+      "signed-out",
+    );
+    // The Hub's answer is an answer, and so is every status after it.
+    expect(resolveLaunchAccountStatus("signed-out", { ...checking, check: "answered" })).toBe(
+      "signed-out",
+    );
+    for (const status of ["authenticated", "unavailable", "session-expired"] as const) {
+      expect(resolveLaunchAccountStatus(status, checking)).toBe(status);
+    }
+  });
+
+  it("reads a held session the Hub was never asked about as unavailable, not signed out", () => {
+    // The hardware key did not load, or no endpoint is configured.
+    const unanswered = { storedSession: true, check: "unanswered" } as const;
+    expect(resolveLaunchAccountStatus("signed-out", unanswered)).toBe("unavailable");
+    expect(resolveLaunchAccountStatus("signed-out", { ...unanswered, storedSession: false })).toBe(
+      "signed-out",
+    );
+    expect(resolveLaunchAccountStatus("signed-out", { ...unanswered, storedSession: null })).toBe(
+      "signed-out",
+    );
+  });
+
+  it("reads the published launch state by default, and an answer is final", () => {
+    resetHubLaunchStateForTests();
+    publishStoredHubSession(true);
+    expect(resolveLaunchAccountStatus("signed-out")).toBe("authenticating");
+    publishHubLaunchCheckSettled(false);
+    expect(resolveLaunchAccountStatus("signed-out")).toBe("unavailable");
+    publishHubLaunchCheckSettled(true);
+    expect(resolveLaunchAccountStatus("signed-out")).toBe("signed-out");
+    publishHubLaunchCheckSettled(false);
+    expect(resolveLaunchAccountStatus("signed-out")).toBe("signed-out");
+    resetHubLaunchStateForTests();
+  });
+
+  it("counts an authenticated account as the Hub's answer", () => {
+    resetHubLaunchStateForTests();
+    publishStoredHubSession(true);
+    publishHubLaunchCheckSettled(false);
+    const account = accountStore("signed-out");
+    watchHubSessionConfirmation({
+      kv: memoryKV(),
+      now: () => NOW,
+      readAccountStatus: account.read,
+      subscribe: account.subscribe,
+    });
+    // A sign-in later in the same run, then a sign-out: that one is real.
+    account.set("authenticated");
+    account.set("signed-out");
+    expect(resolveLaunchAccountStatus("signed-out")).toBe("signed-out");
+    resetHubLaunchStateForTests();
   });
 });

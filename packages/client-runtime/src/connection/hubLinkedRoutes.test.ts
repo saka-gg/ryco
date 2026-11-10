@@ -187,6 +187,48 @@ describe("a Hub machine's linked routes", () => {
     await expect(routes.resolve(HUB, signal())).resolves.not.toBeNull();
   });
 
+  it("allows an address the upgrader just proved the full check time on the next attempt", async () => {
+    vi.useFakeTimers({ now: NOW });
+    try {
+      // The address answers when the test opens the gate, however long that takes.
+      let open: (() => void) | null = null;
+      const fetchDescriptorId = vi.fn(
+        (_: string, abort: AbortSignal) =>
+          new Promise<EnvironmentId>((resolve, reject) => {
+            open = () => resolve(DIRECT);
+            abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          }),
+      );
+      const routes = createHubLinkedRoutes(
+        ports({ fetchDescriptorId, attemptCheckTimeoutMs: 20, nowMs: () => Date.now() }),
+      );
+      // Too slow for an attempt's short check.
+      const first = routes.resolve(HUB, signal());
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(first).resolves.toBeNull();
+      expect(fetchDescriptorId).toHaveBeenCalledTimes(1);
+
+      // The upgrader's check waits longer, and sees it answer and prove the key.
+      const check = routes.checkRoutes(routes.routesFor(HUB), signal());
+      await vi.advanceTimersByTimeAsync(100);
+      open!();
+      await check;
+
+      // The attempt that follows waits as long as the check did.
+      let settled = false;
+      const second = routes.resolve(HUB, signal()).then((attempt) => {
+        settled = true;
+        return attempt;
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toBe(false);
+      open!();
+      await expect(second).resolves.toMatchObject({ routeKey: "https://studio.tail1.ts.net" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not hold a called-off attempt against its address", async () => {
     const abort = new AbortController();
     const fetchDescriptorId = vi.fn(

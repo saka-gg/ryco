@@ -88,6 +88,7 @@ const THREAD_CACHED_REASON_COPY: Record<ThreadConnectionDegradedReason, string> 
   "node-missing": "This node is no longer in your Hub directory. Showing cached content.",
   "directory-unavailable": "The Hub directory is unreachable. Showing cached content.",
   "signed-out": "Hub session ended. Sign in to reconnect. Showing cached content.",
+  "hub-unreachable": "Your Hub can't be reached right now. Showing cached content.",
   "hosted-unavailable": "Hub connections are unavailable on this device. Showing cached content.",
 };
 

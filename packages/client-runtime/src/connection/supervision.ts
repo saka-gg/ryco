@@ -88,6 +88,10 @@ export const VIEW_RESUME_HEARTBEAT_GRACE_MS = 12_000;
 export const VIEW_RESUME_SILENT_MS = 3 * 60_000;
 const VIEW_RESUME_REASONS: ReadonlySet<string> = new Set(["visibilitychange", "pageshow"]);
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
+/**
+ * How many saved environments connect at once unless the platform says
+ * otherwise (`savedEnvironmentConnectConcurrency`).
+ */
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
 /**
  * A saved environment that could not be reached — the remote machine asleep,
@@ -141,6 +145,13 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly isSavedEnvironmentAwaitingRepair?: (environmentId: EnvironmentId) => boolean;
   readonly disconnectSavedEnvironment: (environmentId: EnvironmentId) => Promise<void>;
   readonly waitForPrimaryShellSnapshotApplied: (timeoutMs: number) => Promise<void>;
+  /**
+   * How many saved environments may connect at once; two when absent. Each
+   * connect holds its slot until it lands or fails, so with two slots two
+   * machines that are asleep keep a reachable third waiting behind them. A
+   * client whose saved machines are its whole workspace asks for more.
+   */
+  readonly savedEnvironmentConnectConcurrency?: number;
   readonly subscribeBrowserResume: (listener: (reason: string) => void) => () => void;
   /**
    * The device stayed online but moved to another network path (the platform's
@@ -1512,7 +1523,8 @@ export function createEnvironmentConnectionSupervisor<
     }
     const connectable = records.filter((record) => !awaitingRepair(record.environmentId));
     await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(connectable), {
-      concurrency: SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
+      concurrency:
+        input.savedEnvironmentConnectConcurrency ?? SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
       connect: async (record) => {
         try {
           await connectWithinSlot(

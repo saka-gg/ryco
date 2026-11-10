@@ -103,6 +103,8 @@ export function watchHubSessionConfirmation(input: {
     const changed = status !== previous;
     previous = status;
     if (status === "authenticated") {
+      // The Hub answered for this session: from here on the status speaks for itself.
+      publishHubLaunchCheckSettled(true);
       const now = input.now();
       if (
         !changed &&
@@ -129,33 +131,87 @@ export function watchHubSessionConfirmation(input: {
 }
 
 // ---------------------------------------------------------------------------
-// The stored-session read, published by the hosted runtime's session setup
-// (after the Hub profile is authoritative, before any Hub request) and read by
-// the access gate.
+// What the hosted runtime's session setup publishes for the launch: whether a
+// stored session credential was read (after the Hub profile is authoritative,
+// before any Hub request), and that the launch-time access check has settled.
 // ---------------------------------------------------------------------------
 
 let storedSession: boolean | null = null;
+/**
+ * `answered`: the Hub was asked (it confirmed the session, refused it, or
+ * could not be reached, each of which the account status states). `unanswered`:
+ * the setup ended before the Hub could be asked (no usable hardware key, no
+ * endpoint), so the account status is still the store's starting value.
+ */
+let launchCheck: "pending" | "answered" | "unanswered" = "pending";
 const listeners = new Set<() => void>();
+
+const notify = () => {
+  for (const listener of Array.from(listeners)) listener();
+};
 
 export function publishStoredHubSession(present: boolean | null): void {
   if (storedSession === present) return;
   storedSession = present;
-  for (const listener of Array.from(listeners)) listener();
+  notify();
 }
 
 export function readStoredHubSession(): boolean | null {
   return storedSession;
 }
 
-export function subscribeStoredHubSession(listener: () => void): () => void {
+/**
+ * The launch-time session setup has ended; `answered` is whether it got as far
+ * as asking the Hub. An answer is final: a later setup that ends early does
+ * not take it back.
+ */
+export function publishHubLaunchCheckSettled(answered: boolean): void {
+  const next = answered || launchCheck === "answered" ? "answered" : "unanswered";
+  if (launchCheck === next) return;
+  launchCheck = next;
+  notify();
+}
+
+export function isHubLaunchCheckSettled(): boolean {
+  return launchCheck !== "pending";
+}
+
+/** Notified when the stored-session read or the launch check's state changes. */
+export function subscribeHubLaunchState(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 }
 
+/**
+ * The account status as a surface that mounts before the launch check has
+ * answered must read it. The store starts at `signed-out` and stays there
+ * until the check answers, so until then `signed-out` is the absence of an
+ * answer, not a sign-out: it reads as `authenticating`, unless the device
+ * holds no stored session at all, in which case nothing is being checked.
+ * When the setup ended before the Hub could be asked and the device does hold
+ * a stored session, the session was neither confirmed nor refused: that reads
+ * as `unavailable`. Every other status, and every status once the Hub was
+ * asked, is itself.
+ */
+export function resolveLaunchAccountStatus(
+  accountStatus: HostedAccountStatus,
+  launch: {
+    readonly storedSession: boolean | null;
+    readonly check: "pending" | "answered" | "unanswered";
+  } = { storedSession, check: launchCheck },
+): HostedAccountStatus {
+  if (accountStatus !== "signed-out" || launch.check === "answered") return accountStatus;
+  if (launch.check === "pending") {
+    return launch.storedSession === false ? accountStatus : "authenticating";
+  }
+  return launch.storedSession === true ? "unavailable" : accountStatus;
+}
+
 /** Test seam. */
-export function resetStoredHubSessionForTests(): void {
+export function resetHubLaunchStateForTests(): void {
   storedSession = null;
+  launchCheck = "pending";
   listeners.clear();
 }

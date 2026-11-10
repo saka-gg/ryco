@@ -12,9 +12,10 @@ import { View } from "react-native";
 import { ConnectionsNewRouteScreen, NativeIdentityScreen } from "../../navigation/lazyRouteScreens";
 import {
   deriveRetainedHubSession,
+  isHubLaunchCheckSettled,
   readHubSessionConfirmedAt,
   readStoredHubSession,
-  subscribeStoredHubSession,
+  subscribeHubLaunchState,
 } from "../../hostedHub/retainedSessionAccess";
 import { useHostedHubStore, ensureMobileHostedSession } from "../../hostedHub/state";
 import { mobileKV } from "../../platform/kv";
@@ -76,8 +77,8 @@ export function AppAccessGate(props: {
   const [hostedHydrated, setHostedHydrated] = useState(false);
   // The launch check itself settled, unlike `hostedHydrated`, which the launch
   // deadline also sets: only then is the account status the check's answer.
-  const [hostedCheckSettled, setHostedCheckSettled] = useState(false);
-  const storedHubSession = useSyncExternalStore(subscribeStoredHubSession, readStoredHubSession);
+  const hostedCheckSettled = useSyncExternalStore(subscribeHubLaunchState, isHubLaunchCheckSettled);
+  const storedHubSession = useSyncExternalStore(subscribeHubLaunchState, readStoredHubSession);
   const [hubSessionConfirmedAt, setHubSessionConfirmedAt] = useState<number | null>(null);
   const [savedWorkspaceRead, setSavedWorkspaceRead] = useState(() =>
     mobileRuntimeStartupBarrier.isHydrated(),
@@ -100,9 +101,7 @@ export function AppAccessGate(props: {
     }, HOSTED_LAUNCH_DECISION_DEADLINE_MS);
     void ensureMobileHostedSession().finally(() => {
       clearTimeout(deadline);
-      if (!active) return;
-      setHostedCheckSettled(true);
-      setHostedHydrated(true);
+      if (active) setHostedHydrated(true);
     });
     // What a retained sign-in opens is the saved workspace, so it waits for
     // that to be read; and it needs to know when the Hub last confirmed it.

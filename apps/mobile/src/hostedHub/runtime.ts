@@ -55,7 +55,7 @@ import { createHostedEnvironmentConnection } from "./primaryConnection";
 import { installHostedEnvironmentConnectionFactory } from "./primaryConnectionFactory";
 import { configureAuthoritativeNodeTrustSource } from "../features/home/authoritativeNodeTrustSource";
 import { MobileHostedRelaySocket, mobileHostedRelayUrl } from "./relaySocket";
-import { publishStoredHubSession } from "./retainedSessionAccess";
+import { publishHubLaunchCheckSettled, publishStoredHubSession } from "./retainedSessionAccess";
 import {
   getMobileHostedEndpoint,
   getMobileHostedHttpClient,
@@ -573,9 +573,12 @@ export function ensureMobileHostedSession(): Promise<void> {
     return true;
   })().then(
     (ready) => {
+      // `ready` means the Hub was asked; otherwise the setup ended before that.
+      publishHubLaunchCheckSettled(ready);
       if (!ready && session === attempt) session = undefined;
     },
     () => {
+      publishHubLaunchCheckSettled(false);
       if (session === attempt) session = undefined;
     },
   );

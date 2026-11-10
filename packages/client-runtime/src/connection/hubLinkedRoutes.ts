@@ -115,6 +115,9 @@ export const LINKED_ROUTE_ATTEMPT_CHECK_TIMEOUT_MS = 800;
  */
 export const LINKED_ROUTE_UNANSWERED_SKIP_MS = 10 * 60_000;
 
+/** How long after the upgrader's check proved an address an attempt allows it the full check time. */
+export const LINKED_ROUTE_PROVEN_ALLOWANCE_MS = 30_000;
+
 /** Run `work` with a signal that aborts with `signal` or after `ms`; `null` once it did. */
 async function withDeadline<A>(
   signal: AbortSignal,
@@ -145,6 +148,13 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
   const refused = new Set<string>();
   /** Addresses that did not answer, and when; attempts leave them out for a while. */
   const unanswered = new Map<string, number>();
+  /**
+   * Addresses the upgrader's check just saw answer and prove the key. The
+   * attempt that check asks for allows them the same time the check did, so an
+   * address that answers slower than an attempt's short check is not found by
+   * the upgrader only to be given up by the attempt.
+   */
+  const provenAt = new Map<string, number>();
   const noteAnswer = (key: string, result: RouteCheckResult | undefined) => {
     if (result?.kind === "timeout" || result?.kind === "unreachable") unanswered.set(key, nowMs());
   };
@@ -194,8 +204,10 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
         );
         if (proof === "proven") {
           unanswered.delete(key);
+          provenAt.set(key, nowMs());
           return;
         }
+        provenAt.delete(key);
         if (proof === "refused") {
           refused.add(key);
           onRefused?.();
@@ -255,11 +267,17 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
         );
       });
       if (routes.length === 0) return null;
+      const justProven = routes.some((route) => {
+        const at = provenAt.get(environmentRouteKey(route));
+        return at !== undefined && startedAt - at < LINKED_ROUTE_PROVEN_ALLOWANCE_MS;
+      });
       const results = await checkEnvironmentRoutes({
         routes,
         fetchDescriptorId: ports.fetchDescriptorId,
         signal,
-        timeoutMs: ports.attemptCheckTimeoutMs ?? LINKED_ROUTE_ATTEMPT_CHECK_TIMEOUT_MS,
+        timeoutMs: justProven
+          ? ROUTE_CHECK_TIMEOUT_MS
+          : (ports.attemptCheckTimeoutMs ?? LINKED_ROUTE_ATTEMPT_CHECK_TIMEOUT_MS),
       });
       for (const route of routes) {
         if (route.kind !== "direct" || signal.aborted) continue;
@@ -294,6 +312,7 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
         if (record.hubLink?.hubEnvironmentId === hubEnvironmentId) {
           refused.delete(record.httpBaseUrl);
           unanswered.delete(record.httpBaseUrl);
+          provenAt.delete(record.httpBaseUrl);
         }
       }
     },
@@ -301,6 +320,7 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
     forgetRefusal(httpBaseUrl: string): void {
       refused.delete(httpBaseUrl);
       unanswered.delete(httpBaseUrl);
+      provenAt.delete(httpBaseUrl);
     },
   };
 }

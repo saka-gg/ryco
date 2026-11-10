@@ -11,6 +11,10 @@ import {
 import type { EnvironmentId } from "@ryco/contracts";
 
 import {
+  resolveLaunchAccountStatus,
+  subscribeHubLaunchState,
+} from "../hostedHub/retainedSessionAccess";
+import {
   getCachedHubNodeRoster,
   subscribeCachedHubNodeRoster,
   type CachedHubNodeRecord,
@@ -45,6 +49,7 @@ export type ThreadConnectionDegradedReason =
   | "node-missing"
   | "directory-unavailable"
   | "signed-out"
+  | "hub-unreachable"
   | "hosted-unavailable";
 
 export type ThreadConnectionRetargetDecision =
@@ -150,16 +155,18 @@ export function deriveThreadConnectionRetarget(
   //    closed with a stated reason rather than a spinner that never settles.
   if (!hostedAvailable) return { kind: "degraded", reason: "hosted-unavailable" };
 
-  // 5. Account. Signed out / expired / unavailable are terminal for this
-  //    attempt and the user has an action to take; the signing-in and
-  //    signing-out transients resolve on their own, so wait them out.
+  // 5. Account. Signed out / expired are terminal for this attempt and the
+  //    user has an action to take. `unavailable` is terminal for it too, but
+  //    the session is still held and the Hub simply did not answer: the app
+  //    keeps retrying, and the thread says so instead of asking for a sign-in.
+  //    The signing-in and signing-out transients resolve on their own, so
+  //    wait them out.
   if (state.accountStatus !== "authenticated") {
-    if (
-      state.accountStatus === "signed-out" ||
-      state.accountStatus === "session-expired" ||
-      state.accountStatus === "unavailable"
-    ) {
+    if (state.accountStatus === "signed-out" || state.accountStatus === "session-expired") {
       return { kind: "degraded", reason: "signed-out" };
+    }
+    if (state.accountStatus === "unavailable") {
+      return { kind: "degraded", reason: "hub-unreachable" };
     }
     return { kind: "wait" };
   }
@@ -537,7 +544,24 @@ let mobileEngine: ThreadConnectionRetargetEngine | null = null;
 export function ensureMobileThreadConnectionRetargetEngine(): ThreadConnectionRetargetEngine {
   if (mobileEngine) return mobileEngine;
   mobileEngine = createThreadConnectionRetargetEngine({
-    store: hostedHubStore,
+    // A thread can be opened from the saved workspace before the launch check
+    // has answered. Until then the store's starting `signed-out` is no answer
+    // and must wait, not degrade (`resolveLaunchAccountStatus`).
+    store: {
+      getState: () => {
+        const state = hostedHubStore.getState();
+        const accountStatus = resolveLaunchAccountStatus(state.accountStatus);
+        return accountStatus === state.accountStatus ? state : { ...state, accountStatus };
+      },
+      subscribe: (listener) => {
+        const unsubscribeStore = hostedHubStore.subscribe(listener);
+        const unsubscribeLaunch = subscribeHubLaunchState(listener);
+        return () => {
+          unsubscribeStore();
+          unsubscribeLaunch();
+        };
+      },
+    },
     // Wave 3b preserves 3a's decision model and replaces only its actuator:
     // the same retarget decision now acquires/touches a bounded connection.
     selectNode: acquireMobileHostedNode,

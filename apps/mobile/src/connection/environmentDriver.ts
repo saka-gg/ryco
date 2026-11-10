@@ -151,6 +151,9 @@ export interface MobileEnvironmentDriverDeps {
   readonly threadDetailEventScheduling?: ThreadDetailEventScheduling;
 }
 
+/** Directly paired machines the phone connects at once; a phone rarely has more. */
+export const MOBILE_SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 6;
+
 export interface MobileEnvironmentDriver {
   readonly supervisor: EnvironmentConnectionSupervisor;
   readonly start: () => () => void;
@@ -609,6 +612,9 @@ export function createMobileEnvironmentDriver(
       await getSupervisor().remove(environmentId);
     },
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
+    // Every paired machine starts connecting at launch: one that is asleep or
+    // out of reach must not hold a reachable one behind it.
+    savedEnvironmentConnectConcurrency: MOBILE_SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
     subscribeBrowserResume: (listener) => subscribeResume(listener),
     subscribeNetworkChange: (listener) => subscribeNetworkChange(listener),
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
