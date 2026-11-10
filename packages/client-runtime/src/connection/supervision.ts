@@ -1242,11 +1242,15 @@ export function createEnvironmentConnectionSupervisor<
         options?.speculative === true && departedThreadBodies.get(key)?.speculativeOnly !== false,
       idleSince: null,
       protocol: "bounded" as const,
-      windowLimits: input.threadWindowInitialLimits ?? THREAD_WINDOW_LIMITS,
+      windowLimits: THREAD_WINDOW_LIMITS,
       estimatedRetainedBytes: 0,
       retainedRows: createRetainedThreadBytes(),
     };
     if (!existing) threadDetailSubscriptions.set(key, entry);
+    // A new subscription's first window is sized to the screen (`threadWindowInitialLimits`).
+    if (!existing && input.threadWindowInitialLimits) {
+      entry.windowLimits = input.threadWindowInitialLimits;
+    }
     clearEviction(entry);
     entry.refCount += 1;
     const view = options?.view === true;

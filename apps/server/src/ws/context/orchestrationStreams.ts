@@ -33,6 +33,11 @@ import {
   ORCHESTRATION_THREAD_RESUME_MAX_SCAN_EVENTS,
 } from "./constants.ts";
 import { isThreadDetailEvent } from "./orchestrationEvents.ts";
+import {
+  type ThreadEventRegistration,
+  registerThreadEventSubscriber,
+} from "./threadEventRouter.ts";
+import { previewActivityAppendedEvent } from "../../orchestration/activityPayloadPreview.ts";
 import { randomShortId } from "./branchNaming.ts";
 import { readSharedThreadShell } from "./sharedThreadShellReads.ts";
 import {
@@ -44,11 +49,6 @@ import { makeCachedJsonBytes, rechunkByBudget, tapArray } from "../streamBatchin
 import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
-import {
-  type ThreadEventRegistration,
-  registerThreadEventSubscriber,
-} from "./threadEventRouter.ts";
-import { previewActivityAppendedEvent } from "../../orchestration/activityPayloadPreview.ts";
 
 const makeLiveQueueOverflowError = (input: {
   readonly stream: WsReplayStreamKind;
