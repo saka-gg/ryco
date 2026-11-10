@@ -363,19 +363,36 @@ export class ProjectStageFileReferenceError extends Schema.TaggedError<ProjectSt
 
 /** Optional, bounded project artwork carried inside the authenticated node RPC channel. */
 export const PROJECT_ICON_MAX_BYTES = 512 * 1024;
-export const ProjectReadIconInput = Schema.Struct({ projectId: ProjectId });
+const ProjectIconHash = Schema.String.check(Schema.isMaxLength(128));
+export const ProjectReadIconInput = Schema.Struct({
+  projectId: ProjectId,
+  /**
+   * The `hash` of the artwork the client holds: a server that still has the
+   * same artwork answers `{ unchanged: true }` instead of the bytes. Older
+   * servers ignore it.
+   */
+  knownHash: Schema.optional(ProjectIconHash),
+});
 export type ProjectReadIconInput = typeof ProjectReadIconInput.Type;
 export const ProjectReadIconResult = Schema.NullOr(
-  Schema.Struct({
-    dataBase64: Schema.String.check(Schema.isMaxLength(Math.ceil(PROJECT_ICON_MAX_BYTES / 3) * 4)),
-    mimeType: Schema.Literals([
-      "image/png",
-      "image/jpeg",
-      "image/webp",
-      "image/svg+xml",
-      "image/x-icon",
-    ]),
-  }),
+  Schema.Union([
+    Schema.Struct({
+      dataBase64: Schema.String.check(
+        Schema.isMaxLength(Math.ceil(PROJECT_ICON_MAX_BYTES / 3) * 4),
+      ),
+      mimeType: Schema.Literals([
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/svg+xml",
+        "image/x-icon",
+      ]),
+      /** Names these bytes, for a later `knownHash`; absent on older servers. */
+      hash: Schema.optional(ProjectIconHash),
+    }),
+    /** Only ever the answer to a read that sent the matching `knownHash`. */
+    Schema.Struct({ unchanged: Schema.Literal(true) }),
+  ]),
 );
 export type ProjectReadIconResult = typeof ProjectReadIconResult.Type;
 export class ProjectReadIconError extends Schema.TaggedError<ProjectReadIconError>()(

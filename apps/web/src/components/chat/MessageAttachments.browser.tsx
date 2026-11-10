@@ -4,21 +4,30 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
-const { readChunk } = vi.hoisted(() => ({ readChunk: vi.fn() }));
+const { readChunk, connection } = vi.hoisted(() => {
+  const readChunk = vi.fn();
+  // Each test is a new connection: what one learns about its server stays with it.
+  const connection = { readChunk: (input: unknown) => readChunk(input) };
+  return { readChunk, connection };
+});
 vi.mock("../../environmentApi", () => ({
   ensureEnvironmentApi: vi.fn(),
   createEnvironmentApi: vi.fn(),
   readEnvironmentApiForConnection: vi.fn(),
   __setEnvironmentApiOverrideForTests: vi.fn(),
   __resetEnvironmentApiOverridesForTests: vi.fn(),
-  readEnvironmentApi: () => ({ attachments: { readChunk } }),
+  readEnvironmentApi: () => ({ attachments: connection }),
 }));
 import { MessageAttachments } from "./MessageAttachments";
+import { clearHostedImageSources } from "./hostedImageSource";
+import { useStore } from "../../store";
 import { pdfFixture } from "./pdfTestFixtures";
 
 afterEach(() => {
   vi.restoreAllMocks();
   readChunk.mockReset();
+  connection.readChunk = (input: unknown) => readChunk(input);
+  clearHostedImageSources();
 });
 
 function waveFixture() {
@@ -131,7 +140,7 @@ it("never hands agent HTML or SVG a blob URL the browser would run in the app's 
   await expect.element(page.getByRole("dialog")).toBeVisible();
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByRole("button", { name: /logo.svg/ }).click();
-  await page.getByRole("button", { name: /chart.svg/ }).click();
+  // An image loads by itself: small, it is its own preview.
 
   // The page and the vector file are opaque downloads...
   await expect.element(page.getByRole("link", { name: "Download logo.svg" })).toBeVisible();
@@ -468,5 +477,158 @@ it("shows a page handed over on a user message as its card, not the page itself"
   await expect.element(page.getByRole("button", { name: "Open Pricing mockup" })).toBeVisible();
   expect(document.querySelector("[data-html-render-frame]")).toBeNull();
   expect(readChunk).not.toHaveBeenCalled();
+  await screen.unmount();
+});
+
+/** A PNG of `width` x `height`, drawn on a canvas. */
+async function pngFixture(width: number, height: number, fill: string) {
+  const canvas = new OffscreenCanvas(width, height);
+  const context = canvas.getContext("2d")!;
+  context.fillStyle = fill;
+  context.fillRect(0, 0, width, height);
+  const bytes = new Uint8Array(await (await canvas.convertToBlob()).arrayBuffer());
+  return { bytes, dataBase64: btoa(String.fromCharCode(...bytes)) };
+}
+
+/** A node that makes previews: `preview` answers a read asking for one, `original` the rest. */
+function serveImage(
+  original: { bytes: Uint8Array; dataBase64: string },
+  preview?: typeof original,
+) {
+  readChunk.mockImplementation(async (input: { offset: number; preview?: number }) => {
+    const served = input.preview !== undefined && preview ? preview : original;
+    return {
+      offset: input.offset,
+      totalBytes: served.bytes.length,
+      dataBase64: served.dataBase64,
+      ...(input.preview !== undefined ? { preview: served === preview } : {}),
+    };
+  });
+}
+
+const hostedImageProps = {
+  environmentId: EnvironmentId.make("env"),
+  threadId: ThreadId.make("thread"),
+  messageId: MessageId.make("message"),
+};
+
+it("shows a hosted image's preview by itself and opens the original", async () => {
+  const original = await pngFixture(64, 40, "teal");
+  const preview = await pngFixture(32, 20, "orange");
+  serveImage(original, preview);
+  const onImageExpand = vi.fn();
+  const attachment = {
+    type: "image" as const,
+    id: "shot",
+    name: "shot.png",
+    mimeType: "image/png",
+    // As the thread knows it: the original's size, not the preview's.
+    sizeBytes: original.bytes.length,
+  };
+  const screen = await render(
+    <MessageAttachments
+      {...hostedImageProps}
+      onImageExpand={onImageExpand}
+      attachments={[attachment]}
+    />,
+  );
+  const image = page.getByRole("img", { name: "shot.png" });
+  await expect.element(image).toBeInTheDocument();
+  await vi.waitFor(() => expect((image.element() as HTMLImageElement).naturalWidth).toBe(32));
+  expect(readChunk.mock.calls).toEqual([
+    [{ threadId: "thread", messageId: "message", attachmentId: "shot", offset: 0, preview: 1024 }],
+  ]);
+
+  await page.getByRole("button", { name: "Preview shot.png" }).click();
+  await vi.waitFor(() => expect(onImageExpand).toHaveBeenCalledOnce());
+  expect(readChunk.mock.calls.at(-1)).toEqual([
+    { threadId: "thread", messageId: "message", attachmentId: "shot", offset: 0 },
+  ]);
+  const expanded = onImageExpand.mock.calls[0]![0] as { images: Array<{ src: string }> };
+  const opened = await fetch(expanded.images[0]!.src);
+  expect(new Uint8Array(await opened.arrayBuffer())).toEqual(original.bytes);
+  await screen.unmount();
+
+  // Back to the thread: kept for the session, no read through the relay.
+  readChunk.mockClear();
+  const again = await render(
+    <MessageAttachments
+      {...hostedImageProps}
+      onImageExpand={() => undefined}
+      attachments={[attachment]}
+    />,
+  );
+  await expect.element(page.getByRole("img", { name: "shot.png" })).toBeInTheDocument();
+  expect(readChunk).not.toHaveBeenCalled();
+  await again.unmount();
+
+  // Signed out (the machine's state goes): gone.
+  useStore.setState({ environmentStateById: {} });
+  const afterSignOut = await render(
+    <MessageAttachments
+      {...hostedImageProps}
+      onImageExpand={() => undefined}
+      attachments={[attachment]}
+    />,
+  );
+  await expect.element(page.getByRole("img", { name: "shot.png" })).toBeInTheDocument();
+  expect(readChunk).toHaveBeenCalled();
+  await afterSignOut.unmount();
+});
+
+it("leaves a large image behind a click on a node that makes no previews", async () => {
+  const original = await pngFixture(16, 16, "teal");
+  // An older node: it ignores `preview` and sends the original, 2 MB as the thread says.
+  readChunk.mockImplementation(async (input: { offset: number }) => ({
+    offset: input.offset,
+    totalBytes: 2 * 1024 * 1024,
+    dataBase64: original.dataBase64,
+  }));
+  const screen = await render(
+    <MessageAttachments
+      {...hostedImageProps}
+      onImageExpand={() => undefined}
+      attachments={[
+        {
+          type: "image",
+          id: "big",
+          name: "big.png",
+          mimeType: "image/png",
+          sizeBytes: 2 * 1024 * 1024,
+        },
+      ]}
+    />,
+  );
+  await vi.waitFor(() => expect(readChunk).toHaveBeenCalledOnce());
+  await expect
+    .element(page.getByRole("button", { name: /big.png/ }))
+    .toMatchTextContent("Open file");
+  expect(page.getByRole("img", { name: "big.png" }).query()).toBeNull();
+  await screen.unmount();
+});
+
+it("shows a direct image as its node's preview and downloads the original", async () => {
+  const screen = await render(
+    <MessageAttachments
+      onImageExpand={() => undefined}
+      attachments={[
+        {
+          type: "image",
+          id: "shot",
+          name: "shot.png",
+          mimeType: "image/png",
+          sizeBytes: 4_000_000,
+          width: 2880,
+          height: 1800,
+          previewUrl: "http://node.test/attachments/shot",
+        },
+      ]}
+    />,
+  );
+  const image = page.getByRole("img", { name: "shot.png" }).element() as HTMLImageElement;
+  expect(image.getAttribute("src")).toBe("http://node.test/attachments/shot?preview=1024");
+  expect(
+    document.querySelector<HTMLAnchorElement>('a[download="shot.png"]')!.getAttribute("href"),
+  ).toBe("http://node.test/attachments/shot?download=shot.png");
   await screen.unmount();
 });

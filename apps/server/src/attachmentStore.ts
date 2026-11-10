@@ -668,5 +668,10 @@ export async function deleteThreadAttachmentFiles(input: {
     } catch (cause) {
       if (errorCode(cause) !== "ENOENT") throw cause;
     }
+    await import("./attachmentPreview.ts")
+      .then(({ removeAttachmentPreviews }) =>
+        removeAttachmentPreviews(input.attachmentsDir, attachmentId),
+      )
+      .catch(() => undefined);
   }
 }

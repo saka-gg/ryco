@@ -54,6 +54,10 @@
       "types": "./src/rpc/shellSnapshotAssembly.ts",
       "import": "./src/rpc/shellSnapshotAssembly.ts"
     },
+    "./rpc/attachmentPreviewRead": {
+      "types": "./src/rpc/attachmentPreviewRead.ts",
+      "import": "./src/rpc/attachmentPreviewRead.ts"
+    },
     "./rpc/workspaceFileRead": {
       "types": "./src/rpc/workspaceFileRead.ts",
       "import": "./src/rpc/workspaceFileRead.ts"

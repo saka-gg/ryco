@@ -168,7 +168,10 @@ import {
   RepositoryIdentityResolver,
   type RepositoryIdentityResolverShape,
 } from "./project/Services/RepositoryIdentityResolver.ts";
-import { ProjectAvatarStore } from "./project/Services/ProjectAvatarStore.ts";
+import {
+  ProjectAvatarStore,
+  type ProjectAvatarStoreShape,
+} from "./project/Services/ProjectAvatarStore.ts";
 import { makeDeviceServiceLayer } from "./device/Layers/DeviceService.ts";
 import {
   ServerEnvironment,
@@ -556,6 +559,7 @@ const buildAppUnderTest = (options?: {
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcasterShape>;
     projectSetupScriptRunner?: Partial<ProjectSetupScriptRunnerShape>;
     projectFaviconResolver?: ProjectFaviconResolverShape;
+    projectAvatarRead?: ProjectAvatarStoreShape["read"];
     terminalManager?: Partial<TerminalManagerShape>;
     orchestrationEngine?: Partial<OrchestrationEngineShape>;
     threadDeletionReactor?: Partial<ThreadDeletionReactorShape>;
@@ -1076,7 +1080,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.succeed(ProjectAvatarStore, {
           write: () => Effect.die("ProjectAvatarStore.write not implemented in test"),
-          read: () => Effect.succeed(null),
+          read: options?.layers?.projectAvatarRead ?? (() => Effect.succeed(null)),
           remove: () => Effect.void,
         }),
       ),
@@ -1725,13 +1729,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         config: { devUrl: new URL("http://127.0.0.1:5173") },
       });
 
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
       const response = yield* HttpClient.get(
         `/api/project-favicon?cwd=${encodeURIComponent(projectDir)}`,
-        {
-          headers: {
-            cookie: yield* getAuthenticatedSessionCookieHeader(),
-          },
-        },
+        { headers: { cookie } },
       );
 
       assert.equal(response.status, 200);
@@ -1739,6 +1740,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.headers["x-content-type-options"], "nosniff");
       assert.include(response.headers["content-security-policy"] ?? "", "sandbox");
       assert.equal(yield* response.text, "<svg>router-project-favicon</svg>");
+      const etag = response.headers["etag"];
+      assert.isString(etag);
+      const revalidated = yield* HttpClient.get(
+        `/api/project-favicon?cwd=${encodeURIComponent(projectDir)}`,
+        { headers: { cookie, "if-none-match": etag! } },
+      );
+      assert.equal(revalidated.status, 304);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -2630,7 +2638,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         },
       });
       assert.equal(response.status, 200);
-      assert.equal(response.headers["cache-control"], "private, max-age=3600");
+      assert.equal(response.headers["cache-control"], "private, max-age=31536000, immutable");
       assert.equal(response.headers["x-content-type-options"], "nosniff");
       assert.equal(response.headers["content-type"], "application/octet-stream");
       assert.include(response.headers["content-disposition"] ?? "", "attachment");
@@ -2662,9 +2670,107 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         },
       );
       assert.equal(response.status, 200);
-      assert.equal(response.headers["cache-control"], "private, max-age=3600");
+      assert.equal(response.headers["cache-control"], "private, max-age=31536000, immutable");
       assert.equal(response.headers["x-content-type-options"], "nosniff");
       assert.equal(yield* response.text, "attachment-encoded-ok");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("answers an attachment's validator with 304 and serves image previews", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const attachmentId = "thread-22222222-2222-4222-8222-222222222222";
+      const config = yield* buildAppUnderTest();
+      const attachmentPath = resolveAttachmentRelativePath({
+        attachmentsDir: config.attachmentsDir,
+        relativePath: `${attachmentId}.png`,
+      });
+      assert.isNotNull(attachmentPath);
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      const png = yield* Effect.promise(async () =>
+        (await import("sharp"))
+          .default({
+            create: {
+              width: 1800,
+              height: 1200,
+              channels: 3,
+              background: "#000",
+              noise: { type: "gaussian", mean: 128, sigma: 40 },
+            },
+          })
+          .png()
+          .toBuffer(),
+      );
+      yield* fileSystem.writeFile(attachmentPath, png);
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+
+      const original = yield* HttpClient.get(`/attachments/${attachmentId}`, {
+        headers: { cookie },
+      });
+      assert.equal(original.status, 200);
+      assert.equal(original.headers["content-type"], "image/png");
+      const etag = original.headers["etag"];
+      assert.isString(etag);
+      assert.equal((yield* original.arrayBuffer).byteLength, png.length);
+
+      const revalidated = yield* HttpClient.get(`/attachments/${attachmentId}`, {
+        headers: { cookie, "if-none-match": etag! },
+      });
+      assert.equal(revalidated.status, 304);
+      assert.equal(revalidated.headers["cache-control"], "private, max-age=31536000, immutable");
+      assert.equal((yield* revalidated.arrayBuffer).byteLength, 0);
+
+      const preview = yield* HttpClient.get(`/attachments/${attachmentId}?preview=512`, {
+        headers: { cookie },
+      });
+      assert.equal(preview.status, 200);
+      assert.equal(preview.headers["content-type"], "image/webp");
+      assert.equal(preview.headers["cache-control"], "private, max-age=31536000, immutable");
+      const previewEtag = preview.headers["etag"];
+      assert.isString(previewEtag);
+      assert.notEqual(previewEtag, etag);
+      const previewBytes = (yield* preview.arrayBuffer).byteLength;
+      assert.isBelow(previewBytes, png.length / 10);
+      const previewRevalidated = yield* HttpClient.get(`/attachments/${attachmentId}?preview=512`, {
+        headers: { cookie, "if-none-match": previewEtag! },
+      });
+      assert.equal(previewRevalidated.status, 304);
+
+      // A download is always the original; an unknown size is ignored.
+      for (const query of ["?preview=512&download=shot.png", "?preview=999"]) {
+        const response = yield* HttpClient.get(`/attachments/${attachmentId}${query}`, {
+          headers: { cookie },
+        });
+        assert.equal((yield* response.arrayBuffer).byteLength, png.length);
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("caches a project avatar named by its hash for good and answers 304", () =>
+    Effect.gen(function* () {
+      const projectId = "project-avatar-cache";
+      yield* buildAppUnderTest({
+        layers: {
+          projectAvatarRead: () =>
+            Effect.succeed({ bytes: Buffer.from("png-bytes"), contentHash: "abc123" }),
+        },
+      });
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const versioned = yield* HttpClient.get(
+        `/api/project-avatar?projectId=${projectId}&v=abc123`,
+        { headers: { cookie } },
+      );
+      assert.equal(versioned.status, 200);
+      assert.equal(versioned.headers["cache-control"], "private, max-age=31536000, immutable");
+      assert.equal(versioned.headers["etag"], '"abc123"');
+      const stale = yield* HttpClient.get(`/api/project-avatar?projectId=${projectId}&v=old`, {
+        headers: { cookie },
+      });
+      assert.equal(stale.headers["cache-control"], "private, max-age=0, must-revalidate");
+      const revalidated = yield* HttpClient.get(`/api/project-avatar?projectId=${projectId}`, {
+        headers: { cookie, "if-none-match": '"abc123"' },
+      });
+      assert.equal(revalidated.status, 304);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

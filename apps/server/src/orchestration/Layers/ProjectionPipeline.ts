@@ -573,6 +573,11 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
       });
     },
   );
+  // Best effort: a preview left behind is never served without its attachment.
+  const removePreviews = (
+    remove: (previews: typeof import("../../attachmentPreview.ts")) => Promise<void>,
+  ) =>
+    Effect.promise(() => import("../../attachmentPreview.ts").then(remove).catch(() => undefined));
 
   const deleteThreadAttachments = Effect.fn("deleteThreadAttachments")(function* (
     threadId: string,
@@ -592,6 +597,12 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
       {
         concurrency: 1,
       },
+    );
+    yield* removePreviews(({ removeThreadAttachmentPreviews }) =>
+      removeThreadAttachmentPreviews(
+        attachmentsRootDir,
+        (attachmentId) => parseThreadSegmentFromAttachmentId(attachmentId) === threadSegment,
+      ),
     );
   });
 
@@ -623,6 +634,9 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
 
     if (!keptThreadRelativePaths.has(relativePath)) {
       yield* fileSystem.remove(absolutePath, { force: true });
+      yield* removePreviews(({ removeAttachmentPreviews }) =>
+        removeAttachmentPreviews(attachmentsRootDir, attachmentId),
+      );
     }
   });
 

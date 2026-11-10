@@ -159,3 +159,41 @@ describe("project icon cache", () => {
     expect(projectIconCacheBytes(EnvironmentId.make("environment-19"))).toBeGreaterThan(0);
   });
 });
+
+describe("revalidating expired artwork", () => {
+  it("asks with the known hash and keeps the artwork the node calls unchanged", async () => {
+    vi.useFakeTimers();
+    const readIcon = vi
+      .fn()
+      .mockResolvedValueOnce({ ...icon, hash: "h1" })
+      .mockResolvedValueOnce({ unchanged: true })
+      .mockResolvedValueOnce({ mimeType: "image/png", dataBase64: "bmV3", hash: "h2" });
+    const api = makeApi(readIcon);
+    const first = await readProjectIconSource(api, environmentA, project, null);
+    expect(first).toBe(`data:image/png;base64,${icon.dataBase64}`);
+    expect(readIcon).toHaveBeenLastCalledWith({ projectId: project });
+
+    vi.advanceTimersByTime(PROJECT_ICON_TTL_MS + 1);
+    expect(await readProjectIconSource(api, environmentA, project, null)).toBe(first);
+    expect(readIcon).toHaveBeenLastCalledWith({ projectId: project, knownHash: "h1" });
+    // Still fresh after `unchanged`: no request.
+    expect(await readProjectIconSource(api, environmentA, project, null)).toBe(first);
+    expect(readIcon).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(PROJECT_ICON_TTL_MS + 1);
+    expect(await readProjectIconSource(api, environmentA, project, null)).toBe(
+      "data:image/png;base64,bmV3",
+    );
+    expect(readIcon).toHaveBeenLastCalledWith({ projectId: project, knownHash: "h1" });
+  });
+
+  it("reads in full from an older node that names no hash", async () => {
+    vi.useFakeTimers();
+    const readIcon = vi.fn(async () => icon);
+    const api = makeApi(readIcon);
+    await readProjectIconSource(api, environmentA, project, null);
+    vi.advanceTimersByTime(PROJECT_ICON_TTL_MS + 1);
+    await readProjectIconSource(api, environmentA, project, null);
+    expect(readIcon.mock.calls).toEqual([[{ projectId: project }], [{ projectId: project }]]);
+  });
+});
