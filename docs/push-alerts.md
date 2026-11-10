@@ -108,8 +108,8 @@ and the thread opens with its card already there. Older phones ignore it; older 
 ```
 
 - `a`, an approval: the request kind, the command or path (`d`) and the provider's reason (`r`),
-  exactly the open request the thread's card shows (the node derives it with the clients'
-  `derivePendingApprovals` over the thread's request activities, one indexed read per alert).
+  exactly the open request the thread's card shows: the node reads it from its own open-request
+  tables and the activity that asked, one indexed read per alert, only while it is still open.
 - `u`, a question: its request id, its request event id (`ev`, the key of the app's answer draft),
   and its questions with header, text, option labels (descriptions left out) and multi-select.
   `c` says questions or options were left out to fit.
