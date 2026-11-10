@@ -60,6 +60,7 @@ import {
 } from "./environmentSnapshotCodec";
 import { resetPreferencesStoreForTests } from "../state/preferencesStore";
 import {
+  clearEnvironmentSnapshotCache,
   createSnapshotPersistenceRuntime,
   initializeMobileSnapshotPersistence,
   listEnvironmentCacheStorage,
@@ -73,6 +74,7 @@ import {
 import { hasSavedThreadBody, requestSavedThreadBody } from "./savedThreadBodies";
 import { payloadByteLength, payloadHash, type SnapshotDb } from "./snapshotDb";
 import { createTestSnapshotDb } from "./snapshotDb.testSupport";
+import { onTaskCachePurge } from "../features/tasks/taskCacheKeys";
 
 function wireSnapshot(projectId: string): OrchestrationShellSnapshot {
   return {
@@ -240,10 +242,11 @@ async function seedMachine(
     ],
     worktrees: [],
   });
-  const threads = (input.threads ?? []).map((threadId) => {
+  const threads = (input.threads ?? []).map((threadId, position) => {
     const thread = { ...shellThread(threadId), environmentId };
     const payload = JSON.stringify({ shell: thread, summary: thread });
-    return { threadId, payload, bytes: payloadByteLength(payload), hash: payloadHash(payload) };
+    const bytes = payloadByteLength(payload);
+    return { threadId, payload, bytes, hash: payloadHash(payload), position };
   });
   await db.writeEnvironmentRows({
     environmentId,
@@ -256,6 +259,7 @@ async function seedMachine(
       projectCount: 1,
     },
     upsertThreads: threads,
+    threadPositions: [],
     deleteThreads: [],
     upsertBodies: [],
     bodySequences: [],
@@ -460,7 +464,8 @@ describe("environment snapshot persistence", () => {
     expect(loadBody).not.toHaveBeenCalled();
     const state = useStore.getState();
     expect(state.environmentStateById[goodId]?.projectIds).toHaveLength(1);
-    expect(state.environmentStateById[goodId]?.threadIds).toEqual(["t1", "t2"]);
+    // In the order the rows were written.
+    expect(state.environmentStateById[goodId]?.threadIds).toEqual(["t2", "t1"]);
     expect(state.environmentStateById[goodId]?.hydratedFromCacheAt).toBe(1_000);
     expect(state.environmentStateById[goodId]?.bootstrapComplete).toBe(false);
     // The bumped machine is discarded rather than mis-decoded, its rows dropped.
@@ -479,7 +484,8 @@ describe("environment snapshot persistence", () => {
       schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
       updatedAt: 1_000,
       envelope: { bytes: 0, threadCount: 2, projectCount: 1 },
-      upsertThreads: [{ threadId: "bad", payload: "{not-json", bytes: 9, hash: 1 }],
+      upsertThreads: [{ threadId: "bad", payload: "{not-json", bytes: 9, hash: 1, position: 1 }],
+      threadPositions: [],
       deleteThreads: [],
       upsertBodies: [],
       bodySequences: [],
@@ -1066,6 +1072,71 @@ describe("environment snapshot persistence", () => {
     runtime.dispose();
   });
 
+  it("shows a machine's threads after a restart in the order the store had them", async () => {
+    const test = await createTestSnapshotDb();
+    const environmentId = env("persist-thread-order");
+    useStore
+      .getState()
+      .syncServerShellSnapshot(wireSnapshotWithThreads(["c", "a", "b"]), environmentId);
+    const writes = countingWrites(test.db);
+    const runtime = createSnapshotPersistenceRuntime({
+      db: writes.db,
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    await runtime.capture(environmentId);
+
+    // Reordered by a new snapshot: only the places move, no row is rewritten.
+    useStore
+      .getState()
+      .syncServerShellSnapshot(wireSnapshotWithThreads(["b", "c", "a"]), environmentId);
+    await runtime.capture(environmentId);
+    expect(writes.calls[1]?.upsertThreads).toEqual([]);
+    expect(writes.calls[1]?.threadPositions.map((entry) => entry.threadId).toSorted()).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+    runtime.dispose();
+
+    useStore.getState().removeEnvironmentState(environmentId);
+    const reader = createSnapshotPersistenceRuntime({
+      db: test.db,
+      store: useStore,
+      now: () => 2,
+      hasDirectEnvironment: () => true,
+    });
+    await reader.hydrate();
+    expect(useStore.getState().environmentStateById[environmentId]?.threadIds).toEqual([
+      "b",
+      "c",
+      "a",
+    ]);
+    reader.dispose();
+  });
+
+  it("keeps the rows and task list of a machine that went live before the launch read named it", async () => {
+    const { db } = await createTestSnapshotDb();
+    const environmentId = env("persist-live-unrostered");
+    await seedMachine(db, environmentId, { threads: ["t1"] });
+    // A Hub machine whose roster entry was never saved, already live.
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("live"), environmentId);
+    const purgedTasks: string[] = [];
+    const stop = onTaskCachePurge((id) => purgedTasks.push(id));
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 10,
+      hasDirectEnvironment: () => false,
+    });
+    await runtime.hydrate();
+    expect(await hasStoredMachine(db, environmentId)).toBe(true);
+    expect(purgedTasks).toEqual([]);
+    stop();
+    runtime.dispose();
+  });
+
   describe("machines saved by an older build", () => {
     function legacyPayload(environmentId: EnvironmentId, schemaVersion: number, extra = {}) {
       const thread = { ...shellThread("thread-1"), environmentId };
@@ -1624,6 +1695,84 @@ describe("environment snapshot persistence", () => {
       runtime.dispose();
     });
 
+    it("shows no body read while its machine's rows are being removed", async () => {
+      const test = await createTestSnapshotDb();
+      const environmentId = env("persist-content-read-during-clear");
+      goLive(environmentId, { "thread-1": ["cleared text"], "thread-2": [] });
+      const writer = contentRuntime(test.db, createFakeContentSetting(true).setting);
+      await writer.capture(environmentId);
+      writer.dispose();
+      // The machine is live; only thread-2's body is not in the store.
+      useStore.getState().removeEnvironmentState(environmentId);
+      useStore
+        .getState()
+        .syncServerShellSnapshot(wireSnapshotWithThreads(["thread-1", "thread-2"]), environmentId);
+
+      let releaseRemoval!: () => void;
+      const removalHeld = new Promise<void>((resolve) => {
+        releaseRemoval = resolve;
+      });
+      const reader = contentRuntime(
+        {
+          ...test.db,
+          removeEnvironment: async (id) => {
+            await removalHeld;
+            await test.db.removeEnvironment(id);
+          },
+        },
+        createFakeContentSetting(true).setting,
+      );
+      await reader.hydrate();
+      // "Clear this machine's cache": the read starts and ends before the delete lands.
+      const clearing = reader.purgeEnvironment(environmentId);
+      await reader.loadThreadBody(environmentId, "thread-1" as ThreadId);
+      releaseRemoval();
+      await clearing;
+      expect(messageTexts(environmentId, "thread-1")).toEqual([]);
+      expect(await test.db.listThreadBodyKeys()).toEqual([]);
+      reader.dispose();
+    });
+
+    it("keeps the saved-body keys a capture set while the launch listing ran", async () => {
+      const { db } = await createTestSnapshotDb();
+      const environmentId = env("persist-content-keys-merge");
+      goLive(environmentId, { "thread-1": ["old"] });
+      const writer = contentRuntime(db, createFakeContentSetting(true).setting);
+      await writer.capture(environmentId);
+      writer.dispose();
+
+      let loaded!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        loaded = resolve;
+      });
+      const reader = contentRuntime(db, { isEnabled: () => true, ready });
+      const hydrating = reader.hydrate();
+      await vi.advanceTimersByTimeAsync(0);
+      // Live and captured before the listing: thread-1 left, thread-2 has text now.
+      useStore.getState().removeEnvironmentState(environmentId);
+      goLive(environmentId, { "thread-2": ["new"] });
+      await reader.capture(environmentId);
+      loaded();
+      await hydrating;
+      expect(hasSavedThreadBody(environmentId, "thread-2" as ThreadId)).toBe(true);
+      expect(hasSavedThreadBody(environmentId, "thread-1" as ThreadId)).toBe(false);
+      reader.dispose();
+    });
+
+    it("writes bodies again when the setting is turned off and quickly on", async () => {
+      const { db } = await createTestSnapshotDb();
+      const environmentId = env("persist-content-off-on");
+      goLive(environmentId, { "thread-1": ["kept"] });
+      const setting = createFakeContentSetting(true);
+      const runtime = contentRuntime(db, setting.setting);
+      await runtime.capture(environmentId);
+      setting.set(false);
+      setting.set(true);
+      await vi.advanceTimersByTimeAsync(SNAPSHOT_WRITE_MAX_WAIT_MS);
+      expect(await storedBodies(db, environmentId)).toEqual({ "thread-1": ["kept"] });
+      runtime.dispose();
+    });
+
     it("saves the open approval card and the window's sequence, and shows the card on open", async () => {
       const { db } = await createTestSnapshotDb();
       const environmentId = env("persist-content-cards");
@@ -1767,6 +1916,25 @@ describe("the app singleton", () => {
     expect(useStore.getState().environmentStateById[environmentId]?.threadIds).toHaveLength(1);
     await vi.waitFor(async () => expect(await test.db.listThreadBodyKeys()).toEqual([]));
     expect(messageTexts(environmentId, "thread-1")).toEqual([]);
+  });
+
+  it("clearing a live machine's cache drops the saved bodies it shows", async () => {
+    const environmentId = env("persist-singleton-clear-live");
+    const test = await storeConversation(environmentId);
+    await start();
+    useStore
+      .getState()
+      .syncServerShellSnapshot(wireSnapshotWithThreads(["thread-1"]), environmentId);
+    requestSavedThreadBody(environmentId, "thread-1" as ThreadId);
+    await vi.waitFor(() =>
+      expect(messageTexts(environmentId, "thread-1")).toEqual(["from last session"]),
+    );
+
+    await clearEnvironmentSnapshotCache(environmentId);
+
+    expect(messageTexts(environmentId, "thread-1")).toEqual([]);
+    expect(useStore.getState().environmentStateById[environmentId]?.bootstrapComplete).toBe(true);
+    expect(await test.db.listThreadBodyKeys()).toEqual([]);
   });
 
   it("reports each machine's counts and size for Settings without reading a row", async () => {

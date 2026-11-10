@@ -964,6 +964,8 @@ export function ThreadDetailScreen(props: {
   const { worktrees } = useHomeWorkspaceData();
   const environments = useHomeEnvironments();
   const pendingApprovals = built?.viewModel.pendingApprovals ?? NO_PENDING_APPROVALS;
+  // Approvals a send may decline: only those the node's own window confirmed, never saved cards.
+  const answerableApprovals = threadLiveDetailLoaded ? pendingApprovals : NO_PENDING_APPROVALS;
   const pendingUserInputs = built?.viewModel.pendingUserInputs ?? [];
   const optionalUserInputs = built?.viewModel.optionalUserInputs ?? [];
   // When each pending approval was first on screen: a send declines only approvals shown long
@@ -2440,7 +2442,7 @@ export function ThreadDetailScreen(props: {
     // A message sent while approvals wait declines the ones on screen and steers the turn
     // (`resolveApprovalRedirect`, the decision the placeholder shows). Any other message queues
     // behind them as before.
-    const approvalsAtSend = pendingApprovals;
+    const approvalsAtSend = answerableApprovals;
     const redirectApprovals = async (message: QueuedThreadMessage) => {
       // A notification reply answers no approval: it queues behind them.
       if (notificationReply) return "queue" as const;
@@ -2960,7 +2962,7 @@ export function ThreadDetailScreen(props: {
     thread !== undefined &&
     selectedModelSelection !== null &&
     resolveApprovalRedirect({
-      approvals: pendingApprovals,
+      approvals: answerableApprovals,
       runtimeSessionId: thread.session?.runtimeSessionId,
       activeTurnId: thread.session?.activeTurnId,
       steerAllowed: getSteerEligibility({

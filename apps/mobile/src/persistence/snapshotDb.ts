@@ -62,7 +62,7 @@ export interface StoredThreadBodyRow {
 
 /** What each stored row of a machine was written from, so a capture writes only what changed. */
 export interface StoredEnvironmentRowHashes {
-  readonly threads: ReadonlyMap<string, number>;
+  readonly threads: ReadonlyMap<string, { readonly hash: number; readonly position: number }>;
   readonly bodies: ReadonlyMap<string, { readonly hash: number; readonly sequence: number | null }>;
 }
 
@@ -80,6 +80,11 @@ export interface StoredRowWrite {
   readonly payload: string;
   readonly bytes: number;
   readonly hash: number;
+}
+
+export interface StoredThreadWrite extends StoredRowWrite {
+  /** The thread's place in the machine's thread list. */
+  readonly position: number;
 }
 
 export interface StoredBodyWrite extends StoredRowWrite {
@@ -102,7 +107,9 @@ export interface EnvironmentRowsWrite {
     readonly threadCount: number;
     readonly projectCount: number;
   };
-  readonly upsertThreads: ReadonlyArray<StoredRowWrite>;
+  readonly upsertThreads: ReadonlyArray<StoredThreadWrite>;
+  /** Threads whose row is unchanged and whose place in the list moved. */
+  readonly threadPositions: ReadonlyArray<{ readonly threadId: string; readonly position: number }>;
   readonly deleteThreads: ReadonlyArray<string>;
   readonly upsertBodies: ReadonlyArray<StoredBodyWrite>;
   /** Bodies whose text is unchanged and whose sequence moved. */
@@ -116,7 +123,7 @@ export interface EnvironmentRowsWrite {
 export interface SnapshotDb {
   /** Machines' envelopes, most recently written first (the launch read). */
   readonly loadEnvironmentEnvelopes: () => Promise<ReadonlyArray<StoredEnvironmentEnvelopeRow>>;
-  /** One machine's thread rows (the launch read). */
+  /** One machine's thread rows in list order (the launch read). */
   readonly loadEnvironmentThreads: (
     environmentId: string,
   ) => Promise<ReadonlyArray<StoredEnvironmentThreadRow>>;
@@ -280,6 +287,7 @@ CREATE TABLE IF NOT EXISTS environment_threads (
   payload TEXT NOT NULL,
   payload_bytes INTEGER NOT NULL,
   payload_hash INTEGER NOT NULL,
+  position INTEGER NOT NULL,
   PRIMARY KEY (environment_id, thread_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS environment_thread_bodies (
@@ -335,12 +343,17 @@ export function createSnapshotDb(
     });
     return handlePromise;
   };
-  // The connection is shared and its calls are asynchronous: transactions run
-  // one at a time, so two machines' writes never nest a BEGIN in another.
-  let transactions: Promise<unknown> = Promise.resolve();
-  const transaction = (work: (handle: SnapshotDbHandle) => Promise<void>): Promise<void> => {
-    const run = transactions.then(async () => {
-      const handle = await acquire();
+  // The connection is shared and its calls are asynchronous: every write runs
+  // in one queue, so no write lands inside another machine's transaction
+  // (where its rollback would undo it) and no BEGIN nests in another.
+  let writeQueue: Promise<unknown> = Promise.resolve();
+  const write = <T>(work: (handle: SnapshotDbHandle) => Promise<T>): Promise<T> => {
+    const run = writeQueue.then(async () => work(await acquire()));
+    writeQueue = run.catch(() => undefined);
+    return run;
+  };
+  const transaction = (work: (handle: SnapshotDbHandle) => Promise<void>): Promise<void> =>
+    write(async (handle) => {
       await handle.execAsync("BEGIN");
       try {
         await work(handle);
@@ -350,9 +363,6 @@ export function createSnapshotDb(
         throw error;
       }
     });
-    transactions = run.catch(() => undefined);
-    return run;
-  };
 
   return {
     loadEnvironmentEnvelopes: async () => {
@@ -382,7 +392,9 @@ export function createSnapshotDb(
     loadEnvironmentThreads: async (environmentId) => {
       const handle = await acquire();
       const rows = await handle.getAllAsync<{ thread_id: string; payload: string }>(
-        "SELECT thread_id, payload FROM environment_threads WHERE environment_id = ?",
+        `SELECT thread_id, payload FROM environment_threads
+          WHERE environment_id = ?
+          ORDER BY position`,
         [environmentId],
       );
       return rows.map((row) => ({ threadId: row.thread_id, payload: row.payload }));
@@ -416,8 +428,9 @@ export function createSnapshotDb(
     loadEnvironmentRowHashes: async (environmentId) => {
       const handle = await acquire();
       const [threads, bodies] = await Promise.all([
-        handle.getAllAsync<{ thread_id: string; payload_hash: number }>(
-          "SELECT thread_id, payload_hash FROM environment_threads WHERE environment_id = ?",
+        handle.getAllAsync<{ thread_id: string; payload_hash: number; position: number }>(
+          `SELECT thread_id, payload_hash, position FROM environment_threads
+            WHERE environment_id = ?`,
           [environmentId],
         ),
         handle.getAllAsync<{ thread_id: string; payload_hash: number; sequence: number | null }>(
@@ -427,7 +440,12 @@ export function createSnapshotDb(
         ),
       ]);
       return {
-        threads: new Map(threads.map((row) => [row.thread_id, Number(row.payload_hash)])),
+        threads: new Map(
+          threads.map((row) => [
+            row.thread_id,
+            { hash: Number(row.payload_hash), position: Number(row.position) },
+          ]),
+        ),
         bodies: new Map(
           bodies.map((row) => [
             row.thread_id,
@@ -478,13 +496,21 @@ export function createSnapshotDb(
         for (const row of input.upsertThreads) {
           await handle.runAsync(
             `INSERT INTO environment_threads
-               (environment_id, thread_id, payload, payload_bytes, payload_hash)
-             VALUES (?, ?, ?, ?, ?)
+               (environment_id, thread_id, payload, payload_bytes, payload_hash, position)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (environment_id, thread_id) DO UPDATE SET
                payload = excluded.payload,
                payload_bytes = excluded.payload_bytes,
-               payload_hash = excluded.payload_hash`,
-            [environmentId, row.threadId, row.payload, row.bytes, row.hash],
+               payload_hash = excluded.payload_hash,
+               position = excluded.position`,
+            [environmentId, row.threadId, row.payload, row.bytes, row.hash, row.position],
+          );
+        }
+        for (const row of input.threadPositions) {
+          await handle.runAsync(
+            `UPDATE environment_threads SET position = ?
+              WHERE environment_id = ? AND thread_id = ?`,
+            [row.position, environmentId, row.threadId],
           );
         }
         for (const threadId of input.deleteBodies) {
@@ -546,16 +572,16 @@ export function createSnapshotDb(
         projectCount: row.project_count,
       }));
     },
-    removeThreadBodies: async (environmentId) => {
-      const handle = await acquire();
-      if (environmentId === undefined) {
-        await handle.runAsync("DELETE FROM environment_thread_bodies", []);
-        return;
-      }
-      await handle.runAsync("DELETE FROM environment_thread_bodies WHERE environment_id = ?", [
-        environmentId,
-      ]);
-    },
+    removeThreadBodies: (environmentId) =>
+      write(async (handle) => {
+        if (environmentId === undefined) {
+          await handle.runAsync("DELETE FROM environment_thread_bodies", []);
+          return;
+        }
+        await handle.runAsync("DELETE FROM environment_thread_bodies WHERE environment_id = ?", [
+          environmentId,
+        ]);
+      }),
     loadLegacyEnvironmentSnapshots: async () => {
       const handle = await acquire();
       const rows = await handle.getAllAsync<{
@@ -574,12 +600,12 @@ export function createSnapshotDb(
         updatedAt: row.updated_at,
       }));
     },
-    removeLegacyEnvironmentSnapshot: async (environmentId) => {
-      const handle = await acquire();
-      await handle.runAsync("DELETE FROM environment_snapshots WHERE environment_id = ?", [
-        environmentId,
-      ]);
-    },
+    removeLegacyEnvironmentSnapshot: (environmentId) =>
+      write(async (handle) => {
+        await handle.runAsync("DELETE FROM environment_snapshots WHERE environment_id = ?", [
+          environmentId,
+        ]);
+      }),
     loadHubNodeRoster: async () => {
       const handle = await acquire();
       const row = await handle.getFirstAsync<{ schema_version: number; payload: string }>(
@@ -588,18 +614,18 @@ export function createSnapshotDb(
       );
       return row ? { schemaVersion: row.schema_version, payload: row.payload } : null;
     },
-    saveHubNodeRoster: async (input) => {
-      const handle = await acquire();
-      await handle.runAsync(
-        `INSERT INTO hub_node_roster (singleton, schema_version, payload, updated_at)
-         VALUES (1, ?, ?, ?)
-         ON CONFLICT (singleton) DO UPDATE SET
-           schema_version = excluded.schema_version,
-           payload = excluded.payload,
-           updated_at = excluded.updated_at`,
-        [input.schemaVersion, input.payload, input.updatedAt],
-      );
-    },
+    saveHubNodeRoster: (input) =>
+      write(async (handle) => {
+        await handle.runAsync(
+          `INSERT INTO hub_node_roster (singleton, schema_version, payload, updated_at)
+           VALUES (1, ?, ?, ?)
+           ON CONFLICT (singleton) DO UPDATE SET
+             schema_version = excluded.schema_version,
+             payload = excluded.payload,
+             updated_at = excluded.updated_at`,
+          [input.schemaVersion, input.payload, input.updatedAt],
+        );
+      }),
     clearAll: () =>
       transaction(async (handle) => {
         for (const table of ENVIRONMENT_TABLES) await handle.runAsync(`DELETE FROM ${table}`, []);
@@ -621,27 +647,27 @@ export function createSnapshotDb(
         ? { schemaVersion: row.schema_version, payload: row.payload, updatedAt: row.updated_at }
         : null;
     },
-    saveSavedQuery: async (input) => {
-      const handle = await acquire();
-      await handle.runAsync(
-        `INSERT INTO saved_queries
-           (environment_id, query_key, schema_version, payload, payload_bytes, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (environment_id, query_key) DO UPDATE SET
-           schema_version = excluded.schema_version,
-           payload = excluded.payload,
-           payload_bytes = excluded.payload_bytes,
-           updated_at = excluded.updated_at`,
-        [
-          input.environmentId,
-          input.key,
-          input.schemaVersion,
-          input.payload,
-          input.payloadBytes,
-          input.updatedAt,
-        ],
-      );
-    },
+    saveSavedQuery: (input) =>
+      write(async (handle) => {
+        await handle.runAsync(
+          `INSERT INTO saved_queries
+             (environment_id, query_key, schema_version, payload, payload_bytes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (environment_id, query_key) DO UPDATE SET
+             schema_version = excluded.schema_version,
+             payload = excluded.payload,
+             payload_bytes = excluded.payload_bytes,
+             updated_at = excluded.updated_at`,
+          [
+            input.environmentId,
+            input.key,
+            input.schemaVersion,
+            input.payload,
+            input.payloadBytes,
+            input.updatedAt,
+          ],
+        );
+      }),
     listSavedQueryStats: async () => {
       const handle = await acquire();
       const rows = await handle.getAllAsync<{
@@ -659,13 +685,14 @@ export function createSnapshotDb(
     },
     removeSavedQueries: async (entries) => {
       if (entries.length === 0) return;
-      const handle = await acquire();
-      for (const entry of entries) {
-        await handle.runAsync(
-          "DELETE FROM saved_queries WHERE environment_id = ? AND query_key = ?",
-          [entry.environmentId, entry.key],
-        );
-      }
+      await write(async (handle) => {
+        for (const entry of entries) {
+          await handle.runAsync(
+            "DELETE FROM saved_queries WHERE environment_id = ? AND query_key = ?",
+            [entry.environmentId, entry.key],
+          );
+        }
+      });
     },
     savedQueryBytes: async (environmentId) => {
       const handle = await acquire();
@@ -675,13 +702,13 @@ export function createSnapshotDb(
       );
       return row?.bytes ?? 0;
     },
-    removeSavedQueriesBelowVersion: async (minimum) => {
-      const handle = await acquire();
-      await handle.runAsync("DELETE FROM saved_queries WHERE schema_version < ?", [minimum]);
-    },
-    clearSavedQueries: async () => {
-      const handle = await acquire();
-      await handle.runAsync("DELETE FROM saved_queries", []);
-    },
+    removeSavedQueriesBelowVersion: (minimum) =>
+      write(async (handle) => {
+        await handle.runAsync("DELETE FROM saved_queries WHERE schema_version < ?", [minimum]);
+      }),
+    clearSavedQueries: () =>
+      write(async (handle) => {
+        await handle.runAsync("DELETE FROM saved_queries", []);
+      }),
   };
 }

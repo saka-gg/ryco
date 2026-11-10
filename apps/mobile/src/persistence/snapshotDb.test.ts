@@ -24,6 +24,7 @@ function rowsWrite(
     updatedAt: 1,
     envelope: { payload: "{}", bytes: 2, threadCount: 0, projectCount: 0 },
     upsertThreads: [],
+    threadPositions: [],
     deleteThreads: [],
     upsertBodies: [],
     bodySequences: [],
@@ -38,6 +39,10 @@ const row = (threadId: string, payload: string) => ({
   bytes: payloadByteLength(payload),
   hash: payloadHash(payload),
 });
+const threadRow = (threadId: string, payload: string, position = 0) => ({
+  ...row(threadId, payload),
+  position,
+});
 
 describe("snapshotDb", () => {
   it("writes a machine's rows in one go and reads envelopes most recent first", async () => {
@@ -45,14 +50,14 @@ describe("snapshotDb", () => {
     await db.writeEnvironmentRows(
       rowsWrite("env-old", {
         envelope: { payload: '{"e":1}', bytes: 7, threadCount: 1, projectCount: 1 },
-        upsertThreads: [row("t1", '{"t":1}')],
+        upsertThreads: [threadRow("t1", '{"t":1}')],
       }),
     );
     await db.writeEnvironmentRows(
       rowsWrite("env-new", {
         updatedAt: 5,
         envelope: { payload: '{"e":2}', bytes: 7, threadCount: 2, projectCount: 0 },
-        upsertThreads: [row("t1", '{"t":1}'), row("t2", '{"t":2}')],
+        upsertThreads: [threadRow("t1", '{"t":1}'), threadRow("t2", '{"t":2}')],
         upsertBodies: [{ ...row("t2", '{"messages":[]}'), sequence: 9 }],
       }),
     );
@@ -97,7 +102,7 @@ describe("snapshotDb", () => {
     await db.writeEnvironmentRows(
       rowsWrite("env-1", {
         envelope: { payload: '{"e":1}', bytes: 7, threadCount: 2, projectCount: 1 },
-        upsertThreads: [row("t1", '{"t":1}'), row("t2", '{"t":2}')],
+        upsertThreads: [threadRow("t1", '{"t":1}'), threadRow("t2", '{"t":2}')],
         upsertBodies: [{ ...row("t1", '{"messages":[1]}'), sequence: 1 }],
       }),
     );
@@ -105,7 +110,7 @@ describe("snapshotDb", () => {
       rowsWrite("env-1", {
         updatedAt: 9,
         envelope: { bytes: 7, threadCount: 1, projectCount: 1 },
-        upsertThreads: [row("t1", '{"t":"1b"}')],
+        upsertThreads: [threadRow("t1", '{"t":"1b"}')],
         deleteThreads: ["t2"],
         bodySequences: [{ threadId: "t1", sequence: 4 }],
       }),
@@ -121,9 +126,35 @@ describe("snapshotDb", () => {
       sequence: 4,
     });
     const hashes = await db.loadEnvironmentRowHashes("env-1");
-    expect([...hashes.threads]).toEqual([["t1", payloadHash('{"t":"1b"}')]]);
+    expect([...hashes.threads]).toEqual([["t1", { hash: payloadHash('{"t":"1b"}'), position: 0 }]]);
     expect([...hashes.bodies]).toEqual([
       ["t1", { hash: payloadHash('{"messages":[1]}'), sequence: 4 }],
+    ]);
+  });
+
+  it("reads a machine's threads in list order and moves a thread without rewriting it", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        upsertThreads: [threadRow("b", '{"t":"b"}', 0), threadRow("a", '{"t":"a"}', 1)],
+      }),
+    );
+    expect((await db.loadEnvironmentThreads("env-1")).map((entry) => entry.threadId)).toEqual([
+      "b",
+      "a",
+    ]);
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        envelope: { bytes: 2, threadCount: 2, projectCount: 0 },
+        threadPositions: [
+          { threadId: "a", position: 0 },
+          { threadId: "b", position: 1 },
+        ],
+      }),
+    );
+    expect((await db.loadEnvironmentThreads("env-1")).map((entry) => entry.threadId)).toEqual([
+      "a",
+      "b",
     ]);
   });
 
@@ -135,7 +166,7 @@ describe("snapshotDb", () => {
     await db.writeEnvironmentRows(
       rowsWrite("env-1", {
         envelope: { payload: '{"e":1}', bytes: 7, threadCount: 1, projectCount: 3 },
-        upsertThreads: [row("t1", '{"t":1}')],
+        upsertThreads: [threadRow("t1", '{"t":1}')],
         upsertBodies: [{ ...row("t1", body), sequence: null }],
       }),
     );
@@ -157,7 +188,7 @@ describe("snapshotDb", () => {
     for (const environmentId of ["env-1", "env-2"]) {
       await db.writeEnvironmentRows(
         rowsWrite(environmentId, {
-          upsertThreads: [row("t1", "{}")],
+          upsertThreads: [threadRow("t1", "{}")],
           upsertBodies: [{ ...row("t1", '{"messages":[]}'), sequence: null }],
         }),
       );
@@ -188,13 +219,15 @@ describe("snapshotDb", () => {
 
   it("rolls a failed write back whole, and runs two machines' writes one after the other", async () => {
     const test = await createTestSnapshotDb();
-    await test.db.writeEnvironmentRows(rowsWrite("env-1", { upsertThreads: [row("t1", "{}")] }));
+    await test.db.writeEnvironmentRows(
+      rowsWrite("env-1", { upsertThreads: [threadRow("t1", "{}")] }),
+    );
     // A thread id the table cannot take (NOT NULL) fails the write after its first statement.
     await expect(
       test.db.writeEnvironmentRows(
         rowsWrite("env-1", {
           deleteThreads: ["t1"],
-          upsertThreads: [{ ...row("t2", "{}"), threadId: null as never }],
+          upsertThreads: [{ ...threadRow("t2", "{}"), threadId: null as never }],
         }),
       ),
     ).rejects.toThrow();
@@ -203,10 +236,51 @@ describe("snapshotDb", () => {
     ]);
 
     await Promise.all([
-      test.db.writeEnvironmentRows(rowsWrite("env-a", { upsertThreads: [row("t", "{}")] })),
-      test.db.writeEnvironmentRows(rowsWrite("env-b", { upsertThreads: [row("t", "{}")] })),
+      test.db.writeEnvironmentRows(rowsWrite("env-a", { upsertThreads: [threadRow("t", "{}")] })),
+      test.db.writeEnvironmentRows(rowsWrite("env-b", { upsertThreads: [threadRow("t", "{}")] })),
     ]);
     expect((await test.db.loadEnvironmentEnvelopes()).length).toBe(3);
+  });
+
+  it("never lets another write land inside a machine's transaction that then rolls back", async () => {
+    const test = await createTestSnapshotDb();
+    await test.db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        upsertBodies: [{ ...row("t1", '{"messages":[]}'), sequence: null }],
+      }),
+    );
+    // A statement takes a turn of the event loop, so writes started together interleave
+    // unless they share one queue.
+    const slow = {
+      ...test.handle,
+      runAsync: async (source: string, params: Array<string | number | null>) => {
+        await new Promise((resolve) => setImmediate(resolve));
+        return test.handle.runAsync(source, params);
+      },
+    };
+    const db = createSnapshotDb(async () => slow);
+    const failing = db.writeEnvironmentRows(
+      rowsWrite("env-2", {
+        upsertThreads: [
+          threadRow("t1", "{}"),
+          { ...threadRow("t2", "{}"), threadId: null as never },
+        ],
+      }),
+    );
+    const removal = db.removeThreadBodies();
+    const roster = db.saveHubNodeRoster({
+      schemaVersion: 1,
+      payload: '{"nodes":[]}',
+      updatedAt: 1,
+    });
+    await expect(failing).rejects.toThrow();
+    await Promise.all([removal, roster]);
+    expect(await test.db.listThreadBodyKeys()).toEqual([]);
+    expect(await test.db.loadHubNodeRoster()).toEqual({
+      schemaVersion: 1,
+      payload: '{"nodes":[]}',
+    });
+    expect(await test.db.loadEnvironmentThreads("env-2")).toEqual([]);
   });
 
   it("reads and removes single-row snapshots of older builds", async () => {

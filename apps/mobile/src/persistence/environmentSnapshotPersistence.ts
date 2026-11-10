@@ -253,7 +253,7 @@ function samePersistedSlices(left: PersistedSlices, right: PersistedSlices): boo
 interface StoredRows {
   /** The envelope payload last written in this process; null when not known. */
   readonly envelope: string | null;
-  readonly threads: ReadonlyMap<string, number>;
+  readonly threads: ReadonlyMap<string, { readonly hash: number; readonly position: number }>;
   readonly bodies: ReadonlyMap<string, { readonly hash: number; readonly sequence: number | null }>;
 }
 
@@ -263,7 +263,27 @@ function planRowWrites(rows: EnvironmentRows, stored: StoredRows) {
   const keptBodies = new Set(rows.bodies.map((row) => row.threadId));
   return {
     envelopePayload: stored.envelope === rows.envelope.payload ? undefined : rows.envelope.payload,
-    upsertThreads: rows.threads.filter((row) => stored.threads.get(row.threadId) !== row.hash),
+    // A thread's place is its index in the list, kept so a launch shows the
+    // list in the order the store had it.
+    upsertThreads: rows.threads.flatMap((row, position) =>
+      stored.threads.get(row.threadId)?.hash === row.hash
+        ? []
+        : [
+            {
+              threadId: row.threadId,
+              payload: row.payload,
+              bytes: row.bytes,
+              hash: row.hash,
+              position,
+            },
+          ],
+    ),
+    threadPositions: rows.threads.flatMap((row, position) => {
+      const previous = stored.threads.get(row.threadId);
+      return previous !== undefined && previous.hash === row.hash && previous.position !== position
+        ? [{ threadId: row.threadId, position }]
+        : [];
+    }),
     deleteThreads: [...stored.threads.keys()].filter((threadId) => !keptThreads.has(threadId)),
     upsertBodies: rows.bodies.filter((row) => stored.bodies.get(row.threadId)?.hash !== row.hash),
     bodySequences: rows.bodies.flatMap((row) => {
@@ -281,21 +301,13 @@ function planRowWrites(rows: EnvironmentRows, stored: StoredRows) {
 function storedRowsOf(rows: EnvironmentRows): StoredRows {
   return {
     envelope: rows.envelope.payload,
-    threads: new Map(rows.threads.map((row) => [row.threadId, row.hash])),
+    threads: new Map(
+      rows.threads.map((row, position) => [row.threadId, { hash: row.hash, position }]),
+    ),
     bodies: new Map(
       rows.bodies.map((row) => [row.threadId, { hash: row.hash, sequence: row.sequence }]),
     ),
   };
-}
-
-function threadOrder(
-  left: StoredEnvironmentSnapshotThread,
-  right: StoredEnvironmentSnapshotThread,
-): number {
-  return (
-    left.shell.createdAt.localeCompare(right.shell.createdAt) ||
-    left.shell.id.localeCompare(right.shell.id)
-  );
 }
 
 export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) {
@@ -329,19 +341,44 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   >();
   const removalEpochs = new Map<EnvironmentId, number>();
   const removalEpochOf = (environmentId: EnvironmentId) => removalEpochs.get(environmentId) ?? 0;
+  const bumpRemovalEpoch = (environmentId: EnvironmentId) =>
+    removalEpochs.set(environmentId, removalEpochOf(environmentId) + 1);
+  /** Machines whose rows are being removed right now: a body read meanwhile is not shown. */
+  const removing = new Map<EnvironmentId, number>();
+  /**
+   * Machines whose saved-body keys a capture or removal set since the launch
+   * started: the launch listing does not overwrite them.
+   */
+  const bodyKeysTouched = new Set<EnvironmentId>();
+  /**
+   * Runs a removal of a machine's rows. The epoch moves before it starts and
+   * again once it landed, and a body read overlapping it is not shown.
+   */
+  const whileRemoving = async (
+    environmentId: EnvironmentId,
+    removal: () => Promise<unknown>,
+  ): Promise<void> => {
+    bumpRemovalEpoch(environmentId);
+    removing.set(environmentId, (removing.get(environmentId) ?? 0) + 1);
+    try {
+      await removal();
+    } finally {
+      const left = (removing.get(environmentId) ?? 1) - 1;
+      if (left === 0) removing.delete(environmentId);
+      else removing.set(environmentId, left);
+      bumpRemovalEpoch(environmentId);
+    }
+  };
   /** Per-environment row fragments, so a capture re-serializes only changed rows. */
   const serializers = new Map<EnvironmentId, EnvironmentRowSerializer>();
   const removeStoredSnapshot = async (environmentId: EnvironmentId): Promise<void> => {
     written.delete(environmentId);
     serializers.delete(environmentId);
+    bodyKeysTouched.add(environmentId);
     forgetEnvironmentSavedThreadBodies(environmentId);
     // The machine's task list copy goes with the rest of its cached content.
     purgeTaskCache(environmentId);
-    try {
-      await deps.db.removeEnvironment(environmentId);
-    } finally {
-      removalEpochs.set(environmentId, removalEpochOf(environmentId) + 1);
-    }
+    await whileRemoving(environmentId, () => deps.db.removeEnvironment(environmentId));
   };
   let rosterTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
@@ -461,12 +498,14 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
         projectCount: rows.projectCount,
       },
       upsertThreads: plan.upsertThreads,
+      threadPositions: plan.threadPositions,
       deleteThreads: plan.deleteThreads,
       upsertBodies: plan.upsertBodies,
       bodySequences: plan.bodySequences,
       deleteBodies: plan.deleteBodies,
     });
     written.set(environmentId, { slices, epoch, rows: storedRowsOf(rows) });
+    bodyKeysTouched.add(environmentId);
     setEnvironmentSavedThreadBodyKeys(
       environmentId,
       rows.bodies.map((row) => row.threadId as ThreadId),
@@ -524,10 +563,13 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       dirtyTimers.delete(environmentId);
     }
     dirtySince.delete(environmentId);
-    await Promise.all([
-      serialize(environmentId, () => removeStoredSnapshot(environmentId)),
-      purgeEnvironmentDeviceData(environmentId),
-    ]);
+    // Marked from the moment it is asked for, also while it waits behind a write.
+    await whileRemoving(environmentId, () =>
+      Promise.all([
+        serialize(environmentId, () => removeStoredSnapshot(environmentId)),
+        purgeEnvironmentDeviceData(environmentId),
+      ]),
+    );
   };
 
   /**
@@ -538,6 +580,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   const removeStoredBodies = (environmentId: EnvironmentId): Promise<void> =>
     serialize(environmentId, async () => {
       await deps.db.removeThreadBodies(environmentId);
+      bodyKeysTouched.add(environmentId);
       forgetEnvironmentSavedThreadBodies(environmentId);
       const entry = written.get(environmentId);
       // The next capture compares against a machine with no bodies.
@@ -568,8 +611,6 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
         ),
       ),
     );
-    // Bodies of a machine with no envelope (none is expected) go too.
-    await deps.db.removeThreadBodies();
   };
 
   // The setting turned on captures what is already live; turned off, it purges.
@@ -756,6 +797,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
               projectCount: rows.projectCount,
             },
             upsertThreads: plan.upsertThreads,
+            threadPositions: plan.threadPositions,
             deleteThreads: plan.deleteThreads,
             upsertBodies: plan.upsertBodies,
             bodySequences: plan.bodySequences,
@@ -794,22 +836,31 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
 
     // A launch starts with no thread known to have a saved body.
     replaceSavedThreadBodyKeys([]);
+    bodyKeysTouched.clear();
     await moveLegacyRows();
     // Saved bodies are only read when a thread opens; which threads have one
     // is known once the saved choice is. Bodies left from before the setting
-    // was turned off are removed instead.
+    // was turned off are removed instead, each machine after its own writes.
     const bodyKeys = (contentCache?.ready ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {
         if (!contentEnabled()) {
-          replaceSavedThreadBodyKeys([]);
-          await deps.db.removeThreadBodies();
+          await purgeAllStoredBodies();
           return;
         }
-        const keys = await deps.db.listThreadBodyKeys();
-        replaceSavedThreadBodyKeys(
-          keys.map((key) => [key.environmentId as EnvironmentId, key.threadId as ThreadId]),
-        );
+        const listed = new Map<EnvironmentId, ThreadId[]>();
+        for (const key of await deps.db.listThreadBodyKeys()) {
+          const environmentId = key.environmentId as EnvironmentId;
+          const threadIds = listed.get(environmentId) ?? [];
+          threadIds.push(key.threadId as ThreadId);
+          listed.set(environmentId, threadIds);
+        }
+        // A machine a capture or removal set since the launch started keeps that.
+        for (const [environmentId, threadIds] of listed) {
+          if (!bodyKeysTouched.has(environmentId)) {
+            setEnvironmentSavedThreadBodyKeys(environmentId, threadIds);
+          }
+        }
       })
       .catch(warn("could not read saved conversation keys"));
 
@@ -828,13 +879,15 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     // The direct supervisor may already be connected (it starts once the
     // catalog is hydrated), and so may a Hub machine. Rows a live capture has
     // replaced since the read above are not this hydration's to discard.
-    const discardRows = (environmentId: EnvironmentId): Promise<void> =>
-      serialize(environmentId, async () => {
-        if (written.has(environmentId)) return;
-        await removeStoredSnapshot(environmentId);
-      });
     const hasState = (environmentId: EnvironmentId) =>
       deps.store.getState().environmentStateById[environmentId] !== undefined;
+    // A machine that went live meanwhile (a Hub machine can, before its roster
+    // entry is saved) keeps its rows and task list: its own captures replace them.
+    const discardRows = (environmentId: EnvironmentId): Promise<void> =>
+      serialize(environmentId, async () => {
+        if (written.has(environmentId) || hasState(environmentId)) return;
+        await removeStoredSnapshot(environmentId);
+      });
     let batch: Array<{
       readonly environmentId: EnvironmentId;
       readonly cached: CachedEnvironmentShellSnapshot;
@@ -895,7 +948,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
             capturedAt: row.updatedAt,
             projects: envelope.projects,
             worktrees: envelope.worktrees,
-            threads: threads.toSorted(threadOrder),
+            // In list order, as the rows were written.
+            threads,
           },
         });
         batchBytes += bytes;
@@ -926,9 +980,17 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     ) {
       return;
     }
+    if (removing.has(environmentId)) return;
     const epoch = removalEpochOf(environmentId);
     const row = await deps.db.loadThreadBody(environmentId, threadId);
-    if (disposed || epoch !== removalEpochOf(environmentId) || !contentEnabled()) return;
+    if (
+      disposed ||
+      removing.has(environmentId) ||
+      epoch !== removalEpochOf(environmentId) ||
+      !contentEnabled()
+    ) {
+      return;
+    }
     const body = row === null ? null : decodeStoredThreadBody(row.payload);
     if (body === null) {
       forgetSavedThreadBody(environmentId, threadId);
@@ -1148,9 +1210,18 @@ export async function clearEnvironmentSnapshotCache(environmentId: EnvironmentId
       purgeEnvironmentDeviceData(environmentId),
     ]);
   }
-  // Evict only offline-hydrated presentation state. Live synchronization retains ownership.
+  // Evict only offline-hydrated presentation state. Live synchronization retains ownership,
+  // but saved bodies it shows go: a later capture would otherwise write them back.
   const state = useStore.getState();
-  if (state.environmentStateById[environmentId]?.hydratedFromCacheAt !== undefined) {
+  const environmentState = state.environmentStateById[environmentId];
+  if (environmentState?.hydratedFromCacheAt !== undefined) {
     state.removeEnvironmentState(environmentId);
+  } else if (environmentState !== undefined) {
+    const savedBodies = Object.keys(environmentState.cachedMessageThreadIds ?? {});
+    if (savedBodies.length > 0) {
+      state.evictThreadBodies(
+        savedBodies.map((threadId) => ({ environmentId, threadId: threadId as ThreadId })),
+      );
+    }
   }
 }
