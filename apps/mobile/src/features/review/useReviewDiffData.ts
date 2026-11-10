@@ -76,10 +76,10 @@ export function useCheckpointDiffFilePatch(
   open: boolean,
 ): CheckpointDiffFilePatchState {
   const key = checkpointDiffFilePatches.filePatchKey(input, index, file);
+  // Loading is idempotent (a held or loading patch is left alone), so a new
+  // `input` object for the same diff only re-checks.
   useEffect(() => {
     if (open) checkpointDiffFilePatches.loadFilePatch(input, index, file);
-    // The key names the input, the commit pair and the file.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, open]);
+  }, [input, index, file, open]);
   return useAtomValue(checkpointDiffFilePatches.filePatchAtom(key));
 }
