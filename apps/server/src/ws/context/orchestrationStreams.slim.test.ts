@@ -81,7 +81,11 @@ const decodeItem = Schema.decodeUnknownSync(OrchestrationThreadWindowStreamItem)
 
 /** A live frame as the socket sends it: one RPC chunk, deflated on its own above the threshold. */
 const wireBytes = (values: ReadonlyArray<unknown>) => {
-  const json = JSON.stringify({ _tag: "Chunk", requestId: "4711", values: values.map(encodeItem) });
+  const json = JSON.stringify({
+    _tag: "Chunk",
+    requestId: "4711",
+    values: values.map((value) => encodeItem(value as never)),
+  });
   return {
     raw: Buffer.byteLength(json),
     deflated:
@@ -117,7 +121,10 @@ describe("slim live thread events", () => {
         },
       });
       // The item round-trips through the wire schema a client decodes.
-      assert.deepEqual(decodeItem(JSON.parse(JSON.stringify(encodeItem(item as never)))), item);
+      assert.deepEqual(
+        decodeItem(JSON.parse(JSON.stringify(encodeItem(item as never)))) as unknown,
+        item,
+      );
     }),
   );
 

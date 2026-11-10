@@ -44,9 +44,6 @@ const projectEvent = (sequence: number): OrchestrationEvent => ({
   payload: { projectId: ProjectId.make("project-1"), deletedAt: "2026-11-10T00:00:00.000Z" },
 });
 
-/** Lets forked fibers run (the scheduler may run them after a setImmediate). */
-const settle = Effect.sleep("10 millis");
-
 const makeEngine = Effect.gen(function* () {
   const live = yield* PubSub.unbounded<OrchestrationEvent>();
   let subscriptions = 0;
@@ -62,11 +59,12 @@ const makeEngine = Effect.gen(function* () {
 });
 
 describe("threadEventRouter", () => {
-  it.live("hands each thread's events only to that thread's subscribers", () =>
+  it.effect("hands each thread's events only to that thread's subscribers", () =>
     Effect.gen(function* () {
       const { live, engine } = yield* makeEngine;
       const threads = Array.from({ length: 30 }, (_, index) => ThreadId.make(`thread-${index}`));
       const received = new Map<string, Array<number>>();
+      const delivered = yield* Queue.unbounded<number>();
       let wakeups = 0;
       const scope = yield* Scope.make();
       const registrations = yield* Effect.forEach(threads, (threadId) =>
@@ -75,6 +73,7 @@ describe("threadEventRouter", () => {
             Effect.sync(() => {
               wakeups += 1;
               received.set(threadId, [...(received.get(threadId) ?? []), event.sequence]);
+              Queue.offerUnsafe(delivered, event.sequence);
             }),
           onEnd: Effect.void,
         }).pipe(Scope.provide(scope)),
@@ -85,7 +84,7 @@ describe("threadEventRouter", () => {
       yield* PubSub.publish(live, messageEvent(1, threads[3]!));
       yield* PubSub.publish(live, projectEvent(2));
       yield* PubSub.publish(live, messageEvent(3, threads[7]!));
-      yield* settle;
+      assert.deepEqual([yield* Queue.take(delivered), yield* Queue.take(delivered)], [1, 3]);
 
       assert.equal(wakeups, 2);
       assert.deepEqual(Object.fromEntries(received), { "thread-3": [1], "thread-7": [3] });
@@ -95,28 +94,31 @@ describe("threadEventRouter", () => {
     }),
   );
 
-  it.live("closes its subscription with the last subscriber and opens a fresh one after", () =>
+  it.effect("closes its subscription with the last subscriber and opens a fresh one after", () =>
     Effect.gen(function* () {
       const { live, engine, subscriptions } = yield* makeEngine;
       const threadId = ThreadId.make("thread-a");
       const seen: Array<number> = [];
+      const delivered = yield* Queue.unbounded<number>();
       const subscriber = {
-        onEvent: (event: OrchestrationEvent) => Effect.sync(() => void seen.push(event.sequence)),
+        onEvent: (event: OrchestrationEvent) =>
+          Effect.sync(() => {
+            seen.push(event.sequence);
+            Queue.offerUnsafe(delivered, event.sequence);
+          }),
         onEnd: Effect.void,
       };
       yield* Effect.scoped(
         Effect.gen(function* () {
           const registration = yield* registerThreadEventSubscriber(engine, threadId, subscriber);
           yield* PubSub.publish(live, messageEvent(1, threadId));
-          yield* settle;
+          assert.equal(yield* Queue.take(delivered), 1);
           assert.equal(registration.routedThrough(), 1);
         }),
       );
       assert.equal(subscriptions(), 1);
       // Nothing is subscribed while nobody listens.
       yield* PubSub.publish(live, messageEvent(2, threadId));
-      yield* settle;
-      assert.deepEqual(seen, [1]);
 
       yield* Effect.scoped(
         Effect.gen(function* () {
@@ -124,15 +126,16 @@ describe("threadEventRouter", () => {
           // A new run has routed nothing: replays read to the end of the log.
           assert.equal(registration.routedThrough(), 0);
           yield* PubSub.publish(live, messageEvent(3, threadId));
-          yield* settle;
+          assert.equal(yield* Queue.take(delivered), 3);
         }),
       );
       assert.equal(subscriptions(), 2);
+      // Event 2 was published while nobody listened: no subscription received it.
       assert.deepEqual(seen, [1, 3]);
     }),
   );
 
-  it.live("thread subscriptions on many threads open one engine subscription", () =>
+  it.effect("thread subscriptions on many threads open one engine subscription", () =>
     Effect.gen(function* () {
       const { live, engine, subscriptions } = yield* makeEngine;
       const helpers = makeOrchestrationStreamHelpers({
@@ -160,8 +163,9 @@ describe("threadEventRouter", () => {
       yield* PubSub.publish(live, messageEvent(12, threads[9]!));
       assert.equal(yield* Queue.take(delivered), "thread-5:11");
       assert.equal(yield* Queue.take(delivered), "thread-9:12");
-      yield* settle;
-      assert.equal(yield* Queue.size(delivered), 0);
+      // Nothing else was delivered in between: the next item is the next event.
+      yield* PubSub.publish(live, messageEvent(13, threads[5]!));
+      assert.equal(yield* Queue.take(delivered), "thread-5:13");
       yield* Fiber.interruptAll(fibers);
     }),
   );

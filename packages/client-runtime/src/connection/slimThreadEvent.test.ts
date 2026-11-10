@@ -29,7 +29,9 @@ describe("expandSlimThreadEvent", () => {
         },
       },
     });
-    if (item.kind !== "slim-event") throw new Error("expected a slim event");
+    if (isUnknownUnionMember(item) || item.kind !== "slim-event") {
+      throw new Error("expected a slim event");
+    }
     const event = expandSlimThreadEvent(item.event, threadId);
     expect(event).toMatchObject({
       sequence: 42,
@@ -52,7 +54,9 @@ describe("expandSlimThreadEvent", () => {
         payload: {},
       },
     });
-    if (item.kind !== "slim-event") throw new Error("expected a slim event");
+    if (isUnknownUnionMember(item) || item.kind !== "slim-event") {
+      throw new Error("expected a slim event");
+    }
     const event = expandSlimThreadEvent(item.event as OrchestrationSlimThreadEvent, threadId);
     expect(isUnknownUnionMember(event)).toBe(true);
     expect(event).toMatchObject({ sequence: 43, aggregateKind: "thread", aggregateId: threadId });
