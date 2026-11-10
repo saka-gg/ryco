@@ -1,4 +1,7 @@
-import type { ThreadDetailSubscriptionRetainOptions } from "@ryco/client-runtime/connection";
+import type {
+  ThreadDetailSubscriptionReleaseOptions,
+  ThreadDetailSubscriptionRetainOptions,
+} from "@ryco/client-runtime/connection";
 import type {
   EnvironmentId,
   MessageId,
@@ -39,6 +42,21 @@ export function retainThreadDetailSubscription(
     releaseConnectionDetail();
     releaseDetail();
   };
+}
+
+/**
+ * A prefetch of the thread's detail (a Home row pressed or near the top), not a view of it:
+ * `speculative` in the supervisor, so a body only it fetched is the first the store drops, and
+ * no hosted connection scope, so it never connects a machine, or keeps one connected, that
+ * nothing else wants. Callers only ask for environments that are live already.
+ */
+export function retainSpeculativeThreadDetailSubscription(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): (options?: ThreadDetailSubscriptionReleaseOptions) => void {
+  return registry.driver.supervisor.retainThreadDetailSubscription(environmentId, threadId, {
+    speculative: true,
+  });
 }
 
 export function loadOlderThreadMessages(input: {
