@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  isActivityPayloadOutdated,
   resolveActivityPayloadOutputView,
   type ActivityPayloadInput,
   type ActivityPayloadOutputView,
@@ -18,7 +19,7 @@ export interface ActivityPayloadOutput extends ActivityPayloadOutputView {
  * is null, i.e. the row's output is already complete.
  */
 export function useActivityPayloadOutput(input: ActivityPayloadInput): ActivityPayloadOutput {
-  const { environmentId, threadId, activityId } = input;
+  const { environmentId, threadId, activityId, payloadBytes } = input;
   const cacheKey = activityPayloadQuery.keyOf(input);
   useEffect(
     () => activityPayloadQuery.watch({ environmentId, threadId, activityId }),
@@ -26,6 +27,11 @@ export function useActivityPayloadOutput(input: ActivityPayloadInput): ActivityP
   );
   const state = useAtomValue(activityPayloadQuery.getAtom(cacheKey));
   const retry = useCallback(() => activityPayloadQuery.refresh(cacheKey), [cacheKey]);
+  // A running tool's output grew since it was fetched: read it again in place.
+  const outdated = isActivityPayloadOutdated(state, payloadBytes);
+  useEffect(() => {
+    if (outdated) activityPayloadQuery.refresh(cacheKey);
+  }, [outdated, cacheKey]);
   const view = useMemo(() => resolveActivityPayloadOutputView(cacheKey, state), [cacheKey, state]);
   return useMemo(() => ({ ...view, retry }), [view, retry]);
 }

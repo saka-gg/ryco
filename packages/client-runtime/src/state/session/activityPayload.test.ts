@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { appAtomRegistry } from "../../rpc/atomRegistry.ts";
 import {
   createActivityPayloadQuery,
+  isActivityPayloadOutdated,
   resolveActivityChangedFiles,
   resolveActivityPayloadOutputView,
   type ActivityPayloadInput,
@@ -155,5 +156,50 @@ describe("resolveActivityPayloadOutputView", () => {
     expect(resolveActivityChangedFiles(entry?.changedFiles ?? [], loaded)).toEqual(
       full?.changedFiles,
     );
+  });
+});
+
+describe("isActivityPayloadOutdated", () => {
+  const loaded = (fullBytes: number): ActivityPayloadQueryState => ({
+    data: { activityId: "activity-1" as never, payload: {}, fullBytes, truncated: false },
+    isLoading: false,
+    error: null,
+  });
+
+  it("asks again when a running tool's newer preview announces a larger payload", () => {
+    expect(isActivityPayloadOutdated(loaded(10_000), 20_000)).toBe(true);
+    expect(isActivityPayloadOutdated(loaded(20_000), 20_000)).toBe(false);
+    expect(isActivityPayloadOutdated(loaded(20_000), null)).toBe(false);
+    expect(isActivityPayloadOutdated({ data: null, isLoading: true, error: null }, 20_000)).toBe(
+      false,
+    );
+  });
+
+  it("follows the newest preview's size through a running tool's rewrites", () => {
+    const toolUpdate = (fullBytes: number, createdAt: string): OrchestrationThreadActivity =>
+      ({
+        id: EventId.make("command-1"),
+        createdAt,
+        kind: "tool.updated",
+        summary: "Run command",
+        tone: "tool",
+        payload: { ...commandPayload("partial"), providerItemId: "item-1" },
+        payloadPreview: { fullBytes },
+        turnId: null,
+      }) as OrchestrationThreadActivity;
+    const [first] = deriveWorkLogEntries(
+      [toolUpdate(30_000, "2026-11-10T00:00:00.000Z")],
+      undefined,
+    );
+    expect(first?.outputPreviewBytes).toBe(30_000);
+    const [grown] = deriveWorkLogEntries(
+      [
+        toolUpdate(30_000, "2026-11-10T00:00:00.000Z"),
+        toolUpdate(60_000, "2026-11-10T00:00:01.000Z"),
+      ],
+      undefined,
+    );
+    expect(grown?.outputPreviewActivityId).toBe("command-1");
+    expect(grown?.outputPreviewBytes).toBe(60_000);
   });
 });

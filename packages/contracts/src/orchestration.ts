@@ -1810,6 +1810,15 @@ export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
   resumeFromSequence: ThreadResumeFromSequence,
   historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
   activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  /**
+   * How the live and replayed `thread.activity-appended` events of this
+   * subscription carry their payloads. `"preview"` bounds each large payload
+   * as a window does (`OrchestrationThreadActivity.payloadPreview`), and the
+   * client reads the stored one through `orchestration.getActivityPayload`.
+   * Absent means full payloads, what an older client gets; an older server
+   * ignores the field and sends full payloads.
+   */
+  liveActivityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;

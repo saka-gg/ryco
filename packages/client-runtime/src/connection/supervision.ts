@@ -647,6 +647,11 @@ export function createEnvironmentConnectionSupervisor<
 
   const activityPayloads = input.threadWindowActivityPayloads;
   const activityPayloadsRequest = activityPayloads !== undefined ? { activityPayloads } : {};
+  // A client that reads previews on demand takes live tool output as previews too.
+  const windowSubscriptionPayloads =
+    activityPayloads === "preview"
+      ? { activityPayloads, liveActivityPayloads: activityPayloads }
+      : activityPayloadsRequest;
   const historyPagination = createThreadHistoryPaginationController({
     request: (environmentId, request) => {
       const query = require(environmentId).client.orchestration.getThreadHistoryPage;
@@ -830,7 +835,7 @@ export function createEnvironmentConnectionSupervisor<
       subscribing = true;
       pendingFailure = null;
       unsubscribeCurrent = subscribeWindow(
-        { threadId: entry.threadId, limits: entry.windowLimits, ...activityPayloadsRequest },
+        { threadId: entry.threadId, limits: entry.windowLimits, ...windowSubscriptionPayloads },
         (item) => {
           // Any item, a resume included, means the server served this window.
           failedWindowAttempts = 0;

@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import { deriveActivityPayloadOutput } from "@ryco/client-runtime/state/session";
+import {
+  deriveActivityPayloadOutput,
+  isActivityPayloadOutdated,
+} from "@ryco/client-runtime/state/session";
 import { useCallback, useEffect, useMemo } from "react";
 
 import { activityPayloadQuery, type ActivityPayloadInput } from "./activityPayloadAtoms";
@@ -20,7 +23,7 @@ export interface ActivityPayloadOutput {
  * output is already complete.
  */
 export function useActivityPayloadOutput(input: ActivityPayloadInput): ActivityPayloadOutput {
-  const { environmentId, threadId, activityId } = input;
+  const { environmentId, threadId, activityId, payloadBytes } = input;
   const cacheKey = activityPayloadQuery.keyOf(input);
   useEffect(
     () => activityPayloadQuery.watch({ environmentId, threadId, activityId }),
@@ -28,6 +31,11 @@ export function useActivityPayloadOutput(input: ActivityPayloadInput): ActivityP
   );
   const state = useAtomValue(activityPayloadQuery.getAtom(cacheKey));
   const retry = useCallback(() => activityPayloadQuery.refresh(cacheKey), [cacheKey]);
+  // A running tool's output grew since it was fetched: read it again in place.
+  const outdated = isActivityPayloadOutdated(state, payloadBytes);
+  useEffect(() => {
+    if (outdated) activityPayloadQuery.refresh(cacheKey);
+  }, [outdated, cacheKey]);
   const derived = useMemo(
     () => (state.data ? deriveActivityPayloadOutput(state.data.payload) : null),
     [state.data],

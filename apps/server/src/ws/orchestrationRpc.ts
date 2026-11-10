@@ -983,7 +983,10 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               }),
             ),
             input.threadId,
-            { resumeFromSequence: input.resumeFromSequence },
+            {
+              resumeFromSequence: input.resumeFromSequence,
+              liveActivityPayloads: input.liveActivityPayloads,
+            },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),
             observeArrays(isServerPerfProfileEnabled(), (items) =>

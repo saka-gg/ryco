@@ -1825,6 +1825,7 @@ function areWorkLogEntriesUnchanged(previous: WorkLogEntry, next: WorkLogEntry):
       previous.turnId === next.turnId &&
       previous.output === next.output &&
       previous.outputPreviewActivityId === next.outputPreviewActivityId &&
+      previous.outputPreviewBytes === next.outputPreviewBytes &&
       previous.exitCode === next.exitCode &&
       previous.startedAt === next.startedAt &&
       previous.lastActivityAt === next.lastActivityAt &&

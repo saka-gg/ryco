@@ -3518,6 +3518,7 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
     environmentId: activeThreadEnvironmentId,
     threadId: parseScopedThreadKey(routeThreadKey)?.threadId ?? null,
     activityId: workEntry.outputPreviewActivityId ?? null,
+    payloadBytes: workEntry.outputPreviewBytes ?? null,
   });
   const output = fullOutput.output ?? workEntry.output;
   const exitCode = fullOutput.status === "loaded" ? (fullOutput.exitCode ?? undefined) : undefined;

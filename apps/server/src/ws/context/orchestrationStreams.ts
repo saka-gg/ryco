@@ -1,5 +1,6 @@
 import { Array as Arr, Effect, Fiber, Option, Queue, Ref, Stream } from "effect";
 import {
+  type OrchestrationActivityPayloadMode,
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationShellSnapshotDelivery,
@@ -43,6 +44,7 @@ import { rechunkByBudget, tapArray } from "../streamBatching.ts";
 import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
+import { previewActivityAppendedEvent } from "../../orchestration/activityPayloadPreview.ts";
 
 const makeLiveQueueOverflowError = (input: {
   readonly stream: WsReplayStreamKind;
@@ -826,7 +828,11 @@ export const makeOrchestrationStreamHelpers = (deps: {
   >(
     snapshot: Effect.Effect<Snapshot, SnapshotError>,
     threadId: ThreadId,
-    options: { readonly resumeFromSequence?: number | undefined } = {},
+    options: {
+      readonly resumeFromSequence?: number | undefined;
+      /** `"preview"`: live and replayed activity payloads are bounded like a window's. */
+      readonly liveActivityPayloads?: OrchestrationActivityPayloadMode | undefined;
+    } = {},
   ) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -854,12 +860,13 @@ export const makeOrchestrationStreamHelpers = (deps: {
           event.aggregateId === threadId &&
           isThreadDetailEvent(event);
 
+        const previewActivities = options.liveActivityPayloads === "preview";
         const threadEvents = <E, R>(stream: Stream.Stream<OrchestrationEvent, E, R>) =>
           stream.pipe(
             Stream.filter(isMatchingThreadEvent),
             Stream.map((event) => ({
               kind: "event" as const,
-              event,
+              event: previewActivities ? previewActivityAppendedEvent(event) : event,
             })),
           );
 

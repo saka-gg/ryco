@@ -47,6 +47,8 @@ export interface ActivityRow {
    * `output` is cut short, and the full payload is read when the row opens.
    */
   readonly outputPreviewActivityId: string | null;
+  /** The stored payload size the preview announced; a grown payload is read again. */
+  readonly outputPreviewBytes: number | null;
   readonly exitCode: number | null;
   readonly changedFiles: ReadonlyArray<string>;
   readonly tone: ActivityTone;
@@ -173,6 +175,7 @@ function toRow(entry: WorkLogEntry, foldRunning: boolean): ActivityRow {
     command: firstLine(entry.command ?? entry.rawCommand),
     output: entry.output?.trim() || null,
     outputPreviewActivityId: entry.outputPreviewActivityId ?? null,
+    outputPreviewBytes: entry.outputPreviewBytes ?? null,
     exitCode: entry.exitCode ?? null,
     changedFiles: entry.changedFiles ?? [],
     tone: entry.tone,
