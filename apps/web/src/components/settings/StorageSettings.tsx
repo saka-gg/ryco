@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   type DatabaseStorageReport,
   type EnvironmentId,
@@ -821,12 +828,11 @@ function DatabaseCompactionRow({
   };
 
   // Waiting for the node to idle: ask again until nothing would be cut off, then start.
+  const retryStart = useEffectEvent(() => void start());
   useEffect(() => {
     if (!waiting) return;
-    const timer = setInterval(() => void start(), COMPACTION_IDLE_POLL_MS);
+    const timer = setInterval(retryStart, COMPACTION_IDLE_POLL_MS);
     return () => clearInterval(timer);
-    // `start` reads fresh status each time.
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [waiting]);
 
   const running = desktop.phase === "running";
