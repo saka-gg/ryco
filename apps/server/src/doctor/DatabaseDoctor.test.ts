@@ -305,6 +305,23 @@ describe("DatabaseDoctor", () => {
     () =>
       Effect.gen(function* () {
         const home = makeHome();
+        // Receipt rows an older build wrote for every streamed provider event (this one keeps
+        // them in memory), months old, and one client command's receipt that is kept forever.
+        const oldProviderReceipts = 3;
+        execute(
+          home.dbPath,
+          `INSERT INTO orchestration_command_receipts
+             (command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence, status, error)
+           VALUES
+             ('provider:0f8fad5b-d9cb-469f-a165-70867728950e:thread-activity-append:a', 'thread', 'old-thread', '2026-01-01T00:00:00.000Z', 1, 'accepted', NULL),
+             ('provider:7c9e6679-7425-40de-944b-e07fc1f90ae7:thread-activity-append:b', 'thread', 'old-thread', '2026-01-01T00:00:01.000Z', 2, 'accepted', NULL),
+             ('history:16fd2706-8baf-433b-82eb-8c7fada847da', 'thread', 'old-thread', '2026-01-01T00:00:02.000Z', 3, 'rejected', 'old'),
+             ('old-client-command', 'thread', 'old-thread', '2026-01-01T00:00:03.000Z', 3, 'accepted', NULL)`,
+        );
+        const receiptsBefore = scalar(
+          home.dbPath,
+          "SELECT count(*) FROM orchestration_command_receipts",
+        );
         const projections = projectionDump(home.dbPath);
         const eventsBefore = scalar(home.dbPath, "SELECT count(*) FROM orchestration_events");
         const superseded = supersededEvents(home.dbPath);
@@ -342,8 +359,19 @@ describe("DatabaseDoctor", () => {
           "ok",
         );
         assert.deepEqual(projectionDump(home.dbPath), projections);
-        // Old random-id receipts went too (the fixture's history is months old).
-        assert.isAbove(result.removedReceipts, 0);
+        // Old per-emission receipts went too; the client command's receipt stays.
+        assert.equal(result.removedReceipts, oldProviderReceipts);
+        assert.equal(
+          scalar(home.dbPath, "SELECT count(*) FROM orchestration_command_receipts"),
+          receiptsBefore - oldProviderReceipts,
+        );
+        assert.equal(
+          scalar(
+            home.dbPath,
+            "SELECT count(*) FROM orchestration_command_receipts WHERE command_id = 'old-client-command'",
+          ),
+          1,
+        );
         // The compaction cursor sits at the head, the receipt cursor starts over after the copy.
         const state = decodeState(
           query<{ value: string }>(
