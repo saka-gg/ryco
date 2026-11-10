@@ -12,11 +12,13 @@ import type {
   EventId,
   MessageId,
   OrchestrationCheckpointSummary,
+  OrchestrationEvent,
   OrchestrationMessage,
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
+  OrchestrationShellStreamEvent,
   OrchestrationThread,
   OrchestrationSearchThreadMessagesInput,
   OrchestrationThreadMessageSearchResult,
@@ -268,6 +270,21 @@ export interface ThreadUserMessageCountBound {
   readonly excludingMessageId?: MessageId;
 }
 
+/**
+ * What changed in the shell after a sequence, as the shell stream sends it: the current row of
+ * every project, workspace and thread an event named since then, and the removal of each one
+ * gone, ascending by the sequence of the last event that named it.
+ */
+export interface ShellChangesSince {
+  /** The shell's sequence: every change up to it is in `items`, later ones are not. */
+  readonly snapshotSequence: number;
+  readonly items: ReadonlyArray<OrchestrationShellStreamEvent>;
+  /** Threads in `items` (upserted or removed). */
+  readonly threadCount: number;
+  /** Unarchived threads in the shell, which a snapshot sends in full. */
+  readonly liveThreadCount: number;
+}
+
 export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
@@ -400,6 +417,35 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadShellById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * A thread's shell row from the node's shared thread list (`shellSnapshotCopy.ts`), for readers
+   * that follow the event stream (shell subscriptions, push alerts): every reader of the same
+   * change gets one shared read and the same row object. Absent in test doubles: read through
+   * {@link readSharedThreadShell}.
+   */
+  readonly getSharedThreadShell?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * Turns on the shared thread list and returns its feed. The orchestration engine calls it once
+   * and hands it every committed event after `fromSequence`, ascending, before publishing it;
+   * until then shells are built from the database. Absent in test doubles.
+   */
+  readonly trackShellChanges?: (
+    fromSequence: number,
+  ) => (events: ReadonlyArray<OrchestrationEvent>) => void;
+
+  /**
+   * The shell's changes after `sequence`, from the shared thread list's in-memory change index
+   * (`shellSnapshotCopy.ts`): a resuming shell subscriber gets only those rows, however many
+   * events happened since. None when the index does not reach back that far (the server started,
+   * or a project was deleted or a workspace relocated, after it). Absent in test doubles.
+   */
+  readonly getShellChangesSince?: (
+    sequence: number,
+  ) => Effect.Effect<Option.Option<ShellChangesSince>, ProjectionRepositoryError>;
 
   /**
    * Read a single worktree shell row by id.
@@ -641,6 +687,16 @@ export const readThreadKeyPage = (
 ): Effect.Effect<ReadonlyArray<ProjectionThreadOrderKey>, ProjectionRepositoryError> =>
   query.listThreadKeyPage?.(input) ??
   Effect.map(query.getShellSnapshot(), (snapshot) => threadKeyPageOf(snapshot, input));
+
+/**
+ * A thread's shell row from the shared thread list; see
+ * {@link ProjectionSnapshotQueryShape.getSharedThreadShell}.
+ */
+export const readSharedThreadShell = (
+  query: Pick<ProjectionSnapshotQueryShape, "getThreadShellById" | "getSharedThreadShell">,
+  threadId: ThreadId,
+): Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError> =>
+  query.getSharedThreadShell?.(threadId) ?? query.getThreadShellById(threadId);
 
 /** Threads whose goal synchronization is pending; see {@link readProjectShells}. */
 export const readPendingGoalSyncThreads = (

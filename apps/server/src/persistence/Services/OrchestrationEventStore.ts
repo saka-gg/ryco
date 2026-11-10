@@ -16,6 +16,24 @@ import type { Effect, Stream } from "effect";
 import type { OrchestrationEventStoreError } from "../Errors.ts";
 
 /**
+ * An event without its payload (see `readEventHeadersPage`). `payload` carries only the ids a
+ * project, workspace or thread removal names and a relocation's paths, where the event has them.
+ */
+export interface OrchestrationEventHeader {
+  readonly sequence: number;
+  readonly type: OrchestrationEvent["type"];
+  readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+  readonly aggregateId: string;
+  readonly payload: {
+    readonly projectId?: string;
+    readonly worktreeId?: string;
+    readonly threadId?: string;
+    readonly sourcePath?: string;
+    readonly destinationPath?: string;
+  };
+}
+
+/**
  * OrchestrationEventStoreShape - Service API for orchestration event persistence.
  */
 export interface OrchestrationEventStoreShape {
@@ -71,6 +89,24 @@ export interface OrchestrationEventStoreShape {
   ) => Effect.Effect<
     {
       readonly events: ReadonlyArray<OrchestrationEvent>;
+      readonly nextSequence: number;
+      readonly hasMore: boolean;
+    },
+    OrchestrationEventStoreError
+  >;
+
+  /**
+   * {@link readPage} without payloads, for readers that re-read the rows events name (the shell
+   * stream's resume replay): each event's kind, id and type, and the few payload fields such a
+   * reader needs, read by SQLite's JSON functions instead of decoding every payload. Optional
+   * for test doubles; readers fall back to {@link readPage}.
+   */
+  readonly readEventHeadersPage?: (
+    sequenceExclusive: number,
+    limit: number,
+  ) => Effect.Effect<
+    {
+      readonly events: ReadonlyArray<OrchestrationEventHeader>;
       readonly nextSequence: number;
       readonly hasMore: boolean;
     },

@@ -5,21 +5,24 @@
  *
  * - replayMetrics: one live enqueue plus dequeue on one of N active shell/thread subscriptions
  *   (the replay gauges used to rescan every subscription per event).
- * - sharedThreadShellReads: N subscribers mapping the same thread event, counting the shell
- *   row reads they cause (one per event when shared, N before).
+ * - sharedThreadShellReads: N subscribers mapping the same thread event through the shared
+ *   thread list (shellSnapshotCopy.ts), counting the shell row reads they cause (one per event
+ *   when shared, N before).
  * - commandModelThreadUpdate: one thread update in a command read model of T threads (an
  *   index lookup and one array slot instead of find + map over every thread).
  */
 import { parseArgs } from "node:util";
 
-import { ThreadId, type OrchestrationThreadShell } from "@ryco/contracts";
+import {
+  ThreadId,
+  type OrchestrationEvent,
+  type OrchestrationShellSnapshot,
+  type OrchestrationThreadShell,
+} from "@ryco/contracts";
 import { Effect, Option } from "effect";
 
 import { findThreadInArray, updateThreadInArray } from "../src/orchestration/threadIndex.ts";
-import {
-  readSharedThreadShell,
-  sharedThreadShellReadCount,
-} from "../src/ws/context/sharedThreadShellReads.ts";
+import { makeShellSnapshotCopy } from "../src/orchestration/shellSnapshotCopy.ts";
 import { makeWsReplayMetrics } from "../src/wsReplayMetrics.ts";
 
 const { values } = parseArgs({
@@ -62,17 +65,43 @@ async function replayMetrics() {
 }
 
 async function sharedReads() {
-  const shell = { id: ThreadId.make("bench-thread") } as unknown as OrchestrationThreadShell;
-  const query = {
-    getThreadShellById: () => Effect.as(Effect.yieldNow, Option.some(shell)),
-  };
+  const threadId = ThreadId.make("bench-thread");
+  const shell = {
+    id: threadId,
+    createdAt: "2026-10-04T00:00:00.000Z",
+    updatedAt: "2026-10-04T00:00:00.000Z",
+    latestTurn: null,
+    session: null,
+  } as unknown as OrchestrationThreadShell;
+  let reads = 0;
+  const copy = makeShellSnapshotCopy({
+    buildShell: () =>
+      Effect.succeed({
+        snapshotSequence: 0,
+        updatedAt: shell.updatedAt,
+        projects: [],
+        threads: [shell],
+      } as unknown as OrchestrationShellSnapshot),
+    getThreadShellById: () =>
+      Effect.sync(() => {
+        reads += 1;
+      }).pipe(Effect.andThen(Effect.as(Effect.yieldNow, Option.some(shell)))),
+    getProjectShellById: () => Effect.succeed(Option.none()),
+  });
+  await Effect.runPromise(copy.read());
   const threadEvents = Math.min(events, 2_000);
   for (let sequence = 1; sequence <= threadEvents; sequence += 1) {
+    copy.record([
+      {
+        type: "thread.activity-appended",
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        sequence,
+      },
+    ] as unknown as ReadonlyArray<OrchestrationEvent>);
     await Effect.runPromise(
       Effect.all(
-        Array.from({ length: subscriptions }, () =>
-          readSharedThreadShell(query, ThreadId.make("bench-thread"), sequence),
-        ),
+        Array.from({ length: subscriptions }, () => copy.readThread(threadId)),
         { concurrency: "unbounded" },
       ),
     );
@@ -80,7 +109,7 @@ async function sharedReads() {
   return {
     subscribers: subscriptions,
     threadEvents,
-    reads: sharedThreadShellReadCount(query),
+    reads,
     readsWithoutSharing: threadEvents * subscriptions,
   };
 }

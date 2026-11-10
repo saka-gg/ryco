@@ -1368,6 +1368,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           onSome: (eventStore) => ({
             ...(eventStore.probeResume ? { probeResume: eventStore.probeResume } : {}),
             ...(eventStore.readReplayFloor ? { readReplayFloor: eventStore.readReplayFloor } : {}),
+            ...(eventStore.readEventHeadersPage
+              ? { readEventHeadersPage: eventStore.readEventHeadersPage }
+              : {}),
             readStreamEventsPage: eventStore.readStreamEventsPage,
           }),
         }),
