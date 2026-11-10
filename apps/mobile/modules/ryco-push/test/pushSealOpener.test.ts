@@ -2,12 +2,14 @@
 // this test runs under Node, so it pulls the types in for itself.
 /// <reference types="node" />
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { THREAD_ALERT_COPY } from "@ryco/client-runtime/state/settings";
 import { PushAlertKind } from "@ryco/contracts/push";
+import { pushSealAssociatedData, sealPushPayload } from "@ryco/shared/pushSeal";
+import { e2eeX25519KeyPair } from "@ryco/shared/relayE2eeKeys";
 
 import { notificationCategoryForKind } from "../../../src/notifications/notificationActionsModel";
 import { describe, expect, it } from "vite-plus/test";
@@ -26,6 +28,66 @@ const VECTORS_PATH = fileURLToPath(
 const OPENER_SOURCES = [
   join(MODULE_DIR, "extension/PushSealOpener.swift"),
   join(MODULE_DIR, "extension/PushAlertOpener.swift"),
+];
+
+const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
+const EXCERPT_KEY = e2eeX25519KeyPair();
+const EXCERPT_AT = Date.parse("2026-11-10T12:00:00.000Z");
+
+/** A payload sealed here, as a node seals one, with the extension's inputs beside it. */
+function sealedCase(name: string, plaintext: Record<string, unknown>) {
+  const environmentId = "env_excerpt000000000000";
+  const enrollmentId = "enr_excerpt0000000000000000";
+  const sequence = EXCERPT_AT;
+  const sealed = sealPushPayload({
+    recipientPublicKey: EXCERPT_KEY.publicKey,
+    plaintext: new TextEncoder().encode(
+      JSON.stringify({
+        v: 1,
+        t: "Fix the login race",
+        e: environmentId,
+        th: "thread-1",
+        tu: "turn-1",
+        q: sequence,
+        at: EXCERPT_AT,
+        ...plaintext,
+      }),
+    ),
+    associatedData: pushSealAssociatedData({ environmentId, sequence, enrollmentId }),
+  });
+  return {
+    name,
+    recipientSecretKey: hex(EXCERPT_KEY.secretKey),
+    environmentId,
+    enrollmentId,
+    sequence,
+    sealed: Buffer.from(sealed).toString("base64url"),
+    now: EXCERPT_AT + 60_000,
+  };
+}
+
+const EXCERPT_CASES = [
+  sealedCase("approval", {
+    k: "approval",
+    rq: "approval-1",
+    x: { a: { k: "command", d: "npm run deploy -- --prod", r: "Ships it", extra: 1 } },
+  }),
+  sealedCase("question", {
+    k: "input",
+    x: {
+      u: {
+        rq: "question-1",
+        ev: "event-1",
+        qs: [{ id: "target", h: "Target", q: "Where should it deploy?", o: ["Staging", "Prod"], m: true }],
+        c: true,
+      },
+    },
+  }),
+  // An excerpt that does not match the alert's kind, or is malformed, is ignored: the alert
+  // shows as it did before excerpts.
+  sealedCase("mismatched", { k: "completed", x: { a: { k: "command", d: "ls" } } }),
+  sealedCase("malformed", { k: "approval", rq: "a", x: { a: { k: "launch-rockets" } } }),
+  sealedCase("none", { k: "approval", rq: "a" }),
 ];
 
 interface Vector {
@@ -88,11 +150,59 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         ["swiftc", "-O", "-o", binary, ...OPENER_SOURCES, join(MODULE_DIR, "test/main.swift")],
         { stdio: "pipe" },
       );
-      const output = JSON.parse(execFileSync(binary, [VECTORS_PATH], { encoding: "utf8" })) as {
+      const casesPath = join(directory, "excerpts.json");
+      writeFileSync(casesPath, JSON.stringify(EXCERPT_CASES));
+      const output = JSON.parse(
+        execFileSync(binary, [VECTORS_PATH, casesPath], { encoding: "utf8" }),
+      ) as {
         readonly vectors: ReadonlyArray<HarnessVector>;
         readonly kindTitles: Readonly<Record<string, string>>;
         readonly kindCategories: Readonly<Record<string, string>>;
+        readonly requestKindLabels: Readonly<Record<string, string>>;
+        readonly excerpts: ReadonlyArray<{
+          readonly name: string;
+          readonly alert: Readonly<Record<string, string | null>> | null;
+        }>;
       };
+
+      // The approval card's words for each request kind.
+      expect(output.requestKindLabels).toEqual({
+        command: "Run command",
+        "file-read": "Read file",
+        "file-change": "Change file",
+      });
+      const excerpts = Object.fromEntries(output.excerpts.map((item) => [item.name, item.alert]));
+      expect(excerpts.approval).toMatchObject({
+        kind: "approval",
+        body: "Fix the login race",
+        excerptLine: "Run command: npm run deploy -- --prod",
+      });
+      // Only the keys a node sends reach the app.
+      expect(JSON.parse(excerpts.approval!.excerpt!)).toEqual({
+        a: { k: "command", d: "npm run deploy -- --prod", r: "Ships it" },
+      });
+      expect(JSON.parse(excerpts.approval!.record!)).toEqual({
+        v: 1,
+        e: "env_excerpt000000000000",
+        th: "thread-1",
+        tu: "turn-1",
+        k: "approval",
+        rq: "approval-1",
+        at: EXCERPT_AT,
+        x: { a: { k: "command", d: "npm run deploy -- --prod", r: "Ships it" } },
+      });
+      expect(excerpts.question).toMatchObject({ excerptLine: "Where should it deploy?" });
+      expect(JSON.parse(excerpts.question!.excerpt!)).toEqual({
+        u: {
+          rq: "question-1",
+          ev: "event-1",
+          qs: [{ id: "target", h: "Target", q: "Where should it deploy?", o: ["Staging", "Prod"], m: true }],
+          c: true,
+        },
+      });
+      for (const name of ["mismatched", "malformed", "none"]) {
+        expect(excerpts[name], name).toMatchObject({ excerptLine: null, excerpt: null, record: null });
+      }
 
       expect(output.kindTitles).toEqual(expectedKindTitles);
       // The extension's categories are the ones the app registers.

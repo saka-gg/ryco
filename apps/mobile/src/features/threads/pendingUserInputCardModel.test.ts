@@ -100,3 +100,28 @@ describe("native question card", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("native question card from an alert", () => {
+  it("takes choices while the thread connects, but sends only from the live card", () => {
+    const view = pendingUserInputCardView({
+      userInput: {},
+      route: "steer",
+      answers,
+      disabled: true,
+      submitting: false,
+      fromAlert: { partial: false },
+    });
+    expect(view).toMatchObject({ editable: false, canSubmit: false, canDismiss: false });
+    const open = pendingUserInputCardView({
+      userInput: {},
+      route: "steer",
+      answers,
+      disabled: false,
+      submitting: false,
+      fromAlert: { partial: true },
+    });
+    expect(open.editable).toBe(true);
+    expect(open.canSubmit).toBe(false);
+    expect(open.hint).toMatch(/did not fit the alert/u);
+  });
+});

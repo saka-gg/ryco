@@ -18,7 +18,15 @@ export interface RycoPushNativeModule {
   readonly readKey: () => Promise<NativePushKey | null>;
   /** Records what the extension opens alerts with: the Hub enrollment and the sound setting. */
   readonly setRegistration: (enrollmentId: string, sound: boolean) => Promise<void>;
+  /** Deletes the key, and the alert excerpts the extension left (`AlertExcerptStore`). */
   readonly deleteKey: () => Promise<void>;
+  /**
+   * The excerpt record the extension left for a thread's latest approval or question alert, as
+   * JSON (`alertExcerpts.ts` reads it). Absent from binaries older than excerpts.
+   */
+  readonly readAlertExcerpt?: (environmentId: string, threadId: string) => Promise<string | null>;
+  /** Forgets a thread's excerpt. Absent from binaries older than excerpts. */
+  readonly removeAlertExcerpt?: (environmentId: string, threadId: string) => Promise<void>;
 }
 
 interface NativePushKey {
