@@ -1,6 +1,9 @@
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
-import type { CheckpointDiffChange, OrchestrationBatchEffects } from "./orchestrationEventEffects.ts";
+import type {
+  CheckpointDiffChange,
+  OrchestrationBatchEffects,
+} from "./orchestrationEventEffects.ts";
 
 /**
  * Turn diffs and reverts change files in one thread's checkout. The queue
