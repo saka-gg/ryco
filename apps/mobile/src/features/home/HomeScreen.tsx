@@ -45,6 +45,7 @@ import { createHomeScrollMemory } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
 import { useInboxSource } from "./useInboxSource";
 import { useHostedWorkspaceDiscovery } from "./useHostedWorkspaceDiscovery";
+import { useHomeThreadPrefetch } from "./useHomeThreadPrefetch";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
 import { QueuedTasksSection } from "../newTask/QueuedTasksSection";
 
@@ -288,6 +289,24 @@ export function HomeScreen() {
     }) => openThreadOverSheets(navigation, thread),
     [navigation],
   );
+  // Opening a recent thread shows its whole conversation at once: the top rows are fetched
+  // once Home is still, and a row as soon as a finger goes down on it.
+  const prefetchRows = useMemo(
+    () => (byProject ? [] : listedSections.flatMap((section) => section.rows)),
+    [byProject, listedSections],
+  );
+  const prefetchReadinessKey = environments
+    .map((environment) => `${environment.environmentId}:${environment.mutationReady ? 1 : 0}`)
+    .join(",");
+  const pressInThread = useHomeThreadPrefetch({
+    rows: prefetchRows,
+    focused: isFocused,
+    readinessKey: prefetchReadinessKey,
+  });
+  const prefetchInboxThread = useCallback(
+    (row: InboxThreadRow) => pressInThread(scopeThreadRef(row.environmentId, row.threadId)),
+    [pressInThread],
+  );
   const openInboxThread = useCallback(
     (row: InboxThreadRow) => {
       // Opening a woken thread clears its "Woke" mark.
@@ -389,6 +408,7 @@ export function HomeScreen() {
           contentInsets={contentInsets}
           settledStartsOpen={chats.filter === "done"}
           onOpenThread={openInboxThread}
+          onPressInThread={prefetchInboxThread}
           onEmptyAction={handleInboxEmptyAction}
           archivedCount={archivedCount}
           onOpenArchived={openArchived}

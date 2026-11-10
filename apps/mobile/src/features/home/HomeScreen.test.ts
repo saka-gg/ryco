@@ -81,6 +81,7 @@ vi.mock("../../hostedHub/state", () => ({
 vi.mock("../../hostedHub/directoryDemand", () => ({
   useDirectoryPresenceDemand: directoryDemandMock,
 }));
+vi.mock("./useHomeThreadPrefetch", () => ({ useHomeThreadPrefetch: () => () => undefined }));
 vi.mock("./useHostedWorkspaceDiscovery", () => ({
   useHostedWorkspaceDiscovery: workspaceDiscoveryMock,
 }));

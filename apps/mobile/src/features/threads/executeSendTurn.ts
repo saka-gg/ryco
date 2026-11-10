@@ -7,6 +7,7 @@ import type {
   AgentTokenMode,
   ProviderDriverKind,
   EnvironmentApi,
+  MessageId,
   ModelSelection,
   ProjectId,
   ProviderInteractionMode,
@@ -87,6 +88,12 @@ export interface ExecuteSendTurnInput {
   }) => void;
   readonly setThreadError: (threadId: ThreadId, error: string | null) => void;
   readonly beginLocalDispatch?: (options: { readonly preparingWorktree: boolean }) => void;
+  /** The send's message id, when the caller already shows the message (an optimistic send). */
+  readonly messageId?: MessageId;
+  /** When the message was sent, matching the optimistic one. */
+  readonly createdAt?: string;
+  /** Runs right before `thread.turn.start` goes out. */
+  readonly onBeforeTurnStart?: () => void;
 }
 
 /**
@@ -97,8 +104,8 @@ export interface ExecuteSendTurnInput {
 export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<boolean> {
   const promptSnapshot = input.composer.prompt;
   const imagesSnapshot = [...input.composer.images];
-  const messageId = newMessageId();
-  const createdAt = new Date().toISOString();
+  const messageId = input.messageId ?? newMessageId();
+  const createdAt = input.createdAt ?? new Date().toISOString();
   // The shared composition: quote tokens go out expanded, as on web.
   const outgoingMessageText =
     composeOutgoingPrompt({ prompt: promptSnapshot }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
@@ -197,6 +204,7 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
       createdAt,
       newCommandId,
       beginLocalDispatch: input.beginLocalDispatch ?? (() => {}),
+      ...(input.onBeforeTurnStart ? { onBeforeTurnStart: input.onBeforeTurnStart } : {}),
       // Per-thread next-turn settings persistence is deferred (§3-13).
       persistThreadSettingsForNextTurn: () => Promise.resolve(),
     });

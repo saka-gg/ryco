@@ -301,6 +301,8 @@ export function ThreadMessage(props: {
   readonly onEditFromHere?: (() => void) | undefined;
   /** Present only on a reply whose turn's file changes can be undone right now. */
   readonly onUndoFileChanges?: (() => void) | undefined;
+  /** A send of this device the node has not echoed yet: dimmed, and "Sending…" for its time. */
+  readonly pending?: boolean | undefined;
 }) {
   const isUser = props.message.role === "user";
   // A delegated result or another agent's message reads as one line until opened.
@@ -412,7 +414,7 @@ export function ThreadMessage(props: {
       <View
         className={
           isUser
-            ? `max-w-[88%] rounded-[20px] px-4 py-3 ${presentation.bubbleClassName}`
+            ? `max-w-[88%] rounded-[20px] px-4 py-3 ${presentation.bubbleClassName}${props.pending ? " opacity-60" : ""}`
             : "w-full px-1 py-1"
         }
       >
@@ -557,7 +559,9 @@ export function ThreadMessage(props: {
       </View>
       {isUser ? (
         <View className="mt-1 max-w-[88%] flex-row items-center gap-1 pr-1">
-          {sentLabel ? (
+          {props.pending ? (
+            <Text className="shrink text-2xs text-foreground-tertiary">Sending…</Text>
+          ) : sentLabel ? (
             <Text
               accessibilityLabel={`Sent ${sentLabel}`}
               className="shrink text-2xs text-foreground-tertiary"

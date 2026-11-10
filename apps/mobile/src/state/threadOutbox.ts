@@ -91,6 +91,12 @@ const dispatchedByThreadKey = new Map<string, Set<string>>();
 const failedSnapshots = new Map<string, QueuedDispatchSnapshot>();
 const inFlightThreadKeys = new Set<string>();
 /**
+ * Sends a thread's screen dispatched itself and that are still on their way, by thread key. The
+ * drain leaves the thread alone meanwhile, and a message queued behind one waits for its turn to
+ * start, as behind one of its own.
+ */
+const foregroundDispatchCountByThreadKey = new Map<string, number>();
+/**
  * Per thread, the message whose add to the node's queue is on its way. It must not be edited or
  * steered meanwhile: the add can still land, so an edited copy or a steer would be a second one.
  */
@@ -513,8 +519,60 @@ export function getThreadOutboxHold(threadKey: string): QueueHold | null {
  * has not started yet (and the queue is not held): a new message has to queue behind it.
  */
 export function isThreadOutboxDispatchPending(threadKey: string): boolean {
-  if (inFlightThreadKeys.has(threadKey)) return true;
+  if (inFlightThreadKeys.has(threadKey) || foregroundDispatchCountByThreadKey.has(threadKey)) {
+    return true;
+  }
   return pendingDispatchByThreadKey.has(threadKey) && holds[threadKey] === undefined;
+}
+
+export interface ThreadOutboxForegroundDispatch {
+  /** The send's turn is about to start (`commitSendTurnDispatch`'s `onBeforeTurnStart`). */
+  readonly onBeforeTurnStart: () => void;
+  /** The send ended; a dispatched one makes the messages queued behind it wait for its turn. */
+  readonly end: (dispatched: boolean) => void;
+}
+
+/**
+ * A send the thread's screen dispatches itself (the composer is free again at once). Until it
+ * ends the thread counts as busy (`isThreadOutboxDispatchPending`), so a second send queues
+ * here instead of racing it, and the drain sends that one only once this turn has started.
+ */
+export function beginThreadOutboxForegroundDispatch(input: {
+  readonly threadKey: string;
+  readonly messageId: string;
+  readonly readView: () => QueueThreadView | null;
+  readonly now?: () => number;
+}): ThreadOutboxForegroundDispatch {
+  const { threadKey, messageId } = input;
+  const nowIso = () => new Date((input.now ?? Date.now)()).toISOString();
+  const epoch = outboxEpoch;
+  const startSnapshot = captureQueuedDispatchSnapshot(input.readView(), messageId, nowIso());
+  let hookSnapshot: QueuedDispatchSnapshot | null = null;
+  let ended = false;
+  foregroundDispatchCountByThreadKey.set(
+    threadKey,
+    (foregroundDispatchCountByThreadKey.get(threadKey) ?? 0) + 1,
+  );
+  notifyListeners();
+  return {
+    onBeforeTurnStart: () => {
+      hookSnapshot = captureQueuedDispatchSnapshot(input.readView(), messageId, nowIso());
+    },
+    end: (dispatched) => {
+      if (ended || epoch !== outboxEpoch) return;
+      ended = true;
+      const count = (foregroundDispatchCountByThreadKey.get(threadKey) ?? 1) - 1;
+      if (count > 0) foregroundDispatchCountByThreadKey.set(threadKey, count);
+      else foregroundDispatchCountByThreadKey.delete(threadKey);
+      if (dispatched) {
+        addDispatched(threadKey, messageId);
+        if (queueOf(threadKey).length > 0) {
+          pendingDispatchByThreadKey.set(threadKey, hookSnapshot ?? startSnapshot);
+        }
+      }
+      notifyListeners();
+    },
+  };
 }
 
 /** The thread's message whose add to the node's queue is on its way, if any. */
@@ -586,6 +644,7 @@ export function resetThreadOutboxForTests(): void {
   dispatchedByThreadKey.clear();
   failedSnapshots.clear();
   inFlightThreadKeys.clear();
+  foregroundDispatchCountByThreadKey.clear();
   movingMessageIdByThreadKey.clear();
   steeringOutboxAttempts.clear();
   outboxEpoch += 1;
@@ -666,7 +725,7 @@ function queueOf(key: string): ReadonlyArray<QueuedThreadMessage> {
 export async function drainThreadOutbox(deps: ThreadOutboxDrainDeps): Promise<void> {
   const now = deps.now ?? Date.now;
   for (const key of Object.keys(groupQueuedThreadMessages(messages))) {
-    if (inFlightThreadKeys.has(key)) continue;
+    if (inFlightThreadKeys.has(key) || foregroundDispatchCountByThreadKey.has(key)) continue;
     for (let step = 0; step < MAX_STEPS_PER_THREAD; step += 1) {
       const queue = queueOf(key);
       const head = queue[0];

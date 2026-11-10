@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import {
@@ -12,6 +12,7 @@ import {
   resolveHomeGroupingMode,
   type HomeThreadGroup,
 } from "./homeGrouping";
+import { createHomeSummaryStabilizer } from "./homeDataModel";
 import { usePreferences } from "./preferencesStore";
 
 export { buildHomeThreadGroups, resolveHomeGroupingMode } from "./homeGrouping";
@@ -36,7 +37,19 @@ function filterEligible<T extends { readonly environmentId: string }>(
 export function useHomeWorkspaceData(eligibleEnvironmentIds?: ReadonlySet<string>) {
   const allProjects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const allWorktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
-  const allThreads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  // A streamed reply moves its thread's `updatedAt` a few times a second; Home keeps the summary
+  // it has until that would show (`createHomeSummaryStabilizer`).
+  const [stabilizeThreads] = useState(() =>
+    createHomeSummaryStabilizer<
+      ReturnType<typeof selectSidebarThreadsAcrossEnvironments>[number]
+    >(),
+  );
+  const allThreads = useStore(
+    useShallow((state) => {
+      const rows = selectSidebarThreadsAcrossEnvironments(state);
+      return stabilizeThreads(rows);
+    }),
+  );
   const projects = useMemo(
     () => filterEligible(allProjects, eligibleEnvironmentIds),
     [allProjects, eligibleEnvironmentIds],

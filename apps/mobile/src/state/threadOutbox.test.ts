@@ -31,6 +31,7 @@ vi.mock("expo-sqlite/kv-store", () => ({
 }));
 
 import {
+  beginThreadOutboxForegroundDispatch,
   clearThreadOutboxSteering,
   drainThreadOutbox,
   endThreadOutboxSteer,
@@ -38,6 +39,7 @@ import {
   getThreadOutboxHold,
   holdThreadOutboxForInterrupt,
   hydrateThreadOutbox,
+  isThreadOutboxDispatchPending,
   listThreadOutboxMessages,
   nextThreadOutboxLimitReleaseAtMs,
   markThreadOutboxSteering,
@@ -178,6 +180,58 @@ describe("threadOutbox store + drain", () => {
     );
     expect(sendQueuedMessage).toHaveBeenCalledTimes(2);
     expect(listThreadOutboxMessages()).toHaveLength(0);
+  });
+
+  it("holds a message queued behind a foreground send until that send's turn starts", async () => {
+    let current: QueueThreadView = IDLE;
+    const foreground = beginThreadOutboxForegroundDispatch({
+      threadKey: KEY,
+      messageId: "f1",
+      readView: () => current,
+    });
+    expect(isThreadOutboxDispatchPending(KEY)).toBe(true);
+    enqueueThreadOutboxMessage(queued("m2", "2026-07-24T11:00:00.000Z"));
+    const sendQueuedMessage = accepting();
+
+    // The foreground send is still on its way: the drain leaves the thread alone.
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+
+    foreground.onBeforeTurnStart();
+    foreground.end(true);
+    // Dispatched, but its turn has not started: m2 still waits.
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).not.toHaveBeenCalled();
+
+    current = view({
+      latestTurn: { turnId: "turn-2" as TurnId, state: "completed" },
+      projectedMessageIds: new Set(["f1"]),
+    });
+    await drainThreadOutbox(deps(current, sendQueuedMessage));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
+    expect(isThreadOutboxDispatchPending(KEY)).toBe(false);
+  });
+
+  it("releases the thread when a foreground send fails, and ends only once", async () => {
+    const first = beginThreadOutboxForegroundDispatch({
+      threadKey: KEY,
+      messageId: "f1",
+      readView: () => IDLE,
+    });
+    const second = beginThreadOutboxForegroundDispatch({
+      threadKey: KEY,
+      messageId: "f2",
+      readView: () => IDLE,
+    });
+    first.end(false);
+    first.end(false);
+    expect(isThreadOutboxDispatchPending(KEY)).toBe(true);
+    second.end(false);
+    expect(isThreadOutboxDispatchPending(KEY)).toBe(false);
+    enqueueThreadOutboxMessage(queued("m2", "2026-07-24T11:00:00.000Z"));
+    const sendQueuedMessage = accepting();
+    await drainThreadOutbox(deps(IDLE, sendQueuedMessage));
+    expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
   });
 
   it("removes an already projected message without sending it again", async () => {

@@ -90,10 +90,12 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
   readonly row: InboxThreadRow;
   readonly snoozeMenuPresets: ReadonlyArray<InboxSnoozeMenuPreset>;
   readonly onOpenThread: (row: InboxThreadRow) => void;
+  /** A finger went down on the row: the thread may be about to open. */
+  readonly onPressInThread?: ((row: InboxThreadRow) => void) | undefined;
   /** A delegated child inside its parent's open group: indented, and no "from" line. */
   readonly nested?: boolean;
 }) {
-  const { row, snoozeMenuPresets, onOpenThread } = props;
+  const { row, snoozeMenuPresets, onOpenThread, onPressInThread } = props;
   const { width } = useWindowDimensions();
   const background = useThemeColor("--color-screen");
   const actions = useMemo(
@@ -105,6 +107,7 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
     [row],
   );
   const onPress = useCallback(() => onOpenThread(row), [onOpenThread, row]);
+  const onPressIn = useCallback(() => onPressInThread?.(row), [onPressInThread, row]);
   const swipe = useMemo(
     () => buildInboxSwipeActions(row, snoozeMenuPresets),
     [row, snoozeMenuPresets],
@@ -121,7 +124,12 @@ export const InboxThreadMenuRow = memo(function InboxThreadMenuRow(props: {
       secondaryAction={swipe.secondary}
     >
       <MenuView shouldOpenOnLongPress actions={actions} onPressAction={onPressAction}>
-        <ThreadRow row={row} onPress={onPress} showParent={props.nested !== true} />
+        <ThreadRow
+          row={row}
+          onPress={onPress}
+          onPressIn={onPressIn}
+          showParent={props.nested !== true}
+        />
       </MenuView>
     </ThreadSwipeable>
   );
@@ -200,6 +208,8 @@ export const InboxScreen = memo(function InboxScreen(props: {
   readonly nowMs: number;
   readonly initialScrollOffset?: number;
   readonly onOpenThread: (row: InboxThreadRow) => void;
+  /** A finger went down on a row: Home prefetches the thread it may open. */
+  readonly onPressInThread?: (row: InboxThreadRow) => void;
   readonly onEmptyAction: (state: Exclude<InboxEmptyState, null>) => void;
   readonly onScrollOffset?: (offset: number) => void;
   /** Archived tasks on the machines in view; the list ends with a link to them. */
@@ -214,7 +224,7 @@ export const InboxScreen = memo(function InboxScreen(props: {
   /** The settled shelf starts open (Chats' Done chip lists only it). */
   readonly settledStartsOpen?: boolean;
 }) {
-  const { nowMs, onOpenThread, onScrollOffset } = props;
+  const { nowMs, onOpenThread, onPressInThread, onScrollOffset } = props;
   const onScrollEvent = props.onScroll;
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(props.settledStartsOpen === true);
@@ -365,11 +375,12 @@ export const InboxScreen = memo(function InboxScreen(props: {
           row={item.row}
           snoozeMenuPresets={snoozeMenuPresets}
           onOpenThread={onOpenThread}
+          onPressInThread={onPressInThread}
           nested={item.nested}
         />
       );
     },
-    [mutedColor, onOpenThread, snoozeMenuPresets, toggleDelegatedGroup],
+    [mutedColor, onOpenThread, onPressInThread, snoozeMenuPresets, toggleDelegatedGroup],
   );
   const listRef = useRef<LegendListRef>(null);
   const offsetRef = useRef(props.initialScrollOffset ?? 0);

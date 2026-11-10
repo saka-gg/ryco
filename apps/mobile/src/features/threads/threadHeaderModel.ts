@@ -101,7 +101,9 @@ export interface ThreadHeaderModel {
     | "Needs approval"
     | "Input needed"
     | "Archived"
-    | "Offline";
+    | "Offline"
+    /** Only the screen's own overlay: a Stop on its way (`threadStopping`). */
+    | "Stopping";
   readonly contextAccessibilityLabel: string;
   readonly reviewVisible: boolean;
   /**
