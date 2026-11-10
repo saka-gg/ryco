@@ -9,9 +9,11 @@
 //
 // Reads only: the changes a reader makes (comments, new issues, re-runs,
 // transitions) are sent by the screens and read these again afterwards
-// (`refreshProjectExplorerReads`). Node-owned content lives only in the atom
-// state — never persisted, never logged — and is dropped when the environment
-// is torn down or the retained-key budget is exceeded.
+// (`refreshProjectExplorerReads`). Node-owned content lives in the atom state —
+// never logged — and is dropped when the environment is torn down or the
+// retained-key budget is exceeded. The lists (issues, runs, work items) are
+// also kept on the device (the saved query cache, `persist`) and show at once
+// on the next open while they are read again; details and logs are not.
 import type {
   AtlassianProjectLink,
   EnvironmentId,
@@ -28,11 +30,18 @@ import type {
   WorkItemSummary,
 } from "@ryco/contracts";
 import { KEY_SEP } from "@ryco/client-runtime/rpc";
+import {
+  SourceControlIssueSummary as IssueSummarySchema,
+  SourceControlWorkflowRunListResult as WorkflowRunListSchema,
+} from "@ryco/contracts/source-control";
+import { WorkItemSummary as WorkItemSummarySchema } from "@ryco/contracts/work-items";
+import * as Schema from "effect/Schema";
 
 import { readRpcClient } from "../connection/environmentApi";
 import { cachedPayloadBytes } from "../persistence/cacheSize";
 import { createMobileQueryCache, runWithRetry } from "./mobileQueryCache";
 import { PullRequestNodeOfflineError } from "./pullRequestAtoms";
+import { schemaSavedQueryCodec } from "./savedQueryCodec";
 
 // A list reopened within this window answers from cache; pull to refresh and a
 // reconnect always read again. Runs move fastest, so they go stale soonest.
@@ -90,6 +99,7 @@ export const issueListQuery = explorerCache.defineQuery<
 >({
   label: "issues",
   staleTime: LIST_STALE_TIME_MS,
+  persist: schemaSavedQueryCodec(Schema.Array(IssueSummarySchema), 1),
   retainedKeyLimit: LIST_RETAINED_KEY_LIMIT,
   isEnabled: checkoutEnabled,
   buildKey: (input) => key(input.environmentId, input.cwd, input.state, input.limit),
@@ -193,6 +203,7 @@ export const workflowRunsQuery = explorerCache.defineQuery<
   SourceControlWorkflowRunListResult
 >({
   label: "runs",
+  persist: schemaSavedQueryCodec(WorkflowRunListSchema, 1),
   staleTime: RUNS_STALE_TIME_MS,
   retainedKeyLimit: LIST_RETAINED_KEY_LIMIT,
   isEnabled: checkoutEnabled,
@@ -297,6 +308,7 @@ export const workItemListQuery = explorerCache.defineQuery<
 >({
   label: "work-items",
   staleTime: LIST_STALE_TIME_MS,
+  persist: schemaSavedQueryCodec(Schema.Array(WorkItemSummarySchema), 1),
   retainedKeyLimit: LIST_RETAINED_KEY_LIMIT,
   isEnabled: projectEnabled,
   buildKey: (input) => key(input.environmentId, input.projectId, input.state, input.limit),
