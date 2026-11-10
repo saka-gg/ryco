@@ -20,6 +20,7 @@ import {
 
 import { defaultRelayScheduler, type RelaySessionScheduler } from "./RelayConnectionSession.ts";
 import { RelaySendQueue } from "./RelaySendQueue.ts";
+import { RelayTransferMeter } from "./relayTransferMeter.ts";
 
 /**
  * What a channel does with a message the send path would not take.
@@ -60,7 +61,13 @@ export type RelayChannelSendRefusal =
   /** The channel is gone, or was never registered. */
   | "channel_closed"
   /** The channel's outbound data sequence is exhausted. */
-  | "sequence_exhausted";
+  | "sequence_exhausted"
+  /**
+   * The channel's transfer meter cannot pay for this message yet
+   * (`relayTransferMeter.ts`). Ordinary backpressure: never closes the channel,
+   * whatever the caller's disposition, and a later attempt succeeds.
+   */
+  | "paced";
 
 export type RelayChannelSendResult =
   | { readonly accepted: true }
@@ -317,6 +324,8 @@ interface ChannelEntry {
   readonly role: RelayEffectiveRole;
   readonly session: RelayRpcChannelSession;
   readonly send: RelayChannelSendHandle;
+  /** What this channel spent of the Hub's per-channel transfer budget, as far as the node can tell. */
+  readonly meter: RelayTransferMeter;
   inboundSequence: number;
   outboundSequence: number;
   inboundPaused: boolean;
@@ -360,6 +369,7 @@ export class RelayChannelRegistry {
   readonly #onOutboundReady: () => void;
   readonly #connection: () => RelayConnectionIdentity | undefined;
   readonly #scheduler: RelaySessionScheduler;
+  readonly #transferMeter: () => RelayTransferMeter;
   readonly #channels = new Map<string, ChannelEntry>();
   readonly #preparing = new Set<string>();
   readonly #recentlyClosed = new Set<string>();
@@ -391,7 +401,10 @@ export class RelayChannelRegistry {
      * enforces, rather than a second, untestable clock.
      */
     readonly scheduler?: RelaySessionScheduler;
+    /** A fresh transfer meter per channel; injectable for tests. */
+    readonly transferMeter?: () => RelayTransferMeter;
   }) {
+    this.#transferMeter = options.transferMeter ?? (() => new RelayTransferMeter());
     this.#limits = options.limits;
     this.#version = { ...options.protocol };
     this.#sendQueue = options.sendQueue;
@@ -623,7 +636,11 @@ export class RelayChannelRegistry {
     refusal: RelayChannelSendRefusal,
     options: RelayChannelSendOptions,
   ): RelayChannelSendResult {
-    if ((options.onRefused ?? "close") === "close" && this.#channels.has(channelId as string)) {
+    if (
+      refusal !== "paced" &&
+      (options.onRefused ?? "close") === "close" &&
+      this.#channels.has(channelId as string)
+    ) {
       const reason: RelayCloseReason =
         refusal === "queue_full"
           ? "slow_consumer"
@@ -744,6 +761,7 @@ export class RelayChannelRegistry {
     let entry: ChannelEntry | undefined;
     try {
       const role = frame.effectiveRole;
+      const meter = this.#transferMeter();
       let outputSequence = 0;
       const messageLimits = () => ({
         maxChunkBytes: this.#limits.maxDataChunkBytes,
@@ -775,6 +793,11 @@ export class RelayChannelRegistry {
         if (prepared.kind === "error") {
           return this.#refuse(frame.channelId, prepared.reason, options);
         }
+        const payloadSizes = prepared.payloads.map((payload) => payload.byteLength);
+        // An admitted message was paced when it was admitted (`admit` below).
+        if (admittedBytes === 0 && !meter.allows(payloadSizes)) {
+          return this.#refuse(frame.channelId, "paced", options);
+        }
         const accepted = this.#sendQueue.enqueueDataBatch(
           prepared.payloads.map((payload, index) => ({
             type: "data",
@@ -786,6 +809,7 @@ export class RelayChannelRegistry {
           { admittedBytes },
         );
         if (!accepted) return this.#refuse(frame.channelId, "queue_full", options);
+        meter.spend(payloadSizes);
         outputSequence += prepared.payloads.length;
         entry.outboundSequence = outputSequence;
         this.#onOutboundReady();
@@ -797,6 +821,7 @@ export class RelayChannelRegistry {
         if (outputSequence > 0xffff_ffff) return undefined;
         const sizes = plannedRelayPayloadSizes(messageBytes, messageLimits());
         if (sizes === undefined) return undefined;
+        if (!meter.allows(sizes)) return undefined;
         const reservedBytes = sizes.reduce(
           (total, size) => total + size + DATA_FRAME_ADMISSION_OVERHEAD_BYTES,
           0,
@@ -845,6 +870,7 @@ export class RelayChannelRegistry {
         role,
         session,
         send,
+        meter,
         inboundSequence: 0,
         outboundSequence: 0,
         inboundPaused: false,
@@ -913,6 +939,8 @@ export class RelayChannelRegistry {
       await this.closeChannel(frame.channelId, "transfer_limit");
       return;
     }
+    // The client's bytes spend the same Hub budget as the node's.
+    entry.meter.spend([frame.payload.byteLength]);
     if (entry.inboundPaused) {
       entry.graceFrames += 1;
       // One message can now arrive as many frames, so a one-frame grace would
