@@ -99,7 +99,12 @@ import {
   samePath,
 } from "./checkoutInspection.ts";
 import { checkoutChangeBlockers, describeProtectedIgnored, plural } from "./checkoutStatus.ts";
-import { type DiskUsageCache, exclusiveDiskUsage, makeDiskUsageCache } from "./diskUsage.ts";
+import {
+  type DiskUsageCache,
+  type DiskUsageMeasurement,
+  exclusiveDiskUsage,
+  makeDiskUsageCache,
+} from "./diskUsage.ts";
 import {
   WorkspaceAccessPolicy,
   type WorkspaceAccessPolicyShape,
@@ -1536,7 +1541,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
           ),
         };
       }),
-    diskUsage: ({ projectId, refresh }) =>
+    diskUsage: ({ projectId, refresh, allowStale }) =>
       Effect.gen(function* () {
         const placement = yield* readWorkspacePlacement(deps.snapshots).pipe(
           Effect.mapError(() => lifecycleError("Workspace state is unavailable.")),
@@ -1559,22 +1564,49 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             path: checkoutPath,
           });
         }
+        type MeasuredCheckout = (typeof checkouts)[number] & {
+          readonly usage: DiskUsageMeasurement;
+          readonly measuredAtMs: number;
+          /** Set only for `allowStale` reads. */
+          readonly measuring: boolean | undefined;
+        };
+        const measureCheckout = (
+          checkout: (typeof checkouts)[number],
+          canonical: string,
+        ): Effect.Effect<MeasuredCheckout> => {
+          if (allowStale !== true) {
+            return Effect.promise(() => diskUsageCache.read(canonical, refresh === true)).pipe(
+              Effect.map((read) => ({
+                ...checkout,
+                path: canonical,
+                ...read,
+                measuring: undefined,
+              })),
+            );
+          }
+          // The last figure at once; a background measurement replaces it.
+          const peeked = diskUsageCache.peek(canonical, refresh === true);
+          return Effect.succeed({
+            ...checkout,
+            path: canonical,
+            usage: peeked.last?.usage ?? { bytes: null, partial: false },
+            measuredAtMs: peeked.last?.measuredAtMs ?? now(),
+            measuring: peeked.measuring,
+          });
+        };
         const measured = yield* Effect.forEach(
           checkouts,
           (checkout) =>
             deps.policy
               .assertExistingPath({ path: checkout.path, operation: "lifecycle.diskUsage" })
               .pipe(
-                Effect.flatMap((canonical) =>
-                  Effect.promise(() => diskUsageCache.read(canonical, refresh === true)).pipe(
-                    Effect.map((read) => ({ ...checkout, path: canonical, ...read })),
-                  ),
-                ),
+                Effect.flatMap((canonical) => measureCheckout(checkout, canonical)),
                 // A missing or out-of-bounds checkout is reported unmeasured.
-                Effect.orElseSucceed(() => ({
+                Effect.orElseSucceed((): MeasuredCheckout => ({
                   ...checkout,
                   usage: { bytes: null, partial: false },
                   measuredAtMs: now(),
+                  measuring: undefined,
                 })),
               ),
           { concurrency: "unbounded" },
@@ -1587,6 +1619,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             bytes: exclusive[index]!.bytes,
             partial: exclusive[index]!.partial,
             measuredAt: new Date(checkout.measuredAtMs).toISOString(),
+            ...(checkout.measuring === undefined ? {} : { measuring: checkout.measuring }),
           })),
         };
       }),

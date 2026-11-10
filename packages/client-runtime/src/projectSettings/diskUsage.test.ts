@@ -1,7 +1,19 @@
-import { WorktreeId } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import {
+  ProjectId,
+  WorktreeId,
+  type WorkspaceDiskUsageInput,
+  type WorkspaceDiskUsageResult,
+} from "@ryco/contracts";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { diskSizeText, diskText, formatDiskSize, readingTotal, sumDiskSizes } from "./diskUsage.ts";
+import {
+  diskSizeText,
+  diskText,
+  formatDiskSize,
+  readDiskUsageProgressively,
+  readingTotal,
+  sumDiskSizes,
+} from "./diskUsage.ts";
 
 const usage = (worktreeId: string, bytes: number | null, partial = false) => ({
   worktreeId: WorktreeId.make(worktreeId),
@@ -56,5 +68,77 @@ describe("disk sizes", () => {
     expect(diskSizeText({ bytes: 2048, partial: true })).toBe("At least 2.0 KB");
     expect(diskText(null, { status: "loading" })).toBe("Measuring…");
     expect(diskText(null, { status: "unavailable" })).toBe("Unavailable");
+  });
+});
+
+describe("readDiskUsageProgressively", () => {
+  const projectId = ProjectId.make("project-1");
+  const answer = (measuring: boolean | undefined, bytes: number | null) => ({
+    workspaces: [{ ...usage("main", bytes), ...(measuring === undefined ? {} : { measuring }) }],
+  });
+
+  it("shows the device's last figures at once and reads again until it is done", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: WorkspaceDiskUsageInput[] = [];
+      const answers = [answer(true, 900), answer(true, 900), answer(false, 1000)];
+      const results: Array<readonly [number | null, boolean]> = [];
+      readDiskUsageProgressively({
+        read: async (request) => {
+          requests.push(request);
+          return answers.shift()!;
+        },
+        projectId,
+        refresh: true,
+        onResult: (result, final) => results.push([result.workspaces[0]!.bytes, final]),
+        onError: () => {},
+      });
+      await vi.runAllTimersAsync();
+      expect(results).toEqual([
+        [900, false],
+        [900, false],
+        [1000, true],
+      ]);
+      // Only the first read asks to measure afresh; every read allows an old answer.
+      expect(requests).toEqual([
+        { projectId, allowStale: true, refresh: true },
+        { projectId, allowStale: true },
+        { projectId, allowStale: true },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("takes an older device's single waited answer as final, and stops when asked", async () => {
+    const results: boolean[] = [];
+    let reads = 0;
+    const read = async (): Promise<WorkspaceDiskUsageResult> => {
+      reads += 1;
+      return answer(undefined, 5);
+    };
+    readDiskUsageProgressively({
+      read,
+      projectId,
+      refresh: false,
+      onResult: (_, final) => results.push(final),
+      onError: () => {},
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(results).toEqual([true]);
+
+    const stop = readDiskUsageProgressively({
+      read,
+      projectId,
+      refresh: false,
+      onResult: (_, final) => results.push(final),
+      onError: () => {},
+    });
+    stop();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(results).toEqual([true]);
+    expect(reads).toBe(2);
   });
 });

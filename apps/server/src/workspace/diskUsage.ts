@@ -116,10 +116,24 @@ export function exclusiveDiskUsage(
   return result;
 }
 
-interface CachedMeasurement {
+interface Measured {
+  readonly usage: DiskUsageMeasurement;
   readonly measuredAtMs: number;
-  readonly usage: Promise<DiskUsageMeasurement>;
-  settled: boolean;
+}
+
+interface CachedMeasurement {
+  /** The newest settled measurement. */
+  last: Measured | null;
+  /** A measurement in progress and when it started. */
+  running: { readonly measuredAtMs: number; readonly done: Promise<Measured> } | null;
+}
+
+/** What the cache knows without waiting (`peek`). */
+export interface DiskUsagePeek {
+  /** The newest settled measurement; null when none finished yet. */
+  readonly last: Measured | null;
+  /** A newer measurement runs in the background. */
+  readonly measuring: boolean;
 }
 
 export interface DiskUsageCache {
@@ -128,6 +142,11 @@ export interface DiskUsageCache {
     root: string,
     refresh: boolean,
   ) => Promise<{ readonly usage: DiskUsageMeasurement; readonly measuredAtMs: number }>;
+  /**
+   * The path's last measurement at once, however old, starting a new one in the background when
+   * it is older than the TTL, missing, or `refresh` asks (unless one is already running).
+   */
+  readonly peek: (root: string, refresh: boolean) => DiskUsagePeek;
 }
 
 export function makeDiskUsageCache(options?: {
@@ -159,23 +178,46 @@ export function makeDiskUsageCache(options?: {
     }
   };
 
+  const entryFor = (key: string): CachedMeasurement => {
+    const existing = entries.get(key);
+    // Most recently used last, so the oldest entry is evicted first.
+    entries.delete(key);
+    const entry = existing ?? { last: null, running: null };
+    entries.set(key, entry);
+    if (entries.size > maxEntries) entries.delete(entries.keys().next().value!);
+    return entry;
+  };
+
+  /** The running measurement, or a new one when none runs. */
+  const start = (key: string, entry: CachedMeasurement) => {
+    if (entry.running !== null) return entry.running.done;
+    const measuredAtMs = now();
+    const done = limited(key).then((usage): Measured => {
+      const measured = { usage, measuredAtMs };
+      entry.last = measured;
+      if (entry.running?.done === done) entry.running = null;
+      return measured;
+    });
+    entry.running = { measuredAtMs, done };
+    return done;
+  };
+
+  const fresh = (entry: CachedMeasurement) =>
+    entry.last !== null && now() - entry.last.measuredAtMs < ttlMs;
+
   return {
     read: async (root, refresh) => {
       const key = path.resolve(root);
-      const cached = entries.get(key);
+      const entry = entryFor(key);
       // An in-flight measurement is shared, refresh or not: it is the newest one.
-      if (cached && (!cached.settled || (!refresh && now() - cached.measuredAtMs < ttlMs))) {
-        return { usage: await cached.usage, measuredAtMs: cached.measuredAtMs };
-      }
-      const usage = limited(key);
-      const next: CachedMeasurement = { measuredAtMs: now(), usage, settled: false };
-      void usage.then(() => {
-        next.settled = true;
-      });
-      entries.delete(key);
-      entries.set(key, next);
-      if (entries.size > maxEntries) entries.delete(entries.keys().next().value!);
-      return { usage: await usage, measuredAtMs: next.measuredAtMs };
+      if (entry.running === null && !refresh && fresh(entry)) return entry.last!;
+      return start(key, entry);
+    },
+    peek: (root, refresh) => {
+      const key = path.resolve(root);
+      const entry = entryFor(key);
+      if (entry.running === null && (refresh || !fresh(entry))) void start(key, entry);
+      return { last: entry.last, measuring: entry.running !== null };
     },
   };
 }

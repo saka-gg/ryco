@@ -14,6 +14,7 @@ import {
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Duration, Effect, Layer, Logger, Option } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
 import { AgentControlAuditRepositoryLive } from "../../persistence/Layers/AgentControlAudit.ts";
@@ -703,23 +704,24 @@ it("sleeps until the next due schedule and retries one it could not claim", () =
   assert.strictEqual(sleep({ retry: true }), 30_000, "a run recovery retries");
 });
 
-it.live("wakes for a new schedule and runs it when due, without a fixed tick", () =>
+it.effect("wakes for a new schedule and sleeps only until it is due", () =>
   Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
     const repository = yield* AgentControlAutomationRepository;
     const automations = yield* AgentControlAutomationService;
-    // Due in 400 ms; the scheduler's longest sleep is an hour, so only the wake on the lifecycle
-    // change and the sleep until the due time can run it.
-    const runAt = new Date(Date.now() + 400).toISOString();
-    const automationId = AgentControlAutomationId.make("automation-wakes-when-due");
+    yield* Effect.yieldNow;
+    // Due in ten minutes; the scheduler's longest sleep is an hour.
+    const runAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const automationId = AgentControlAutomationId.make("automation-sleeps-until-due");
     yield* automations.applyLifecycle({
-      proposalId: AgentControlProposalId.make("proposal-wakes-when-due"),
-      requestId: AgentControlRequestId.make("request-wakes-when-due"),
+      proposalId: AgentControlProposalId.make("proposal-sleeps-until-due"),
+      requestId: AgentControlRequestId.make("request-sleeps-until-due"),
       principal,
       planVersion: 1,
       plan: {
         kind: "createAutomation",
         automationId,
-        definition: makeAutomation("wakes-when-due", runAt).definition,
+        definition: makeAutomation("sleeps-until-due", runAt).definition,
       },
       planDigest: "f".repeat(64),
       riskTags: [AGENT_CONTROL_RISK_TAGS.createsAutomation],
@@ -731,12 +733,15 @@ it.live("wakes for a new schedule and runs it when due, without a fixed tick", (
       decidedAt: new Date().toISOString(),
       result: null,
     });
-    assert.deepStrictEqual(yield* repository.listRuns({ automationId, limit: 10 }), []);
-    let runs = 0;
-    for (let attempt = 0; attempt < 40 && runs === 0; attempt += 1) {
-      yield* Effect.sleep(Duration.millis(50));
-      runs = (yield* repository.listRuns({ automationId, limit: 10 })).length;
-    }
-    assert.strictEqual(runs, 1);
+    const runCount = Effect.gen(function* () {
+      for (let attempt = 0; attempt < 100; attempt += 1) yield* Effect.yieldNow;
+      return (yield* repository.listRuns({ automationId, limit: 10 })).length;
+    });
+    assert.strictEqual(yield* runCount, 0);
+    // Ten minutes pass: claims compare against the wall clock, so the row is made due too.
+    yield* sql`UPDATE agent_control_automations SET next_run_at = ${new Date(Date.now() - 1_000).toISOString()} WHERE automation_id = ${automationId}`;
+    yield* TestClock.adjust(Duration.minutes(11));
+    assert.strictEqual(yield* runCount, 1);
+    // The layer is built in the test's context, so the scheduler sleeps on the test clock.
   }).pipe(Effect.provide(makeAutomationLayer(true, { schedulerIntervalMs: 3_600_000 }))),
 );

@@ -16,6 +16,7 @@ import {
   OrchestrationWorktreeShell,
   ProjectId,
   ThreadId,
+  type WorkspaceDiskUsage,
   type WorkspaceLifecycleSummary,
   WorktreeId,
 } from "@ryco/contracts";
@@ -779,6 +780,28 @@ describe("workspace lifecycle service", () => {
       bytes: null,
       partial: false,
     });
+  });
+
+  it("answers a stale-allowed read at once and fills it in from the background", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.checkout, "large.bin"), Buffer.alloc(512 * 1024));
+    const { first, settled, waited } = await f.run((s) =>
+      Effect.gen(function* () {
+        const topicOf = (result: { readonly workspaces: ReadonlyArray<WorkspaceDiskUsage> }) =>
+          result.workspaces.find((workspace) => workspace.worktreeId === topicId);
+        const first = topicOf(yield* s.diskUsage({ projectId, allowStale: true }));
+        // A read without it waits, here for the measurement the first read started, and says
+        // nothing about measuring.
+        const waited = topicOf(yield* s.diskUsage({ projectId }));
+        const settled = topicOf(yield* s.diskUsage({ projectId, allowStale: true }));
+        return { first, settled, waited };
+      }),
+    );
+    expect(first).toMatchObject({ bytes: null, measuring: true });
+    expect(settled?.measuring).toBe(false);
+    expect(settled?.bytes).toBeGreaterThanOrEqual(512 * 1024);
+    expect(waited).not.toHaveProperty("measuring");
+    expect(waited?.bytes).toBe(settled?.bytes);
   });
 
   it("recreates a removed checkout on its existing branch", async () => {
