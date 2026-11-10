@@ -1,4 +1,8 @@
 import { recordWsConnectionOpened } from "@ryco/client-runtime/rpc";
+import {
+  clearWorkspaceFileReadCache,
+  WORKSPACE_FILE_CHUNKS_IN_FLIGHT,
+} from "@ryco/client-runtime/rpc/workspaceFileRead";
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import "../index.css";
 
@@ -469,6 +473,8 @@ describe("PreviewPanel", () => {
   beforeEach(() => {
     resetPreviewFileSessionsForTests();
     previewHarness.reset();
+    // Previews read before are remembered by fingerprint; every test reads anew.
+    clearWorkspaceFileReadCache();
     resetAppAtomRegistryForTests();
     resetProjectPreviewAtomsForTests();
     recordWsConnectionOpened({ environmentId: EnvironmentId.make("environment-local") });
@@ -955,7 +961,8 @@ describe("PreviewPanel", () => {
     await page.getByRole("button", { name: "Try again" }).click();
     const image = page.getByRole("img", { name: "assets/logo.png" });
     await expect.element(image).toHaveAttribute("src", expect.stringMatching(/^blob:/));
-    expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual([0, 32, 0, 32, 64]);
+    // The rest of the file is read a few chunks at a time, on both tries.
+    expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual([0, 32, 64, 0, 32, 64]);
   });
 
   it("renders SVG previews from the text read", async () => {
@@ -1556,8 +1563,8 @@ describe("PreviewPanel", () => {
 
       mounted = await renderPreviewPanel();
       await page.getByRole("button", { name: "docs/sample.pdf" }).click();
-      // The first chunk arrived; the second is in flight.
-      await vi.waitFor(() => expect(previewHarness.chunkReads).toHaveLength(2));
+      // The first chunk arrived; the next ones are in flight.
+      await vi.waitFor(() => expect(previewHarness.chunkReads.length).toBeGreaterThanOrEqual(2));
       await expect
         .element(page.getByRole("status", { name: /^Loading PDF… / }))
         .toBeInTheDocument();
@@ -1568,10 +1575,14 @@ describe("PreviewPanel", () => {
         .toHaveValue("one");
       release();
       await waitForLayout();
-      expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual([
-        0,
-        previewHarness.chunkBytes,
-      ]);
+      // The chunks in flight when the other file opened, and none after.
+      const chunks = Math.ceil(pdfFixture().length / previewHarness.chunkBytes);
+      expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual(
+        Array.from(
+          { length: 1 + Math.min(WORKSPACE_FILE_CHUNKS_IN_FLIGHT, chunks - 1) },
+          (_, index) => index * previewHarness.chunkBytes,
+        ),
+      );
     });
 
     it("offers to read a PDF again after a read fails mid-way", async () => {

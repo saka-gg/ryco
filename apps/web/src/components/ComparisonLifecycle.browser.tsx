@@ -93,7 +93,13 @@ describe("comparison lifecycle adapter", () => {
     const atom = wsConnectionStatusForEnvironmentAtom(environmentId);
     appAtomRegistry.set(atom, { ...appAtomRegistry.get(atom), phase: "disconnected" });
     resolvePending(snapshot("obsolete"));
-    await expect.element(screen.getByRole("status", { name: "Patch" })).toMatchTextContent("empty");
+    // A disconnect keeps the comparison on screen; the read it interrupted is dropped.
+    await expect
+      .element(screen.getByRole("status", { name: "Loading" }))
+      .toMatchTextContent("false");
+    await expect
+      .element(screen.getByRole("status", { name: "Patch" }))
+      .toMatchTextContent("initial");
     fixture.read.mockResolvedValueOnce(snapshot("reconnected"));
     appAtomRegistry.set(atom, {
       ...appAtomRegistry.get(atom),
@@ -103,6 +109,8 @@ describe("comparison lifecycle adapter", () => {
     await expect
       .element(screen.getByRole("status", { name: "Patch" }))
       .toMatchTextContent("reconnected");
+    // The re-read named the comparison it held, so an unchanged one could come back empty.
+    expect(fixture.read.mock.calls.at(-1)?.[0]).toMatchObject({ knownRevision: "initial" });
     await screen.unmount();
   });
 });

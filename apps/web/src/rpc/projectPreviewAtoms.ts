@@ -13,7 +13,7 @@ import {
 } from "@ryco/client-runtime/rpc";
 import { listEntriesSince, readFileSince } from "@ryco/client-runtime/state/files";
 
-import { onCheckoutFilesChanged } from "./workspaceChangeInvalidation";
+import { onCheckoutFilesChanged } from "./checkoutFileChanges";
 
 // Like the phone: a turn that changed files invalidates its checkout's tree
 // (the runtime's workspace change flush), and a re-read the node answers

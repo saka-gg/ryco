@@ -3,6 +3,7 @@ import { createWorkspaceChangeQueue } from "@ryco/client-runtime/state/orchestra
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 
 import { selectEnvironmentState, useStore } from "~/store";
+import { notifyCheckoutFilesChanged } from "./checkoutFileChanges";
 import { invalidateProjectSearchEntries } from "./projectAtoms";
 import { invalidateCheckpointDiffChanges } from "./providerAtoms";
 
@@ -19,19 +20,6 @@ export function resolveThreadCheckoutCwd(
   return projectScriptCwd({ project: { cwd: project.cwd }, worktreePath: shell.worktreePath });
 }
 
-type CheckoutChangeListener = (environmentId: EnvironmentId, cwd: string | null) => void;
-const checkoutChangeListeners = new Set<CheckoutChangeListener>();
-
-/**
- * Lazily loaded file caches (the files panel's tree and reads) listen here
- * instead of being imported by the runtime service, which is on the boot path.
- * `cwd` null: every checkout of the environment.
- */
-export function onCheckoutFilesChanged(listener: CheckoutChangeListener): () => void {
-  checkoutChangeListeners.add(listener);
-  return () => checkoutChangeListeners.delete(listener);
-}
-
 /**
  * The web binding of the shared workspace change queue: a flush drops the
  * `@` search, file tree and file reads of the changed checkouts and only the
@@ -45,7 +33,7 @@ export function createWebWorkspaceChangeQueue() {
       resolveThreadCheckoutCwd(environmentId, threadId),
     invalidateCheckout: (environmentId, cwd) => {
       invalidateProjectSearchEntries(cwd === null ? { environmentId } : { environmentId, cwd });
-      for (const listener of checkoutChangeListeners) listener(environmentId, cwd);
+      notifyCheckoutFilesChanged(environmentId, cwd);
     },
     invalidateCheckpointDiffs: (changes) => invalidateCheckpointDiffChanges(changes),
   });
