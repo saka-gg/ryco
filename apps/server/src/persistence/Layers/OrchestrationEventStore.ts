@@ -24,7 +24,9 @@ import {
 import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
+  type OrchestrationEventSummary,
 } from "../Services/OrchestrationEventStore.ts";
+import { lastSequenceBefore } from "./EventLogTimeSearch.ts";
 
 const decodeEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const UnknownFromJsonString = Schema.fromJsonString(Schema.Unknown);
@@ -307,21 +309,41 @@ const makeEventStore = Effect.gen(function* () {
     execute: () => sql`SELECT MAX(sequence) AS "sequence" FROM orchestration_events`,
   });
 
-  const readRecentEventRows = SqlSchema.findAll({
-    Request: Schema.Struct({ since: IsoDateTime, limit: Schema.Int }),
-    Result: OrchestrationEventPersistedRowSchema,
-    execute: ({ since, limit }) => sql`
-      SELECT sequence, event_id AS "eventId", event_type AS "type",
-        aggregate_kind AS "aggregateKind", stream_id AS "aggregateId",
-        occurred_at AS "occurredAt", command_id AS "commandId",
-        causation_event_id AS "causationEventId", correlation_id AS "correlationId",
-        payload_json AS "payload", metadata_json AS "metadata"
-      FROM orchestration_events
-      WHERE occurred_at >= ${since}
-      ORDER BY sequence DESC
-      LIMIT ${limit}
-    `,
-  });
+  /**
+   * Summaries only: no payload is read, and `providerAttributed` comes from two metadata keys. The
+   * scan starts at the first event at or after `since` (EventLogTimeSearch.ts) instead of
+   * filtering the whole log by `occurred_at`, which has no index: with a recent `since` that
+   * matched few events, the filter read every row, 6.8 s with a cold cache on a 4 GB log.
+   */
+  const readRecentSummaryRows = (since: string, limit: number) =>
+    Effect.gen(function* () {
+      const [headRow] = yield* sql<{ readonly head: number | null }>`
+        SELECT MAX(sequence) AS head FROM orchestration_events
+      `;
+      const from = (yield* lastSequenceBefore(sql, since, Number(headRow?.head ?? 0))) + 1;
+      return yield* sql<{
+        readonly sequence: number;
+        readonly eventId: string;
+        readonly type: string;
+        readonly aggregateKind: string;
+        readonly aggregateId: string;
+        readonly occurredAt: string;
+        readonly commandId: string | null;
+        readonly providerMetadata: number;
+      }>`
+        SELECT sequence, event_id AS "eventId", event_type AS "type",
+          aggregate_kind AS "aggregateKind", stream_id AS "aggregateId",
+          occurred_at AS "occurredAt", command_id AS "commandId",
+          (
+            json_extract(metadata_json, '$.providerTurnId') IS NOT NULL
+            OR json_extract(metadata_json, '$.providerItemId') IS NOT NULL
+          ) AS "providerMetadata"
+        FROM orchestration_events
+        WHERE sequence >= ${from} AND occurred_at >= ${since}
+        ORDER BY sequence DESC
+        LIMIT ${limit}
+      `;
+    });
 
   const findEventAfter = SqlSchema.findOneOption({
     Request: HasEventAfterRequestSchema,
@@ -568,25 +590,21 @@ const makeEventStore = Effect.gen(function* () {
     );
 
   const readRecent: OrchestrationEventStoreShape["readRecent"] = (input) =>
-    readRecentEventRows({
-      since: input.since,
-      limit: Math.min(Math.max(1, Math.floor(input.limit)), 500),
-    }).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "OrchestrationEventStore.readRecent:query",
-          "OrchestrationEventStore.readRecent:decodeRows",
-        ),
+    readRecentSummaryRows(input.since, Math.min(Math.max(1, Math.floor(input.limit)), 500)).pipe(
+      Effect.map((rows) =>
+        rows.map((row): OrchestrationEventSummary => ({
+          sequence: Number(row.sequence),
+          eventId: row.eventId as OrchestrationEventSummary["eventId"],
+          type: row.type as OrchestrationEventSummary["type"],
+          aggregateKind: row.aggregateKind as OrchestrationEventSummary["aggregateKind"],
+          aggregateId: row.aggregateId,
+          occurredAt: row.occurredAt,
+          commandId: row.commandId,
+          providerAttributed:
+            row.commandId?.startsWith("provider:") === true || Number(row.providerMetadata) === 1,
+        })),
       ),
-      Effect.flatMap((rows) =>
-        Effect.forEach(rows, (row) =>
-          decodeEvent(row).pipe(
-            Effect.mapError(
-              toPersistenceDecodeError("OrchestrationEventStore.readRecent:rowToEvent"),
-            ),
-          ),
-        ),
-      ),
+      Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.readRecent:query")),
     );
 
   const hasEventAfter: OrchestrationEventStoreShape["hasEventAfter"] = (input) =>

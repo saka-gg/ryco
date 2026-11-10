@@ -181,17 +181,20 @@ layer("OrchestrationEventStore", (it) => {
     Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;
       const since = "2026-08-18T00:00:00.000Z";
-      for (const index of [1, 2, 3]) {
+      for (const index of [0, 1, 2, 3, 4]) {
         yield* eventStore.append({
           type: "project.created",
           eventId: EventId.make(`evt-store-recent-${index}`),
           aggregateKind: "project",
           aggregateId: ProjectId.make(`project-recent-${index}`),
-          occurredAt: `2026-08-18T00:00:0${index}.000Z`,
-          commandId: CommandId.make(`cmd-store-recent-${index}`),
+          // Event 0 is older than `since`, event 4 newer than every later probe.
+          occurredAt: index === 0 ? "2026-08-17T23:59:59.000Z" : `2026-08-18T00:00:0${index}.000Z`,
+          commandId: CommandId.make(
+            index === 2 ? `provider:recent-${index}` : `cmd-store-recent-${index}`,
+          ),
           causationEventId: null,
           correlationId: CommandId.make(`cmd-store-recent-${index}`),
-          metadata: {},
+          metadata: index === 3 ? { providerTurnId: "turn-recent" } : {},
           payload: {
             projectId: ProjectId.make(`project-recent-${index}`),
             title: `Recent Project ${index}`,
@@ -204,10 +207,27 @@ layer("OrchestrationEventStore", (it) => {
         });
       }
 
-      const recent = yield* eventStore.readRecent!({ since, limit: 2 });
+      const recent = yield* eventStore.readRecent!({ since, limit: 3 });
       assert.deepEqual(
-        recent.map((event) => event.eventId),
-        [EventId.make("evt-store-recent-3"), EventId.make("evt-store-recent-2")],
+        recent.map((event) => [event.eventId, event.providerAttributed]),
+        [
+          [EventId.make("evt-store-recent-4"), false],
+          [EventId.make("evt-store-recent-3"), true],
+          [EventId.make("evt-store-recent-2"), true],
+        ],
+      );
+      assert.notProperty(recent[0], "payload");
+      assert.deepEqual(
+        (yield* eventStore.readRecent!({ since, limit: 50 }))
+          .map((event) => event.eventId)
+          .filter((eventId) => eventId.startsWith("evt-store-recent-")),
+        [4, 3, 2, 1].map((index) => EventId.make(`evt-store-recent-${index}`)),
+        "nothing older than since",
+      );
+      assert.isFalse(
+        (yield* eventStore.readRecent!({ since: "2026-08-18T00:00:05.000Z", limit: 50 })).some(
+          (event) => event.eventId.startsWith("evt-store-recent-"),
+        ),
       );
     }),
   );

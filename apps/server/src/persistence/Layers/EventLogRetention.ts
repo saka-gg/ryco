@@ -48,6 +48,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
 import { ORCHESTRATION_PROJECTOR_NAMES } from "../../orchestration/projectorNames.ts";
+import { lastSequenceBefore } from "./EventLogTimeSearch.ts";
 import type {
   EventLogCompactionDeleteBatch,
   EventLogCompactionMode,
@@ -137,27 +138,6 @@ const globalUpperBound = (sql: SqlClient.SqlClient, compactedThroughSequence: nu
         ? Number.POSITIVE_INFINITY
         : Number(row.intentFloor) - 1;
     return Math.max(0, Math.min(projected, intentFloor, compactedThroughSequence));
-  });
-
-/** Largest sequence whose event is older than `cutoffIso` (0 when none); holes tolerated. */
-const lastSequenceBefore = (sql: SqlClient.SqlClient, cutoffIso: string, head: number) =>
-  Effect.gen(function* () {
-    let lo = 0;
-    let hi = head;
-    while (lo < hi) {
-      const mid = lo + Math.ceil((hi - lo) / 2);
-      const [row] = yield* sql<{ readonly sequence: number; readonly occurredAt: string | null }>`
-        SELECT sequence, occurred_at AS "occurredAt" FROM orchestration_events
-        WHERE sequence >= ${mid} AND sequence <= ${hi}
-        ORDER BY sequence LIMIT 1
-      `;
-      if (row === undefined || row.occurredAt === null || !(row.occurredAt < cutoffIso)) {
-        hi = mid - 1;
-      } else {
-        lo = Number(row.sequence);
-      }
-    }
-    return lo;
   });
 
 /** A thread that an open completion return or a pending restart continuation still reads. */

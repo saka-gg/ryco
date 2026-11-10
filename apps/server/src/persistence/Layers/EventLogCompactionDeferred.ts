@@ -37,9 +37,11 @@ export const ONLINE_COMPACTION_PASS_OPTIONS: EventLogCompactionPassOptions = {
   maxScanSequences: 250_000,
   maxWallMs: 120_000,
   selectionPageSequences: 2_000,
-  // Deleting costs ~75 µs per event on the main connection (indexes, the statistics partial
-  // index reads each payload, overflow pages): 200 events stay near 15 ms even when a batch of
-  // large payloads follows a fast one.
+  // Deleting costs ~75 µs per event on the main connection with a warm cache (indexes, the
+  // statistics partial index reads each payload, overflow pages): 200 events stay near 15 ms even
+  // when a batch of large payloads follows a fast one. A pass starts cold, 6 hours after the last
+  // one, at up to ~0.4 ms per event, so its first batch is small and grows while batches stay fast.
+  // Retention adapts the same way (at most its own `deleteBatch`).
   deleteBatch: { initial: 25, min: 10, max: 200, targetMs: 8 },
   interBatchPauseMs: 8,
   idleRatio: 3,
