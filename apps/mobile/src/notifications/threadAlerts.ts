@@ -13,6 +13,7 @@ import * as Linking from "expo-linking";
 import * as Notifications from "expo-notifications";
 import { AppState, Platform } from "react-native";
 
+import { requestSavedThreadBody } from "../persistence/savedThreadBodies";
 import type { Preferences } from "../state/preferencesStore";
 import {
   NOTIFICATION_CATEGORIES,
@@ -190,6 +191,8 @@ export function createExpoThreadAlertsPlatform(
       return () => subscription.remove();
     },
     openThread: (ref) => {
+      // The thread's saved body (text, open cards) is read while it opens.
+      requestSavedThreadBody(ref.environmentId, ref.threadId);
       // Alerts run outside the workspace navigator; the app's own deep link
       // reaches it, through the access gate when that locked meanwhile.
       void Linking.openURL(Linking.createURL(threadAlertLinkPath(ref))).catch(() => undefined);

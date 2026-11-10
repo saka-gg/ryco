@@ -1,11 +1,13 @@
 import { hostedHubStore, type HostedHubState } from "@ryco/client-runtime/authorization";
 import { planEvictionsToCapacity } from "@ryco/client-runtime/connection";
 import type { KVService } from "@ryco/client-runtime/platform";
+import type { AppState, CachedEnvironmentShellSnapshot } from "@ryco/client-runtime/state/threads";
+import { hydrateCachedThreadBodies } from "@ryco/client-runtime/state/threads/threadBodyCache";
 import {
   MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS,
   MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES,
 } from "@ryco/client-runtime/state/workspace";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import {
   encodeStoredHubNodeRoster,
@@ -24,12 +26,15 @@ import {
 } from "../state/preferencesStore";
 import { useStore, type EnvironmentState } from "../state/threadsRuntime";
 import {
-  createEnvironmentSnapshotSerializer,
+  createEnvironmentRowSerializer,
+  decodeStoredEnvironmentEnvelope,
   decodeStoredEnvironmentSnapshot,
-  type EnvironmentSnapshotSerializer,
-  mayHoldStoredContent,
-  toCachedEnvironmentShellSnapshot,
-  withoutStoredContent,
+  decodeStoredEnvironmentThread,
+  decodeStoredThreadBody,
+  environmentRowsFromLegacyRecord,
+  type EnvironmentRows,
+  type EnvironmentRowSerializer,
+  type StoredEnvironmentSnapshotThread,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
 } from "./environmentSnapshotCodec";
 import { purgeEnvironmentDeviceData } from "./environmentDevicePurge";
@@ -40,30 +45,40 @@ import {
   type SavedQueryStoreHandle,
 } from "./savedQueryStore";
 import { purgeTaskCache } from "../features/tasks/taskCacheKeys";
+import {
+  forgetEnvironmentSavedThreadBodies,
+  forgetSavedThreadBody,
+  installSavedThreadBodyLoader,
+  replaceSavedThreadBodyKeys,
+  setEnvironmentSavedThreadBodyKeys,
+} from "./savedThreadBodies";
 import { hydrateSavedServerConfigs, installServerConfigSaving } from "./serverConfigPersistence";
-import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
+import { createSnapshotDb, type SnapshotDb } from "./snapshotDb";
 
 /**
- * Orchestrates the per-environment snapshot cache (wave 2): debounced capture
- * of settled projections out of the threads store, cold-start hydration back
+ * Orchestrates the per-environment snapshot cache: debounced capture of
+ * settled projections out of the threads store, cold-start hydration back
  * into it, the persisted Hub node roster mirror (amendment A), and
  * revocation/removal invalidation. All I/O failures degrade to a cache miss
  * with a console warning — persistence must never take the live sync path
  * down with it.
  *
- * Bounded recent message text is stored with each environment's shell while
- * the "keep recent conversations" device setting is on. It is display-only:
- * hydrated as cached message bodies that live data replaces, and removed
- * wherever the shell is, and when the setting is turned off.
+ * A machine is stored as rows (`snapshotDb.ts`): an envelope, one row per
+ * thread, and one body per thread with saved text. A capture writes only the
+ * rows that changed, in one transaction. Launch reads envelopes and thread
+ * rows only; a thread's body (recent message text and its open approval or
+ * question cards) is read when the thread opens (`savedThreadBodies.ts`).
+ * Bodies are kept only while the "keep recent conversations" device setting
+ * is on; they are display-only: live data replaces them, and they are removed
+ * wherever the machine's rows are, and when the setting is turned off.
  */
 
 /**
- * Trailing debounce on projection writes, bounded by a maximum wait. Every
- * capture writes the whole environment row (up to the per-environment byte
- * cap), so a busy environment is written at most once per window rather than
- * after every short gap in its event stream; the maximum wait keeps a
- * continuously active one from never being written, and backgrounding flushes
- * whatever is pending, so the longer window costs no durability.
+ * Trailing debounce on projection writes, bounded by a maximum wait. A
+ * busy environment is written at most once per window rather than after every
+ * short gap in its event stream; the maximum wait keeps a continuously active
+ * one from never being written, and backgrounding flushes whatever is
+ * pending, so the longer window costs no durability.
  */
 export const SNAPSHOT_WRITE_DEBOUNCE_MS = 2_000;
 export const SNAPSHOT_WRITE_MAX_WAIT_MS = 10_000;
@@ -71,26 +86,27 @@ export const SNAPSHOT_WRITE_MAX_WAIT_MS = 10_000;
  * An environment written within the last `SNAPSHOT_BUSY_WINDOW_MS` and dirty
  * again is busy (an agent streams into it): it is written at most once per
  * `SNAPSHOT_BUSY_MAX_WAIT_MS`, after `SNAPSHOT_BUSY_DEBOUNCE_MS` of quiet. A
- * capture re-serializes the streaming thread's content and hands the whole
- * row (up to the per-environment byte cap) to SQLite, so while an agent runs
- * this cuts that JS-thread work threefold; backgrounding still flushes at
- * once, so nothing a person saw is lost when the app is suspended.
+ * capture re-captures the streaming thread's body (up to its text limit) and
+ * writes it whole, so while an agent runs this cuts that work and those bytes
+ * threefold; backgrounding still flushes at once, so nothing a person saw is
+ * lost when the app is suspended.
  */
 export const SNAPSHOT_BUSY_WINDOW_MS = 60_000;
 export const SNAPSHOT_BUSY_DEBOUNCE_MS = 5_000;
 export const SNAPSHOT_BUSY_MAX_WAIT_MS = 30_000;
 const ROSTER_WRITE_DEBOUNCE_MS = 1_000;
 /**
- * Environments whose thread fragments are kept between captures. Fragments
- * hold each thread's serialized JSON (up to the per-environment byte cap), and
- * only an environment captured again and again — one an agent is running in —
+ * Environments whose row fragments are kept between captures. Fragments hold
+ * each thread's serialized JSON (up to the per-environment byte cap), and only
+ * an environment captured again and again — one an agent is running in —
  * gains from them, so only the most recently captured few keep theirs.
  */
 const MAX_RETAINED_SNAPSHOT_SERIALIZERS = 2;
 /**
  * Total-across-environments bounds, enforced with the shared eviction policy
- * (count cap + byte budget, LRU) from client-runtime. Per-environment bounds
- * are applied at capture in environmentSnapshotCodec.ts.
+ * (count cap + byte budget, LRU) from client-runtime over each machine's
+ * summed rows. Per-environment bounds are applied at capture in
+ * environmentSnapshotCodec.ts.
  */
 const MAX_CACHED_ENVIRONMENT_SNAPSHOTS = MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS;
 const MAX_CACHED_ENVIRONMENT_SNAPSHOT_TOTAL_BYTES = MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES;
@@ -110,10 +126,11 @@ interface ThreadsStoreLike {
     readonly hydrateEnvironmentStatesFromCache: (
       entries: ReadonlyArray<{
         readonly environmentId: EnvironmentId;
-        readonly cached: ReturnType<typeof toCachedEnvironmentShellSnapshot>;
+        readonly cached: CachedEnvironmentShellSnapshot;
       }>,
       onEntryError?: (environmentId: EnvironmentId, error: unknown) => void,
     ) => void;
+    readonly applyStateTransition: (transition: (state: AppState) => AppState) => void;
     readonly removeEnvironmentState: (environmentId: EnvironmentId) => void;
   };
 }
@@ -157,6 +174,11 @@ export interface SnapshotPersistenceDeps {
   readonly yieldToEventLoop?: () => Promise<void>;
   /** Message text is never stored or shown from storage unless this says so. */
   readonly contentCache?: ThreadContentCacheSetting;
+  /**
+   * The sequence the store's body of a thread is current to (the supervisor's
+   * `readThreadDetailSequence`), saved with the thread's body.
+   */
+  readonly readThreadSequence?: (environmentId: EnvironmentId, threadId: ThreadId) => number | null;
   readonly debounceMs?: number;
   readonly maxWaitMs?: number;
   /** Write window of a busy environment; defaults to the plain window when that is overridden. */
@@ -178,7 +200,7 @@ const yieldWithTimeout = (): Promise<void> =>
 /**
  * The store slices a capture persists. The threads store updates immutably, so
  * a capture whose slices are all identical to the last written ones would
- * serialize exactly the same projection.
+ * write exactly the same rows.
  */
 interface PersistedSlices {
   readonly projectIds: unknown;
@@ -188,9 +210,11 @@ interface PersistedSlices {
   readonly threadIds: unknown;
   readonly threadShellById: unknown;
   readonly sidebarThreadSummaryById: unknown;
-  /** Null while message text is not stored, so a change of the setting is a change here. */
+  /** Null while bodies are not stored, so a change of the setting is a change here. */
   readonly messageIdsByThreadId: unknown;
   readonly messageByThreadId: unknown;
+  readonly activityIdsByThreadId: unknown;
+  readonly activityByThreadId: unknown;
 }
 
 function persistedSlices(state: EnvironmentState, includeContent: boolean): PersistedSlices {
@@ -204,6 +228,8 @@ function persistedSlices(state: EnvironmentState, includeContent: boolean): Pers
     sidebarThreadSummaryById: state.sidebarThreadSummaryById,
     messageIdsByThreadId: includeContent ? state.messageIdsByThreadId : null,
     messageByThreadId: includeContent ? state.messageByThreadId : null,
+    activityIdsByThreadId: includeContent ? state.activityIdsByThreadId : null,
+    activityByThreadId: includeContent ? state.activityByThreadId : null,
   };
 }
 
@@ -217,7 +243,58 @@ function samePersistedSlices(left: PersistedSlices, right: PersistedSlices): boo
     left.threadShellById === right.threadShellById &&
     left.sidebarThreadSummaryById === right.sidebarThreadSummaryById &&
     left.messageIdsByThreadId === right.messageIdsByThreadId &&
-    left.messageByThreadId === right.messageByThreadId
+    left.messageByThreadId === right.messageByThreadId &&
+    left.activityIdsByThreadId === right.activityIdsByThreadId &&
+    left.activityByThreadId === right.activityByThreadId
+  );
+}
+
+/** What a machine's stored rows were written from: each row's hash, and each body's sequence. */
+interface StoredRows {
+  /** The envelope payload last written in this process; null when not known. */
+  readonly envelope: string | null;
+  readonly threads: ReadonlyMap<string, number>;
+  readonly bodies: ReadonlyMap<string, { readonly hash: number; readonly sequence: number | null }>;
+}
+
+/** The rows to write to turn `stored` into `rows`. */
+function planRowWrites(rows: EnvironmentRows, stored: StoredRows) {
+  const keptThreads = new Set(rows.threads.map((row) => row.threadId));
+  const keptBodies = new Set(rows.bodies.map((row) => row.threadId));
+  return {
+    envelopePayload: stored.envelope === rows.envelope.payload ? undefined : rows.envelope.payload,
+    upsertThreads: rows.threads.filter((row) => stored.threads.get(row.threadId) !== row.hash),
+    deleteThreads: [...stored.threads.keys()].filter((threadId) => !keptThreads.has(threadId)),
+    upsertBodies: rows.bodies.filter((row) => stored.bodies.get(row.threadId)?.hash !== row.hash),
+    bodySequences: rows.bodies.flatMap((row) => {
+      const previous = stored.bodies.get(row.threadId);
+      return previous !== undefined &&
+        previous.hash === row.hash &&
+        previous.sequence !== row.sequence
+        ? [{ threadId: row.threadId, sequence: row.sequence }]
+        : [];
+    }),
+    deleteBodies: [...stored.bodies.keys()].filter((threadId) => !keptBodies.has(threadId)),
+  };
+}
+
+function storedRowsOf(rows: EnvironmentRows): StoredRows {
+  return {
+    envelope: rows.envelope.payload,
+    threads: new Map(rows.threads.map((row) => [row.threadId, row.hash])),
+    bodies: new Map(
+      rows.bodies.map((row) => [row.threadId, { hash: row.hash, sequence: row.sequence }]),
+    ),
+  };
+}
+
+function threadOrder(
+  left: StoredEnvironmentSnapshotThread,
+  right: StoredEnvironmentSnapshotThread,
+): number {
+  return (
+    left.shell.createdAt.localeCompare(right.shell.createdAt) ||
+    left.shell.id.localeCompare(right.shell.id)
   );
 }
 
@@ -239,24 +316,29 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   /** When each environment first became dirty since its last capture. */
   const dirtySince = new Map<EnvironmentId, number>();
   /**
-   * The slices each environment's stored snapshot was written from, and that
-   * environment's removal epoch at the start of the capture. A removal of the
-   * row (purge, eviction, hydration discard) bumps the epoch once it has
-   * landed, so a row deleted after it was written can never be mistaken for
-   * current. Removing another environment's row leaves this one's epoch alone.
+   * The slices each environment's stored rows were written from, the rows
+   * themselves (by hash), and that environment's removal epoch at the start of
+   * the capture. A removal of the rows (purge, eviction, hydration discard)
+   * bumps the epoch once it has landed, so rows deleted after they were
+   * written can never be mistaken for current. Removing another environment's
+   * rows leaves this one's epoch alone.
    */
-  const written = new Map<EnvironmentId, { slices: PersistedSlices; epoch: number }>();
+  const written = new Map<
+    EnvironmentId,
+    { slices: PersistedSlices | null; epoch: number; rows: StoredRows }
+  >();
   const removalEpochs = new Map<EnvironmentId, number>();
   const removalEpochOf = (environmentId: EnvironmentId) => removalEpochs.get(environmentId) ?? 0;
-  /** Per-environment thread fragments, so a capture re-serializes only changed rows. */
-  const serializers = new Map<EnvironmentId, EnvironmentSnapshotSerializer>();
+  /** Per-environment row fragments, so a capture re-serializes only changed rows. */
+  const serializers = new Map<EnvironmentId, EnvironmentRowSerializer>();
   const removeStoredSnapshot = async (environmentId: EnvironmentId): Promise<void> => {
     written.delete(environmentId);
     serializers.delete(environmentId);
+    forgetEnvironmentSavedThreadBodies(environmentId);
     // The machine's task list copy goes with the rest of its cached content.
     purgeTaskCache(environmentId);
     try {
-      await deps.db.removeEnvironmentSnapshot(environmentId);
+      await deps.db.removeEnvironment(environmentId);
     } finally {
       removalEpochs.set(environmentId, removalEpochOf(environmentId) + 1);
     }
@@ -273,23 +355,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     maxBytes: MAX_CACHED_ENVIRONMENT_SNAPSHOT_TOTAL_BYTES,
   };
 
-  const evictToCapacity = async (justWrittenEnvironmentId: EnvironmentId): Promise<void> => {
-    const stats = await deps.db.listEnvironmentSnapshotStats();
-    const planned = planEvictionsToCapacity(
-      stats.map((stat) => ({
-        key: stat.environmentId,
-        lastAccessedAt: stat.updatedAt,
-        retainedBytes: stat.payloadBytes,
-        evictable: stat.environmentId !== justWrittenEnvironmentId,
-      })),
-      caps,
-    );
-    for (const environmentId of planned) {
-      await removeStoredSnapshot(environmentId as EnvironmentId);
-    }
-  };
-
-  // A clear must finish after any write that was already in flight for this node.
+  // Writes and removals of one machine run one after another; a clear must
+  // finish after any write that was already in flight for it.
   const writes = new Map<EnvironmentId, Promise<void>>();
   const serialize = (environmentId: EnvironmentId, action: () => Promise<void>): Promise<void> => {
     const result = (writes.get(environmentId) ?? Promise.resolve()).catch(() => {}).then(action);
@@ -301,7 +368,39 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       .catch(() => {});
     return result;
   };
-  const captureNow = async (environmentId: EnvironmentId): Promise<void> => {
+
+  /**
+   * Runs outside any machine's write chain: an evicted machine's removal waits
+   * for its own writes, and a write never waits for another machine's.
+   */
+  const evictToCapacity = async (justWrittenEnvironmentId: EnvironmentId): Promise<void> => {
+    const stats = await deps.db.listEnvironmentCacheStats();
+    const planned = planEvictionsToCapacity(
+      stats.map((stat) => ({
+        key: stat.environmentId,
+        lastAccessedAt: stat.updatedAt,
+        retainedBytes: stat.bytes,
+        evictable: stat.environmentId !== justWrittenEnvironmentId,
+      })),
+      caps,
+    );
+    await Promise.all(
+      planned.map((environmentId) =>
+        serialize(environmentId as EnvironmentId, () =>
+          removeStoredSnapshot(environmentId as EnvironmentId),
+        ),
+      ),
+    );
+  };
+
+  /** What the database holds for a machine this process has not written yet. */
+  const readStoredRows = async (environmentId: EnvironmentId): Promise<StoredRows> => {
+    const hashes = await deps.db.loadEnvironmentRowHashes(environmentId);
+    return { envelope: null, threads: hashes.threads, bodies: hashes.bodies };
+  };
+
+  /** Whether the capture wrote anything. */
+  const captureNow = async (environmentId: EnvironmentId): Promise<boolean> => {
     const environmentState = deps.store.getState().environmentStateById[environmentId];
     // Only a live, settled projection is worth persisting: never before the
     // first full shell snapshot (that would write a partial projection as
@@ -311,13 +410,13 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       !environmentState.bootstrapComplete ||
       environmentState.hydratedFromCacheAt !== undefined
     ) {
-      return;
+      return false;
     }
     // A capture whose persisted slices are all unchanged since the last write
     // is skipped in O(1). While an agent runs this rarely hits: the shell
-    // stream gives the active thread a fresh `updatedAt` (and session) several
-    // times a second, replacing its shell and summary, so the serializer
-    // re-stringifies only those rows and reuses every other thread's fragment.
+    // stream gives the active thread a fresh `updatedAt` several times a
+    // second, so the serializer re-stringifies only that row, and only the
+    // rows whose hash changed are written.
     const includeContent = contentEnabled();
     const slices = persistedSlices(environmentState, includeContent);
     const previous = written.get(environmentId);
@@ -325,11 +424,12 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     if (
       previous !== undefined &&
       previous.epoch === epoch &&
+      previous.slices !== null &&
       samePersistedSlices(previous.slices, slices)
     ) {
-      return;
+      return false;
     }
-    const serializer = serializers.get(environmentId) ?? createEnvironmentSnapshotSerializer();
+    const serializer = serializers.get(environmentId) ?? createEnvironmentRowSerializer();
     // Most recently captured last; the least recently captured beyond the
     // bound drops its fragments.
     serializers.delete(environmentId);
@@ -338,25 +438,49 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       if (serializers.size <= MAX_RETAINED_SNAPSHOT_SERIALIZERS) break;
       serializers.delete(retained);
     }
-    const { payload, payloadBytes } = serializer.serialize(
-      environmentState,
-      environmentId,
-      deps.now(),
-      { content: includeContent },
-    );
-    await deps.db.saveEnvironmentSnapshot({
+    const readSequence = deps.readThreadSequence;
+    const rows = serializer.serialize(environmentState, environmentId, {
+      content: includeContent,
+      ...(readSequence
+        ? { readSequence: (threadId: string) => readSequence(environmentId, threadId as ThreadId) }
+        : {}),
+    });
+    const stored =
+      previous !== undefined && previous.epoch === epoch
+        ? previous.rows
+        : await readStoredRows(environmentId);
+    const plan = planRowWrites(rows, stored);
+    await deps.db.writeEnvironmentRows({
       environmentId,
       schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
-      payload,
-      payloadBytes,
       updatedAt: deps.now(),
+      envelope: {
+        ...(plan.envelopePayload === undefined ? {} : { payload: plan.envelopePayload }),
+        bytes: rows.envelope.bytes,
+        threadCount: rows.threads.length,
+        projectCount: rows.projectCount,
+      },
+      upsertThreads: plan.upsertThreads,
+      deleteThreads: plan.deleteThreads,
+      upsertBodies: plan.upsertBodies,
+      bodySequences: plan.bodySequences,
+      deleteBodies: plan.deleteBodies,
     });
-    written.set(environmentId, { slices, epoch });
-    await evictToCapacity(environmentId);
+    written.set(environmentId, { slices, epoch, rows: storedRowsOf(rows) });
+    setEnvironmentSavedThreadBodyKeys(
+      environmentId,
+      rows.bodies.map((row) => row.threadId as ThreadId),
+    );
+    return true;
   };
 
-  const capture = (environmentId: EnvironmentId): Promise<void> =>
-    serialize(environmentId, () => captureNow(environmentId));
+  const capture = async (environmentId: EnvironmentId): Promise<void> => {
+    let wrote = false;
+    await serialize(environmentId, async () => {
+      wrote = await captureNow(environmentId);
+    });
+    if (wrote) await evictToCapacity(environmentId);
+  };
 
   const captureDirty = (environmentId: EnvironmentId): void => {
     const pending = dirtyTimers.get(environmentId);
@@ -407,31 +531,31 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   };
 
   /**
-   * Rewrites an environment's stored row without its message text. The shell
-   * stays as written, and so does the row's timestamp: eviction order follows
-   * the last real capture.
+   * Removes a machine's saved bodies after any write in flight for it. Its
+   * thread rows and envelope stay as written, and so does the row's
+   * timestamp: eviction order follows the last real capture.
    */
-  const removeStoredContent = (environmentId: EnvironmentId): Promise<void> =>
+  const removeStoredBodies = (environmentId: EnvironmentId): Promise<void> =>
     serialize(environmentId, async () => {
-      const row = await deps.db.loadEnvironmentSnapshot(environmentId);
-      const payload = row ? withoutStoredContent(row.payload) : null;
-      if (!row || payload === null) return;
-      await deps.db.saveEnvironmentSnapshot({
-        environmentId,
-        schemaVersion: row.schemaVersion,
-        payload,
-        payloadBytes: payloadByteLength(payload),
-        updatedAt: row.updatedAt,
-      });
-      // The stored row is no longer what the last capture wrote.
-      written.delete(environmentId);
+      await deps.db.removeThreadBodies(environmentId);
+      forgetEnvironmentSavedThreadBodies(environmentId);
+      const entry = written.get(environmentId);
+      // The next capture compares against a machine with no bodies.
+      if (entry) {
+        written.set(environmentId, {
+          ...entry,
+          slices: null,
+          rows: { ...entry.rows, bodies: new Map() },
+        });
+      }
     });
 
-  /** Turning the setting off removes every environment's stored message text at once. */
-  const purgeAllStoredContent = async (): Promise<void> => {
-    const stats = await deps.db.listEnvironmentSnapshotStats();
-    // A row being written right now may not be listed yet. Each removal waits
-    // for that environment's writes and then reads its row again.
+  /** Turning the setting off removes every machine's saved bodies at once. */
+  const purgeAllStoredBodies = async (): Promise<void> => {
+    replaceSavedThreadBodyKeys([]);
+    const stats = await deps.db.listEnvironmentCacheStats();
+    // A machine being written right now may not be listed yet. Each removal
+    // waits for that machine's writes.
     const environmentIds = new Set([
       ...stats.map((stat) => stat.environmentId),
       ...writes.keys(),
@@ -439,11 +563,13 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     ]);
     await Promise.all(
       [...environmentIds].map((environmentId) =>
-        removeStoredContent(environmentId as EnvironmentId).catch(
+        removeStoredBodies(environmentId as EnvironmentId).catch(
           warn("could not remove stored conversation text"),
         ),
       ),
     );
+    // Bodies of a machine with no envelope (none is expected) go too.
+    await deps.db.removeThreadBodies();
   };
 
   // The setting turned on captures what is already live; turned off, it purges.
@@ -455,7 +581,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
         if (enabled === contentWasEnabled) return;
         contentWasEnabled = enabled;
         if (!enabled) {
-          void purgeAllStoredContent().catch(warn("could not remove stored conversation text"));
+          void purgeAllStoredBodies().catch(warn("could not remove stored conversation text"));
           // Saved screen answers follow the same setting.
           void deps.db.clearSavedQueries().catch(warn("could not remove saved answers"));
           return;
@@ -471,16 +597,25 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     );
   }
 
-  // A thread's messages can change without a shell or orchestration event
+  // A thread's body can change without a shell or orchestration event
   // marking the environment dirty (its detail snapshot, an older page of
-  // history), so a change to an environment's message slices marks it too.
-  const observedMessages = new Map<string, { readonly ids: unknown; readonly byId: unknown }>();
+  // history), so a change to an environment's message or activity slices
+  // marks it too.
+  const observedBodies = new Map<
+    string,
+    {
+      readonly messageIds: unknown;
+      readonly messages: unknown;
+      readonly activityIds: unknown;
+      readonly activities: unknown;
+    }
+  >();
   // The threads store changes on every event of every environment; most of
   // those changes leave `environmentStateById` (or a given environment's
   // state) as it was. Only environments whose state object changed are
   // looked at, so a busy store costs O(1) per change for the others.
   let observedEnvironments: Record<string, EnvironmentState> | null = null;
-  const noticeMessageChanges = () => {
+  const noticeBodyChanges = () => {
     const environments = deps.store.getState().environmentStateById;
     const previous = observedEnvironments;
     if (environments === previous) return;
@@ -489,25 +624,32 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     for (const environmentId in environments) {
       const state = environments[environmentId] as EnvironmentState;
       if (previous !== null && previous[environmentId] === state) continue;
-      const seen = observedMessages.get(environmentId);
-      if (seen?.ids === state.messageIdsByThreadId && seen.byId === state.messageByThreadId) {
+      const seen = observedBodies.get(environmentId);
+      if (
+        seen?.messageIds === state.messageIdsByThreadId &&
+        seen.messages === state.messageByThreadId &&
+        seen.activityIds === state.activityIdsByThreadId &&
+        seen.activities === state.activityByThreadId
+      ) {
         continue;
       }
-      observedMessages.set(environmentId, {
-        ids: state.messageIdsByThreadId,
-        byId: state.messageByThreadId,
+      observedBodies.set(environmentId, {
+        messageIds: state.messageIdsByThreadId,
+        messages: state.messageByThreadId,
+        activityIds: state.activityIdsByThreadId,
+        activities: state.activityByThreadId,
       });
       // An environment seen for the first time is marked by the write that created it.
       if (seen && included && state.bootstrapComplete && state.hydratedFromCacheAt === undefined) {
         markDirty(environmentId as EnvironmentId);
       }
     }
-    for (const environmentId of observedMessages.keys()) {
-      if (!Object.hasOwn(environments, environmentId)) observedMessages.delete(environmentId);
+    for (const environmentId of observedBodies.keys()) {
+      if (!Object.hasOwn(environments, environmentId)) observedBodies.delete(environmentId);
     }
   };
-  noticeMessageChanges();
-  uninstallers.push(deps.store.subscribe(noticeMessageChanges));
+  noticeBodyChanges();
+  uninstallers.push(deps.store.subscribe(noticeBodyChanges));
 
   const persistRosterDebounced = (): void => {
     if (rosterTimer) clearTimeout(rosterTimer);
@@ -582,7 +724,56 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     reconcile();
   };
 
-  const hydrate = async (): Promise<void> => {
+  /**
+   * Moves machines saved in the single-row layout (v1 to v3) into rows, once.
+   * A row that does not decode is dropped, as a launch always did.
+   */
+  const moveLegacyRows = async (): Promise<void> => {
+    let legacy: Awaited<ReturnType<SnapshotDb["loadLegacyEnvironmentSnapshots"]>>;
+    try {
+      legacy = await deps.db.loadLegacyEnvironmentSnapshots();
+    } catch (error) {
+      warn("could not read single-row snapshots")(error);
+      return;
+    }
+    for (const row of legacy) {
+      const environmentId = row.environmentId as EnvironmentId;
+      await serialize(environmentId, async () => {
+        const record = decodeStoredEnvironmentSnapshot(row.payload, environmentId);
+        // A machine this process already wrote keeps its new rows.
+        if (record !== null && !written.has(environmentId)) {
+          const rows = environmentRowsFromLegacyRecord(record);
+          const stored = await readStoredRows(environmentId);
+          const plan = planRowWrites(rows, stored);
+          await deps.db.writeEnvironmentRows({
+            environmentId,
+            schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
+            updatedAt: record.capturedAt,
+            envelope: {
+              payload: rows.envelope.payload,
+              bytes: rows.envelope.bytes,
+              threadCount: rows.threads.length,
+              projectCount: rows.projectCount,
+            },
+            upsertThreads: plan.upsertThreads,
+            deleteThreads: plan.deleteThreads,
+            upsertBodies: plan.upsertBodies,
+            bodySequences: plan.bodySequences,
+            deleteBodies: plan.deleteBodies,
+          });
+        }
+        await deps.db.removeLegacyEnvironmentSnapshot(environmentId);
+      }).catch(warn("could not move a single-row snapshot"));
+    }
+  };
+
+  /** Resolves when the launch read has committed what it shows (or the runtime is gone). */
+  let resolveHydrated!: () => void;
+  const hydrated = new Promise<void>((resolve) => {
+    resolveHydrated = resolve;
+  });
+
+  const hydrateNow = async (): Promise<void> => {
     try {
       const storedRoster = await deps.db.loadHubNodeRoster();
       if (storedRoster) {
@@ -601,24 +792,43 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       roster.filter((record) => record.revokedAt === null).map((record) => record.environmentId),
     );
 
-    // One read for every row (most recently written first) instead of a stats
-    // query plus one SELECT per environment. Decoded environments are
-    // committed in byte-bounded batches with a yield between them, so decoding
-    // a large cache never holds the JS thread in one long task.
-    let rows: Awaited<ReturnType<SnapshotDb["loadEnvironmentSnapshots"]>>;
+    // A launch starts with no thread known to have a saved body.
+    replaceSavedThreadBodyKeys([]);
+    await moveLegacyRows();
+    // Saved bodies are only read when a thread opens; which threads have one
+    // is known once the saved choice is. Bodies left from before the setting
+    // was turned off are removed instead.
+    const bodyKeys = (contentCache?.ready ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => {
+        if (!contentEnabled()) {
+          replaceSavedThreadBodyKeys([]);
+          await deps.db.removeThreadBodies();
+          return;
+        }
+        const keys = await deps.db.listThreadBodyKeys();
+        replaceSavedThreadBodyKeys(
+          keys.map((key) => [key.environmentId as EnvironmentId, key.threadId as ThreadId]),
+        );
+      })
+      .catch(warn("could not read saved conversation keys"));
+
+    // Envelopes most recently written first, then each machine's thread rows.
+    // Decoded machines are committed in byte-bounded batches with a yield
+    // between them, so decoding a large cache never holds the JS thread in
+    // one long task.
+    let envelopes: Awaited<ReturnType<SnapshotDb["loadEnvironmentEnvelopes"]>>;
     try {
-      rows = await deps.db.loadEnvironmentSnapshots();
+      envelopes = await deps.db.loadEnvironmentEnvelopes();
     } catch (error) {
       warn("could not load environment snapshots")(error);
+      await bodyKeys;
       return;
     }
-    // Stored message text is shown only while the saved choice allows it.
-    await contentCache?.ready?.catch(() => undefined);
-    const includeContent = contentEnabled();
     // The direct supervisor may already be connected (it starts once the
-    // catalog is hydrated). A row a live capture has replaced since the read
-    // above is not this hydration's to discard.
-    const discardRow = (environmentId: EnvironmentId): Promise<void> =>
+    // catalog is hydrated), and so may a Hub machine. Rows a live capture has
+    // replaced since the read above are not this hydration's to discard.
+    const discardRows = (environmentId: EnvironmentId): Promise<void> =>
       serialize(environmentId, async () => {
         if (written.has(environmentId)) return;
         await removeStoredSnapshot(environmentId);
@@ -627,7 +837,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       deps.store.getState().environmentStateById[environmentId] !== undefined;
     let batch: Array<{
       readonly environmentId: EnvironmentId;
-      readonly cached: ReturnType<typeof toCachedEnvironmentShellSnapshot>;
+      readonly cached: CachedEnvironmentShellSnapshot;
     }> = [];
     let batchBytes = 0;
     const commit = () => {
@@ -641,7 +851,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       batch = [];
       batchBytes = 0;
     };
-    for (const row of rows) {
+    for (const row of envelopes) {
       const environmentId = row.environmentId as EnvironmentId;
       // A full slice is committed before anything else waits on the database.
       if (batchBytes >= HYDRATION_SLICE_BYTES) {
@@ -655,46 +865,93 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
           revokedEnvironmentIds.has(environmentId) ||
           (!rosterEnvironmentIds.has(environmentId) && !deps.hasDirectEnvironment(environmentId))
         ) {
-          await discardRow(environmentId);
+          await discardRows(environmentId);
           continue;
-        }
-        if (!includeContent && mayHoldStoredContent(row.payload)) {
-          // Left from before the setting was turned off, whether or not it decodes.
-          void removeStoredContent(environmentId).catch(
-            warn("could not remove stored conversation text"),
-          );
         }
         // Switched off: kept for when it is on again, never shown meanwhile.
         if (deps.isEnvironmentSwitchedOff?.(environmentId) === true) continue;
         // Live data wins: a cached projection would be ignored at commit, so
         // decoding it is wasted work on the launch path.
         if (hasState(environmentId)) continue;
-        const record = decodeStoredEnvironmentSnapshot(row.payload, environmentId);
-        if (!record) {
+        const envelope = decodeStoredEnvironmentEnvelope(row.payload, environmentId);
+        if (!envelope) {
           // Version bump or corrupt payload: discard rather than mis-decode.
-          await discardRow(environmentId);
+          await discardRows(environmentId);
           continue;
+        }
+        const threadRows = await deps.db.loadEnvironmentThreads(environmentId);
+        if (hasState(environmentId)) continue;
+        const threads: StoredEnvironmentSnapshotThread[] = [];
+        let bytes = row.payload.length;
+        for (const threadRow of threadRows) {
+          bytes += threadRow.payload.length;
+          // A thread row that does not decode is left out; the others still show.
+          const thread = decodeStoredEnvironmentThread(threadRow.payload, environmentId);
+          if (thread !== null && thread.shell.id === threadRow.threadId) threads.push(thread);
         }
         batch.push({
           environmentId,
-          cached: toCachedEnvironmentShellSnapshot(record, { includeContent }),
+          cached: {
+            capturedAt: row.updatedAt,
+            projects: envelope.projects,
+            worktrees: envelope.worktrees,
+            threads: threads.toSorted(threadOrder),
+          },
         });
-        batchBytes += row.payload.length;
+        batchBytes += bytes;
       } catch (error) {
         warn("could not hydrate environment snapshot")(error);
       }
     }
     commit();
+    await bodyKeys;
+  };
+
+  const hydrate = (): Promise<void> => hydrateNow().finally(resolveHydrated);
+
+  /**
+   * Shows a thread's saved body (recent text, open cards) once the launch read
+   * is in the store: display-only, and only where live data has given the
+   * thread no body yet. Read from the database when the thread opens or is
+   * about to.
+   */
+  const loadThreadBody = async (environmentId: EnvironmentId, threadId: ThreadId) => {
+    await hydrated;
+    if (disposed || !contentEnabled()) return;
+    const environmentState = deps.store.getState().environmentStateById[environmentId];
+    if (
+      environmentState === undefined ||
+      !Object.hasOwn(environmentState.threadShellById, threadId) ||
+      Object.hasOwn(environmentState.messageByThreadId, threadId)
+    ) {
+      return;
+    }
+    const epoch = removalEpochOf(environmentId);
+    const row = await deps.db.loadThreadBody(environmentId, threadId);
+    if (disposed || epoch !== removalEpochOf(environmentId) || !contentEnabled()) return;
+    const body = row === null ? null : decodeStoredThreadBody(row.payload);
+    if (body === null) {
+      forgetSavedThreadBody(environmentId, threadId);
+      return;
+    }
+    deps.store
+      .getState()
+      .applyStateTransition((state) =>
+        hydrateCachedThreadBodies(state, [
+          { environmentId, threadId, content: body.content, prompts: body.prompts },
+        ]),
+      );
   };
 
   const dispose = (): void => {
     disposed = true;
+    resolveHydrated();
     for (const timer of dirtyTimers.values()) clearTimeout(timer);
     dirtyTimers.clear();
     dirtySince.clear();
     lastCapturedAt.clear();
     serializers.clear();
-    observedMessages.clear();
+    observedBodies.clear();
     if (rosterTimer) clearTimeout(rosterTimer);
     rosterTimer = null;
     for (const uninstall of uninstallers.splice(0)) uninstall();
@@ -706,6 +963,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     flushPending,
     purgeEnvironment,
     hydrate,
+    loadThreadBody,
     installHostedRosterMirror,
     dispose,
   };
@@ -750,8 +1008,9 @@ export function purgeEnvironmentSnapshot(environmentId: EnvironmentId): void {
     return;
   }
   purgeTaskCache(environmentId);
+  forgetEnvironmentSavedThreadBodies(environmentId);
   void getSharedSnapshotDb()
-    .removeEnvironmentSnapshot(environmentId)
+    .removeEnvironment(environmentId)
     .catch(warn("could not purge snapshot"));
   void purgeEnvironmentDeviceData(environmentId);
 }
@@ -767,7 +1026,7 @@ function createPreferencesContentCache(): ThreadContentCacheSetting {
 
 /**
  * One-time cold-start initialization: hydrate the roster and every cached
- * environment into the threads store before connections exist, then install
+ * environment's thread list into the threads store, then install
  * the roster mirror and the Hub selection persistence. The caller must have
  * awaited saved-environment catalog hydration first, or the orphan check
  * would misread direct environments as unknown.
@@ -777,6 +1036,7 @@ export async function initializeMobileSnapshotPersistence(deps: {
   readonly hasDirectEnvironment: (environmentId: EnvironmentId) => boolean;
   readonly isEnvironmentSwitchedOff?: (environmentId: EnvironmentId) => boolean;
   readonly subscribeBackground?: (listener: () => void) => () => void;
+  readonly readThreadSequence?: (environmentId: EnvironmentId, threadId: ThreadId) => number | null;
 }): Promise<void> {
   if (activeRuntime) return;
   // Loading the saved setting overlaps the SQLite open and decode below.
@@ -798,8 +1058,14 @@ export async function initializeMobileSnapshotPersistence(deps: {
       : {}),
     contentCache,
     ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
+    ...(deps.readThreadSequence ? { readThreadSequence: deps.readThreadSequence } : {}),
   });
   activeRuntime = runtime;
+  // A thread opened (or about to be) shows its saved body; requests made
+  // before this point wait for it.
+  installSavedThreadBodyLoader((environmentId, threadId) =>
+    runtime.loadThreadBody(environmentId, threadId),
+  );
   const savedQueryStore = createSavedQueryStore({
     db: getSharedSnapshotDb(),
     isEnabled: contentCache.isEnabled,
@@ -833,6 +1099,8 @@ export function resetMobileSnapshotPersistenceForTests(): void {
   uninstallServerConfigSaving = null;
   activeRuntime?.dispose();
   activeRuntime = null;
+  installSavedThreadBodyLoader(null);
+  replaceSavedThreadBodyKeys([]);
   dirtyBeforeInitialization.clear();
   sharedDb = null;
   uninstallSelectionPersistence?.();
@@ -844,31 +1112,39 @@ export function savedScreenAnswerBytes(environmentId: EnvironmentId): Promise<nu
   return savedQueryBytes(getSharedSnapshotDb(), environmentId);
 }
 
-/** Storage settings reports stored payload bytes, not SQLite allocation or free disk space. */
+/**
+ * Storage settings reports stored payload bytes (not SQLite allocation or free
+ * disk space) and the counts kept beside each machine's rows: no row is read.
+ */
 export async function listEnvironmentCacheStorage() {
-  const db = getSharedSnapshotDb();
-  const stats = await db.listEnvironmentSnapshotStats();
-  return Promise.all(
-    stats.map(async (stat) => {
-      const stored = await db.loadEnvironmentSnapshot(stat.environmentId);
-      const snapshot = stored
-        ? decodeStoredEnvironmentSnapshot(stored.payload, stat.environmentId as EnvironmentId)
-        : null;
-      return {
-        environmentId: stat.environmentId,
-        payloadBytes: stat.payloadBytes,
-        threads: snapshot?.threads.length ?? 0,
-        projects: snapshot?.projects.length ?? 0,
-      };
-    }),
-  );
+  const stats = await getSharedSnapshotDb().listEnvironmentCacheStats();
+  return stats.map((stat) => ({
+    environmentId: stat.environmentId,
+    payloadBytes: stat.bytes,
+    threads: stat.threadCount,
+    projects: stat.projectCount,
+  }));
 }
+
+/**
+ * The thread window's sequence saved with a thread's body, or null. Kept for
+ * a resume from the saved copy; not used for one yet, since a saved body is a
+ * trimmed display copy, not the complete window (`readRestoredThreadSequence`).
+ */
+export function readSavedThreadSequence(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): Promise<number | null> {
+  return getSharedSnapshotDb().loadThreadBodySequence(environmentId, threadId);
+}
+
 export async function clearEnvironmentSnapshotCache(environmentId: EnvironmentId): Promise<void> {
   if (activeRuntime) await activeRuntime.purgeEnvironment(environmentId);
   else {
     purgeTaskCache(environmentId);
+    forgetEnvironmentSavedThreadBodies(environmentId);
     await Promise.all([
-      getSharedSnapshotDb().removeEnvironmentSnapshot(environmentId),
+      getSharedSnapshotDb().removeEnvironment(environmentId),
       purgeEnvironmentDeviceData(environmentId),
     ]);
   }

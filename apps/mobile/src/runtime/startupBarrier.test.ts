@@ -3,6 +3,32 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { createMobileRuntimeStartupBarrier } from "./startupBarrier";
 
 describe("mobile runtime startup barrier", () => {
+  it("reports the direct stage open as soon as the catalog is read, before the cache", async () => {
+    const barrier = createMobileRuntimeStartupBarrier();
+    let finishCache!: () => void;
+    const cache = new Promise<void>((resolve) => {
+      finishCache = resolve;
+    });
+    let markedDirectReady!: () => void;
+    const directReady = new Promise<void>((resolve) => {
+      markedDirectReady = resolve;
+    });
+    expect(barrier.isDirectReady()).toBe(false);
+    const hydration = barrier.beginHydration(async ({ markDirectReady }) => {
+      markDirectReady();
+      markedDirectReady();
+      await cache;
+    }, vi.fn());
+    await directReady;
+    expect(barrier.isDirectReady()).toBe(true);
+    expect(barrier.isHydrated()).toBe(false);
+    finishCache();
+    await hydration;
+    expect(barrier.isHydrated()).toBe(true);
+    barrier.reset();
+    expect(barrier.isDirectReady()).toBe(false);
+  });
+
   it("holds connection work until hydration has completed", async () => {
     const barrier = createMobileRuntimeStartupBarrier();
     const events: string[] = [];

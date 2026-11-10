@@ -8,6 +8,7 @@ import {
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
 
 import { retainSpeculativeThreadDetailSubscription } from "../../connection/threadDetail";
+import { requestSavedThreadBody } from "../../persistence/savedThreadBodies";
 import { mobileAppLifecycle } from "../../platform/appLifecycle";
 import { readEnvironmentMutationReady } from "../../state/environmentMutationReady";
 import { useStore } from "../../state/threadsRuntime";
@@ -78,5 +79,9 @@ export function useHomeThreadPrefetch(input: {
     );
   }, [foreground, input.focused, prefetch, readiness, topKey]);
 
-  return prefetch.pressIn;
+  return (ref) => {
+    // A cached machine's row still shows its saved body at once when opened.
+    requestSavedThreadBody(ref.environmentId, ref.threadId);
+    prefetch.pressIn(ref);
+  };
 }

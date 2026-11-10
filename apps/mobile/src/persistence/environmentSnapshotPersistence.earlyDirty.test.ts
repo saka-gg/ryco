@@ -24,13 +24,17 @@ const saved = vi.hoisted(() => [] as string[]);
 vi.mock("./snapshotDb", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./snapshotDb")>()),
   createSnapshotDb: () => ({
-    loadEnvironmentSnapshot: async () => null,
-    loadEnvironmentSnapshots: async () => [],
-    saveEnvironmentSnapshot: async (input: { readonly environmentId: string }) => {
+    loadEnvironmentEnvelopes: async () => [],
+    loadEnvironmentThreads: async () => [],
+    loadLegacyEnvironmentSnapshots: async () => [],
+    listThreadBodyKeys: async () => [],
+    loadEnvironmentRowHashes: async () => ({ threads: new Map(), bodies: new Map() }),
+    writeEnvironmentRows: async (input: { readonly environmentId: string }) => {
       saved.push(input.environmentId);
     },
-    removeEnvironmentSnapshot: async () => undefined,
-    listEnvironmentSnapshotStats: async () => [],
+    removeEnvironment: async () => undefined,
+    removeThreadBodies: async () => undefined,
+    listEnvironmentCacheStats: async () => [],
     loadHubNodeRoster: async () => null,
     saveHubNodeRoster: async () => undefined,
     clearAll: async () => undefined,

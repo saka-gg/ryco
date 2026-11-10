@@ -362,6 +362,10 @@
       "types": "./src/state/threads/threadBodyResidency.ts",
       "import": "./src/state/threads/threadBodyResidency.ts"
     },
+    "./state/threads/threadBodyCache": {
+      "types": "./src/state/threads/threadBodyCache.ts",
+      "import": "./src/state/threads/threadBodyCache.ts"
+    },
     "./state/threads/threadContentCachePolicy": {
       "types": "./src/state/threads/threadContentCachePolicy.ts",
       "import": "./src/state/threads/threadContentCachePolicy.ts"

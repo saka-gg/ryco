@@ -170,12 +170,16 @@ export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
     useStore.getState().setActiveEnvironmentId(environmentId);
   },
   connectEnvironment: (node, generation) => {
-    // Hosted connections wait for the cached roster and projections.
-    if (mobileRuntimeStartupBarrier.isHydrated()) {
+    // The relay handshake starts as soon as the saved-machine catalog is
+    // read (a machine the direct plane owns is never reached through the
+    // relay), alongside the launch read of the snapshot cache: the threads
+    // store lets live data win that race, as on the direct plane, and the
+    // session still needs its own accepted snapshot before it may mutate.
+    if (mobileRuntimeStartupBarrier.isDirectReady()) {
       openEnvironmentConnection(node, generation);
       return;
     }
-    mobileRuntimeStartupBarrier.runAfterHydration(
+    mobileRuntimeStartupBarrier.runAfterDirectReady(
       () => openEnvironmentConnection(node, generation),
       (error: unknown) => {
         console.warn("[connection] hosted startup failed", error);
