@@ -809,7 +809,8 @@ function readChangeRequestDetail(
     controller !== undefined &&
     compositeKey !== null &&
     changeRequestDetailState(compositeKey).data !== null &&
-    (controller.lastFetchedAt === 0 || !controller.hasData);
+    // A new entry showing its sibling's detail has read nothing yet (`lastFetchedAt` 0).
+    (controller.hasData ? controller.lastFetchedAt === 0 : controller.lastFetchedAt > 0);
   const startedAt = Date.now();
   return sourceControlClient(environmentId)
     .getChangeRequestDetail({
