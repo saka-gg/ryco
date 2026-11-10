@@ -3,6 +3,7 @@ import {
   type WorkspaceLifecycleShape,
 } from "./workspace/WorkspaceLifecycle.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import { NODE_DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import {
   NODE_BROWSER_FRAME_CLOSE,
@@ -4024,6 +4025,55 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         if (legacy?.type !== "snapshot") return assert.fail("expected a snapshot");
         assert.isFalse("providerCatalogs" in legacy);
         assert.deepEqual(legacy.config.providers[0]?.models, codex.models);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes websocket rpc subscribeServerConfig leaves out config sections the client holds",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Effect.succeed({
+                keybindings: NODE_DEFAULT_RESOLVED_KEYBINDINGS,
+                issues: [],
+              }),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: { getProviders: Effect.succeed([]), streamChanges: Stream.empty },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const subscribe = (input: ServerSubscribeConfigInput) =>
+          Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.subscribeServerConfig](input).pipe(
+                Stream.map(knownMember),
+                Stream.take(1),
+                Stream.runCollect,
+                Effect.map((events) => Array.from(events)[0]),
+              ),
+            ),
+          );
+        const first = yield* subscribe({ knownConfigSections: [] });
+        if (first?.type !== "snapshot") return assert.fail("expected a snapshot");
+        const digests = first.configSections?.digests;
+        assert.deepEqual(first.configSections?.omitted, []);
+        assert.isAbove(first.config.keybindings.length, 0);
+
+        const second = yield* subscribe({
+          knownConfigSections: [digests!.settings, digests!.keybindings],
+        });
+        if (second?.type !== "snapshot") return assert.fail("expected a snapshot");
+        assert.deepEqual(second.configSections?.omitted, ["settings", "keybindings"]);
+        assert.deepEqual(second.config.keybindings, []);
+
+        // A client that names nothing gets the snapshot older clients get.
+        const legacy = yield* subscribe({});
+        if (legacy?.type !== "snapshot") return assert.fail("expected a snapshot");
+        assert.isFalse("configSections" in legacy);
+        assert.deepEqual(legacy.config.keybindings, first.config.keybindings);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -52,6 +52,11 @@ import {
   restoreSnapshotCatalogs,
   type ProviderCatalog,
 } from "./providerCatalogCache.ts";
+import {
+  type ConfigSectionValue,
+  configSectionCache,
+  restoreSnapshotSections,
+} from "./configSectionCache.ts";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -1312,15 +1317,19 @@ export function createWsRpcClient(
         let unsubscribeCurrent: () => void = () => undefined;
         const start = (claimCatalogs: boolean) => {
           let pinned: ReadonlyMap<string, ProviderCatalog> = new Map();
+          let pinnedSections: ReadonlyMap<string, ConfigSectionValue> = new Map();
           unsubscribeCurrent = transport.subscribe(
             (client) => {
-              // Name the catalogs this page holds so the snapshot leaves them
-              // out, and take provider changes as deltas. Older servers ignore
-              // both and send everything.
+              // Name the catalogs and config sections this page holds (possibly
+              // none: naming opts in to the digests that fill the caches) so the
+              // snapshot leaves them out, and take provider changes as deltas.
+              // Older servers ignore all three and send everything.
               pinned = claimCatalogs ? providerCatalogCache.pin() : new Map();
+              pinnedSections = claimCatalogs ? configSectionCache.pin() : new Map();
               return client[WS_METHODS.subscribeServerConfig]({
                 providerStatuses: "delta",
-                ...(pinned.size === 0 ? {} : { knownProviderCatalogs: [...pinned.keys()] }),
+                knownProviderCatalogs: [...pinned.keys()],
+                knownConfigSections: [...pinnedSections.keys()],
               });
             },
             (event) => {
@@ -1329,13 +1338,17 @@ export function createWsRpcClient(
                 listener(event);
                 return;
               }
-              const restored = restoreSnapshotCatalogs(event, pinned, providerCatalogCache);
+              const withCatalogs = restoreSnapshotCatalogs(event, pinned, providerCatalogCache);
+              const restored =
+                withCatalogs === null
+                  ? null
+                  : restoreSnapshotSections(withCatalogs, pinnedSections, configSectionCache);
               if (restored !== null) {
                 listener(restored);
                 return;
               }
-              // The server left out a catalog this subscription never named:
-              // start over without naming any.
+              // The server left out a catalog or section this subscription never
+              // named: start over without naming any.
               void Promise.resolve().then(() => {
                 if (disposed) return;
                 unsubscribeCurrent();
