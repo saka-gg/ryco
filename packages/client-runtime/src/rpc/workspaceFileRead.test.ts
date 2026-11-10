@@ -127,7 +127,8 @@ describe("readWorkspaceFileBytes in flight and cached (D7)", () => {
       maxInFlight = Math.max(maxInFlight, inFlight);
       const depth = lastAnsweredDepth + 1;
       roundTrips = Math.max(roundTrips, depth);
-      await new Promise((resolve) => setTimeout(resolve, 1));
+      // Latency without a clock: the answer comes after other lanes had their turn.
+      for (let tick = 0; tick < 4; tick += 1) await Promise.resolve();
       inFlight -= 1;
       lastAnsweredDepth = depth;
       const unchanged = answersUnchanged && input.knownFingerprint === fingerprint;

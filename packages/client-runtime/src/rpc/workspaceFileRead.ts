@@ -168,18 +168,17 @@ export async function readWorkspaceFileBytes(input: {
 
   const offsets: number[] = [];
   for (let offset = stride; offset < bytes.length; offset += stride) offsets.push(offset);
-  let next = 0;
-  let failed = false;
+  const lanesState = { next: 0, failed: false };
   const lane = async () => {
-    while (!failed && next < offsets.length) {
-      const offset = offsets[next++]!;
+    while (!lanesState.failed && lanesState.next < offsets.length) {
+      const offset = offsets[lanesState.next++]!;
       assertActive();
       const result = await input.readChunk({
         ...reference,
         offset,
         expectedFingerprint: fingerprint,
       });
-      if (failed) return;
+      if (lanesState.failed) return;
       assertActive();
       place(result, offset);
     }
@@ -188,7 +187,7 @@ export async function readWorkspaceFileBytes(input: {
     { length: Math.min(WORKSPACE_FILE_CHUNKS_IN_FLIGHT, offsets.length) },
     () =>
       lane().catch((error: unknown) => {
-        failed = true;
+        lanesState.failed = true;
         throw error;
       }),
   );
