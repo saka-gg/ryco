@@ -105,7 +105,11 @@ import {
 
 export interface DoctorReporter {
   /** A new step. */
-  readonly phase: (text: string) => Effect.Effect<void>;
+  /**
+   * A new step. `step` names the one a caller must know about: `swap`, after which an
+   * interruption no longer stops the run before the file is replaced.
+   */
+  readonly phase: (text: string, step?: "swap") => Effect.Effect<void>;
   /** Progress within the current step; `fraction` in [0, 1] when known. */
   readonly progress: (text: string, fraction: number | null) => Effect.Effect<void>;
   /** A line of its own (a warning, what a finalizer did). */
@@ -1057,7 +1061,7 @@ const repairSteps = (
     }
 
     // 7. The swap.
-    yield* reporter.phase("Swapping the compacted copy in");
+    yield* reporter.phase("Swapping the compacted copy in", "swap");
     yield* Effect.tryPromise(() => prepareCopyForSwap(copyPath, databaseFile)).pipe(
       Effect.mapError((cause) =>
         fail(

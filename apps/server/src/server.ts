@@ -678,7 +678,12 @@ const RuntimeServicesLive = Layer.mergeAll(
   // Compaction state for the database report (the same memoized layer the upkeep uses), and the
   // once-per-boot log line suggesting `ryco doctor` when the database could shrink a lot.
   Layer.mergeAll(
-    StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
+    // The agent-work tracker (memoized: the same one the sleep holds use) tells one-click
+    // compaction whether stopping the server would cut agents off.
+    StorageServiceLive.pipe(
+      Layer.provide(ProviderProtectedPathsLive),
+      Layer.provide(AgentWorkActivityLive),
+    ),
     DoctorSuggestionLogLive,
   ).pipe(
     Layer.provide(EventLogCompactionDeferredLive),

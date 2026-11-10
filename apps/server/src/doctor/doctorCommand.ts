@@ -75,6 +75,18 @@ export const makeDoctorCommand = <E, R>(deps: DoctorCommandDeps<E, R>) =>
       ),
       Flag.withDefault(true),
     ),
+    resultFile: Flag.String("result-file").pipe(
+      Flag.withDescription(
+        "Also write the --json result document to this file (for a program that is not there when the doctor ends).",
+      ),
+      Flag.optional,
+    ),
+    progressJson: Flag.Boolean("progress-json").pipe(
+      Flag.withDescription(
+        "Report progress as one JSON object per line on stderr (for programs that run the doctor).",
+      ),
+      Flag.withDefault(false),
+    ),
     json: deps.jsonFlag,
   }).pipe(
     Command.withDescription(

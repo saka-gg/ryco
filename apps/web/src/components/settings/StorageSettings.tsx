@@ -1,4 +1,11 @@
-import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   type DatabaseStorageReport,
   type EnvironmentId,
@@ -8,6 +15,7 @@ import {
 } from "@ryco/contracts";
 import { createStorageManagementController } from "@ryco/client-runtime/state/storage";
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
+import { usePrimaryEnvironmentId } from "../../environments/primary/context";
 import { useServerConfig } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
@@ -401,6 +409,16 @@ function StorageEditor({
               database={state.snapshot.database}
               busy={busy}
               onRemoveBackup={(name) => void controller.removeDatabaseBackup(name)}
+              compaction={
+                state.snapshot.database.oneClickCompaction === true ? (
+                  <DatabaseCompactionRow
+                    database={state.snapshot.database}
+                    controller={controller}
+                    environmentId={environmentId}
+                    disabled={disabled}
+                  />
+                ) : null
+              }
             />
           ) : null}
         </>
@@ -506,10 +524,13 @@ function DatabaseStorageRows({
   database,
   busy,
   onRemoveBackup,
+  compaction,
 }: {
   database: DatabaseStorageReport;
   busy: boolean;
   onRemoveBackup: (name: string) => void;
+  /** The one-click compaction row, on nodes that offer it (it replaces the doctor command). */
+  compaction: React.ReactNode;
 }) {
   const value = (text: string) => (
     <span className="text-xs tabular-nums text-muted-foreground">{text}</span>
@@ -567,7 +588,8 @@ function DatabaseStorageRows({
         }
         control={value(formatBytes(database.reclaimableBytes))}
       />
-      {database.doctor?.recommended ? <DatabaseDoctorRow database={database} /> : null}
+      {compaction ??
+        (database.doctor?.recommended ? <DatabaseDoctorRow database={database} /> : null)}
       {database.backups && database.backups.length > 0 ? (
         <DatabaseBackupRows backups={database.backups} busy={busy} onRemove={onRemoveBackup} />
       ) : null}
@@ -685,6 +707,191 @@ function DatabaseDoctorRow({ database }: { database: DatabaseStorageReport }) {
           {command}
         </p>
       )}
+    </SettingsRow>
+  );
+}
+
+type StorageController = ReturnType<typeof createStorageManagementController>;
+type CompactionStatus = NonNullable<Awaited<ReturnType<StorageController["readCompactionStatus"]>>>;
+type DesktopCompactionState = Awaited<
+  ReturnType<NonNullable<NonNullable<Window["desktopBridge"]>["databaseCompaction"]>["getState"]>
+>;
+
+/** While waiting for the node to idle, it is asked again this often. */
+const COMPACTION_IDLE_POLL_MS = 15_000;
+
+const RUN_STATUS_TEXT: Record<string, string> = {
+  running: "Running",
+  repaired: "Done",
+  compacted: "History removed; the file was not replaced",
+  "already-compact": "Nothing to shrink",
+  refused: "Not run",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+function describeRun(run: {
+  readonly status: string;
+  readonly message: string;
+  readonly beforeBytes: number | null;
+  readonly afterBytes: number | null;
+  readonly downtimeMs: number | null;
+}): string {
+  // The doctor's own message already names the sizes when it shrank the file.
+  const sizes =
+    run.beforeBytes !== null && run.afterBytes !== null && !run.message.includes("→")
+      ? ` ${formatBytes(run.beforeBytes)} → ${formatBytes(run.afterBytes)}.`
+      : "";
+  const downtime =
+    run.downtimeMs !== null
+      ? ` The server was stopped for ${Math.round(run.downtimeMs / 1000)} s.`
+      : "";
+  return `${RUN_STATUS_TEXT[run.status] ?? run.status}: ${run.message}${sizes}${downtime}`;
+}
+
+/**
+ * One-click compaction: the doctor's copy-and-swap while the server is stopped. The desktop app
+ * runs it for its own server (with progress and Cancel until the swap); a background-service node
+ * runs it detached and restarts. Offered above the doctor's threshold, and only while nothing
+ * would be cut off; otherwise it waits for the node to idle, while this view stays open.
+ */
+function DatabaseCompactionRow({
+  database,
+  controller,
+  environmentId,
+  disabled,
+}: {
+  database: DatabaseStorageReport;
+  controller: StorageController;
+  environmentId: EnvironmentId | undefined;
+  disabled: boolean;
+}) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const bridge =
+    environmentId !== undefined && environmentId === primaryEnvironmentId
+      ? window.desktopBridge?.databaseCompaction
+      : undefined;
+  const [status, setStatus] = useState<CompactionStatus | null>(null);
+  const [desktop, setDesktop] = useState<DesktopCompactionState>({ phase: "idle" });
+  const [waiting, setWaiting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void controller.readCompactionStatus().then((next) => {
+      if (live) setStatus(next);
+    });
+    return () => {
+      live = false;
+    };
+  }, [controller]);
+
+  useEffect(() => {
+    if (!bridge) return;
+    let live = true;
+    void bridge.getState().then((next) => {
+      if (live) setDesktop(next);
+    });
+    const unsubscribe = bridge.onState((next) => {
+      setDesktop(next);
+      // The file changed: the sizes and the offer above come from a scan that is now stale.
+      // A moment later, once the window reconnected to the restarted server.
+      if (next.phase === "finished") setTimeout(() => void controller.scan(), 2_000);
+    });
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, [bridge, controller]);
+
+  const runner = status?.runner ?? "none";
+  const canRun = runner === "service" || (runner === "desktop" && bridge !== undefined);
+
+  const start = async () => {
+    const fresh = await controller.readCompactionStatus();
+    setStatus(fresh);
+    if (fresh === null) {
+      setMessage("The node could not be asked. Try again once it is connected.");
+      return;
+    }
+    if (fresh.busy.length > 0) {
+      setWaiting(true);
+      return;
+    }
+    setWaiting(false);
+    if (fresh.runner === "desktop" && bridge) {
+      setDesktop(await bridge.start());
+      return;
+    }
+    const started = await controller.startServiceCompaction().catch(() => null);
+    setMessage(started?.detail ?? "The compaction could not start.");
+  };
+
+  // Waiting for the node to idle: ask again until nothing would be cut off, then start.
+  const retryStart = useEffectEvent(() => void start());
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setInterval(retryStart, COMPACTION_IDLE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [waiting]);
+
+  const running = desktop.phase === "running";
+  const finished = desktop.phase === "finished" ? desktop : null;
+  const lastRun = finished ?? status?.lastRun ?? null;
+  if (!database.doctor?.recommended && !running && lastRun === null) return null;
+
+  const description = running
+    ? `${desktop.text}${desktop.detail ? ` · ${desktop.detail}` : ""}${
+        desktop.cancellable ? "" : " · Finishing; it can no longer be cancelled."
+      }`
+    : waiting
+      ? `Waiting until nothing would be interrupted: ${status?.busy.join(" ") ?? ""}`
+      : !database.doctor?.recommended
+        ? "The database file is compact; the last run is below."
+        : canRun
+          ? `About ${formatBytes(database.reclaimableBytes)} could be returned to the disk. Ryco's server stops while the database is compacted (a few minutes for a large one) and starts again; nothing is replaced unless the compacted copy passes its checks.`
+          : runner === "none" && status !== null
+            ? "Stop this server and run the doctor to compact the database."
+            : "Checking whether the database can be compacted here…";
+  return (
+    <SettingsRow
+      title="Compact database"
+      description={description}
+      status={
+        message ?? (lastRun !== null && !running ? `Last run: ${describeRun(lastRun)}` : undefined)
+      }
+      control={
+        running ? (
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={!desktop.cancellable}
+            onClick={() => void bridge?.cancel()}
+          >
+            Cancel
+          </Button>
+        ) : waiting ? (
+          <Button size="xs" variant="outline" onClick={() => setWaiting(false)}>
+            Stop waiting
+          </Button>
+        ) : canRun && database.doctor?.recommended ? (
+          <Button size="xs" variant="outline" disabled={disabled} onClick={() => void start()}>
+            Compact now
+          </Button>
+        ) : null
+      }
+    >
+      {running && desktop.fraction !== null ? (
+        <progress
+          className="mt-2 w-full"
+          max={1}
+          value={desktop.fraction}
+          aria-label="Compaction progress"
+        />
+      ) : null}
+      {runner === "none" && status !== null && database.doctor?.command ? (
+        <p className="font-mono text-[13px] break-all select-all">{database.doctor.command}</p>
+      ) : null}
     </SettingsRow>
   );
 }
