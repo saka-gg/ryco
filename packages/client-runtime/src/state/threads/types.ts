@@ -114,6 +114,12 @@ export interface ChatMessage {
   createdAt: string;
   completedAt?: string | undefined;
   streaming: boolean;
+  /**
+   * Set when `text` is the head of a very long finished message the server
+   * sent as a preview (`OrchestrationMessage.textPreview`); the whole text is
+   * read on demand (`orchestration.getMessageText`).
+   */
+  textPreview?: { readonly fullLength: number } | undefined;
 }
 
 export interface ProposedPlan {

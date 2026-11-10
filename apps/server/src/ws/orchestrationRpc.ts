@@ -36,7 +36,7 @@ import {
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
 import { stampTurnOrigin } from "../orchestration/turnOrigin.ts";
 import { shellSettlementPolicy } from "../orchestration/threadSettlementInput.ts";
-import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
+import { loadActivityPayload, loadMessageText } from "../orchestration/activityPayloadPreview.ts";
 import { encodeThreadHistoryCursor } from "../orchestration/threadHistoryCursor.ts";
 import {
   makeThreadHistoryRecoveryRegistry,
@@ -399,10 +399,16 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     const load = query({
       threadId: input.threadId,
       ...(input.activityPayloads !== undefined ? { activityPayloads: input.activityPayloads } : {}),
+      ...(input.messageText !== undefined ? { messageText: input.messageText } : {}),
       limits,
     }).pipe(Effect.map((window) => fitThreadWindowToByteBudget(window)));
     // Subscribers opening the same window at once share one read (sharedThreadWindowLoads.ts).
-    const key = JSON.stringify([input.threadId, limits, input.activityPayloads ?? "full"]);
+    const key = JSON.stringify([
+      input.threadId,
+      limits,
+      input.activityPayloads ?? "full",
+      input.messageText ?? "full",
+    ]);
     return loadSharedThreadWindow(query, key, load).pipe(
       Effect.mapError((cause) =>
         Schema.is(OrchestrationThreadHistoryError)(cause)
@@ -788,6 +794,12 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
       observeRpcEffect(ORCHESTRATION_WS_METHODS.getThreadShells, loadThreadShells(input), {
         "rpc.aggregate": "orchestration",
       }),
+    [ORCHESTRATION_WS_METHODS.getMessageText]: (input) =>
+      observeRpcEffect(
+        ORCHESTRATION_WS_METHODS.getMessageText,
+        loadMessageText(projectionSnapshotQuery.getMessageText, input),
+        { "rpc.aggregate": "orchestration" },
+      ),
     [ORCHESTRATION_WS_METHODS.getActivityPayload]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.getActivityPayload,

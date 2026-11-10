@@ -348,6 +348,7 @@ function mapMessage(environmentId: EnvironmentId, message: OrchestrationMessage)
     streaming: message.streaming,
     ...(message.streaming ? {} : { completedAt: message.updatedAt }),
     ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    ...(message.textPreview !== undefined ? { textPreview: message.textPreview } : {}),
   };
 }
 
@@ -1948,8 +1949,13 @@ function updateThreadSettlementState(
 }
 
 function mergeMessageUpdate(existing: ChatMessage, message: ChatMessage): ChatMessage {
+  // Text that replaces the existing text brings its own preview marker (or none).
+  const replacesText = !message.streaming && message.text.length > 0;
+  const textPreview = replacesText ? message.textPreview : existing.textPreview;
+  const { textPreview: _existingPreview, ...rest } = existing;
   return {
-    ...existing,
+    ...rest,
+    ...(textPreview !== undefined ? { textPreview } : {}),
     text: message.streaming
       ? `${existing.text}${message.text}`
       : message.text.length > 0

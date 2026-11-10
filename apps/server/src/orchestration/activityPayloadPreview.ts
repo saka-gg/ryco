@@ -1,7 +1,10 @@
 import {
   type EventId,
+  type MessageId,
   OrchestrationGetActivityPayloadError,
   type OrchestrationGetActivityPayloadResult,
+  OrchestrationGetMessageTextError,
+  type OrchestrationGetMessageTextResult,
   type ThreadId,
 } from "@ryco/contracts";
 import { Effect, Option } from "effect";
@@ -35,6 +38,11 @@ export const ACTIVITY_PREVIEW_MAX_BYTES = 64 * 1024;
  * and encryption; anything larger is returned as a preview at this size.
  */
 export const ACTIVITY_PAYLOAD_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * The longest text `getMessageText` returns whole (UTF-16 code units, up to
+ * 3 bytes each in UTF-8): within the relay's 4 MiB per message, as above.
+ */
+export const MESSAGE_TEXT_RESPONSE_MAX_LENGTH = 1024 * 1024;
 
 const TOOL_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "tool.started",
@@ -244,3 +252,46 @@ export function previewActivityAppendedEvent<
 }
 
 const previewedEvents = new WeakMap<object, unknown>();
+
+/**
+ * `orchestration.getMessageText`: the whole text of one message of an active
+ * thread, cut to what one response carries. Unknown threads, deleted threads
+ * and messages of other threads all answer `not-found`.
+ */
+export const loadMessageText = (
+  query: ProjectionSnapshotQueryShape["getMessageText"],
+  input: { readonly threadId: ThreadId; readonly messageId: MessageId },
+  maxLength: number = MESSAGE_TEXT_RESPONSE_MAX_LENGTH,
+): Effect.Effect<OrchestrationGetMessageTextResult, OrchestrationGetMessageTextError> =>
+  Effect.gen(function* () {
+    const fail = (reason: "not-found" | "unavailable") =>
+      new OrchestrationGetMessageTextError({
+        reason,
+        threadId: input.threadId,
+        messageId: input.messageId,
+      });
+    if (query === undefined) return yield* fail("unavailable");
+    const row = yield* query(input).pipe(
+      Effect.tapError((cause) =>
+        Effect.logWarning("message text read failed", {
+          threadId: input.threadId,
+          messageId: input.messageId,
+          cause,
+        }),
+      ),
+      Effect.mapError(() => fail("unavailable")),
+    );
+    if (Option.isNone(row)) return yield* fail("not-found");
+    const text = row.value.text;
+    let end = Math.min(text.length, maxLength);
+    if (end < text.length) {
+      const code = text.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    return {
+      messageId: input.messageId,
+      text: end < text.length ? text.slice(0, end) : text,
+      fullLength: text.length,
+      truncated: end < text.length,
+    };
+  });

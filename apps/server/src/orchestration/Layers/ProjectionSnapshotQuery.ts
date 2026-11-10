@@ -37,6 +37,7 @@ import {
   type OrchestrationThreadWindowSnapshot,
   type OrchestrationThreadActivity,
   type OrchestrationActivityPayloadMode,
+  type OrchestrationMessageTextMode,
   type ThreadFollowUpQueue,
   EventId,
   OrchestrationThreadShell,
@@ -246,6 +247,72 @@ const ProjectionThreadActivityWindowDbRowSchema = ProjectionThreadActivityDbRowS
  * cap. Older activities stay reachable through history pagination.
  */
 export const THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES = 1024 * 1024;
+
+/**
+ * Text budget for the messages of one thread window snapshot. Messages had no
+ * size limit: a few pasted logs or generated documents made a window several
+ * MB on their own. Older messages stay reachable through history pagination.
+ */
+export const THREAD_WINDOW_MESSAGE_MAX_TEXT_BYTES = 512 * 1024;
+/** A finished message longer than this (UTF-16 code units) is sent as a preview when asked. */
+export const MESSAGE_PREVIEW_MIN_LENGTH = 32_000;
+/** The head of a previewed message, in UTF-16 code units. */
+export const MESSAGE_PREVIEW_LENGTH = 12_000;
+
+/** The head of `text`, never splitting a surrogate pair. */
+export function messageTextHead(text: string, length: number): string {
+  if (text.length <= length) return text;
+  let end = length;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
+type ProjectionMessageDbRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
+type SentMessageRow = ProjectionMessageDbRow & {
+  readonly textPreview?: { readonly fullLength: number };
+};
+
+/**
+ * The message rows as a window or page sends them (order kept). With previews
+ * each very long finished message is cut to its head and marked; streaming
+ * messages are always sent whole, since the client appends their deltas.
+ */
+export function toSentMessageRows(
+  rows: ReadonlyArray<ProjectionMessageDbRow>,
+  mode: OrchestrationMessageTextMode | undefined,
+): ReadonlyArray<SentMessageRow> {
+  if (mode !== "preview") return rows;
+  return rows.map((row) => {
+    if (row.isStreaming !== 0) return row;
+    const text = resolveMessageText(row);
+    if (text.length <= MESSAGE_PREVIEW_MIN_LENGTH) return row;
+    return {
+      ...row,
+      text: messageTextHead(text, MESSAGE_PREVIEW_LENGTH),
+      assembledText: null,
+      textPreview: { fullLength: text.length },
+    };
+  });
+}
+
+/**
+ * Keeps the newest message rows (newest-first input) within the count limit
+ * and {@link THREAD_WINDOW_MESSAGE_MAX_TEXT_BYTES} of text; the newest is
+ * always kept. Anything older is reported through `hasMoreBefore`.
+ */
+export function takeNewestMessagesWithinTextBudget<Row extends ProjectionMessageDbRow>(
+  rows: ReadonlyArray<Row>,
+  limit: number,
+  maxBytes: number = THREAD_WINDOW_MESSAGE_MAX_TEXT_BYTES,
+): { readonly rows: ReadonlyArray<Row>; readonly hasMoreBefore: boolean } {
+  const bounded = takeNewestRowsWithinByteBudget(
+    rows.map((row) => ({ row, payloadBytes: Buffer.byteLength(resolveMessageText(row), "utf8") })),
+    limit,
+    maxBytes,
+  );
+  return { rows: bounded.rows.map((entry) => entry.row), hasMoreBefore: bounded.hasMoreBefore };
+}
 
 /**
  * Keeps the newest rows (newest-first input) within both the count limit and
@@ -615,7 +682,9 @@ function mapProposedPlanRow(
 }
 
 function mapMessageRow(
-  row: Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>,
+  row: Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema> & {
+    readonly textPreview?: { readonly fullLength: number };
+  },
 ): OrchestrationMessage {
   const message = {
     id: row.messageId,
@@ -630,6 +699,7 @@ function mapMessageRow(
     message,
     row.attachments === null ? {} : { attachments: row.attachments },
     row.dispatchMode === null ? {} : { dispatchMode: row.dispatchMode },
+    row.textPreview === undefined ? {} : { textPreview: row.textPreview },
   );
 }
 
@@ -2612,6 +2682,24 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
+  const getMessageTextRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({ threadId: ThreadId, messageId: MessageId }),
+    Result: Schema.Struct({
+      text: Schema.String,
+      assembledText: Schema.NullOr(MessageTextFromSql),
+    }),
+    execute: ({ threadId, messageId }) => sql`
+      SELECT ${messageTextColumns(sql, "message")}
+      FROM projection_thread_messages AS message
+      INNER JOIN projection_threads AS thread
+        ON thread.thread_id = message.thread_id
+      WHERE message.thread_id = ${threadId}
+        AND message.message_id = ${messageId}
+        AND thread.deleted_at IS NULL
+      LIMIT 1
+    `,
+  });
+
   const getActivityPayloadRow = SqlSchema.findOneOption({
     Request: Schema.Struct({ threadId: ThreadId, activityId: EventId }),
     Result: Schema.Struct({
@@ -4476,7 +4564,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         });
       }
 
-      const messageRows = rawMessageRows.slice(0, limits.messages).toReversed();
+      const boundedMessages = takeNewestMessagesWithinTextBudget(
+        toSentMessageRows(rawMessageRows, input.messageText),
+        limits.messages,
+      );
+      const messageRows = boundedMessages.rows.toReversed();
       const proposedPlanRows = rawProposedPlanRows.slice(0, limits.proposedPlans).toReversed();
       const boundedActivities = takeNewestRowsWithinByteBudget(
         toSentActivityRows(rawActivityRows, input.activityPayloads),
@@ -4546,7 +4638,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               createdAt: row.createdAt,
               id: row.messageId,
             })),
-            hasMoreBefore: rawMessageRows.length > limits.messages,
+            hasMoreBefore: boundedMessages.hasMoreBefore,
           }),
           proposedPlans: createdAtHistoryPageInfo({
             threadId: input.threadId,
@@ -4570,6 +4662,17 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         },
       } satisfies OrchestrationThreadWindowSnapshot;
     });
+
+  const getMessageText: ProjectionSnapshotQueryShape["getMessageText"] = (input) =>
+    getMessageTextRow(input).pipe(
+      Effect.map(Option.map((row) => ({ text: resolveMessageText(row) }))),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getMessageText:query",
+          "ProjectionSnapshotQuery.getMessageText:decodeRow",
+        ),
+      ),
+    );
 
   const getActivityPayload: ProjectionSnapshotQueryShape["getActivityPayload"] = (input) =>
     getActivityPayloadRow(input).pipe(
@@ -4774,7 +4877,10 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         );
         yield* ensureThread(threadRow);
         yield* ensureBoundary(boundary);
-        const rows = rawRows.slice(0, pageLimit).toReversed();
+        const rows = toSentMessageRows(
+          rawRows.slice(0, pageLimit),
+          "messageText" in input ? input.messageText : undefined,
+        ).toReversed();
         return {
           collection: "messages",
           snapshotSequence: computeSnapshotSequence(stateRows),
@@ -5170,6 +5276,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     getProjectWorkspaceRows,
     getThreadDetailById,
     getThreadWindow,
+    getMessageText,
     getActivityPayload,
     getCompletedSideQuestionContext,
     getThreadHistoryPage,
