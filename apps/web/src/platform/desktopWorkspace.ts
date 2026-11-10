@@ -6,17 +6,10 @@ import {
   type DesktopWorkspaceStateProjection,
   type DesktopWorkspaceStatePush,
 } from "@ryco/contracts";
-import { scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
-  THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
-  createThreadContentCapture,
   decodeCachedEnvironmentContent,
-  measureRecordBodyBytes,
-  selectThreadsForContentCache,
-  trimContentToBudget,
   type CachedEnvironmentShellSnapshot,
   type CachedThreadContent,
-  type CapturedThreadContent,
 } from "@ryco/client-runtime/state/threads";
 import {
   boundWorkspaceMetadataSnapshot,
@@ -42,6 +35,7 @@ import {
 } from "../workspaceMetadataProjection";
 import { reconcileDesktopWorkspaceCacheHydration } from "./desktopWorkspaceCacheHydration";
 import { renewDesktopMachineDirectAccess } from "./desktopHubLinkedDirectAccess";
+import type { DesktopThreadContentPublisher } from "./desktopThreadContentPublisher";
 
 const SIGNED_OUT: DesktopWorkspaceStateProjection = {
   status: "signed-out",
@@ -91,7 +85,7 @@ export function readDesktopThreadContentCacheEnabled(): boolean | null {
   return threadContentCacheEnabled;
 }
 
-function subscribeDesktopThreadContentCacheEnabled(listener: () => void): () => void {
+export function subscribeDesktopThreadContentCacheEnabled(listener: () => void): () => void {
   threadContentCacheListeners.add(listener);
   return () => threadContentCacheListeners.delete(listener);
 }
@@ -535,61 +529,10 @@ function sameMetadataContent(left: WorkspaceMetadataSnapshot, right: WorkspaceMe
   );
 }
 
-/** Changes to conversations are handed to main at most this often. */
-const THREAD_CONTENT_PUBLISH_THROTTLE_MS = 2_000;
-
-/** What the content of an environment was last captured from, and what that captured. */
-interface ThreadContentPublication {
-  readonly inputs: ThreadContentInputs;
-  readonly captured: ReadonlyArray<CapturedThreadContent>;
-}
-
-/**
- * The store replaces a message list when it changes, so identical lists mean
- * identical content without looking at it. Visits and the open thread decide
- * which conversations are kept, so they are inputs too.
- */
-interface ThreadContentInputs {
-  readonly messageIds: unknown;
-  readonly messages: unknown;
-  readonly threadIds: unknown;
-  readonly visits: unknown;
-  readonly routedThreadId: string | null;
-}
-
-function sameThreadContentInputs(left: ThreadContentInputs, right: ThreadContentInputs): boolean {
-  return (
-    left.messageIds === right.messageIds &&
-    left.messages === right.messages &&
-    left.threadIds === right.threadIds &&
-    left.visits === right.visits &&
-    left.routedThreadId === right.routedThreadId
-  );
-}
-
-/** A capture reuses the entry of a thread whose messages did not change. */
-function sameCapturedThreads(
-  left: ReadonlyArray<CapturedThreadContent>,
-  right: ReadonlyArray<CapturedThreadContent>,
-): boolean {
-  return left.length === right.length && left.every((entry, index) => entry === right[index]);
-}
-
-/** The thread open in this window, from its hash route (`#/<environmentId>/<threadId>`). */
-function readRoutedThread(): { environmentId: string; threadId: string } | null {
-  const route =
-    (globalThis.window?.location?.hash ?? "").replace(/^#/u, "").split(/[?#]/u)[0] ?? "";
-  const segments = route.split("/").filter((segment) => segment.length > 0);
-  if (segments.length !== 2) return null;
-  try {
-    return {
-      environmentId: decodeURIComponent(segments[0]!),
-      threadId: decodeURIComponent(segments[1]!),
-    };
-  } catch {
-    return null;
-  }
-}
+/** A thread-list change is handed to main after this pause... */
+const METADATA_PUBLISH_DELAY_MS = 100;
+/** ...and at most this often while the list keeps changing. */
+export const METADATA_PUBLISH_INTERVAL_MS = 2_000;
 
 /** Bind the renderer only to secret-free projections and exact environment commands. */
 export function startDesktopWorkspaceBridge(): () => void {
@@ -600,13 +543,33 @@ export function startDesktopWorkspaceBridge(): () => void {
   let publicationAccountId = current.accountId;
   const commands = new Map<EnvironmentId, DesktopWorkspaceConnectionCommand>();
   const publications = new Map<EnvironmentId, MetadataPublication>();
-  const threadContentCapture = createThreadContentCapture();
-  const threadContentPublications = new Map<EnvironmentId, ThreadContentPublication>();
-  let threadContentTimer: ReturnType<typeof setTimeout> | null = null;
-  const forgetThreadContentPublications = () => {
-    threadContentPublications.clear();
-    threadContentCapture.clear();
+  /**
+   * Hands main the conversations of live machines. Its own chunk, loaded once
+   * the setting says conversations are kept: off the first download.
+   */
+  let threadContent: DesktopThreadContentPublisher | null = null;
+  let threadContentLoad: Promise<void> | null = null;
+  const loadThreadContentPublisher = () => {
+    if (threadContentLoad !== null || disposed || threadContentCacheEnabled !== true) return;
+    threadContentLoad = import("./desktopThreadContentPublisher")
+      .then(({ createDesktopThreadContentPublisher }) => {
+        if (disposed) return;
+        threadContent = createDesktopThreadContentPublisher({
+          bridge,
+          readMachines: () => current,
+          isEnabled: () => !disposed && threadContentCacheEnabled === true,
+        });
+        threadContent.schedule();
+      })
+      .catch(() => {
+        threadContentLoad = null;
+      });
   };
+  const scheduleThreadContentPublication = () => {
+    if (threadContent !== null) threadContent.schedule();
+    else loadThreadContentPublisher();
+  };
+  const forgetThreadContentPublications = () => threadContent?.reset();
   const adoptPublicationScope = (state: DesktopWorkspaceStatePush) => {
     if (publicationAccountId !== state.accountId) {
       // Signed out, or another account: the links this Desktop made for the
@@ -629,16 +592,24 @@ export function startDesktopWorkspaceBridge(): () => void {
         )
       ) {
         publications.delete(environmentId);
-        threadContentPublications.delete(environmentId);
-        threadContentCapture.forget(environmentId);
+        threadContent?.forget(environmentId);
       }
     }
     adopt(state);
   };
+  let lastMetadataPublicationAt = Number.NEGATIVE_INFINITY;
+  // A throttle: the first change after a quiet period is handed over soon, and
+  // a stream of them (a running turn touches its thread row with every token)
+  // at most once per interval, instead of a full list after every pause.
   const publishLiveMetadata = () => {
-    if (publishTimer) globalThis.clearTimeout(publishTimer);
+    if (publishTimer || disposed) return;
+    const delayMs = Math.max(
+      METADATA_PUBLISH_DELAY_MS,
+      lastMetadataPublicationAt + METADATA_PUBLISH_INTERVAL_MS - Date.now(),
+    );
     publishTimer = globalThis.setTimeout(() => {
       publishTimer = null;
+      lastMetadataPublicationAt = Date.now();
       const publish = bridge.publishDesktopWorkspaceSnapshot;
       if (!publish || disposed) return;
       const primaryEnvironmentId = readPrimaryEnvironmentDescriptor()?.environmentId ?? null;
@@ -687,93 +658,7 @@ export function startDesktopWorkspaceBridge(): () => void {
               publications.delete(machine.environmentId);
           });
       }
-    }, 100);
-  };
-  /**
-   * Hands main the display content of each live machine's recent conversations
-   * when it changed. Nothing is serialized for a store update that left the
-   * message lists, the visits and the open thread as they were.
-   */
-  const publishThreadContent = () => {
-    const publish = bridge.publishDesktopThreadContent;
-    if (!publish || disposed || threadContentCacheEnabled !== true) return;
-    const primaryEnvironmentId = readPrimaryEnvironmentDescriptor()?.environmentId ?? null;
-    const routed = readRoutedThread();
-    const visits = useUiStateStore.getState().threadLastVisitedAtById;
-    for (const machine of current.machines) {
-      if (!machine.canReadMetadata) continue;
-      // The local server is shown from the primary environment, never from a copy
-      // painted from the cache, so there is nothing to hydrate its content into.
-      if (
-        primaryEnvironmentId !== null &&
-        machine.environmentId === current.localEnvironmentId &&
-        machine.environmentId !== primaryEnvironmentId
-      ) {
-        continue;
-      }
-      const environment = useStore.getState().environmentStateById[machine.environmentId];
-      // Content painted from the cache is already owned by main; echoing it back
-      // would make offline data look newly captured.
-      if (!environment?.bootstrapComplete || environment.hydratedFromCacheAt !== undefined)
-        continue;
-      const routedThreadId =
-        routed?.environmentId === machine.environmentId ? ThreadId.make(routed.threadId) : null;
-      const inputs: ThreadContentInputs = {
-        messageIds: environment.messageIdsByThreadId,
-        messages: environment.messageByThreadId,
-        threadIds: environment.threadIds,
-        visits,
-        routedThreadId,
-      };
-      const previous = threadContentPublications.get(machine.environmentId);
-      if (previous && sameThreadContentInputs(previous.inputs, inputs)) continue;
-      const captured = threadContentCapture.capture(
-        machine.environmentId,
-        environment,
-        selectThreadsForContentCache({
-          threadIds: environment.threadIds,
-          hasMessages: (threadId) => (environment.messageIdsByThreadId[threadId]?.length ?? 0) > 0,
-          routedThreadId,
-          lastVisitedAt: (threadId) =>
-            visits[scopedThreadKey({ environmentId: machine.environmentId, threadId })],
-        }),
-      );
-      threadContentPublications.set(machine.environmentId, { inputs, captured });
-      if (previous ? sameCapturedThreads(previous.captured, captured) : captured.length === 0) {
-        continue;
-      }
-      publish(
-        machine.environmentId,
-        Object.fromEntries(
-          trimContentToBudget({
-            bodyBytes: measureRecordBodyBytes({
-              environmentId: machine.environmentId,
-              capturedAt: Date.now(),
-            }),
-            entries: captured,
-            budgetBytes: THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
-          }).map((thread) => [thread.threadId, thread.content]),
-        ),
-      );
-    }
-  };
-  // A throttle, not a debounce: a conversation that streams for minutes must still reach main.
-  const scheduleThreadContentPublication = () => {
-    if (threadContentTimer !== null || disposed || threadContentCacheEnabled !== true) return;
-    threadContentTimer = globalThis.setTimeout(() => {
-      threadContentTimer = null;
-      publishThreadContent();
-    }, THREAD_CONTENT_PUBLISH_THROTTLE_MS);
-  };
-  /** A window that is leaving sight hands over what is still waiting. */
-  const flushThreadContent = () => {
-    if (threadContentTimer === null) return;
-    globalThis.clearTimeout(threadContentTimer);
-    threadContentTimer = null;
-    publishThreadContent();
-  };
-  const flushThreadContentWhenHidden = () => {
-    if (globalThis.document?.visibilityState === "hidden") flushThreadContent();
+    }, delayMs);
   };
   const unsubscribeThreadContentSetting = subscribeDesktopThreadContentCacheEnabled(() => {
     if (threadContentCacheEnabled === true) {
@@ -781,13 +666,9 @@ export function startDesktopWorkspaceBridge(): () => void {
       scheduleThreadContentPublication();
       return;
     }
-    if (threadContentTimer !== null) globalThis.clearTimeout(threadContentTimer);
-    threadContentTimer = null;
     forgetThreadContentPublications();
     resetCachedThreadContent();
   });
-  globalThis.window?.addEventListener?.("pagehide", flushThreadContent);
-  globalThis.document?.addEventListener?.("visibilitychange", flushThreadContentWhenHidden);
   // Main publishes only on change, so a state adopted from the initial read
   // must not replace one pushed while that read was in flight: nothing would
   // publish the newer state again until the next change.
@@ -811,9 +692,10 @@ export function startDesktopWorkspaceBridge(): () => void {
         if (isCurrent()) commands.delete(command.environmentId);
       });
   });
-  const unsubscribeStore = useStore.subscribe(() => {
+  const unsubscribeStore = useStore.subscribe((state) => {
     publishLiveMetadata();
-    scheduleThreadContentPublication();
+    if (threadContent !== null) threadContent.noteStoreChange(state);
+    else scheduleThreadContentPublication();
   });
   const unsubscribeVisits = useUiStateStore.subscribe(scheduleThreadContentPublication);
   void bridge
@@ -842,14 +724,12 @@ export function startDesktopWorkspaceBridge(): () => void {
   return () => {
     disposed = true;
     if (publishTimer) globalThis.clearTimeout(publishTimer);
-    if (threadContentTimer !== null) globalThis.clearTimeout(threadContentTimer);
+    threadContent?.dispose();
     unsubscribeState?.();
     unsubscribeCommands?.();
     unsubscribeStore();
     unsubscribeVisits();
     unsubscribeThreadContentSetting();
-    globalThis.window?.removeEventListener?.("pagehide", flushThreadContent);
-    globalThis.document?.removeEventListener?.("visibilitychange", flushThreadContentWhenHidden);
     resetCachedThreadContent();
   };
 }

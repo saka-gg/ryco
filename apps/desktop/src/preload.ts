@@ -359,6 +359,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.verifyApproval, input),
   publishDesktopThreadContent: (environmentId, content) =>
     ipcRenderer.send(DESKTOP_WORKSPACE_IPC.publishThreadContent, environmentId, content),
+  publishDesktopThreadContentChanges: (environmentId, changes) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.publishThreadContentChanges, environmentId, changes),
   getDesktopThreadContent: (environmentId) =>
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getThreadContent, environmentId),
   getDesktopThreadContentCacheEnabled: () =>
