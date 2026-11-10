@@ -67,11 +67,12 @@ function useComparison(environmentId: EnvironmentId | null, cwd: string | null) 
     return createComparisonController({
       storage: mobileKV,
       storageKey: comparisonStorageKey(environmentId, cwd),
-      read: (selection) =>
+      read: (selection, knownRevision) =>
         ensureEnvironmentApi(environmentId).vcs.readComparison({
           cwd,
           selection,
           ignoreWhitespace: false,
+          ...(knownRevision ? { knownRevision } : {}),
         }),
     });
   }, [cwd, environmentId]);

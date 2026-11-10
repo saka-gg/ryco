@@ -635,10 +635,19 @@ export const GitComparisonSelection = Schema.Struct({
   target: Schema.optionalKey(Schema.Literal("workingTree")),
 });
 export type GitComparisonSelection = typeof GitComparisonSelection.Type;
+/**
+ * The `revision` of a review the client holds: a node whose answer is still
+ * that revision sends it without its patch, as `unchanged`. Older nodes drop
+ * the key and send the whole answer.
+ */
+const GitKnownReviewRevision = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+
 export const GitReadComparisonInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
   selection: GitComparisonSelection,
   ignoreWhitespace: Schema.Boolean,
+  /** `source.revision` of the comparison held for this selection. */
+  knownRevision: Schema.optional(GitKnownReviewRevision),
 });
 export type GitReadComparisonInput = typeof GitReadComparisonInput.Type;
 /** Immutable endpoints shared by patch rendering and subsequent revision reads. */
@@ -657,7 +666,10 @@ export type GitComparisonSource = typeof GitComparisonSource.Type;
 export const GitReadComparisonResult = Schema.Struct({
   selection: GitComparisonSelection,
   source: GitComparisonSource,
+  /** Empty when `unchanged`. */
   patch: Schema.String,
+  /** Still `knownRevision`: keep the patch already held. */
+  unchanged: Schema.optional(Schema.Literal(true)),
 });
 export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;
 
@@ -710,7 +722,11 @@ export const GitReadImageBlobResult = Schema.Union([
 ]);
 export type GitReadImageBlobResult = typeof GitReadImageBlobResult.Type;
 
-export const GitLocalChangesInput = Schema.Struct({ cwd: TrimmedNonEmptyStringSchema });
+export const GitLocalChangesInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  /** `revision` of the review held. */
+  knownRevision: Schema.optional(GitKnownReviewRevision),
+});
 export type GitLocalChangesInput = typeof GitLocalChangesInput.Type;
 export const GitLocalChangesScope = Schema.Literals(["staged", "unstaged"]);
 export type GitLocalChangesScope = typeof GitLocalChangesScope.Type;
@@ -737,8 +753,11 @@ export const GitLocalChangesResult = Schema.Struct({
    * older servers.
    */
   stagedRevision: Schema.optional(Schema.String),
+  /** Both sides empty when `unchanged`. */
   staged: GitLocalPatch,
   unstaged: GitLocalPatch,
+  /** Still `knownRevision`: keep the review already held. */
+  unchanged: Schema.optional(Schema.Literal(true)),
 });
 export type GitLocalChangesResult = typeof GitLocalChangesResult.Type;
 export const GitApplyIndexPatchInput = Schema.Struct({

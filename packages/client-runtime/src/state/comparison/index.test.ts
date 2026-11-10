@@ -144,4 +144,15 @@ describe("comparison state", () => {
       "base",
     ]);
   });
+  it("sends the held revision and keeps the held comparison on unchanged (D5)", async () => {
+    const f = setup();
+    f.controller.setSelection({ ref: "main", mode: "direct" });
+    await f.controller.refresh();
+    const held = f.controller.getSnapshot().data;
+    expect(held).not.toBeNull();
+    f.read.mockResolvedValueOnce({ ...result("main"), patch: "", unchanged: true });
+    await f.controller.refresh();
+    expect(f.read.mock.calls.at(-1)).toEqual([{ ref: "main", mode: "direct" }, "main"]);
+    expect(f.controller.getSnapshot().data).toBe(held);
+  });
 });

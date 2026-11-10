@@ -393,7 +393,13 @@ export const readGitLocalChanges = Effect.fn("readGitLocalChanges")(function* (
   execute: GitVcsDriverShape["execute"],
   input: GitLocalChangesInput,
 ) {
-  return yield* (yield* makeReader(execute, input.cwd)).read();
+  const review = yield* (yield* makeReader(execute, input.cwd)).read();
+  // The client holds this review: the git work is the same, the patches are not sent again.
+  if (input.knownRevision !== undefined && input.knownRevision === review.revision) {
+    const empty = { patch: "", files: [] };
+    return { ...review, staged: empty, unstaged: empty, unchanged: true as const };
+  }
+  return review;
 });
 
 /**

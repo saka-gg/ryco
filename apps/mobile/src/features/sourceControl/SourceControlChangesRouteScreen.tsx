@@ -41,7 +41,10 @@ function useLocalChangesController(environmentId: EnvironmentId | null, cwd: str
     if (!environmentId || !cwd) return null;
     return createLocalChangesController({
       cwd,
-      read: () => ensureEnvironmentApi(environmentId).vcs.readLocalChanges({ cwd }),
+      read: (knownRevision) =>
+        ensureEnvironmentApi(environmentId).vcs.readLocalChanges(
+          knownRevision ? { cwd, knownRevision } : { cwd },
+        ),
       apply: (input) => ensureEnvironmentApi(environmentId).vcs.applyIndexPatch(input),
     });
   }, [cwd, environmentId]);
