@@ -67,6 +67,22 @@ export const DatabaseCompactionReport = Schema.Struct({
 export type DatabaseCompactionReport = typeof DatabaseCompactionReport.Type;
 
 /** The node's state database: its size, free space inside it, and what could be returned. */
+/** One backup of the node's database, as Storage settings lists it. */
+export const DatabaseBackupSummary = Schema.Struct({
+  /** The file name in the backups folder; what `storage.removeDatabaseBackup` takes. */
+  name: TrimmedNonEmptyString,
+  /** `before`: taken before an upgrade's migrations; `manual`: `ryco db backup`. */
+  kind: Schema.Literals(["before", "manual"]),
+  /** Schema the backup holds, and the one the upgrade moved to (null for manual backups). */
+  fromSchema: NonNegativeInt,
+  toSchema: Schema.NullOr(NonNegativeInt),
+  createdAt: IsoDateTime,
+  bytes: NonNegativeInt,
+  /** The newest backup: the way back from the latest upgrade. */
+  newest: Schema.Boolean,
+});
+export type DatabaseBackupSummary = typeof DatabaseBackupSummary.Type;
+
 export const DatabaseStorageReport = Schema.Struct({
   fileBytes: NonNegativeInt,
   /**
@@ -94,8 +110,17 @@ export const DatabaseStorageReport = Schema.Struct({
       command: Schema.NullOr(Schema.String),
     }),
   ),
+  /**
+   * Backups of the database, newest first; each can be removed (`storage.removeDatabaseBackup`).
+   * Absent from nodes that predate it, which have no removal either.
+   */
+  backups: Schema.optionalKey(Schema.Array(DatabaseBackupSummary)),
 });
 export type DatabaseStorageReport = typeof DatabaseStorageReport.Type;
+
+export const StorageRemoveDatabaseBackupInput = Schema.Struct({ name: TrimmedNonEmptyString });
+export const StorageRemoveDatabaseBackupResult = Schema.Struct({ freedBytes: NonNegativeInt });
+export type StorageRemoveDatabaseBackupResult = typeof StorageRemoveDatabaseBackupResult.Type;
 
 export const StorageSnapshot = Schema.Struct({
   scannedAt: IsoDateTime,

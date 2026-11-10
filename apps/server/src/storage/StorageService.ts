@@ -161,8 +161,12 @@ export function makeStorageService(deps: {
   git: Pick<GitWorkflowServiceShape, "removeWorktree" | "listWorktreePaths">;
   /** Records a removed checkout on its workspace record (shared lifecycle state). */
   recordCheckoutRemoval?: (checkoutPath: string) => Effect.Effect<void>;
-  /** The node's database (size, free space, compaction); every scan page carries it. */
+  /** The node's database (size, free space, compaction, backups); every scan page carries it. */
   readDatabase?: Effect.Effect<DatabaseStorageReport>;
+  /** Removes one listed database backup (the owner's click). Absent: unavailable. */
+  removeDatabaseBackup?: (
+    name: string,
+  ) => Effect.Effect<{ readonly freedBytes: number }, StorageError>;
   /** Starts work that outlives the request (the cache purge after a manual batch). */
   runInBackground?: (work: Effect.Effect<void, StorageError>) => Effect.Effect<void>;
   /**
@@ -1616,10 +1620,17 @@ export function makeStorageService(deps: {
         yield* sql`UPDATE storage_owned_entries SET state = 'owned', completed_at = ${new Date().toISOString()}, identity_json = ${JSON.stringify({ device: stat.dev, inode: stat.ino, fingerprint: size.fingerprint })} WHERE id = ${id}`;
       }).pipe(Effect.mapError(failure)),
     );
+  const removeDatabaseBackup = (name: string) =>
+    deps.removeDatabaseBackup === undefined
+      ? Effect.fail(
+          new StorageError({ detail: "Database backups cannot be removed on this node." }),
+        )
+      : deps.removeDatabaseBackup(name);
   return {
     scan,
     preview,
     execute,
+    removeDatabaseBackup,
     runRetention,
     purgePending,
     createTemporaryDirectory,
@@ -1668,16 +1679,41 @@ export const StorageServiceLive = Layer.effect(
       SqlClient.SqlClient | ServerConfig | FileSystem.FileSystem | EventLogCompaction
     >();
     const scope = yield* Effect.scope;
+    const databaseConfig = yield* ServerConfig;
+    const loadBackupList = Effect.promise(() => import("./databaseBackupList.ts"));
     const service = makeStorageService({
       recordCheckoutRemoval,
       runInBackground: (work) =>
         Effect.forkIn(work.pipe(Effect.ignore({ log: true })), scope).pipe(Effect.asVoid),
       // The report (and the doctor suggestion in it) loads when Storage settings first ask, which
       // keeps it off the server's boot path (serverBundleBoundaries.test.ts).
-      readDatabase: Effect.promise(() => import("../persistence/databaseStorageReport.ts")).pipe(
-        Effect.flatMap((report) => report.readDatabaseStorageReport()),
-        Effect.provideContext(databaseServices),
+      readDatabase: Effect.all([
+        Effect.promise(() => import("../persistence/databaseStorageReport.ts")).pipe(
+          Effect.flatMap((report) => report.readDatabaseStorageReport()),
+          Effect.provideContext(databaseServices),
+        ),
+        // Backups load their own module on first use too; a listing that fails leaves them out.
+        loadBackupList.pipe(
+          Effect.flatMap((backups) => backups.listDatabaseBackupSummaries(databaseConfig.dbPath)),
+          Effect.option,
+        ),
+      ]).pipe(
+        Effect.map(([report, backups]) =>
+          backups._tag === "Some" ? { ...report, backups: backups.value } : report,
+        ),
       ),
+      removeDatabaseBackup: (name) =>
+        loadBackupList.pipe(
+          Effect.flatMap((backups) => backups.removeDatabaseBackup(databaseConfig.dbPath, name)),
+          Effect.mapError(
+            () => new StorageError({ detail: "The backup could not be removed. Scan again." }),
+          ),
+          Effect.flatMap((outcome) =>
+            outcome.kind === "removed"
+              ? Effect.succeed({ freedBytes: outcome.freedBytes })
+              : Effect.fail(new StorageError({ detail: outcome.detail })),
+          ),
+        ),
       providerProtection: Option.getOrElse(protection, () => ({ resolve: () => null })),
       sql: yield* SqlClient.SqlClient,
       config: yield* ServerConfig,

@@ -431,6 +431,7 @@ export interface WsRpcClient {
     readonly scan: RpcUnaryMethod<typeof WS_METHODS.storageScan>;
     readonly preview: RpcUnaryMethod<typeof WS_METHODS.storagePreview>;
     readonly execute: RpcUnaryMethod<typeof WS_METHODS.storageExecute>;
+    readonly removeDatabaseBackup: RpcUnaryMethod<typeof WS_METHODS.storageRemoveDatabaseBackup>;
   };
   readonly worktrees: {
     readonly setManualPosition: RpcUnaryMethod<typeof WS_METHODS.worktreesSetManualPosition>;
@@ -1168,6 +1169,8 @@ export function createWsRpcClient(
       scan: (input) => transport.request((client) => client[WS_METHODS.storageScan](input)),
       preview: (input) => transport.request((client) => client[WS_METHODS.storagePreview](input)),
       execute: (input) => transport.request((client) => client[WS_METHODS.storageExecute](input)),
+      removeDatabaseBackup: (input) =>
+        transport.request((client) => client[WS_METHODS.storageRemoveDatabaseBackup](input)),
     },
     worktrees: {
       setManualPosition: (input) =>
