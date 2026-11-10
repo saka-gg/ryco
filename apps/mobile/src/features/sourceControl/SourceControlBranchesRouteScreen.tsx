@@ -78,12 +78,16 @@ export function SourceControlBranchesRouteScreen(props: BranchesRouteProps) {
   const createName = refs ? branchToCreate(query, refs) : null;
   const typedProblem = query.trim().length > 0 ? branchNameProblem(query) : null;
 
+  const refreshReads = () => {
+    if (environmentId && cwd) refreshCheckoutReads(environmentId, cwd);
+  };
+
   const finish = async (label: string, work: () => Promise<unknown>) => {
     setBusy(label);
     setError(null);
     try {
       await work();
-      if (environmentId && cwd) refreshCheckoutReads(environmentId, cwd);
+      refreshReads();
       navigation.goBack();
     } catch (cause) {
       setError(errorMessageOr(cause, `${label} failed.`));
