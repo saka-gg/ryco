@@ -46,6 +46,12 @@ export const PushAlertPlaintext = Schema.Struct({
   q: SafeCounter,
   /** When the node sealed it, epoch milliseconds. */
   at: SafeCounter,
+  /**
+   * How many of this node's threads need the person when it was sealed (the Inbox's "needs you",
+   * the Live Activity's count): the device's extension sets the app icon badge from it, summed
+   * with its other machines. Left out by older nodes; older devices ignore it.
+   */
+  b: Schema.optionalKey(SafeCounter),
 });
 export type PushAlertPlaintext = typeof PushAlertPlaintext.Type;
 

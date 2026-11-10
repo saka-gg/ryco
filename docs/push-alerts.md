@@ -189,6 +189,14 @@ when the Hub can send to this build's bundle id:
    on coming back. Either way the app keeps posting its own alerts until delivery is confirmed, since
    a missed alert is worse than a double one.
 
+**App icon badge.** The badge shows how many threads need the person (the Inbox's "needs you",
+the Live Activity's rule, over every machine). Each sealed alert carries the sending node's count
+(`b`, optional: older nodes leave it out, older apps ignore it); the extension keeps each machine's
+last known count in a keychain item of its own beside the key (`PushBadgeStore`, counts only) and
+sets the badge to their sum. While the app runs with thread alerts on, it writes the live counts of
+the machines it is connected to over those, drops machines it no longer lists, and clears the badge
+when alerts are turned off or the account signs out. The alert permission asks for badges too.
+
 Turning it off removes the Hub registration, the connected nodes' registrations and the key. Any key
 means a Hub registration may exist, so its removal is recorded in the app's storage before the key
 goes and retried on the next foreground or launch until the Hub confirms it (a 404 counts as

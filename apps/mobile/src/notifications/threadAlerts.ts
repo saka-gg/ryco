@@ -213,7 +213,8 @@ export async function requestThreadAlertPermission(): Promise<boolean> {
   Notifications.clearLastNotificationResponse();
   await ensureThreadAlertChannel();
   const permission = await Notifications.requestPermissionsAsync({
-    ios: { allowAlert: true, allowSound: true },
+    // The badge counts what needs the person (`badge/AppBadgeFeed`).
+    ios: { allowAlert: true, allowSound: true, allowBadge: true },
   });
   return permission.granted;
 }

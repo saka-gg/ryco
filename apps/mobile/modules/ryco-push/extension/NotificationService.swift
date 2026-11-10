@@ -63,6 +63,15 @@ final class NotificationService: UNNotificationServiceExtension {
     mutable.categoryIdentifier = alert.categoryIdentifier
     if !record.sound { mutable.sound = nil }
     mutable.userInfo = PushAlertOpener.userInfo(content.userInfo, alert: alert)
+    if let count = alert.badgeCount { mutable.badge = badge(environmentId: alert.environmentId, count: count) }
     return mutable
+  }
+
+  /// The badge with this machine's new count beside every other machine's last known one.
+  private static func badge(environmentId: String, count: Int64) -> NSNumber? {
+    guard let store = PushBadgeStore.fromMainBundle() else { return nil }
+    let next = PushAlertOpener.badge(counts: store.read(), environmentId: environmentId, count: count)
+    try? store.write(next.counts)
+    return NSNumber(value: next.total)
   }
 }

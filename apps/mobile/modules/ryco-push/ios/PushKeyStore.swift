@@ -110,3 +110,76 @@ struct PushKeyStore {
     }
   }
 }
+
+/// Each machine's last known "needs you" count, for the app icon badge (`docs/push-alerts.md`).
+///
+/// A keychain item of its own beside the push key, in the same shared group: the app writes the
+/// counts it sees live, the extension the count a sealed alert carries, and the badge is their
+/// sum. Kept apart from the key so that a badge write can never bring back a deleted key. Counts
+/// only, by environment id: nothing about a thread.
+struct PushBadgeStore {
+  private static let service = "dev.ryco.push"
+  private static let account = "badge-counts-v1"
+
+  let accessGroup: String
+
+  static func fromMainBundle() -> PushBadgeStore? {
+    guard
+      let group = Bundle.main.object(forInfoDictionaryKey: PushKeyStore.accessGroupInfoKey)
+        as? String,
+      !group.isEmpty,
+      !group.contains("$(")
+    else { return nil }
+    return PushBadgeStore(accessGroup: group)
+  }
+
+  private func query() -> [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: Self.service,
+      kSecAttrAccount as String: Self.account,
+      kSecAttrAccessGroup as String: accessGroup,
+      kSecUseDataProtectionKeychain as String: true,
+    ]
+  }
+
+  /// The counts, or none when there are none or they cannot be read.
+  func read() -> [String: Int64] {
+    var query = query()
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var item: CFTypeRef?
+    guard
+      SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+      let data = item as? Data,
+      let counts = try? JSONDecoder().decode([String: Int64].self, from: data)
+    else { return [:] }
+    return counts
+  }
+
+  func write(_ counts: [String: Int64]) throws {
+    if counts.isEmpty {
+      try delete()
+      return
+    }
+    let data = try JSONEncoder().encode(counts)
+    let update: [String: Any] = [
+      kSecValueData as String: data,
+      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+    ]
+    let status = SecItemUpdate(query() as CFDictionary, update as CFDictionary)
+    if status == errSecSuccess { return }
+    guard status == errSecItemNotFound else { throw PushKeyStoreError.keychain(status) }
+    var add = query()
+    add.merge(update) { _, new in new }
+    let added = SecItemAdd(add as CFDictionary, nil)
+    guard added == errSecSuccess else { throw PushKeyStoreError.keychain(added) }
+  }
+
+  func delete() throws {
+    let status = SecItemDelete(query() as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw PushKeyStoreError.keychain(status)
+    }
+  }
+}
