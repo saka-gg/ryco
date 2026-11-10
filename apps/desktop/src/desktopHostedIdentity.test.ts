@@ -956,3 +956,16 @@ describe("Desktop hosted identity coordinator", () => {
     expect(cancelExternalIdentityConnection).toHaveBeenCalledWith("github");
   });
 });
+
+describe("the account session socket's upgrade (H3)", () => {
+  it("names the origin-pinned session URL and signs no other URL", async () => {
+    const identity = coordinator({ api: {} });
+    expect(identity.hubSessionUrl()).toBe("wss://hub.example.test/v1/relay/session");
+    await expect(
+      identity.authorizeRelayUpgrade("wss://hub.example.test/v1/relay/elsewhere"),
+    ).rejects.toThrow("Desktop relay URL is invalid.");
+    await expect(
+      identity.authorizeRelayUpgrade("wss://other.example.test/v1/relay/session"),
+    ).rejects.toThrow("Desktop relay URL is invalid.");
+  });
+});

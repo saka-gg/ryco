@@ -587,9 +587,15 @@ const backendAgentWork = new BackendAgentWorkTracker({
 });
 // Window and power lifecycle for the workspace client: it backgrounds a while
 // after the window leaves sight, never on blur, and keeps machine presence fresh.
+/** The workspace is backgrounded (window out of sight past its grace); see the activity below. */
+let desktopWorkspaceBackgrounded = false;
+/** The account session socket (`desktopHubSession.ts`), created with the relay manager. */
+let desktopHubSession: ReturnType<typeof DesktopHubStack.startDesktopHubSession> | null = null;
 const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
   setBackgrounded: (backgrounded) => {
+    desktopWorkspaceBackgrounded = backgrounded;
     void desktopWorkspaceClient?.setBackgrounded(backgrounded).catch(() => undefined);
+    desktopHubSession?.sync();
   },
   refreshCatalog: () => {
     void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
@@ -1210,8 +1216,22 @@ const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
     if (desktopWorkspaceRelayManager !== null) return desktopWorkspaceRelayManager;
     const context = await ensureDesktopNativeIdentityContext();
     const coordinator = await ensureDesktopHostedIdentityCoordinator();
-    const { DesktopWorkspaceRelayManager } = await loadDesktopHubStack();
+    const { DesktopWorkspaceRelayManager, startDesktopHubSession } = await loadDesktopHubStack();
+    // One account socket for every machine channel, on a Hub that offers it.
+    desktopHubSession ??= startDesktopHubSession({
+      identity: coordinator,
+      authority: () => {
+        const snapshot = desktopWorkspaceClient?.snapshot();
+        return snapshot?.status === "ready" ? snapshot.accountId : null;
+      },
+      isForeground: () => !desktopWorkspaceBackgrounded,
+      onDirectoryInvalidated: () => {
+        void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
+      },
+      revalidateSession: () => desktopWorkspaceClient?.refreshCatalog(),
+    });
     const manager = new DesktopWorkspaceRelayManager({
+      sessionStream: () => desktopHubSession?.manager.streamFactory(),
       authority: {
         resolveTarget: async (environmentId, pairingOnly) => {
           const client = await ensureDesktopWorkspaceClient();
@@ -1386,7 +1406,10 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
     },
   });
   disposeDesktopWorkspaceSubscription?.();
-  disposeDesktopWorkspaceSubscription = client.subscribe(emitDesktopWorkspaceState);
+  disposeDesktopWorkspaceSubscription = client.subscribe((snapshot) => {
+    emitDesktopWorkspaceState(snapshot);
+    desktopHubSession?.sync();
+  });
   desktopWorkspaceClient = client;
   return client;
 }

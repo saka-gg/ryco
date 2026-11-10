@@ -24,6 +24,7 @@ export {
   desktopNativeSecurityNamespace,
   resolveDesktopNativeSecurityHelperPath,
 } from "./nativeSecurityHelper.ts";
+export { startDesktopHubSession } from "./desktopHubSession.ts";
 export {
   createDesktopHostedSessionCredentials,
   getOrCreateDesktopInstallationId,

@@ -198,6 +198,14 @@
       "types": "./src/relay/dpop.ts",
       "import": "./src/relay/dpop.ts"
     },
+    "./relay/deferredHubSessionSocket": {
+      "types": "./src/relay/deferredHubSessionSocket.ts",
+      "import": "./src/relay/deferredHubSessionSocket.ts"
+    },
+    "./relay/nativeHubSessionManager": {
+      "types": "./src/relay/nativeHubSessionManager.ts",
+      "import": "./src/relay/nativeHubSessionManager.ts"
+    },
     "./relay/earlyRelaySocket": {
       "types": "./src/relay/earlyRelaySocket.ts",
       "import": "./src/relay/earlyRelaySocket.ts"

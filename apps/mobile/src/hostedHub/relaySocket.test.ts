@@ -739,3 +739,38 @@ describe("early relay socket", () => {
     expect(createSocket).not.toHaveBeenCalled();
   });
 });
+
+describe("a channel on the account session (H3)", () => {
+  it("runs the engine on the session stream: no socket, no proof, the ticket in its first frame", async () => {
+    const sent: Uint8Array[] = [];
+    const openListeners: Array<() => void> = [];
+    let readyState = 0;
+    const stream = {
+      get bufferedAmount() {
+        return 0;
+      },
+      get readyState() {
+        return readyState;
+      },
+      send: (bytes: Uint8Array) => sent.push(Uint8Array.from(bytes)),
+      close: vi.fn(),
+      onOpen: (listener: () => void) => openListeners.push(listener),
+      onBinaryMessage: () => undefined,
+      onClose: () => undefined,
+      onError: () => undefined,
+    };
+    const discard = vi.fn();
+    const harness = build({
+      sessionStream: () => stream,
+      earlySocket: { discard } as never,
+    });
+    await settle();
+    expect(harness.sockets).toHaveLength(0);
+    expect(harness.sign).not.toHaveBeenCalled();
+    expect(discard).toHaveBeenCalledOnce();
+    readyState = 1;
+    for (const listener of openListeners) listener();
+    const first = decodeRelayFrame(sent[0]!);
+    expect(first.ok && first.value.type).toBe("auth");
+  });
+});

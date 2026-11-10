@@ -27,6 +27,7 @@ import type {
 } from "@ryco/client-runtime/platform";
 import { createDpopProofSigner } from "@ryco/client-runtime/relay";
 import type { HostedRelayTicket } from "@ryco/client-runtime/authorization";
+import { HUB_SESSION_PATH } from "@ryco/contracts/hub-session";
 
 import {
   DesktopAutomaticNodeClaimError,
@@ -496,12 +497,36 @@ export class DesktopHostedIdentityCoordinator {
     return this.#api.issueRelayTicket(nodeId);
   }
 
-  /** Main-process-only DPoP upgrade headers for the origin-pinned relay URL. */
+  /**
+   * What the Hub announced with its last directory answer (`hubFeatures`), and changes of it.
+   * The account session socket opens only on a Hub that announced it (`desktopHubSession.ts`).
+   */
+  hubFeatures(): ReadonlyArray<string> {
+    return this.#api.hubFeatures();
+  }
+
+  subscribeHubFeatures(listener: () => void): () => void {
+    return this.#api.subscribeHubFeatures(listener);
+  }
+
+  /** The origin-pinned account session socket URL (`wss://<hub>/v1/relay/session`). */
+  hubSessionUrl(): string {
+    const url = new URL(HUB_SESSION_PATH, this.#origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.toString();
+  }
+
+  /**
+   * Main-process-only DPoP upgrade headers for an origin-pinned relay URL: a machine's relay
+   * socket, or the account session socket.
+   */
   async authorizeRelayUpgrade(url: string): Promise<Readonly<Record<string, string>>> {
     await this.#credentials.hydrate();
     const relayUrl = new URL("/v1/relay/client", this.#origin);
     relayUrl.protocol = relayUrl.protocol === "https:" ? "wss:" : "ws:";
-    if (url !== relayUrl.toString()) throw new Error("Desktop relay URL is invalid.");
+    if (url !== relayUrl.toString() && url !== this.hubSessionUrl()) {
+      throw new Error("Desktop relay URL is invalid.");
+    }
     const token = this.#credentials.readBearerToken?.() ?? null;
     if (!token || !this.#relayDpopSigner) throw new Error("Desktop Hub session is unavailable.");
     const proof = await this.#relayDpopSigner.sign({
