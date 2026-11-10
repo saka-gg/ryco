@@ -2352,6 +2352,55 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
+  // Newest first over the thread's (thread_id, created_at, message_id) index, so the current
+  // turn's messages are met first; reads no message bodies.
+  const getThreadAssistantMessageForTurnRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      threadId: ThreadId,
+      turnId: TurnId,
+      streamingOnly: Schema.Number,
+    }),
+    Result: Schema.Struct({ messageId: MessageId }),
+    execute: ({ threadId, turnId, streamingOnly }) => sql`
+      SELECT message_id AS "messageId"
+      FROM projection_thread_messages
+      WHERE thread_id = ${threadId}
+        AND turn_id = ${turnId}
+        AND role = 'assistant'
+        AND (${streamingOnly} = 0 OR is_streaming = 1)
+      ORDER BY created_at DESC, message_id DESC
+      LIMIT 1
+    `,
+  });
+
+  // The kinds `findTaskTitleInActivities` (ProviderRuntimeIngestion) reads, served by the
+  // kind-leading activity index; the task id must be a string, as that reader compares it.
+  const listThreadTaskActivityRows = SqlSchema.findAll({
+    Request: Schema.Struct({ threadId: ThreadId, taskId: Schema.String }),
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, taskId }) => sql`
+      SELECT
+        activity_id AS "activityId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        tone,
+        kind,
+        summary,
+        payload_json AS "payload",
+        sequence,
+        created_at AS "createdAt"
+      FROM projection_thread_activities
+      WHERE kind IN ('task.started', 'task.progress', 'task.updated')
+        AND thread_id = ${threadId}
+        AND CASE
+          WHEN json_valid(payload_json) AND json_type(payload_json, '$.taskId') = 'text'
+            THEN json_extract(payload_json, '$.taskId')
+          ELSE NULL
+        END = ${taskId}
+      ORDER BY sequence ASC, created_at ASC, activity_id ASC
+    `,
+  });
+
   const countThreadUserMessageRows = SqlSchema.findOne({
     Request: ThreadIdLookupInput,
     Result: Schema.Struct({ userMessages: NonNegativeInt }),
@@ -5139,14 +5188,50 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           "ProjectionSnapshotQuery.getThreadProposedPlanById:decodeRow",
         ),
       ),
-      Effect.map(
-        Option.map((row) => ({
-          id: row.planId,
-          createdAt: row.createdAt,
-          implementedAt: row.implementedAt,
-          implementationThreadId: row.implementationThreadId,
-        })),
+      Effect.map(Option.map(mapProposedPlanRow)),
+    );
+
+  const hasThreadAssistantMessageForTurn: NonNullable<
+    ProjectionSnapshotQueryShape["hasThreadAssistantMessageForTurn"]
+  > = (input) =>
+    getThreadAssistantMessageForTurnRow({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      streamingOnly: input.streamingOnly ? 1 : 0,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.hasThreadAssistantMessageForTurn:query",
+          "ProjectionSnapshotQuery.hasThreadAssistantMessageForTurn:decodeRow",
+        ),
       ),
+      Effect.map(Option.isSome),
+    );
+
+  const listThreadPendingRequestActivities: NonNullable<
+    ProjectionSnapshotQueryShape["listThreadPendingRequestActivities"]
+  > = (threadId) =>
+    listThreadPendingRequestActivityRows({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listThreadPendingRequestActivities:query",
+          "ProjectionSnapshotQuery.listThreadPendingRequestActivities:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map(mapActivityRow)),
+    );
+
+  const listThreadTaskActivities: NonNullable<
+    ProjectionSnapshotQueryShape["listThreadTaskActivities"]
+  > = (input) =>
+    listThreadTaskActivityRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listThreadTaskActivities:query",
+          "ProjectionSnapshotQuery.listThreadTaskActivities:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map(mapActivityRow)),
     );
 
   return {
@@ -5179,6 +5264,9 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     getThreadHistoryRepairContext,
     countThreadUserMessages,
     getThreadProposedPlanById,
+    hasThreadAssistantMessageForTurn,
+    listThreadPendingRequestActivities,
+    listThreadTaskActivities,
     listThreadTaskPathRefs,
     listPendingCheckpointReverts,
     getLatestCheckpointRevert,

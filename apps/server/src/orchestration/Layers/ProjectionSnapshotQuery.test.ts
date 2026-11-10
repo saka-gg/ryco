@@ -462,6 +462,80 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("answers event intake's turn-boundary reads without the whole thread", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("intake-reads");
+      const insertMessage = (id: string, turnId: string, role: string, streaming: number) =>
+        sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+          VALUES (${id}, ${threadId}, ${turnId}, ${role}, 'text', ${streaming}, ${`2026-09-12T00:00:0${id.length % 10}.000Z`}, '2026-09-12T00:00:00.000Z')`;
+      yield* insertMessage("user-1", "turn-a", "user", 0);
+      yield* insertMessage("done-1", "turn-a", "assistant", 0);
+      yield* insertMessage("live-22", "turn-b", "assistant", 1);
+      yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('other-thread', 'intake-other', 'turn-c', 'assistant', 'text', 1, '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z')`;
+      const has = (turnId: string, streamingOnly: boolean) =>
+        query.hasThreadAssistantMessageForTurn!({
+          threadId,
+          turnId: asTurnId(turnId),
+          streamingOnly,
+        });
+      assert.deepStrictEqual(
+        [
+          yield* has("turn-a", false),
+          yield* has("turn-a", true),
+          yield* has("turn-b", true),
+          yield* has("turn-c", false),
+        ],
+        [true, false, true, false],
+      );
+
+      const insertActivity = (id: string, kind: string, payload: unknown, sequence: number) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${id}, ${threadId}, 'turn-a', 'info', ${kind}, ${kind}, ${typeof payload === "string" ? payload : JSON.stringify(payload)}, ${sequence}, '2026-09-12T00:00:00.000Z')`;
+      yield* insertActivity("task-updated", "task.updated", { taskId: "task-1", detail: "B" }, 3);
+      yield* insertActivity("task-started", "task.started", { taskId: "task-1", detail: "A" }, 1);
+      yield* insertActivity("task-numeric", "task.started", { taskId: 1, detail: "C" }, 2);
+      yield* insertActivity("task-other", "task.progress", { taskId: "task-2" }, 4);
+      yield* insertActivity("tool-same-id", "tool.completed", { taskId: "task-1" }, 5);
+      yield* insertActivity("task-invalid", "task.progress", "not json", 6);
+      yield* insertActivity("approval-open", "approval.requested", { requestId: "r-1" }, 8);
+      yield* insertActivity("approval-done", "approval.resolved", { requestId: "r-1" }, 9);
+      yield* insertActivity("tool", "tool.started", { requestId: "r-2" }, 7);
+
+      const taskActivities = yield* query.listThreadTaskActivities!({ threadId, taskId: "task-1" });
+      assert.deepStrictEqual(
+        taskActivities.map((activity) => activity.id),
+        ["task-started", "task-updated"],
+      );
+      const requestActivities = yield* query.listThreadPendingRequestActivities!(threadId);
+      assert.deepStrictEqual(
+        requestActivities.map((activity) => activity.id),
+        ["approval-open", "approval-done"],
+      );
+
+      yield* sql`INSERT INTO projection_thread_proposed_plans (plan_id, thread_id, turn_id, plan_markdown, implemented_at, implementation_thread_id, created_at, updated_at)
+        VALUES ('plan-1', ${threadId}, 'turn-a', '# Plan', NULL, NULL, '2026-09-12T00:00:00.000Z', '2026-09-12T00:01:00.000Z')`;
+      assert.deepStrictEqual(
+        Option.getOrNull(yield* query.getThreadProposedPlanById!({ threadId, planId: "plan-1" })),
+        {
+          id: "plan-1",
+          turnId: asTurnId("turn-a"),
+          planMarkdown: "# Plan",
+          implementedAt: null,
+          implementationThreadId: null,
+          createdAt: "2026-09-12T00:00:00.000Z",
+          updatedAt: "2026-09-12T00:01:00.000Z",
+        },
+      );
+
+      yield* sql`DELETE FROM projection_thread_messages WHERE thread_id IN (${threadId}, 'intake-other')`;
+      yield* sql`DELETE FROM projection_thread_activities WHERE thread_id = ${threadId}`;
+      yield* sql`DELETE FROM projection_thread_proposed_plans WHERE thread_id = ${threadId}`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

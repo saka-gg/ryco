@@ -505,6 +505,7 @@ describe("ProviderRuntimeIngestion", () => {
           ),
         ),
       completionRepository,
+      sql,
       workspaceRoot,
       attachmentsDir: path.join(workspaceRoot, "userdata", "attachments"),
       reconcileThread: (threadId: ThreadId, trigger?: HistoryRecoveryTrigger) =>
@@ -7033,5 +7034,387 @@ describe("ProviderRuntimeIngestion", () => {
       expect(thread.usageLimit?.resetAt).toBe(resetAt);
       expect(await harness.countEvents("thread.usage-limit-set")).toBe(2);
     });
+  });
+
+  describe("long thread reads at turn boundaries", () => {
+    interface ReadStat {
+      calls: number;
+      rows: number;
+    }
+    const rowsOf = (result: unknown): number => {
+      if (Option.isOption(result)) return Option.isSome(result) ? rowsOf(result.value) : 0;
+      if (Array.isArray(result)) return result.length;
+      if (result && typeof result === "object") {
+        const value = result as Record<string, unknown>;
+        let rows = 0;
+        let found = false;
+        for (const key of [
+          "messages",
+          "activities",
+          "proposedPlans",
+          "checkpoints",
+          "activityKeys",
+          "requestActivities",
+        ]) {
+          if (Array.isArray(value[key])) {
+            rows += (value[key] as Array<unknown>).length;
+            found = true;
+          }
+        }
+        return found ? rows : 1;
+      }
+      return 1;
+    };
+    const countReads =
+      (stats: Map<string, ReadStat>) =>
+      (query: ProjectionSnapshotQueryShape): ProjectionSnapshotQueryShape => {
+        const wrapped: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(query)) {
+          wrapped[key] =
+            typeof value === "function"
+              ? (...args: Array<unknown>) =>
+                  (value as (...a: Array<unknown>) => Effect.Effect<unknown>)(...args).pipe(
+                    Effect.tap((result) =>
+                      Effect.sync(() => {
+                        const stat = stats.get(key) ?? { calls: 0, rows: 0 };
+                        stat.calls += 1;
+                        stat.rows += rowsOf(result);
+                        stats.set(key, stat);
+                      }),
+                    ),
+                  )
+              : value;
+        }
+        return wrapped as unknown as ProjectionSnapshotQueryShape;
+      };
+
+    async function seedLongThread(
+      sql: SqlClient.SqlClient,
+      input: { messages: number; activities: number },
+    ) {
+      const base = Date.parse("2026-01-01T00:00:00.000Z");
+      const at = (index: number) => new Date(base + index * 1000).toISOString();
+      const body = "x".repeat(400);
+      await Effect.runPromise(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            for (let index = 0; index < input.messages; index += 1) {
+              yield* sql`
+                INSERT INTO projection_thread_messages
+                  (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+                VALUES (${`seed-message-${index}`}, 'thread-1', ${`seed-turn-${Math.floor(index / 2)}`},
+                  ${index % 2 === 0 ? "user" : "assistant"}, ${body}, 0, ${at(index)}, ${at(index)})
+              `;
+            }
+            for (let index = 0; index < input.activities; index += 1) {
+              yield* sql`
+                INSERT INTO projection_thread_activities
+                  (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+                VALUES (${`seed-activity-${index}`}, 'thread-1',
+                  ${`seed-turn-${Math.floor(index / 10)}`}, 'tool', 'tool.completed', 'Ran a tool',
+                  ${JSON.stringify({ itemType: "command_execution", detail: body })},
+                  ${index + 1}, ${at(index)})
+              `;
+            }
+          }),
+        ),
+      );
+    }
+
+    it("measures reads per message end, approval and turn end on a long thread", async () => {
+      const stats = new Map<string, ReadStat>();
+      const harness = await createHarness({
+        callbackRuntime: true,
+        wrapSnapshotQuery: countReads(stats),
+      });
+      await seedLongThread(harness.sql, { messages: 240, activities: 1200 });
+      const phases: Record<
+        string,
+        { calls: number; rows: number; fullThreadReads: number; ms: number[] }
+      > = {};
+      const measure = async (phase: string, event: Parameters<typeof harness.emit>[0]) => {
+        await harness.drain();
+        stats.clear();
+        const started = performance.now();
+        harness.emit(event);
+        await harness.drain();
+        const ms = performance.now() - started;
+        const entry = (phases[phase] ??= { calls: 0, rows: 0, fullThreadReads: 0, ms: [] });
+        for (const stat of stats.values()) {
+          entry.calls += stat.calls;
+          entry.rows += stat.rows;
+        }
+        entry.fullThreadReads += stats.get("getThreadDetailById")?.calls ?? 0;
+        entry.ms.push(ms);
+      };
+      const turns = 5;
+      for (let turn = 0; turn < turns; turn += 1) {
+        const base = {
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: new Date().toISOString(),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(`long-turn-${turn}`),
+        };
+        await measure("turn start", {
+          ...base,
+          type: "turn.started",
+          eventId: asEventId(`long-start-${turn}`),
+        });
+        harness.emit({
+          ...base,
+          type: "content.delta",
+          eventId: asEventId(`long-delta-${turn}`),
+          itemId: asItemId(`long-answer-${turn}`),
+          payload: { streamKind: "assistant_text", delta: "An answer." },
+        });
+        await measure("message end", {
+          ...base,
+          type: "item.completed",
+          eventId: asEventId(`long-item-done-${turn}`),
+          itemId: asItemId(`long-answer-${turn}`),
+          payload: { itemType: "assistant_message", status: "completed" },
+        });
+        await measure("approval", {
+          ...base,
+          type: "request.opened",
+          eventId: asEventId(`long-request-${turn}`),
+          requestId: ApprovalRequestId.make(`long-request-${turn}`),
+          payload: { requestType: "command_execution_approval", detail: "pwd" },
+        });
+        await measure("turn end", {
+          ...base,
+          type: "turn.completed",
+          eventId: asEventId(`long-end-${turn}`),
+          payload: { state: "completed" },
+        });
+      }
+      const report = Object.entries(phases).map(([phase, entry]) => {
+        const sorted = entry.ms.toSorted((left, right) => left - right);
+        return {
+          phase,
+          readsPerEvent: entry.calls / turns,
+          rowsPerEvent: entry.rows / turns,
+          fullThreadReads: entry.fullThreadReads,
+          medianMs: Number(sorted[Math.floor(sorted.length / 2)]!.toFixed(2)),
+        };
+      });
+      if (process.env.RYCO_MEASURE_INTAKE_READS) {
+        console.log(`LONG_THREAD_READS ${JSON.stringify(report)}`);
+      }
+      expect(report.map((entry) => entry.phase)).toEqual([
+        "turn start",
+        "message end",
+        "approval",
+        "turn end",
+      ]);
+      for (const entry of report) {
+        // The thread holds 1,440 seeded rows; a boundary reads a handful of them.
+        expect(entry.fullThreadReads).toBe(0);
+        expect(entry.rowsPerEvent).toBeLessThanOrEqual(10);
+      }
+    });
+
+    const boundaryOutcomes: Partial<Record<"narrow" | "full", unknown>> = {};
+    const NARROW_READS = [
+      "getThreadMessageById",
+      "hasThreadAssistantMessageForTurn",
+      "getThreadProposedPlanById",
+      "listThreadPendingRequestActivities",
+      "listThreadTaskActivities",
+    ] as const;
+
+    it.each(["narrow", "full"] as const)(
+      "ends messages, approvals, plans, tasks and turns the same way through %s reads",
+      async (mode) => {
+        const stats = new Map<string, ReadStat>();
+        const harness = await createHarness({
+          callbackRuntime: true,
+          wrapSnapshotQuery: (query) => {
+            const counted = countReads(stats)(query) as unknown as Record<string, unknown>;
+            if (mode === "full") for (const key of NARROW_READS) delete counted[key];
+            return counted as unknown as ProjectionSnapshotQueryShape;
+          },
+        });
+        await seedLongThread(harness.sql, { messages: 20, activities: 40 });
+        // A task whose title only the stored activity still knows (no in-memory description).
+        await Effect.runPromise(harness.sql`
+          INSERT INTO projection_thread_activities
+            (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES ('seeded-task-started', 'thread-1', 'seed-turn-0', 'info', 'task.started',
+            'Task started', ${JSON.stringify({ taskId: "seeded-task", detail: "Seeded task title" })},
+            1000, '2026-01-01T00:10:00.000Z')
+        `);
+        let second = 0;
+        const at = () => new Date(Date.parse("2026-03-01T00:00:00.000Z") + ++second * 1000);
+        const base = (turn: string) => ({
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: at().toISOString(),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId(turn),
+        });
+        const send = async (event: Parameters<typeof harness.emit>[0]) => {
+          harness.emit(event);
+          await harness.drain();
+        };
+        await send({
+          ...base("eq-turn-1"),
+          type: "turn.started",
+          eventId: asEventId("eq-start-1"),
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "content.delta",
+          eventId: asEventId("eq-delta-1"),
+          itemId: asItemId("eq-answer-1"),
+          payload: { streamKind: "assistant_text", delta: "First answer." },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "item.completed",
+          eventId: asEventId("eq-done-1"),
+          itemId: asItemId("eq-answer-1"),
+          payload: { itemType: "assistant_message", status: "completed" },
+        });
+        // No segment and no text: redundant, as the turn already has an assistant message.
+        await send({
+          ...base("eq-turn-1"),
+          type: "item.completed",
+          eventId: asEventId("eq-done-empty"),
+          itemId: asItemId("eq-answer-empty"),
+          payload: { itemType: "assistant_message", status: "completed" },
+        });
+        // Completion text for a message never streamed.
+        await send({
+          ...base("eq-turn-1"),
+          type: "item.completed",
+          eventId: asEventId("eq-done-fallback"),
+          itemId: asItemId("eq-answer-fallback"),
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            detail: "Only the completion text.",
+          },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "content.delta",
+          eventId: asEventId("eq-delta-2"),
+          itemId: asItemId("eq-answer-2"),
+          payload: { streamKind: "assistant_text", delta: "Before the approval." },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "request.opened",
+          eventId: asEventId("eq-request-1"),
+          requestId: ApprovalRequestId.make("eq-request-1"),
+          payload: { requestType: "command_execution_approval", detail: "pwd" },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "content.delta",
+          eventId: asEventId("eq-delta-3"),
+          itemId: asItemId("eq-answer-3"),
+          payload: { streamKind: "assistant_text", delta: "Left open at the end." },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "turn.proposed.completed",
+          eventId: asEventId("eq-plan-1"),
+          payload: { planMarkdown: "# Plan\n\n- first" },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "turn.proposed.completed",
+          eventId: asEventId("eq-plan-2"),
+          payload: { planMarkdown: "# Plan\n\n- first\n- second" },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "task.completed",
+          eventId: asEventId("eq-task-done"),
+          payload: { taskId: "seeded-task", status: "completed" },
+        });
+        await send({
+          ...base("eq-turn-1"),
+          type: "turn.completed",
+          eventId: asEventId("eq-end-1"),
+          payload: { state: "completed" },
+        });
+        await send({
+          ...base("eq-turn-2"),
+          type: "turn.started",
+          eventId: asEventId("eq-start-2"),
+        });
+        await send({
+          ...base("eq-turn-2"),
+          type: "request.opened",
+          eventId: asEventId("eq-request-2"),
+          requestId: ApprovalRequestId.make("eq-request-2"),
+          payload: { requestType: "command_execution_approval", detail: "ls" },
+        });
+        await send({
+          ...base("eq-turn-2"),
+          type: "turn.aborted",
+          eventId: asEventId("eq-abort-2"),
+          payload: { reason: "interrupted" },
+        });
+
+        const thread = (await harness.readModel()).threads.find(
+          (entry) => entry.id === "thread-1",
+        )!;
+        const fullThreadReads = stats.get("getThreadDetailById")?.calls ?? 0;
+        if (mode === "narrow") expect(fullThreadReads).toBe(0);
+        else expect(fullThreadReads).toBeGreaterThan(0);
+        const outcome = {
+          messages: thread.messages
+            .filter((message) => !message.id.startsWith("seed-"))
+            .map(({ id, role, text, turnId, streaming }) => ({
+              id,
+              role,
+              text,
+              turnId,
+              streaming,
+            })),
+          activities: thread.activities
+            .filter((activity) => !activity.id.startsWith("seed-activity-"))
+            .map(({ id, kind, summary, payload, turnId }) => ({
+              id,
+              kind,
+              summary,
+              payload,
+              turnId,
+            })),
+          proposedPlans: thread.proposedPlans,
+        };
+        // Every path the narrow reads replace left its mark.
+        expect(outcome.messages.map((message) => [message.id, message.text])).toEqual(
+          expect.arrayContaining([
+            ["assistant:eq-answer-1", "First answer."],
+            ["assistant:eq-answer-fallback", "Only the completion text."],
+            ["assistant:eq-answer-2", "Before the approval."],
+            ["assistant:eq-answer-3", "Left open at the end."],
+          ]),
+        );
+        expect(outcome.messages.some((message) => message.id === "assistant:eq-answer-empty")).toBe(
+          false,
+        );
+        expect(outcome.messages.every((message) => !message.streaming)).toBe(true);
+        expect(
+          outcome.activities
+            .filter((activity) => activity.kind === "provider.approval.respond.failed")
+            .map((activity) => (activity.payload as { requestId: string }).requestId),
+        ).toEqual(["eq-request-1", "eq-request-2"]);
+        expect(
+          outcome.activities.find((activity) => activity.kind === "task.completed")?.payload,
+        ).toMatchObject({ title: "Seeded task title" });
+        expect(outcome.proposedPlans).toHaveLength(1);
+        if (process.env.RYCO_MEASURE_INTAKE_READS) {
+          console.log(`TURN_BOUNDARY_OUTCOME ${JSON.stringify(outcome)}`);
+        }
+        // The full-thread reads are the reference; the narrow run goes first.
+        boundaryOutcomes[mode] = outcome;
+        if (mode === "full") expect(boundaryOutcomes.narrow).toEqual(outcome);
+      },
+    );
   });
 });
