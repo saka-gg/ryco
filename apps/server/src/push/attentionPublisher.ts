@@ -17,7 +17,10 @@
  *   alert.
  * - Per device: the kinds it asked for, minus action kinds for a viewer, and
  *   nothing while it is in front (its local alerts cover the screen).
- * - One signal per pass (split at 32 deliveries), each with a fresh sequence
+ * - An approval or question alert carries an excerpt (`alertExcerpt.ts`): the approval's
+ *   command or the questions, read once per alert, as much as fits the sealed size the Hub's
+ *   last answer allowed (the legacy 1 KB until a Hub says it takes more).
+ * - One signal per pass (split at 32 deliveries, fewer for large payloads), each with a fresh sequence
  *   persisted before it is sent. A failed send is retried once with the same
  *   sequence and payload, then dropped: alerts are perishable. A Hub without
  *   the route (404) is not asked again for an hour.
@@ -25,7 +28,9 @@
  *   pass read are kept, and after it the node counts them and signals the devices whose card
  *   takes push updates, on the same sequence counter and proof, at most once per
  *   {@link ACTIVITY_MIN_INTERVAL_MS}. A failed activity signal is never retried inside the
- *   queue the alerts share: later passes back off on their own timer.
+ *   queue the alerts share: later passes back off on their own timer. When a turn begins while
+ *   the Hub said a device shows no card, its entry asks the Hub to start one
+ *   (`wantsActivityStart`); the Hub decides whether the device opted in.
  *
  * @module push/attentionPublisher
  */
@@ -42,6 +47,8 @@ import type { PushAlertKind, PushHubDelivery } from "@ryco/contracts/push";
 import {
   PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
+  PUSH_SEALED_LEGACY_MAX_LENGTH,
+  type PushAlertExcerpt,
   type PushActivitySignalInput,
   type PushActivitySignalResult,
   type PushAlertPlaintext,
@@ -56,6 +63,7 @@ import {
   sealPushPayload,
 } from "@ryco/shared/pushSeal";
 
+import { clampSealedMaxLength, fitAlertPlaintext, maxPlaintextBytes } from "./alertExcerpt.ts";
 import {
   ACTIVITY_FOREGROUND_RECHECK_MS,
   ACTIVITY_MIN_INTERVAL_MS,
@@ -66,7 +74,7 @@ import {
   type SentActivity,
 } from "./liveActivityCounts.ts";
 import { effectivePushKinds, type PushRegistration } from "./pushRegistrations.ts";
-import { chunkForSignals } from "./pushSignalChunks.ts";
+import { chunkForSignals, deliveriesPerSignal } from "./pushSignalChunks.ts";
 
 export const ATTENTION_READ_DEBOUNCE_MS = 150;
 export const ATTENTION_COALESCE_MS = 1_000;
@@ -104,6 +112,17 @@ export interface AttentionPublisherDeps {
     threadId: ThreadId,
   ) => Promise<SidebarThreadSummary | null>;
   readonly isSnoozed: (thread: SidebarThreadSummary, nowMs: number) => boolean;
+  /**
+   * What an approval or question alert shows beyond its title: the open request the thread's
+   * card shows (`alertExcerptSource.ts`). Absent, or answering null: the alert goes without one.
+   */
+  readonly readExcerpt?:
+    | ((input: {
+        readonly threadId: ThreadId;
+        readonly kind: "approval" | "input";
+        readonly approvalRequestId: string | null;
+      }) => Promise<PushAlertExcerpt | null>)
+    | undefined;
   readonly registrations: () => Promise<ReadonlyArray<PushRegistration>>;
   /** Enrollments whose device is in front now; they get no push. */
   readonly foregroundEnrollments: (nowMs: number) => Promise<ReadonlySet<string>>;
@@ -172,6 +191,8 @@ export function planAttentionRecipients(input: {
   readonly candidates: ReadonlyArray<ThreadNotificationEvent>;
   readonly registrations: ReadonlyArray<PushRegistration>;
   readonly isForeground: (enrollmentId: string) => boolean;
+  /** The longest sealed payload the Hub takes; it decides how many fit one signal. */
+  readonly sealedMaxLength?: number | undefined;
 }): ReadonlyArray<ReadonlyArray<AttentionRecipient>> {
   const recipients: AttentionRecipient[] = [];
   for (const registration of input.registrations) {
@@ -181,18 +202,31 @@ export function planAttentionRecipients(input: {
       if (kinds.has(candidate.kind)) recipients.push({ registration, candidate });
     }
   }
-  return chunkForSignals(recipients);
+  return chunkForSignals(
+    recipients,
+    deliveriesPerSignal(input.sealedMaxLength ?? PUSH_SEALED_LEGACY_MAX_LENGTH),
+  );
 }
 
-/** Seals each recipient's payload, bound to this signal's sequence. */
+/**
+ * Seals each recipient's payload, bound to this signal's sequence. An approval or question alert
+ * carries its excerpt, as much of it as fits `sealedMaxLength` (the legacy length by default);
+ * every device of one alert gets the same plaintext.
+ */
 export function sealAttentionDeliveries(input: {
   readonly environmentId: string;
   readonly sequence: number;
   readonly issuedAt: number;
   readonly recipients: ReadonlyArray<AttentionRecipient>;
+  readonly excerpts?: ReadonlyMap<ThreadNotificationEvent, PushAlertExcerpt> | undefined;
+  readonly sealedMaxLength?: number | undefined;
 }): ReadonlyArray<PushAttentionDelivery> {
-  return input.recipients.map(({ registration, candidate }) => {
-    const plaintext: PushAlertPlaintext = {
+  const maxBytes = maxPlaintextBytes(input.sealedMaxLength ?? PUSH_SEALED_LEGACY_MAX_LENGTH);
+  const plaintexts = new Map<ThreadNotificationEvent, Uint8Array>();
+  const plaintextOf = (candidate: ThreadNotificationEvent) => {
+    const known = plaintexts.get(candidate);
+    if (known !== undefined) return known;
+    const base: PushAlertPlaintext = {
       v: 1,
       k: candidate.kind,
       t: truncateTitle(candidate.title),
@@ -203,12 +237,22 @@ export function sealAttentionDeliveries(input: {
       q: input.sequence,
       at: input.issuedAt,
     };
+    const bytes = fitAlertPlaintext({
+      base,
+      excerpt: input.excerpts?.get(candidate) ?? null,
+      maxBytes,
+    });
+    plaintexts.set(candidate, bytes);
+    return bytes;
+  };
+  return input.recipients.map(({ registration, candidate }) => {
+    const plaintext = plaintextOf(candidate);
     return {
       enrollmentId: registration.enrollmentId as PushAttentionDelivery["enrollmentId"],
       sealed: toBase64Url(
         sealPushPayload({
           recipientPublicKey: Uint8Array.from(Buffer.from(registration.publicKey, "base64url")),
-          plaintext: new TextEncoder().encode(JSON.stringify(plaintext)),
+          plaintext,
           associatedData: pushSealAssociatedData({
             environmentId: input.environmentId,
             sequence: input.sequence,
@@ -232,6 +276,8 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
   let environmentId: EnvironmentId | null = null;
   let baselined = false;
   let unsupportedUntil = 0;
+  /** What the Hub's last answer said it takes; older Hubs never say, and get the legacy size. */
+  let sealedMaxLength = PUSH_SEALED_LEGACY_MAX_LENGTH;
   const projector = createThreadNotificationProjector({
     readGeneration: () => (stopped ? null : GENERATION),
     isSnoozed: deps.isSnoozed,
@@ -413,6 +459,36 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
     if (unauthorized.length > 0) await deps.removeEnrollments(unauthorized);
   };
 
+  /** One excerpt read per approval or question alert that some device gets in this pass. */
+  const readExcerpts = async (
+    chunks: ReadonlyArray<ReadonlyArray<AttentionRecipient>>,
+  ): Promise<ReadonlyMap<ThreadNotificationEvent, PushAlertExcerpt>> => {
+    const excerpts = new Map<ThreadNotificationEvent, PushAlertExcerpt>();
+    const readExcerpt = deps.readExcerpt;
+    if (readExcerpt === undefined) return excerpts;
+    const wanted = new Set<ThreadNotificationEvent>();
+    for (const chunk of chunks) {
+      for (const { candidate } of chunk) {
+        if (candidate.kind === "approval" || candidate.kind === "input") wanted.add(candidate);
+      }
+    }
+    for (const candidate of wanted) {
+      if (stopped) break;
+      try {
+        const excerpt = await readExcerpt({
+          threadId: candidate.ref.threadId,
+          kind: candidate.kind as "approval" | "input",
+          approvalRequestId: candidate.approvalRequestId,
+        });
+        if (excerpt !== null) excerpts.set(candidate, excerpt);
+      } catch (error) {
+        // The alert still goes, as before: the excerpt only adds to it.
+        deps.reportFailure("A push alert's excerpt could not be read.", error);
+      }
+    }
+    return excerpts;
+  };
+
   const flush = async () => {
     if (stopped || environmentId === null) return;
     const candidates = Array.from(pending.values()).filter((candidate) =>
@@ -434,7 +510,10 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       candidates,
       registrations,
       isForeground: (enrollmentId) => foreground.has(enrollmentId),
+      sealedMaxLength,
     });
+    const excerpts = await readExcerpts(chunks);
+    if (stopped) return;
     for (const recipients of chunks) {
       if (stopped) return;
       const sequence = await deps.reserveSequence();
@@ -442,7 +521,14 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       const signal = {
         sequence,
         issuedAt,
-        deliveries: sealAttentionDeliveries({ environmentId, sequence, issuedAt, recipients }),
+        deliveries: sealAttentionDeliveries({
+          environmentId,
+          sequence,
+          issuedAt,
+          recipients,
+          excerpts,
+          sealedMaxLength,
+        }),
       };
       const result = await sendWithRetry(
         () => deps.send(signal),
@@ -452,6 +538,8 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
         },
       );
       if (result === null) continue;
+      // A Hub that takes larger payloads says so; the next alerts carry longer excerpts.
+      sealedMaxLength = clampSealedMaxLength(result.sealedMaxLength);
       deps.setHubDelivery("available");
       await forgetUnauthorized(result.results);
     }
@@ -518,7 +606,7 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       nowMs,
     });
     let limited = false;
-    for (const enrollmentIds of chunks) {
+    for (const recipients of chunks) {
       if (stopped) return;
       if (!deps.isConnectorOnline()) break;
       const sequence = await deps.reserveSequence();
@@ -530,10 +618,12 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       const outcome = await sendActivity({
         sequence,
         issuedAt,
-        activities: enrollmentIds.map((enrollmentId) => ({
+        activities: recipients.map((recipient) => ({
           enrollmentId:
-            enrollmentId as PushActivitySignalInput["activities"][number]["enrollmentId"],
+            recipient.enrollmentId as PushActivitySignalInput["activities"][number]["enrollmentId"],
           counts: activity.counts,
+          // A turn began while the device shows no card: the Hub may start one (iOS 17.2+).
+          ...(recipient.start ? { start: true as const } : {}),
         })),
       });
       if (stopped) return;
@@ -556,13 +646,22 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       activityBackoffMs = 0;
       activityRetryAt = 0;
       for (const entry of outcome.result.results) {
-        if (entry.status === "accepted" || entry.status === "no-token") {
+        if (
+          entry.status === "accepted" ||
+          entry.status === "started" ||
+          entry.status === "no-token"
+        ) {
+          const previous = sentActivity.get(entry.enrollmentId);
           sentActivity.set(entry.enrollmentId, {
             counts: activity.counts,
             // The pass's own time, so the next pass on the refresh timer finds it due.
             atMs: nowMs,
-            held: entry.status === "accepted",
+            held: entry.status !== "no-token",
             resend: false,
+            // A started card covers this run of work; zero counts end the run.
+            started:
+              !activityCountsZero(activity.counts) &&
+              (entry.status === "started" || previous?.started === true),
           });
         } else if (entry.status === "not-authorized") {
           sentActivity.delete(entry.enrollmentId);

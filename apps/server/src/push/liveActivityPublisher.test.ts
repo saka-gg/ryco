@@ -132,7 +132,9 @@ describe("planActivityRecipients", () => {
       counts,
       nowMs: NOW,
       ...input,
-    }).flat();
+    })
+      .flat()
+      .map((recipient) => recipient.enrollmentId);
 
   it("signals only the devices not in front", () => {
     expect(
@@ -165,6 +167,34 @@ describe("planActivityRecipients", () => {
     ).toEqual([]);
     // Nothing held (no card took pushes): unchanged counts are not refreshed.
     expect(plan({ sent: sent({ held: false }), nowMs: NOW + ACTIVITY_REFRESH_MS })).toEqual([]);
+  });
+
+  it("asks for a start only when a turn began while the Hub said no card shows", () => {
+    const starts = (input: Partial<Parameters<typeof planActivityRecipients>[0]>) =>
+      planActivityRecipients({
+        registrations: [registration(PHONE)],
+        isForeground: () => false,
+        sent: new Map(),
+        counts,
+        nowMs: NOW,
+        ...input,
+      })
+        .flat()
+        .map((recipient) => recipient.start);
+    const sent = (patch: object) =>
+      new Map([[PHONE, { counts: zero, atMs: NOW, held: false, resend: false, ...patch }]]);
+    // No card (`no-token`), and a turn began: ask.
+    expect(starts({ sent: sent({}) })).toEqual([true]);
+    // A card that takes pushes shows: never.
+    expect(starts({ sent: sent({ held: true }) })).toEqual([false]);
+    // Already started for this run of work.
+    expect(starts({ sent: sent({ started: true }) })).toEqual([false]);
+    // Nothing more runs than before (a question, a result): no start.
+    expect(
+      starts({ sent: sent({ counts }), counts: { ...counts, needsYou: 1 } }),
+    ).toEqual([false]);
+    // A node that told the device nothing since it started does not know a turn just began.
+    expect(starts({})).toEqual([false]);
   });
 
   it("splits more than 32 devices over several signals", () => {
@@ -460,6 +490,35 @@ describe("attention publisher: Live Activity counts", () => {
     await vi.advanceTimersByTimeAsync(ACTIVITY_REFRESH_MS * 5);
     expect(test.shellReads()).toBe(reads);
     expect(test.activity).toHaveLength(1);
+    await test.publisher.stop();
+  });
+
+  it("asks the Hub to start a card when a turn begins on a device that shows none", async () => {
+    let status: PushActivityEntryStatus = "no-token";
+    const test = harness({ threads: [], status: () => status });
+    await vi.advanceTimersByTimeAsync(0);
+    // The first word after a start is zero and never asks for a start.
+    expect(test.activity[0]!.activities[0]).not.toHaveProperty("start");
+    status = "started";
+    test.change(thread("a"), 2);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS + ATTENTION_READ_DEBOUNCE_MS);
+    expect(test.activity).toHaveLength(2);
+    expect(test.activity[1]!.activities[0]).toMatchObject({ counts: { running: 1 }, start: true });
+    // Started for this run: a second turn does not ask again, also when the Hub has no token yet.
+    status = "no-token";
+    test.change(thread("b"), 3);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS + ATTENTION_READ_DEBOUNCE_MS);
+    expect(test.activity).toHaveLength(3);
+    expect(test.activity[2]!.activities[0]).toMatchObject({ counts: { running: 2 } });
+    expect(test.activity[2]!.activities[0]).not.toHaveProperty("start");
+    // Once all work ended, the next turn may start a card again.
+    test.remove("a", 4);
+    test.remove("b", 5);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS + ATTENTION_READ_DEBOUNCE_MS);
+    expect(test.activity.at(-1)!.activities[0]!.counts.running).toBe(0);
+    test.change(thread("c"), 6);
+    await vi.advanceTimersByTimeAsync(ACTIVITY_MIN_INTERVAL_MS + ATTENTION_READ_DEBOUNCE_MS);
+    expect(test.activity.at(-1)!.activities[0]).toMatchObject({ start: true });
     await test.publisher.stop();
   });
 });
