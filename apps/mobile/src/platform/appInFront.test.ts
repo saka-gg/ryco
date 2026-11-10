@@ -42,7 +42,7 @@ const APP_SWITCH = ["inactive", "background", "inactive", "active"];
 
 function appState(state: string) {
   native.appState = state;
-  for (const listener of [...native.appListeners]) listener(state);
+  for (const listener of native.appListeners) listener(state);
 }
 
 /** The presence messages one sequence sends, with each test. */

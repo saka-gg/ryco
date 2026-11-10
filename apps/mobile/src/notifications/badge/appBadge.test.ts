@@ -11,7 +11,7 @@ function nativeStore() {
     stored,
     setBadgeCounts: vi.fn(
       async (live: Readonly<Record<string, number>>, listed: ReadonlyArray<string>) => {
-        for (const id of [...stored.keys()]) if (!listed.includes(id)) stored.delete(id);
+        for (const id of stored.keys()) if (!listed.includes(id)) stored.delete(id);
         for (const [id, count] of Object.entries(live)) stored.set(id, count);
         return [...stored.values()].reduce((sum, count) => sum + count, 0);
       },

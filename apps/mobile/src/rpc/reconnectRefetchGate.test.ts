@@ -85,7 +85,7 @@ describe("reconnect refetch gate", () => {
 
     // Back down the stack: each screen reads exactly once when it shows again.
     reads.length = 0;
-    for (const screen of stack.slice(0, -1).reverse()) screen.focus(true);
+    for (const screen of stack.slice(0, -1).toReversed()) screen.focus(true);
     stack[2]?.focus(true);
     answerAll((id) => `${id}@3`);
     await flush();
