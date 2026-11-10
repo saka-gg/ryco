@@ -3895,7 +3895,11 @@ async function startDatabaseCompaction(): Promise<DesktopDatabaseCompactionState
     if (!isQuitting) {
       startBackend();
       try {
-        await waitForHttpReady(backendHttpUrl, { timeoutMs: 120_000 });
+        // The startup wait's readiness path: `/` is the app shell, absent in development.
+        await waitForHttpReady(backendHttpUrl, {
+          timeoutMs: 120_000,
+          path: "/.well-known/ryco/environment",
+        });
         downtimeMs = Date.now() - stoppedAtMs;
       } catch (error) {
         writeDesktopLogHeader(

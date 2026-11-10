@@ -730,8 +730,9 @@ function describeRun(run: {
   readonly afterBytes: number | null;
   readonly downtimeMs: number | null;
 }): string {
+  // The doctor's own message already names the sizes when it shrank the file.
   const sizes =
-    run.beforeBytes !== null && run.afterBytes !== null
+    run.beforeBytes !== null && run.afterBytes !== null && !run.message.includes("→")
       ? ` ${formatBytes(run.beforeBytes)} → ${formatBytes(run.afterBytes)}.`
       : "";
   const downtime =
@@ -784,12 +785,17 @@ function DatabaseCompactionRow({
     void bridge.getState().then((next) => {
       if (live) setDesktop(next);
     });
-    const unsubscribe = bridge.onState(setDesktop);
+    const unsubscribe = bridge.onState((next) => {
+      setDesktop(next);
+      // The file changed: the sizes and the offer above come from a scan that is now stale.
+      // A moment later, once the window reconnected to the restarted server.
+      if (next.phase === "finished") setTimeout(() => void controller.scan(), 2_000);
+    });
     return () => {
       live = false;
       unsubscribe();
     };
-  }, [bridge]);
+  }, [bridge, controller]);
 
   const runner = status?.runner ?? "none";
   const canRun = runner === "service" || (runner === "desktop" && bridge !== undefined);
@@ -834,11 +840,13 @@ function DatabaseCompactionRow({
       }`
     : waiting
       ? `Waiting until nothing would be interrupted: ${status?.busy.join(" ") ?? ""}`
-      : canRun
-        ? `About ${formatBytes(database.reclaimableBytes)} could be returned to the disk. Ryco's server stops while the database is compacted (a few minutes for a large one) and starts again; nothing is replaced unless the compacted copy passes its checks.`
-        : runner === "none" && status !== null
-          ? "Stop this server and run the doctor to compact the database."
-          : "Checking whether the database can be compacted here…";
+      : !database.doctor?.recommended
+        ? "The database file is compact; the last run is below."
+        : canRun
+          ? `About ${formatBytes(database.reclaimableBytes)} could be returned to the disk. Ryco's server stops while the database is compacted (a few minutes for a large one) and starts again; nothing is replaced unless the compacted copy passes its checks.`
+          : runner === "none" && status !== null
+            ? "Stop this server and run the doctor to compact the database."
+            : "Checking whether the database can be compacted here…";
   return (
     <SettingsRow
       title="Compact database"
