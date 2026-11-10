@@ -801,7 +801,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    expect(bytes).toBeLessThan(7_231_000);
+    // 7.232 MB on 2026-11-10 with config sections held by digest (+1.2 KB, measured 7.231645 MB):
+    // the snapshot's settings and keybindings digests and placeholders, and the config stream's
+    // check that skips an unchanged settings update.
+    expect(bytes).toBeLessThan(7_232_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
