@@ -16,7 +16,7 @@ import type { ThreadSession } from "../threads/types.ts";
 import {
   buildTaskStartPrompt,
   countTasksNeedingUser,
-  delegatedThreadSignature,
+  delegatedThreadStates,
   hasTaskLink,
   listTaskChats,
   nextTaskBranchName,
@@ -29,6 +29,7 @@ import {
   taskLiveStatus,
   taskProjectLocked,
   taskStartFailed,
+  tasksWithMovedChats,
 } from "./logic.ts";
 import type { LocalTaskOptimisticStart, LocalTaskThreadSummary } from "./types.ts";
 
@@ -365,15 +366,27 @@ describe("countTasksNeedingUser", () => {
   });
 });
 
-describe("delegatedThreadSignature", () => {
-  it("changes only when an open task's chat moves between states", () => {
+describe("delegatedThreadStates", () => {
+  it("names the open tasks whose chat moved between states", () => {
     const tasks = [
       {
+        taskId: "task-1",
         state: "todo" as const,
         delegations: [delegation(THREAD_A, "running")],
         links: [{ kind: "thread" as const, threadId: THREAD_B }],
       },
-      { state: "done" as const, delegations: [delegation(THREAD_C, "running")], links: [] },
+      {
+        taskId: "task-2",
+        state: "todo" as const,
+        delegations: [],
+        links: [{ kind: "thread" as const, threadId: THREAD_A }],
+      },
+      {
+        taskId: "task-3",
+        state: "done" as const,
+        delegations: [delegation(THREAD_C, "running")],
+        links: [],
+      },
     ];
     let working = true;
     const summaries = (threadId: ThreadId) =>
@@ -382,14 +395,18 @@ describe("delegatedThreadSignature", () => {
         : threadId === THREAD_C
           ? summary({ latestTurn: turn(working ? "running" : "completed") })
           : summary();
-    const before = delegatedThreadSignature(tasks, summaries);
-    expect(before).toBe("thread-a:working:running,thread-b:idle:completed,");
-    expect(delegatedThreadSignature(tasks, summaries)).toBe(before);
+    const before = delegatedThreadStates(tasks, summaries);
+    expect([...before].map(([threadId, value]) => [threadId, value.state, value.taskIds])).toEqual([
+      [THREAD_A, "working:running", ["task-1", "task-2"]],
+      [THREAD_B, "idle:completed", ["task-1"]],
+    ]);
+    expect(tasksWithMovedChats(before, delegatedThreadStates(tasks, summaries)).size).toBe(0);
     working = false;
-    expect(delegatedThreadSignature(tasks, summaries)).toBe(
-      "thread-a:idle:completed,thread-b:idle:completed,",
-    );
-    expect(delegatedThreadSignature(tasks, noSummaries)).toBe("thread-a:-:-,thread-b:-:-,");
+    const after = delegatedThreadStates(tasks, summaries);
+    expect([...tasksWithMovedChats(before, after)]).toEqual(["task-1", "task-2"]);
+    expect(delegatedThreadStates(tasks, noSummaries).get(THREAD_B)?.state).toBe("-:-");
+    // A chat that only joined (a task read with a new start) is no move.
+    expect(tasksWithMovedChats(new Map(), after).size).toBe(0);
   });
 });
 

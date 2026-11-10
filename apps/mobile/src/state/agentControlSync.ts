@@ -1,9 +1,23 @@
 import { useEffect } from "react";
 import type { EnvironmentId } from "@ryco/contracts";
 
-import { readEnvironmentApi } from "../connection/environmentApi";
+import { readEnvironmentApi, subscribeEnvironmentApis } from "../connection/environmentApi";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
-import { startAgentControlProposalSync, useAgentControlStore } from "./agentControlRuntime";
+import { createAgentControlSyncRegistry } from "./agentControlRuntime";
+
+/**
+ * The phone's Agent Control queue subscriptions: the same shared, reference
+ * counted registry the web app uses, so every screen of one machine shares one
+ * stream (and one opening snapshot). The api is cached per live client, so the
+ * agentControl object itself identifies the connection.
+ */
+const agentControlSyncs = createAgentControlSyncRegistry({
+  readSource: (environmentId) => {
+    const source = readEnvironmentApi(environmentId)?.agentControl;
+    return source ? { source } : null;
+  },
+  subscribeSourceChanges: subscribeEnvironmentApis,
+});
 
 /**
  * Keep one environment's Agent Control queue synced into the shared store
@@ -12,26 +26,15 @@ import { startAgentControlProposalSync, useAgentControlStore } from "./agentCont
  * transport of its own.
  */
 export function useAgentControlSync(environmentId: EnvironmentId, enabled: boolean): void {
-  // Wave 3a: `readEnvironmentApi` is snapshotted once per effect run and
-  // returns null while the environment has no connection. A thread opened from
-  // cache has none — the retarget lands one a moment later — so without this
-  // dep the queue would stay dead for the whole life of the screen. The
-  // environment's own socket phase is the arrival signal; it flips to
-  // "connected" exactly when there is an api to read.
+  // Wave 3a: a thread opened from cache has no connection yet — the retarget
+  // lands one a moment later. The environment's own socket phase is the
+  // arrival signal (it flips to "connected" exactly when there is an api to
+  // read): re-running the effect re-retains, and the registry binds the
+  // stream to whatever connection the environment has now.
   const connectionPhase = useWsConnectionStatusForEnvironment(environmentId).phase;
 
   useEffect(() => {
     if (!enabled) return undefined;
-    const source = readEnvironmentApi(environmentId)?.agentControl;
-    if (!source) return undefined;
-    const store = useAgentControlStore.getState();
-    return startAgentControlProposalSync({
-      environmentId,
-      source,
-      sink: {
-        applyStreamEvent: store.applyStreamEvent,
-        clearEnvironment: store.clearEnvironment,
-      },
-    });
+    return agentControlSyncs.retain(environmentId);
   }, [connectionPhase, enabled, environmentId]);
 }

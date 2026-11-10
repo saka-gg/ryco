@@ -266,30 +266,62 @@ export function countTasksNeedingUser(
   return count;
 }
 
+/** The live state of one open task's chat, and the open tasks it belongs to. */
+export interface DelegatedThreadState {
+  /** `activity:latestTurnState`, `-` for what the client does not know. */
+  readonly state: string;
+  readonly taskIds: ReadonlyArray<string>;
+}
+
 /**
- * A cheap fingerprint of the live state of every open task's chats
- * (`threadId:activity:latestTurnState`). It changes exactly when one of them
- * moves between states, which is when the node's status for the task may have
- * changed too and is worth re-reading.
+ * The live state of every open task's chats, by thread. A chat moving between
+ * states is when the node's status for its tasks may have changed too, so the
+ * tasks it belongs to are worth re-reading (and only those).
  */
-export function delegatedThreadSignature(
-  tasks: Iterable<TaskChatSource & Pick<LocalTask, "state">>,
+export function delegatedThreadStates(
+  tasks: Iterable<TaskChatSource & Pick<LocalTask, "state" | "taskId">>,
   getSummary: LocalTaskThreadSummaryReader,
-): string {
-  let signature = "";
-  const add = (threadId: ThreadId) => {
+): ReadonlyMap<ThreadId, DelegatedThreadState> {
+  const states = new Map<ThreadId, { state: string; taskIds: string[] }>();
+  const add = (threadId: ThreadId, taskId: string) => {
+    const known = states.get(threadId);
+    if (known) {
+      if (!known.taskIds.includes(taskId)) known.taskIds.push(taskId);
+      return;
+    }
     const summary = getSummary(threadId);
-    signature += `${threadId}:${summary ? deriveThreadActivityStatus(summary) : "-"}:${
-      summary?.latestTurn?.state ?? "-"
-    },`;
+    states.set(threadId, {
+      state: `${summary ? deriveThreadActivityStatus(summary) : "-"}:${
+        summary?.latestTurn?.state ?? "-"
+      }`,
+      taskIds: [taskId],
+    });
   };
   for (const task of tasks) {
     if (task.state === "done") continue;
-    for (const delegation of task.delegations) add(delegation.threadId);
-    for (const start of task.optimisticStarts ?? []) add(start.threadId);
-    for (const link of task.links) if (link.kind === "thread") add(link.threadId);
+    for (const delegation of task.delegations) add(delegation.threadId, task.taskId);
+    for (const start of task.optimisticStarts ?? []) add(start.threadId, task.taskId);
+    for (const link of task.links) if (link.kind === "thread") add(link.threadId, task.taskId);
   }
-  return signature;
+  return states;
+}
+
+/**
+ * The open tasks whose chats moved between `previous` and `next`: a chat
+ * known to both whose state differs. A chat that only joined or left (a task
+ * read, created or checked off) is no move of its own.
+ */
+export function tasksWithMovedChats(
+  previous: ReadonlyMap<ThreadId, DelegatedThreadState>,
+  next: ReadonlyMap<ThreadId, DelegatedThreadState>,
+): ReadonlySet<string> {
+  const moved = new Set<string>();
+  for (const [threadId, now] of next) {
+    const before = previous.get(threadId);
+    if (before === undefined || before.state === now.state) continue;
+    for (const taskId of now.taskIds) moved.add(taskId);
+  }
+  return moved;
 }
 
 /** Words a branch name skips: they make it longer without telling tasks apart. */

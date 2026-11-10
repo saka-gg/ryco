@@ -214,7 +214,11 @@ describe("per-environment wsConnectionState", () => {
     }
 
     expect(getWsConnectionStatusForEnvironment(environmentId).reconnectPhase).toBe("waiting");
-    expect(getPersistentWsReconnectDelayMs(20)).toBe(60_000);
+    // The ceiling, spread by up to a quarter either way.
+    const ceiling = getPersistentWsReconnectDelayMs(20);
+    expect(ceiling).toBeGreaterThanOrEqual(45_000);
+    expect(ceiling).toBeLessThanOrEqual(75_000);
+    expect(getPersistentWsReconnectDelayMs(20)).toBe(ceiling);
   });
 
   it("keeps a secondary environment out of the global status", () => {

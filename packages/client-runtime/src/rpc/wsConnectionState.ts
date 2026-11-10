@@ -3,6 +3,7 @@ import * as Atom from "effect/reactivity/Atom";
 
 import type { AppLifecycleService } from "../platform/index.ts";
 import { appAtomRegistry } from "./atomRegistry.ts";
+import { jitterRetryDelayMs } from "./retryJitter.ts";
 
 export type WsConnectionUiState = "connected" | "connecting" | "error" | "offline" | "reconnecting";
 export type WsReconnectPhase = "attempting" | "exhausted" | "idle" | "waiting";
@@ -340,13 +341,20 @@ export function seedWsConnectionOnlineStatus(
 /**
  * Backoff for a connection that never gives up: the same doubling as the
  * bounded schedule, held at `WS_PERSISTENT_RECONNECT_MAX_DELAY_MS` instead of
- * ending.
+ * ending. Spread per client (`jitterRetryDelayMs`), the ceiling included, so the
+ * clients of a machine that restarts do not all come back at the same moment.
  */
 export function getPersistentWsReconnectDelayMs(retryIndex: number): number {
   const index = Number.isInteger(retryIndex) && retryIndex > 0 ? retryIndex : 0;
-  return Math.min(
-    Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** Math.min(index, 16)),
-    WS_PERSISTENT_RECONNECT_MAX_DELAY_MS,
+  return jitterRetryDelayMs(
+    Math.min(
+      Math.round(
+        WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** Math.min(index, 16),
+      ),
+      WS_PERSISTENT_RECONNECT_MAX_DELAY_MS,
+    ),
+    index,
+    "ws-reconnect",
   );
 }
 
@@ -355,9 +363,13 @@ export function getWsReconnectDelayMsForRetry(retryIndex: number): number | null
     return null;
   }
 
-  return Math.min(
-    Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** retryIndex),
-    WS_RECONNECT_MAX_DELAY_MS,
+  return jitterRetryDelayMs(
+    Math.min(
+      Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** retryIndex),
+      WS_RECONNECT_MAX_DELAY_MS,
+    ),
+    retryIndex,
+    "ws-reconnect",
   );
 }
 

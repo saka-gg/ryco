@@ -1,6 +1,6 @@
 import { EnvironmentId } from "@ryco/contracts";
 import {
-  startAgentControlProposalSync,
+  createAgentControlSyncRegistry,
   useAgentControlStore,
 } from "@ryco/client-runtime/state/agentControl";
 import { useEffect } from "react";
@@ -17,9 +17,8 @@ import {
 } from "./scheduleProposalHistory";
 
 /**
- * Keeps one environment's Agent Control queue flowing into the shared store
- * for as long as its connection lives. It re-binds whenever the environment's
- * connection is (re)registered, following the gitStatusState pattern, so
+ * The web app's Agent Control queue subscriptions: the shared, reference
+ * counted registry bound to this client's environment connections, so
  * late-connecting saved environments and reconnects keep the queue live.
  *
  * The Agent Control setting is enforced by the TARGET environment's server
@@ -28,112 +27,41 @@ import {
  * server with the feature disabled refuses it — so nothing renders and no
  * policy is decided client-side.
  */
-function bindEnvironmentProposalSync(environmentId: EnvironmentId): ProposalSyncBinding {
-  let currentClient: unknown = null;
-  let stopSync: (() => void) | null = null;
-  const binding: ProposalSyncBinding = { refused: false, stop: () => {} };
-
-  const syncSubscription = () => {
+const proposalSyncs = createAgentControlSyncRegistry({
+  readSource: (environmentId) => {
     const client = readEnvironmentConnection(environmentId)?.client ?? null;
-    if (client === currentClient) return;
-    stopSync?.();
-    stopSync = null;
-    currentClient = client;
-    binding.refused = false;
-    const source = client
-      ? readEnvironmentApiForConnection(environmentId, client)?.agentControl
-      : undefined;
-    if (!source) return;
-    const store = useAgentControlStore.getState();
-    stopSync = startAgentControlProposalSync({
-      environmentId,
-      source,
-      sink: {
-        // Finished schedule proposals also go to the session history, which
-        // outlives the queue's short list of finished proposals.
-        applyStreamEvent: (id, event) => {
-          store.applyStreamEvent(id, event);
-          recordScheduleProposals(id, proposalsOfStreamEvent(event));
-        },
-        clearEnvironment: (id) => {
-          store.clearEnvironment(id);
-          clearScheduleProposalHistory(id);
-        },
-      },
-      // The server refused (feature off, not authorized) and the transport
-      // does not retry: the next retain binds again instead of sharing a dead
-      // subscription, so turning the feature on reopens the stream.
-      onError: () => {
-        binding.refused = true;
-      },
-    });
-  };
-
-  const unsubscribeRegistry = subscribeEnvironmentConnections(syncSubscription);
-  syncSubscription();
-  binding.stop = () => {
-    unsubscribeRegistry();
-    stopSync?.();
-  };
-  return binding;
-}
-
-interface ProposalSyncBinding {
-  /** The server refused the subscription; nothing will arrive on it. */
-  refused: boolean;
-  stop: () => void;
-}
-
-interface RetainedSync {
-  count: number;
-  binding: ProposalSyncBinding;
-  /** A release left the sync unused; it stops at the end of the task unless retained again. */
-  teardownScheduled: boolean;
-}
-
-const retainedSyncs = new Map<EnvironmentId, RetainedSync>();
+    if (!client) return null;
+    const source = readEnvironmentApiForConnection(environmentId, client)?.agentControl;
+    // The api is built per read; the rpc client is what identifies the connection.
+    return source ? { source, connection: client } : null;
+  },
+  subscribeSourceChanges: subscribeEnvironmentConnections,
+  sink: {
+    // Finished schedule proposals also go to the session history, which
+    // outlives the queue's short list of finished proposals.
+    applyStreamEvent: (id, event) => {
+      useAgentControlStore.getState().applyStreamEvent(id, event);
+      recordScheduleProposals(id, proposalsOfStreamEvent(event));
+    },
+    clearEnvironment: (id) => {
+      useAgentControlStore.getState().clearEnvironment(id);
+      clearScheduleProposalHistory(id);
+    },
+  },
+});
 
 /**
  * One queue subscription per environment however many surfaces show it (the
- * chat's approvals, the Automations dialog, the sidebar badge). The last
- * release stops it once the current task ends, so a surface that re-renders
- * with a different set of environments — or React re-running an effect —
- * hands the subscription over instead of tearing it down and opening a new one.
+ * chat's approvals, the Automations dialog, the sidebar badge). See
+ * `createAgentControlSyncRegistry` for the hand-over and refusal rules.
  */
 export function retainAgentControlProposalSync(environmentId: EnvironmentId): () => void {
-  let entry = retainedSyncs.get(environmentId);
-  if (!entry) {
-    entry = {
-      count: 0,
-      binding: bindEnvironmentProposalSync(environmentId),
-      teardownScheduled: false,
-    };
-    retainedSyncs.set(environmentId, entry);
-  } else if (entry.binding.refused) {
-    entry.binding.stop();
-    entry.binding = bindEnvironmentProposalSync(environmentId);
-  }
-  entry.count += 1;
-  const retained = entry;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    retained.count -= 1;
-    if (retained.count > 0 || retained.teardownScheduled) return;
-    retained.teardownScheduled = true;
-    queueMicrotask(() => {
-      retained.teardownScheduled = false;
-      if (retained.count > 0 || retainedSyncs.get(environmentId) !== retained) return;
-      retainedSyncs.delete(environmentId);
-      retained.binding.stop();
-    });
-  };
+  return proposalSyncs.retain(environmentId);
 }
 
 /** Test-only: whether an environment's queue subscription is currently held. */
 export function isAgentControlProposalSyncRetained(environmentId: EnvironmentId): boolean {
-  return retainedSyncs.has(environmentId);
+  return proposalSyncs.isRetained(environmentId);
 }
 
 /** A stable dependency for a list of environments: order and duplicates do not matter. */

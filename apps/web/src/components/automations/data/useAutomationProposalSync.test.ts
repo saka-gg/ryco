@@ -35,78 +35,47 @@ afterEach(() => {
   runtime.subscribeProposals.mockClear();
 });
 
+// Reference counting, hand-over and refusal rules are the shared registry's
+// (client-runtime `retainedSync.test.ts`); these cover the web binding.
 describe("retainAgentControlProposalSync", () => {
-  it("shares one subscription per environment and stops after the last release", async () => {
+  it("shares one subscription per connection although the api is built per read", async () => {
     runtime.client = {};
     const first = retainAgentControlProposalSync(LOCAL);
     const second = retainAgentControlProposalSync(LOCAL);
+    for (const listener of runtime.listeners) listener();
     expect(runtime.subscribeProposals).toHaveBeenCalledTimes(1);
     const unsubscribe = runtime.subscribeProposals.mock.results[0]!.value;
-
     first();
-    first(); // releasing twice counts once
     await flush();
     expect(isAgentControlProposalSyncRetained(LOCAL)).toBe(true);
-    expect(unsubscribe).not.toHaveBeenCalled();
-
     second();
-    expect(unsubscribe).not.toHaveBeenCalled();
     await flush();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
-    expect(isAgentControlProposalSyncRetained(LOCAL)).toBe(false);
-  });
-
-  it("hands the subscription over when it is retained again in the same task", async () => {
-    runtime.client = {};
-    const release = retainAgentControlProposalSync(STUDIO);
-    release();
-    const again = retainAgentControlProposalSync(STUDIO);
-    await flush();
-    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(1);
-    expect(runtime.subscribeProposals.mock.results[0]!.value).not.toHaveBeenCalled();
-    again();
-    await flush();
-    expect(isAgentControlProposalSyncRetained(STUDIO)).toBe(false);
-  });
-
-  it("binds again for a new retainer after the server refused the subscription", async () => {
-    runtime.client = {};
-    const held = retainAgentControlProposalSync(LOCAL);
-    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(1);
-    const [, options] = runtime.subscribeProposals.mock.calls[0] as unknown as [
-      unknown,
-      { onError?: () => void },
-    ];
-    const refusedUnsubscribe = runtime.subscribeProposals.mock.results[0]!.value;
-    // The feature was off: the transport does not retry a refusal.
-    options.onError?.();
-
-    // Turned on: a surface retains the environment again while the first
-    // retainer still holds the refused entry.
-    const reopened = retainAgentControlProposalSync(LOCAL);
-    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(2);
-    expect(refusedUnsubscribe).toHaveBeenCalledTimes(1);
-
-    // A healthy subscription is shared as before.
-    const third = retainAgentControlProposalSync(LOCAL);
-    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(2);
-    held();
-    reopened();
-    third();
-    await flush();
-    expect(runtime.subscribeProposals.mock.results[1]!.value).toHaveBeenCalledTimes(1);
     expect(isAgentControlProposalSyncRetained(LOCAL)).toBe(false);
   });
 
   it("subscribes once the environment connects", async () => {
     const release = retainAgentControlProposalSync(LOCAL);
     expect(runtime.subscribeProposals).not.toHaveBeenCalled();
+    expect(isAgentControlProposalSyncRetained(LOCAL)).toBe(true);
     runtime.client = {};
     for (const listener of runtime.listeners) listener();
     expect(runtime.subscribeProposals).toHaveBeenCalledTimes(1);
     release();
     await flush();
     expect(runtime.listeners.size).toBe(0);
+  });
+
+  it("restarts the stream when the environment's connection is replaced", async () => {
+    runtime.client = {};
+    const release = retainAgentControlProposalSync(STUDIO);
+    runtime.client = {};
+    for (const listener of runtime.listeners) listener();
+    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(2);
+    expect(runtime.subscribeProposals.mock.results[0]!.value).toHaveBeenCalledTimes(1);
+    release();
+    await flush();
+    expect(runtime.subscribeProposals.mock.results[1]!.value).toHaveBeenCalledTimes(1);
   });
 });
 

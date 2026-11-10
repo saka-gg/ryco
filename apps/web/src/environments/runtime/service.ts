@@ -124,7 +124,7 @@ import {
   markStartupPhase,
   measureStartupPhase,
 } from "~/perf/startupInstrumentation";
-import { isHostedHubMode } from "~/env";
+import { isElectron, isHostedHubMode } from "~/env";
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import { isHostedEnvironmentDemanded } from "~/hostedHub/hostedConnectionCoordinator";
 import { getHostedEnvironmentSessions } from "~/hostedHub/state";
@@ -218,6 +218,13 @@ function getEnvironmentSupervisor() {
       ),
     disconnectSavedEnvironment,
     waitForPrimaryShellSnapshotApplied,
+    // The Mac app keeps more saved machines than a browser tab: a third slot
+    // keeps a reachable one from waiting behind two that are asleep.
+    ...(isElectron ? { savedEnvironmentConnectConcurrency: 3 } : {}),
+    readPriorityEnvironmentIds: () => {
+      const activeEnvironmentId = useStore.getState().activeEnvironmentId;
+      return activeEnvironmentId === null ? [] : [activeEnvironmentId];
+    },
     subscribeBrowserResume: subscribeBrowserResumeReconnects,
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
       isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),

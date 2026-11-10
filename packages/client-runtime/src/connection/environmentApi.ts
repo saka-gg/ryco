@@ -31,7 +31,11 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       createLocalTaskFileUpload: rpcClient.server.createLocalTaskFileUpload,
       addLocalTaskFile: rpcClient.server.addLocalTaskFile,
       removeLocalTaskFile: rpcClient.server.removeLocalTaskFile,
-      subscribeLocalTaskChanges: (listener) => rpcClient.server.subscribeLocalTaskChanges(listener),
+      subscribeLocalTaskChanges: (listener, options) =>
+        rpcClient.server.subscribeLocalTaskChanges(listener, {
+          ...(options?.onResubscribe ? { onResubscribe: options.onResubscribe } : {}),
+          ...(options?.onError ? { onError: () => options.onError?.() } : {}),
+        }),
       getDailyRecap: rpcClient.server.getDailyRecap,
       prewarmProviderSession: rpcClient.server.prewarmProviderSession,
       readProjectProviderCommands: rpcClient.server.readProjectProviderCommands,

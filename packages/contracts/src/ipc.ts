@@ -1355,6 +1355,12 @@ export interface DesktopBridge {
   onNotificationBadgeCleared?: (listener: () => void) => () => void;
 }
 
+/** Lifecycle hooks of a task change subscription (`subscribeLocalTaskChanges`). */
+export interface LocalTaskChangeSubscriptionOptions {
+  readonly onResubscribe?: () => void;
+  readonly onError?: () => void;
+}
+
 /**
  * APIs bound to the local app shell, not to any particular backend environment.
  *
@@ -1454,9 +1460,14 @@ export interface LocalApi {
     removeLocalTaskFile?: (
       input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
-    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    /**
+     * Each task that changes on the node from now on; returns the unsubscribe.
+     * `onResubscribe` fires when the stream starts again after a drop (its
+     * first change follows), `onError` when it stopped for good.
+     */
     subscribeLocalTaskChanges?: (
       listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+      options?: LocalTaskChangeSubscriptionOptions,
     ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
@@ -1593,9 +1604,14 @@ export interface EnvironmentApi {
     removeLocalTaskFile?: (
       input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
-    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    /**
+     * Each task that changes on the node from now on; returns the unsubscribe.
+     * `onResubscribe` fires when the stream starts again after a drop (its
+     * first change follows), `onError` when it stopped for good.
+     */
     subscribeLocalTaskChanges?: (
       listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+      options?: LocalTaskChangeSubscriptionOptions,
     ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
