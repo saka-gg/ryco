@@ -1,12 +1,10 @@
 import { resolveWhatsNewLaunch, selectReleasesBetween } from "@ryco/shared/releaseVersion";
+import * as Schema from "effect/Schema";
 import { useEffect, useRef } from "react";
 
 import { APP_VERSION } from "../../branding";
-import {
-  getClientSettings,
-  persistClientSettingsUpdate,
-  useClientSettingsHydrated,
-} from "../../hooks/useSettings";
+import { getLocalStorageItem, setLocalStorageItem } from "../../hooks/useLocalStorage";
+import { getClientSettings, useClientSettingsHydrated } from "../../hooks/useSettings";
 import { scheduleIdleTask } from "../../lib/idleTask";
 import { getPresentationTier } from "../../lib/presentationTier";
 import { openWhatsNewDialog } from "./whatsNewDialogStore";
@@ -15,10 +13,29 @@ import { openWhatsNewDialog } from "./whatsNewDialogStore";
 const WHATS_NEW_IDLE_TIMEOUT_MS = 3_000;
 
 /**
+ * The app version whose release notes this device last saw (or skipped, on a
+ * fresh install). Kept in local storage, like other per-device markers, rather
+ * than in client settings: writing client settings wakes every settings
+ * subscriber, and this write happens during startup, while a reply may stream.
+ */
+export const WHATS_NEW_LAST_SEEN_STORAGE_KEY = "ryco:whats-new:last-seen-version:v1";
+const LastSeenVersion = Schema.String;
+
+function readLastSeenVersion(): string | undefined {
+  try {
+    return getLocalStorageItem(WHATS_NEW_LAST_SEEN_STORAGE_KEY, LastSeenVersion) ?? undefined;
+  } catch {
+    // Unreadable: treated as a fresh install, which only records the version.
+    return undefined;
+  }
+}
+
+/**
  * The first time the app starts after an update, opens What's new with the
  * releases since the version this device last saw. A fresh install only
- * records its version. Runs once per launch, after client settings load, at
- * an idle moment; the release notes load only when there is something to show.
+ * records its version. Runs once per launch, after client settings load (for
+ * the What's new after updates switch), at an idle moment; the release notes
+ * load only when there is something to show.
  */
 export function WhatsNewLaunchCheck() {
   const hydrated = useClientSettingsHydrated();
@@ -38,7 +55,7 @@ function runWhatsNewLaunchCheck(): void {
   const settings = getClientSettings();
   const decision = resolveWhatsNewLaunch({
     currentVersion: APP_VERSION,
-    lastSeenVersion: settings.lastSeenReleaseNotesVersion,
+    lastSeenVersion: readLastSeenVersion(),
     showAfterUpdate: settings.whatsNewAfterUpdate,
   });
   if (decision.kind === "none") return;
@@ -65,7 +82,9 @@ function runWhatsNewLaunchCheck(): void {
 
 /** Remembered as soon as the dialog opens, so a launch never shows the same notes twice. */
 function recordSeenVersion(): void {
-  void persistClientSettingsUpdate({ lastSeenReleaseNotesVersion: APP_VERSION }).catch(
-    (error: unknown) => console.warn("Saving the seen release notes version failed.", error),
-  );
+  try {
+    setLocalStorageItem(WHATS_NEW_LAST_SEEN_STORAGE_KEY, APP_VERSION, LastSeenVersion);
+  } catch (error) {
+    console.warn("Saving the seen release notes version failed.", error);
+  }
 }
