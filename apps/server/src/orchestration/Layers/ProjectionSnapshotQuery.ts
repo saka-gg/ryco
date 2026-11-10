@@ -85,6 +85,7 @@ import { decodePersistedRepositoryIdentity } from "../../project/repositoryIdent
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { makeShellSnapshotCopy } from "../shellSnapshotCopy.ts";
 import { readClientFor, SqliteReadClient } from "../../persistence/SqliteReadClient.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
 import { previewActivityPayload } from "../activityPayloadPreview.ts";
@@ -110,6 +111,8 @@ import {
   type ProjectionThreadCheckpointContext,
   type ProjectionThreadCheckpointHead,
   type ProjectionSnapshotQueryShape,
+  type ProjectionShellScope,
+  scopeShellSnapshot,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
@@ -5149,7 +5152,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
       ),
     );
 
-  return {
+  const query = {
     getScopedShellSnapshot,
     getStubbedShellSnapshot,
     getCommandReadModel,
@@ -5184,6 +5187,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     getLatestCheckpointRevert,
     searchThreadMessages,
   } satisfies ProjectionSnapshotQueryShape;
+  return {
+    query,
+    /** A whole shell built now, without the memo: the shared thread list's builds. */
+    buildShell: () => buildVersionedShellSnapshot().pipe(Effect.map(({ snapshot }) => snapshot)),
+  };
 });
 
 /**
@@ -5215,16 +5223,85 @@ const READ_WORKER_METHODS = [
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const main = yield* makeProjectionSnapshotQueryOn(sql);
+  const { query: main, buildShell: buildShellOnMain } = yield* makeProjectionSnapshotQueryOn(sql);
   const reader = yield* Effect.serviceOption(SqliteReadClient);
-  if (Option.isNone(reader) || reader.value === sql) return main;
-  const onReader = yield* makeProjectionSnapshotQueryOn(reader.value);
+  const onReader =
+    Option.isNone(reader) || reader.value === sql
+      ? undefined
+      : yield* makeProjectionSnapshotQueryOn(reader.value);
+
+  // The node's one thread list, patched from committed events (shellSnapshotCopy.ts). Its builds
+  // and row reads go to the read worker when there is one: they never run inside a caller's
+  // transaction, and every row they read was committed before the event that names it was
+  // recorded, so the worker sees it.
+  const liveness = yield* ThreadBackgroundLivenessService;
+  const copySource = onReader?.query ?? main;
+  const copy = makeShellSnapshotCopy(
+    {
+      buildShell: onReader?.buildShell ?? buildShellOnMain,
+      getThreadShellById: copySource.getThreadShellById,
+      getProjectShellById: copySource.getProjectShellById,
+      getWorktreeShellById: copySource.getWorktreeShellById,
+    },
+    {
+      liveness: {
+        get: liveness.getThreadBackgroundLiveness,
+        liveThreadIds: liveness.listLiveThreadIds,
+      },
+    },
+  );
+  // Until the engine feeds it, nothing tells the copy what changed: shells are built as before.
+  let tracking = false;
+  /**
+   * The shared thread list for callers outside a transaction once the engine feeds it. A caller
+   * inside a transaction holds the single connection and may read its own uncommitted rows: it
+   * builds from that connection, as before.
+   */
+  const fromCopy = <A, E>(
+    copyRead: () => Effect.Effect<A, E>,
+    fallback: () => Effect.Effect<A, E>,
+    options: { readonly onlyWhileHeld?: boolean } = {},
+  ): Effect.Effect<A, E> =>
+    Effect.serviceOption(sql.transactionService).pipe(
+      Effect.flatMap((transaction) =>
+        Option.isNone(transaction) && tracking && (options.onlyWhileHeld !== true || copy.isHeld())
+          ? copyRead()
+          : fallback(),
+      ),
+    );
+
+  const shared = {
+    getShellSnapshot: () => fromCopy(copy.read, main.getShellSnapshot),
+    getStubbedShellSnapshot: () => fromCopy(copy.readStubbed, main.getStubbedShellSnapshot),
+    // A scoped read builds a few threads; only a copy already held answers it cheaper.
+    getScopedShellSnapshot: (scope: ProjectionShellScope) =>
+      fromCopy(
+        () => copy.read().pipe(Effect.map((snapshot) => scopeShellSnapshot(snapshot, scope))),
+        () => main.getScopedShellSnapshot(scope),
+        { onlyWhileHeld: true },
+      ),
+    getSharedThreadShell: (threadId: ThreadId) =>
+      fromCopy(
+        () => copy.readThread(threadId),
+        () => main.getThreadShellById(threadId),
+      ),
+    trackShellChanges: (fromSequence: number) => {
+      tracking = true;
+      copy.startChangeIndex(fromSequence);
+      return copy.record;
+    },
+    getShellChangesSince: (sequence: number) =>
+      tracking ? copy.changesSince(sequence) : Effect.succeed(Option.none()),
+  } satisfies Partial<ProjectionSnapshotQueryShape>;
+
+  if (onReader === undefined) return { ...main, ...shared } satisfies ProjectionSnapshotQueryShape;
+  const offMainQuery = onReader.query;
   type AnyRead = (...args: Array<never>) => Effect.Effect<unknown, ProjectionRepositoryError>;
   const routed = <K extends (typeof READ_WORKER_METHODS)[number]>(
     method: K,
   ): NonNullable<ProjectionSnapshotQueryShape[K]> => {
     const onMain = main[method] as AnyRead;
-    const offMain = onReader[method] as AnyRead;
+    const offMain = offMainQuery[method] as AnyRead;
     const read = (...args: Array<never>) =>
       Effect.flatMap(readClientFor(sql), (client) =>
         client === sql ? onMain(...args) : offMain(...args),
@@ -5233,6 +5310,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   };
   return {
     ...main,
+    ...shared,
     getSnapshot: routed("getSnapshot"),
     getThreadWindow: routed("getThreadWindow"),
     getThreadHistoryPage: routed("getThreadHistoryPage"),

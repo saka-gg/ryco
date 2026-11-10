@@ -950,6 +950,14 @@ const buildAppUnderTest = (options?: {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
             getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+            // No shared thread list: shared row reads go to the (overridable) row read, and a
+            // shell resume uses the event log.
+            getSharedThreadShell: (threadId) =>
+              (
+                options?.layers?.projectionSnapshotQuery?.getThreadShellById ??
+                (() => Effect.succeed(Option.none()))
+              )(threadId),
+            getShellChangesSince: () => Effect.succeed(Option.none()),
             ...options?.layers?.projectionSnapshotQuery,
           }),
           Layer.mock(StatisticsQuery)({

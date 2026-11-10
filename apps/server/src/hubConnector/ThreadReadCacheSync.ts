@@ -10,7 +10,6 @@ import {
   createThreadReadCachePublisher,
   THREAD_READ_CACHE_PUBLISH_INTERVAL_MS,
 } from "./ThreadReadCachePublisher.ts";
-import { makeThreadReadCacheShellMirror } from "./threadReadCacheShellMirror.ts";
 
 class ThreadReadCacheHttpError extends Error {
   readonly status: number;
@@ -119,8 +118,6 @@ export function startThreadReadCacheSync(deps: {
     if (!response.ok) throw new ThreadReadCacheHttpError(response.status);
     return response.value;
   };
-  // Patched from the events notifyChanged records, instead of a whole shell per sequence change.
-  const shellMirror = makeThreadReadCacheShellMirror(deps.query);
   const publisher = createThreadReadCachePublisher({
     nodeId: () => (stopped || deps.connector.status().state !== "online" ? null : currentNodeId),
     now: Date.now,
@@ -128,7 +125,10 @@ export function startThreadReadCacheSync(deps: {
       (await Effect.runPromise(deps.query.getSnapshotSequence(), { signal: abort.signal }))
         .snapshotSequence,
     readShell: async () => {
-      const shell = await Effect.runPromise(shellMirror.read(), { signal: abort.signal });
+      // The node's shared thread list: patched from events, not rebuilt per sequence change.
+      const shell = await Effect.runPromise(deps.query.getShellSnapshot(), {
+        signal: abort.signal,
+      });
       const settlementPolicy = await deps.readSettlementPolicy?.();
       return settlementPolicy === undefined ? shell : { ...shell, settlementPolicy };
     },
@@ -213,11 +213,9 @@ export function startThreadReadCacheSync(deps: {
       schedule(changed && failures === 0 ? changeDelay() : delay);
     });
   };
-  /** `event` names the rows to re-read; without one the next read rebuilds the shell. */
-  const notifyChanged = (event?: OrchestrationEvent) => {
+  /** Something the cloud cache shows may have changed: publish again soon. */
+  const notifyChanged = (_event?: OrchestrationEvent) => {
     if (stopped) return;
-    if (event === undefined) shellMirror.invalidate();
-    else shellMirror.record(event);
     changed = true;
     // A domain-event storm must never bypass the failed upload's retry budget.
     if (inFlight === null && failures === 0) schedule(changeDelay());

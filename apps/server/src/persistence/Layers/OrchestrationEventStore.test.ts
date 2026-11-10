@@ -1,4 +1,4 @@
-import { CommandId, EventId, ProjectId } from "@ryco/contracts";
+import { CommandId, EventId, ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Schema, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -312,6 +312,87 @@ layer("OrchestrationEventStore", (it) => {
       assert.isFalse(
         plan.some((row) => row.detail.startsWith("SCAN orchestration_events")),
         JSON.stringify(plan),
+      );
+    }),
+  );
+
+  it.effect("pages events without payloads, with only the ids and paths readers need", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const before = yield* eventStore.latestSequence;
+      const base = {
+        occurredAt: "2026-10-02T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } as const;
+      const project = ProjectId.make("project-headers");
+      const thread = ThreadId.make("thread-headers");
+      const worktree = WorktreeId.make("worktree-headers");
+      yield* eventStore.append({
+        ...base,
+        type: "project.deleted",
+        eventId: EventId.make("evt-headers-project"),
+        aggregateKind: "project",
+        aggregateId: project,
+        payload: { projectId: project, deletedAt: base.occurredAt },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.deleted",
+        eventId: EventId.make("evt-headers-thread"),
+        aggregateKind: "thread",
+        aggregateId: thread,
+        payload: { threadId: thread, deletedAt: base.occurredAt },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "worktree.relocated",
+        eventId: EventId.make("evt-headers-worktree"),
+        aggregateKind: "worktree",
+        aggregateId: worktree,
+        payload: {
+          worktreeId: worktree,
+          projectId: project,
+          sourcePath: "/tmp/from",
+          destinationPath: "/tmp/to",
+          relocatedAt: base.occurredAt,
+        },
+      } as never);
+
+      const page = yield* eventStore.readEventHeadersPage!(before, 2);
+      assert.equal(page.hasMore, true);
+      assert.equal(page.nextSequence, before + 2);
+      const rest = yield* eventStore.readEventHeadersPage!(page.nextSequence, 10);
+      assert.equal(rest.hasMore, false);
+      assert.deepEqual(
+        [...page.events, ...rest.events].map(({ sequence: _sequence, ...header }) => header),
+        [
+          {
+            type: "project.deleted",
+            aggregateKind: "project",
+            aggregateId: project,
+            payload: { projectId: project },
+          },
+          {
+            type: "thread.deleted",
+            aggregateKind: "thread",
+            aggregateId: thread,
+            payload: { threadId: thread },
+          },
+          {
+            type: "worktree.relocated",
+            aggregateKind: "worktree",
+            aggregateId: worktree,
+            payload: {
+              projectId: project,
+              worktreeId: worktree,
+              sourcePath: "/tmp/from",
+              destinationPath: "/tmp/to",
+            },
+          },
+        ],
       );
     }),
   );

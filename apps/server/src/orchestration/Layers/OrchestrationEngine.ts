@@ -248,6 +248,11 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   /** Highest sequence handed to the bus: the store head at boot until this process publishes. */
   let lastPublishedSequence = 0;
   /**
+   * The shared thread list's feed (shellSnapshotCopy.ts), set once projections caught up at boot.
+   * Every event is recorded before it is published, so a reader that saw it finds it recorded.
+   */
+  let recordShellChanges: ((events: ReadonlyArray<OrchestrationEvent>) => void) | undefined;
+  /**
    * Publishes committed events (ascending) in one batch, each at most once: the reconcile path
    * re-reads events that may already be published. Never waits for a subscriber: the sliding bus
    * drops its oldest event instead, and that subscriber replays it.
@@ -259,6 +264,7 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
           const unpublished = events.filter((event) => event.sequence > lastPublishedSequence);
           const last = unpublished.at(-1);
           if (last === undefined) return Effect.void;
+          recordShellChanges?.(unpublished);
           return PubSub.publishAll(eventPubSub, unpublished).pipe(
             Effect.andThen(
               Effect.sync(() => {
@@ -740,6 +746,8 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   const bootSequence = yield* eventStore.latestSequence;
   // Subscriptions start at the store head: events of earlier processes are never delivered live.
   lastPublishedSequence = bootSequence;
+  // Projections are caught up: the shared thread list may start from them.
+  recordShellChanges = projectionSnapshotQuery.trackShellChanges?.(bootSequence);
 
   const worker = Effect.forever(
     Queue.take(commandQueue).pipe(

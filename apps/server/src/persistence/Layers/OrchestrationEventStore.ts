@@ -23,6 +23,7 @@ import {
 } from "../Errors.ts";
 import {
   OrchestrationEventStore,
+  type OrchestrationEventHeader,
   type OrchestrationEventStoreShape,
 } from "../Services/OrchestrationEventStore.ts";
 
@@ -56,6 +57,18 @@ const OrchestrationEventPersistedRowSchema = Schema.Struct({
   correlationId: Schema.NullOr(CommandId),
   payload: UnknownFromJsonString,
   metadata: EventMetadataFromJsonString,
+});
+
+const OrchestrationEventHeaderRowSchema = Schema.Struct({
+  sequence: NonNegativeInt,
+  type: OrchestrationEventType,
+  aggregateKind: OrchestrationAggregateKind,
+  aggregateId: Schema.String,
+  projectId: Schema.NullOr(Schema.String),
+  worktreeId: Schema.NullOr(Schema.String),
+  threadId: Schema.NullOr(Schema.String),
+  sourcePath: Schema.NullOr(Schema.String),
+  destinationPath: Schema.NullOr(Schema.String),
 });
 
 const HasEventAfterRequestSchema = Schema.Struct({
@@ -241,6 +254,35 @@ const makeEventStore = Effect.gen(function* () {
           correlation_id AS "correlationId",
           payload_json AS "payload",
           metadata_json AS "metadata"
+        FROM orchestration_events
+        WHERE sequence > ${request.sequenceExclusive}
+        ORDER BY sequence ASC
+        LIMIT ${request.limit}
+      `,
+  });
+
+  // Payload fields only for the event types whose readers need them, so no thread event's
+  // payload is parsed (see readEventHeadersPage).
+  const readEventHeaderRows = SqlSchema.findAll({
+    Request: ReadFromSequenceRequestSchema,
+    Result: OrchestrationEventHeaderRowSchema,
+    execute: (request) =>
+      sql`
+        SELECT
+          sequence,
+          event_type AS "type",
+          aggregate_kind AS "aggregateKind",
+          stream_id AS "aggregateId",
+          CASE WHEN aggregate_kind <> 'thread'
+            THEN json_extract(payload_json, '$.projectId') END AS "projectId",
+          CASE WHEN aggregate_kind <> 'thread'
+            THEN json_extract(payload_json, '$.worktreeId') END AS "worktreeId",
+          CASE WHEN event_type IN ('thread.deleted', 'thread.trashed')
+            THEN json_extract(payload_json, '$.threadId') END AS "threadId",
+          CASE WHEN event_type = 'worktree.relocated'
+            THEN json_extract(payload_json, '$.sourcePath') END AS "sourcePath",
+          CASE WHEN event_type = 'worktree.relocated'
+            THEN json_extract(payload_json, '$.destinationPath') END AS "destinationPath"
         FROM orchestration_events
         WHERE sequence > ${request.sequenceExclusive}
         ORDER BY sequence ASC
@@ -494,6 +536,43 @@ const makeEventStore = Effect.gen(function* () {
       readRows: readEventRowsFromSequence,
     });
 
+  const readEventHeadersPage: NonNullable<OrchestrationEventStoreShape["readEventHeadersPage"]> = (
+    sequenceExclusive,
+    requestedLimit,
+  ) => {
+    const limit = Math.max(0, Math.floor(requestedLimit));
+    const from = Math.max(0, Math.floor(sequenceExclusive));
+    if (limit === 0) return Effect.succeed({ events: [], nextSequence: from, hasMore: false });
+    return readEventHeaderRows({ sequenceExclusive: from, limit: limit + 1 }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "OrchestrationEventStore.readEventHeadersPage:query",
+          "OrchestrationEventStore.readEventHeadersPage:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => {
+        const events = rows.slice(0, limit).map((row): OrchestrationEventHeader => ({
+          sequence: row.sequence,
+          type: row.type,
+          aggregateKind: row.aggregateKind,
+          aggregateId: row.aggregateId,
+          payload: {
+            ...(row.projectId === null ? {} : { projectId: row.projectId }),
+            ...(row.worktreeId === null ? {} : { worktreeId: row.worktreeId }),
+            ...(row.threadId === null ? {} : { threadId: row.threadId }),
+            ...(row.sourcePath === null ? {} : { sourcePath: row.sourcePath }),
+            ...(row.destinationPath === null ? {} : { destinationPath: row.destinationPath }),
+          },
+        }));
+        return {
+          events,
+          nextSequence: events.length === 0 ? from : events[events.length - 1]!.sequence,
+          hasMore: rows.length > limit,
+        };
+      }),
+    );
+  };
+
   const readStreamEventsPage: OrchestrationEventStoreShape["readStreamEventsPage"] = (input) =>
     readEventPage({
       operation: "OrchestrationEventStore.readStreamEventsPage",
@@ -604,6 +683,7 @@ const makeEventStore = Effect.gen(function* () {
     append,
     readPage,
     readStreamEventsPage,
+    readEventHeadersPage,
     readRecent,
     probeResume,
     readReplayFloor,
