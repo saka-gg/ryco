@@ -821,6 +821,34 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
 
+    it.effect("answers unchanged to a first chunk that names the held fingerprint (D7)", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeBinaryFile(cwd, "docs/big.pdf", pdfBytes(600_000));
+        const first = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/big.pdf",
+          offset: 0,
+        });
+        const again = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/big.pdf",
+          offset: 0,
+          knownFingerprint: first.fingerprint,
+        });
+        expect(again).toEqual({ ...first, dataBase64: "", unchanged: true });
+        const stale = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/big.pdf",
+          offset: 0,
+          knownFingerprint: "stat:other",
+        });
+        expect(stale.unchanged).toBeUndefined();
+        expect(stale.dataBase64).toBe(first.dataBase64);
+      }),
+    );
+
     it.effect("refuses files that are neither a PDF nor a raster image", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem;

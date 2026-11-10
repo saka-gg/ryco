@@ -275,6 +275,13 @@ export const ProjectReadFileChunkInput = Schema.Struct({
   expectedFingerprint: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH)),
   ),
+  /**
+   * The `fingerprint` of the bytes the client holds (first chunk only): a node whose
+   * file still has it answers `unchanged` with no data. Older nodes ignore it.
+   */
+  knownFingerprint: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH)),
+  ),
 });
 export type ProjectReadFileChunkInput = typeof ProjectReadFileChunkInput.Type;
 
@@ -294,6 +301,8 @@ export const ProjectReadFileChunkResult = Schema.Struct({
   fingerprint: TrimmedNonEmptyString.check(
     Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH),
   ),
+  /** The file is still `knownFingerprint`: `dataBase64` is empty, keep the bytes held. */
+  unchanged: Schema.optional(Schema.Literal(true)),
 });
 export type ProjectReadFileChunkResult = typeof ProjectReadFileChunkResult.Type;
 
