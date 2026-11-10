@@ -218,6 +218,10 @@
       "types": "./src/gitDiffPaths.ts",
       "import": "./src/gitDiffPaths.ts"
     },
+    "./gitPatchFiles": {
+      "types": "./src/gitPatchFiles.ts",
+      "import": "./src/gitPatchFiles.ts"
+    },
     "./gitPointer": {
       "types": "./src/gitPointer.ts",
       "import": "./src/gitPointer.ts"

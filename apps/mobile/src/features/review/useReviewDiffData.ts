@@ -1,5 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
+import {
+  readCheckpointDiffFileIndex,
+  type CheckpointDiffFileIndex,
+  type CheckpointDiffFilePatchState,
+} from "@ryco/client-runtime/rpc/checkpointDiffFiles";
 
 import { inferCheckpointTurnCountByTurnId } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
@@ -7,6 +12,7 @@ import type { TurnDiffSummary } from "@ryco/client-runtime/state/threads";
 
 import {
   checkpointDiffCacheKey,
+  checkpointDiffFilePatches,
   checkpointDiffStateAtom,
   watchCheckpointDiff,
   type CheckpointDiffInput,
@@ -36,6 +42,8 @@ export function buildFullThreadDiffInput(
     // Every completed turn makes a new full-range key; the slot drops the
     // superseded patch once nothing shows it, instead of keeping one per turn.
     cacheSlot: "conversation",
+    // The file list first; each file's patch loads when it is opened (D6).
+    fileIndex: true,
   };
 }
 
@@ -50,4 +58,28 @@ export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffSta
     [key],
   );
   return useAtomValue(checkpointDiffStateAtom(key));
+}
+
+/** The diff's file list, from a node that sends one or split from a whole diff. */
+export function useCheckpointDiffFileIndex(
+  state: CheckpointDiffState,
+): CheckpointDiffFileIndex | null {
+  const data = state.data;
+  return useMemo(() => (data ? readCheckpointDiffFileIndex(data) : null), [data]);
+}
+
+/** One file's patch, loaded once the file is opened and kept by its commit pair. */
+export function useCheckpointDiffFilePatch(
+  input: CheckpointDiffInput,
+  index: CheckpointDiffFileIndex,
+  file: number,
+  open: boolean,
+): CheckpointDiffFilePatchState {
+  const key = checkpointDiffFilePatches.filePatchKey(input, index, file);
+  useEffect(() => {
+    if (open) checkpointDiffFilePatches.loadFilePatch(input, index, file);
+    // The key names the input, the commit pair and the file.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, open]);
+  return useAtomValue(checkpointDiffFilePatches.filePatchAtom(key));
 }

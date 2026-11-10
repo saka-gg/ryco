@@ -4,6 +4,7 @@
 // may kill the app over memory it keeps.
 import type { EnvironmentId } from "@ryco/contracts";
 import { createCheckpointDiffStore } from "@ryco/client-runtime/rpc";
+import { createCheckpointDiffFilePatches } from "@ryco/client-runtime/rpc/checkpointDiffFiles";
 
 import { cachedPayloadBytes } from "../persistence/cacheSize";
 import { ensureEnvironmentApi } from "../connection/environmentApi";
@@ -50,3 +51,12 @@ export function checkpointDiffCacheBytes(environmentId: EnvironmentId): number {
 export function clearCheckpointDiffCacheForEnvironment(environmentId: EnvironmentId): void {
   store.clearUnwatchedCheckpointDiffsForEnvironment(environmentId);
 }
+
+/** Patch characters kept for diffs read file by file (D6); the oldest loaded go first. */
+export const MAX_RETAINED_CHECKPOINT_DIFF_FILE_CHARS = 4 * 1024 * 1024;
+
+/** Turn diffs read file by file: each file's patch loads when it is opened. */
+export const checkpointDiffFilePatches = createCheckpointDiffFilePatches({
+  resolveOrchestrationApi: (environmentId) => ensureEnvironmentApi(environmentId).orchestration,
+  maxRetainedChars: MAX_RETAINED_CHECKPOINT_DIFF_FILE_CHARS,
+});

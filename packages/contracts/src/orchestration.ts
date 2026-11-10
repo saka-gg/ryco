@@ -4408,10 +4408,54 @@ export const TurnCountRange = Schema.Struct({
   ),
 );
 
+/**
+ * A turn diff read file by file (D6): `index` asks for the file list only,
+ * `files` for the patches of some files by their place in that list. A node
+ * that answers sends `fileView` and an empty `diff`; older nodes ignore the
+ * field and send the whole `diff`, which a client then splits itself.
+ */
+export const OrchestrationTurnDiffFileViewRequest = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("index") }),
+  Schema.Struct({
+    kind: Schema.Literal("files"),
+    indices: Schema.Array(NonNegativeInt).check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+  }),
+]);
+export type OrchestrationTurnDiffFileViewRequest = typeof OrchestrationTurnDiffFileViewRequest.Type;
+
+export const OrchestrationTurnDiffFile = Schema.Struct({
+  /** Place in the patch; how `files` requests name it. */
+  index: NonNegativeInt,
+  path: Schema.String,
+  previousPath: Schema.optional(Schema.String),
+  status: Schema.Literals(["added", "deleted", "modified", "renamed"]),
+  binary: Schema.optional(Schema.Boolean),
+  additions: NonNegativeInt,
+  deletions: NonNegativeInt,
+  /** Characters of the file's patch: what loading it costs. */
+  patchChars: NonNegativeInt,
+});
+export type OrchestrationTurnDiffFile = typeof OrchestrationTurnDiffFile.Type;
+
+export const OrchestrationTurnDiffFileView = Schema.Struct({
+  /** The checkpoint commits the diff is between; a file patch is immutable for the pair. */
+  fromCommitOid: Schema.String,
+  toCommitOid: Schema.String,
+  /** Every file of the diff, for an `index` request. */
+  files: Schema.optional(Schema.Array(OrchestrationTurnDiffFile)),
+  /** The requested files' patches, for a `files` request. */
+  patches: Schema.optional(
+    Schema.Array(Schema.Struct({ index: NonNegativeInt, patch: Schema.String })),
+  ),
+});
+export type OrchestrationTurnDiffFileView = typeof OrchestrationTurnDiffFileView.Type;
+
 export const ThreadTurnDiff = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
+    /** Empty when `fileView` answered a file view request. */
     diff: Schema.String,
+    fileView: Schema.optionalKey(OrchestrationTurnDiffFileView),
   }),
   { unsafePreserveChecks: true },
 );
@@ -4459,6 +4503,7 @@ export const OrchestrationGetTurnDiffInput = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
     ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
+    fileView: Schema.optionalKey(OrchestrationTurnDiffFileViewRequest),
   }),
   { unsafePreserveChecks: true },
 );
@@ -4471,6 +4516,7 @@ export const OrchestrationGetFullThreadDiffInput = Schema.Struct({
   threadId: ThreadId,
   toTurnCount: NonNegativeInt,
   ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
+  fileView: Schema.optionalKey(OrchestrationTurnDiffFileViewRequest),
 });
 export type OrchestrationGetFullThreadDiffInput = typeof OrchestrationGetFullThreadDiffInput.Type;
 

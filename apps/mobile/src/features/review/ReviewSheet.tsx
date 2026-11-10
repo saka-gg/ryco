@@ -1,5 +1,8 @@
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { ScrollView, View } from "react-native";
+import { useState } from "react";
+import { Pressable, ScrollView, View } from "react-native";
+import type { CheckpointDiffFileIndex } from "@ryco/client-runtime/rpc/checkpointDiffFiles";
+import type { OrchestrationTurnDiffFile } from "@ryco/contracts/orchestration";
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
@@ -9,7 +12,13 @@ import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { LoadingStrip } from "../../components/LoadingStrip";
 import { selectThreadByRef, useStore } from "../../state/threadsRuntime";
-import { buildFullThreadDiffInput, useCheckpointDiff } from "./useReviewDiffData";
+import type { CheckpointDiffInput } from "../../rpc/checkpointDiffAtoms";
+import {
+  buildFullThreadDiffInput,
+  useCheckpointDiff,
+  useCheckpointDiffFileIndex,
+  useCheckpointDiffFilePatch,
+} from "./useReviewDiffData";
 
 function firstParam(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0] ?? null;
@@ -41,9 +50,10 @@ export function ReviewSheet(props: ReviewSheetProps) {
   );
   const summaries = thread?.turnDiffSummaries ?? [];
 
-  const diffState = useCheckpointDiff(
-    buildFullThreadDiffInput(environmentId, threadId, summaries, false),
-  );
+  const diffInput = buildFullThreadDiffInput(environmentId, threadId, summaries, false);
+  const diffState = useCheckpointDiff(diffInput);
+  // The file list first; a file's patch loads when it is opened (D6).
+  const fileIndex = useCheckpointDiffFileIndex(diffState);
 
   const totalFiles = summaries.reduce((count, summary) => count + summary.files.length, 0);
 
@@ -69,13 +79,11 @@ export function ReviewSheet(props: ReviewSheetProps) {
           <Text className="px-5 pb-1 text-xs font-ryco-bold uppercase tracking-wide text-foreground-muted">
             {totalFiles} file{totalFiles === 1 ? "" : "s"} changed
           </Text>
-          {diffState.data?.diff ? (
+          {fileIndex && fileIndex.files.length > 0 ? (
             <View className="mx-4 my-2 overflow-hidden rounded-2xl border border-border bg-card">
-              <ScrollView horizontal contentContainerStyle={{ padding: 12 }}>
-                <Text className="font-mono text-xs text-foreground" selectable>
-                  {diffState.data.diff}
-                </Text>
-              </ScrollView>
+              {fileIndex.files.map((file) => (
+                <ReviewDiffFile key={file.index} input={diffInput} index={fileIndex} file={file} />
+              ))}
             </View>
           ) : !diffState.isLoading ? (
             <View className="px-4 py-8">
@@ -105,5 +113,50 @@ export function ReviewSheet(props: ReviewSheetProps) {
         </View>
       ) : null}
     </ScrollView>
+  );
+}
+
+/** One changed file: its path and counts, and its patch once opened. */
+function ReviewDiffFile(props: {
+  readonly input: CheckpointDiffInput;
+  readonly index: CheckpointDiffFileIndex;
+  readonly file: OrchestrationTurnDiffFile;
+}) {
+  const { file } = props;
+  const [open, setOpen] = useState(false);
+  const patch = useCheckpointDiffFilePatch(props.input, props.index, file.index, open);
+  return (
+    <View className="border-b border-separator">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen((value) => !value)}
+        className="flex-row items-center gap-2 px-3 py-2.5 active:opacity-70"
+      >
+        <Text className="flex-1 font-mono text-xs text-foreground" numberOfLines={1}>
+          {file.previousPath ? `${file.previousPath} → ${file.path}` : file.path}
+        </Text>
+        {file.binary ? (
+          <Text className="text-xs text-foreground-muted">binary</Text>
+        ) : (
+          <Text className="font-mono text-xs text-foreground-muted">
+            +{file.additions} −{file.deletions}
+          </Text>
+        )}
+      </Pressable>
+      {open ? (
+        patch.patch !== null ? (
+          <ScrollView horizontal contentContainerStyle={{ padding: 12 }}>
+            <Text className="font-mono text-xs text-foreground" selectable>
+              {patch.patch}
+            </Text>
+          </ScrollView>
+        ) : patch.error !== null ? (
+          <Text className="px-3 pb-2.5 text-xs text-danger">{patch.error}</Text>
+        ) : (
+          <LoadingStrip />
+        )
+      ) : null}
+    </View>
   );
 }
