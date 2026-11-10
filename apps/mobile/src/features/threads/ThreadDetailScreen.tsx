@@ -145,6 +145,7 @@ import {
   restartInterruptionNotice,
   threadForkBoundaryQuote,
   threadForkReplyExcerpt,
+  waitForStoreCondition,
   type ChatMessage,
   type ProposedPlan,
 } from "@ryco/client-runtime/state/threads";
@@ -465,13 +466,10 @@ async function guardPlanImplementation(
 
 /** Resolves once the node's new thread reached this device (a few seconds at most). */
 async function waitForThreadInStore(environmentId: EnvironmentId, threadId: ThreadId) {
-  const deadline = Date.now() + 12_000;
-  while (Date.now() < deadline) {
-    if (selectThreadExistsByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  await waitForStoreCondition({
+    ready: (state) => selectThreadExistsByRef(state, scopeThreadRef(environmentId, threadId)),
+    timeoutMs: 12_000,
+  });
 }
 
 /** Sends what a `/goal` message asked for (a plan that changes something). */

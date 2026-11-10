@@ -22,20 +22,17 @@ export interface WaitForThreadShellInput {
 }
 
 /**
- * Resolves true once the shell stream has delivered the thread (shell existence, not a started
- * turn: a fork or an import has history but no turn yet). Resolves false on timeout or abort so
- * the caller decides whether to navigate anyway. Subscribes to the store; never polls.
+ * Resolves true once `ready` holds for the threads store, false on timeout or abort. Subscribes
+ * to the store and never polls, so a waiter moves on the moment the state it waits for lands.
  */
-export function waitForThreadShell(input: WaitForThreadShellInput): Promise<boolean> {
+export function waitForStoreCondition(input: {
+  readonly ready: (state: AppState) => boolean;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal | undefined;
+  readonly store?: ThreadShellSource | undefined;
+}): Promise<boolean> {
   const store = input.store ?? useStore;
-  const ready = (state: AppState): boolean => {
-    const shell = selectEnvironmentState(state, input.environmentId).threadShellById[
-      input.threadId
-    ];
-    return (
-      shell !== undefined && (input.worktreeId == null || shell.worktreeId === input.worktreeId)
-    );
-  };
+  const { ready } = input;
   if (ready(store.getState())) return Promise.resolve(true);
   if (input.signal?.aborted) return Promise.resolve(false);
 
@@ -55,9 +52,30 @@ export function waitForThreadShell(input: WaitForThreadShellInput): Promise<bool
     unsubscribe = store.subscribe((state) => {
       if (ready(state)) finish(true);
     });
-    // The shell can land between the first read and the subscription.
+    // The state can land between the first read and the subscription.
     if (ready(store.getState())) return finish(true);
     input.signal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(() => finish(false), Math.max(0, input.timeoutMs));
+  });
+}
+
+/**
+ * Resolves true once the shell stream has delivered the thread (shell existence, not a started
+ * turn: a fork or an import has history but no turn yet). Resolves false on timeout or abort so
+ * the caller decides whether to navigate anyway. Subscribes to the store; never polls.
+ */
+export function waitForThreadShell(input: WaitForThreadShellInput): Promise<boolean> {
+  return waitForStoreCondition({
+    ready: (state) => {
+      const shell = selectEnvironmentState(state, input.environmentId).threadShellById[
+        input.threadId
+      ];
+      return (
+        shell !== undefined && (input.worktreeId == null || shell.worktreeId === input.worktreeId)
+      );
+    },
+    timeoutMs: input.timeoutMs,
+    signal: input.signal,
+    store: input.store,
   });
 }
