@@ -801,7 +801,14 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    expect(bytes).toBeLessThan(7_231_000);
+    // 7.240 MB on 2026-11-10 with the database and background-work findings (+8.4 KB, measured
+    // 7.238195 MB): timers that sleep until something is due (usage-limit recovery's wake plan
+    // 1.9 KB, the automation scheduler's loop 1.5 KB and its next-due query 0.7 KB), the disk
+    // usage answer from the last measurement (1.2 KB), the backup listing's RPC, schemas and
+    // storage wiring (1.7 KB), migration 103 and the event log's time search shared with the
+    // events tool (1.2 KB); the usage warm-up left (-0.5 KB). The backup listing and removal
+    // load through import().
+    expect(bytes).toBeLessThan(7_240_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
