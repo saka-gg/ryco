@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   BrowserWindow,
   WebContentsView,
@@ -105,6 +106,9 @@ function settleWithin(promise: Promise<unknown>, signal: AbortSignal, ms: number
 /** A capture of a page without a frame yet is retried this often, at most CAPTURE_ATTEMPTS times. */
 const CAPTURE_RETRY_MS = 50;
 const CAPTURE_ATTEMPTS = 20;
+/** The thumbnail preview's width, and its JPEG quality (a fraction of PNG's size for a page). */
+const PREVIEW_WIDTH = 640;
+const PREVIEW_JPEG_QUALITY = 75;
 
 const SIGN_IN_NEEDS_FOCUS = "Show and focus this browser tab before allowing sign-in.";
 const REVIVAL_STOPPED = "Loading was stopped. Reload to recover.";
@@ -778,6 +782,11 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         return false; // Nothing to do without a page.
     }
   }
+  /** Each tab's last thumbnail and its pixels' fingerprint: a still page is not encoded again. */
+  private readonly previewFrames = new WeakMap<
+    TabEntry,
+    { readonly fingerprint: string; readonly dataUrl: string }
+  >();
   async capture(tab: string): Promise<string> {
     const entry = this.entry(tab);
     const now = Date.now();
@@ -792,8 +801,16 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const wc = this.liveOf(entry).view.webContents;
     const loadedUnthrottled = !wc.getBackgroundThrottling();
     this.syncThrottling(entry, now);
-    const image = await this.capturePainted(entry, wc, loadedUnthrottled);
-    return image.resize({ width: 640 }).toDataURL();
+    const image = (await this.capturePainted(entry, wc, loadedUnthrottled)).resize({
+      width: PREVIEW_WIDTH,
+    });
+    // Hashing the raw pixels is cheaper than encoding them; unchanged pixels return the same URL.
+    const fingerprint = createHash("sha1").update(image.toBitmap()).digest("base64");
+    const previous = this.previewFrames.get(entry);
+    if (previous?.fingerprint === fingerprint) return previous.dataUrl;
+    const dataUrl = `data:image/jpeg;base64,${image.toJPEG(PREVIEW_JPEG_QUALITY).toString("base64")}`;
+    this.previewFrames.set(entry, { fingerprint, dataUrl });
+    return dataUrl;
   }
   /**
    * capturePage once the page has a frame. A hidden page paints only after Electron shows it: when

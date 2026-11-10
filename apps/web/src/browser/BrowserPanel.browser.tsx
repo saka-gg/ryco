@@ -92,6 +92,45 @@ it("shows a background thumbnail without mounting the page and opens the workspa
   await new Promise((resolve) => setTimeout(resolve, 2100));
   expect(api.capture).toHaveBeenCalledTimes(before);
 });
+it("captures a still page less and less often, and not at all while the window is hidden", async () => {
+  const api = setup();
+  const src = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="teal"/></svg>')}`;
+  api.capture.mockResolvedValue(src);
+  await api.open({ url: "http://localhost:3000/", project: '[null,"/project"]' });
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    // Away from where an earlier test left the pointer: hovering the tile speeds it up again.
+    const view = await render(
+      <div style={{ paddingTop: 320 }}>
+        <BackgroundBrowserPreview environmentId={null} cwd="/project" onOpen={() => {}} />
+      </div>,
+    );
+    await expect.element(view.getByRole("img", { name: "Browser preview" })).toBeVisible();
+    const start = api.capture.mock.calls.length;
+    for (let second = 0; second < 60; second += 1) await vi.advanceTimersByTimeAsync(1_000);
+    // A still page: 2 s three times, then 4 s, 8 s and 10 s (30 a minute before).
+    expect(api.capture.mock.calls.length - start).toBe(9);
+    setVisibility("hidden");
+    const hidden = api.capture.mock.calls.length;
+    for (let second = 0; second < 60; second += 1) await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.capture).toHaveBeenCalledTimes(hidden);
+    setVisibility("visible");
+    await expect.poll(() => api.capture.mock.calls.length).toBe(hidden + 1);
+    // Pointing at the tile captures at once and follows at the fast pace again.
+    await view.getByRole("button", { name: "Open browser in workspace" }).hover();
+    await expect.poll(() => api.capture.mock.calls.length).toBe(hidden + 2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(api.capture).toHaveBeenCalledTimes(hidden + 3);
+    await view.unmount();
+  } finally {
+    vi.useRealTimers();
+    Reflect.deleteProperty(document, "visibilityState");
+  }
+});
 it("discovers a local site and opens it in the same project browser", async () => {
   await page.viewport(1200, 900);
   const api = setup();
