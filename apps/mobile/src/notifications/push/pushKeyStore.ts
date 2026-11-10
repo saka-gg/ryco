@@ -19,6 +19,17 @@ export interface RycoPushNativeModule {
   /** Records what the extension opens alerts with: the Hub enrollment and the sound setting. */
   readonly setRegistration: (enrollmentId: string, sound: boolean) => Promise<void>;
   readonly deleteKey: () => Promise<void>;
+  /**
+   * The app icon badge (`PushBadgeStore`): writes the machines' live "needs you" counts over the
+   * ones alerts brought, drops machines not in `listed`, sets the badge to the sum and answers it.
+   * Absent from builds before the badge.
+   */
+  readonly setBadgeCounts?: (
+    live: Readonly<Record<string, number>>,
+    listed: ReadonlyArray<string>,
+  ) => Promise<number>;
+  /** Forgets every machine's count and clears the badge. Absent from builds before the badge. */
+  readonly clearBadge?: () => Promise<void>;
 }
 
 interface NativePushKey {

@@ -32,7 +32,7 @@ export interface WidgetsRuntimeDeps {
     readonly subscribe: (listener: () => void) => () => void;
     readonly read: (environmentId: EnvironmentId) => Promise<unknown>;
   };
-  /** React Native's `AppState`, reduced to whether the app is in the foreground. */
+  /** Whether the app is in front (`isAppInFront`: a Notification Center pull is no leaving). */
   readonly appState: {
     readonly isActive: () => boolean;
     readonly subscribe: (listener: (active: boolean) => void) => () => void;
@@ -42,6 +42,12 @@ export interface WidgetsRuntimeDeps {
   readonly now?: () => number;
   readonly onError?: (error: unknown) => void;
 }
+
+/**
+ * Coming back to the app reads a machine's hubs only when its last answer is at least this old: a
+ * short trip out (another app for a moment) leaves the numbers as they are.
+ */
+export const WIDGET_FOREGROUND_REREAD_MS = 2 * 60_000;
 
 /** A machine the app lists (Home's environments), with what decides whether Limits reads it. */
 export interface WidgetEnvironment extends StatisticsAccessEnvironment {
@@ -106,8 +112,9 @@ export function widgetEnvironments(
  * Keeps the subscription usage widget current while the app runs: it rebuilds the widget's
  * snapshot whenever a provider config or a hub read changes, and writes it only when it differs
  * from the last one written, so thread and config traffic that leaves the limits alone writes
- * nothing. Hubs are read again when the app comes to the foreground and every five minutes while
- * it stays there, only on the machines the widget may show. It never asks a node to re-read its
+ * nothing. Hubs are read again when the app comes to the foreground (a machine whose answer is
+ * under two minutes old is left alone) and every five minutes while it stays there, only on the
+ * machines the widget may show. It never asks a node to re-read its
  * providers.
  */
 export function startWidgetsRuntime(deps: WidgetsRuntimeDeps): WidgetsRuntime {
@@ -169,8 +176,18 @@ export function startWidgetsRuntime(deps: WidgetsRuntimeDeps): WidgetsRuntime {
     readNewHubs();
   };
 
+  /** Machines without an answer, or whose last one is at least `WIDGET_FOREGROUND_REREAD_MS` old. */
+  const dueOnReturn = () => {
+    const answers = deps.hubs.snapshot();
+    const at = now();
+    return readable().filter((id) => {
+      const answer = answers.get(id);
+      return answer === undefined || at - answer.receivedAtMs >= WIDGET_FOREGROUND_REREAD_MS;
+    });
+  };
+
   const foreground = () => {
-    readHubs(readable());
+    readHubs(dueOnReturn());
     poll ??= setInterval(() => readHubs(readable()), CLI_PROXY_HUB_POLL_INTERVAL_MS);
   };
   const background = () => {

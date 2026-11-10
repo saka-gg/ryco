@@ -20,6 +20,8 @@ struct PushAlert: Equatable {
   let threadIdentifier: String
   /// The thread's deep link, when the app's scheme is known.
   let url: String?
+  /// How many of the sending machine's threads need the person (`b`); nil from older nodes.
+  let badgeCount: Int64?
 }
 
 /// Reads the `ryco` part of an APNs payload, opens its sealed blob and checks
@@ -138,8 +140,22 @@ enum PushAlertOpener {
         : nil,
       categoryIdentifier: category,
       threadIdentifier: "\(envelope.environmentId)/\(threadId)",
-      url: appScheme.flatMap { threadLink(scheme: $0, environmentId: envelope.environmentId, threadId: threadId) }
+      url: appScheme.flatMap { threadLink(scheme: $0, environmentId: envelope.environmentId, threadId: threadId) },
+      badgeCount: exactInteger(payload["b"])
     )
+  }
+
+  /// The app icon badge once one machine reported its count: every machine's last known count
+  /// (`counts`, by environment id), with this one's replaced. Returns both the new counts and
+  /// their sum.
+  static func badge(
+    counts: [String: Int64],
+    environmentId: String,
+    count: Int64
+  ) -> (counts: [String: Int64], total: Int64) {
+    var next = counts
+    next[environmentId] = count
+    return (next, next.values.reduce(0) { $0 + max(0, $1) })
   }
 
   /// The `userInfo` the app gets with the alert. expo-notifications hands a
