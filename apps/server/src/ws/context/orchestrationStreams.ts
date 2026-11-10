@@ -1,4 +1,4 @@
-import { Array as Arr, Effect, Fiber, Option, Queue, Ref, Stream } from "effect";
+import { Array as Arr, Effect, Fiber, Option, Queue, Ref, type Scope, Stream } from "effect";
 import {
   type OrchestrationActivityPayloadMode,
   type OrchestrationEvent,
@@ -44,6 +44,10 @@ import { rechunkByBudget, tapArray } from "../streamBatching.ts";
 import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
+import {
+  type ThreadEventRegistration,
+  registerThreadEventSubscriber,
+} from "./threadEventRouter.ts";
 import { previewActivityAppendedEvent } from "../../orchestration/activityPayloadPreview.ts";
 
 const makeLiveQueueOverflowError = (input: {
@@ -570,7 +574,17 @@ export const makeOrchestrationStreamHelpers = (deps: {
    */
   const runLiveFeed = (input: {
     readonly stream: WsReplayStreamKind;
-    readonly liveEvents: Stream.Stream<OrchestrationEvent>;
+    /**
+     * Where live events come from: a stream the feed runs on its own fiber, or
+     * a router the feed registers with (`registerThreadEventSubscriber`), whose
+     * fiber calls `handle` for each event and `end` when its stream ended.
+     */
+    readonly liveEvents:
+      | Stream.Stream<OrchestrationEvent>
+      | ((
+          handle: (event: OrchestrationEvent) => Effect.Effect<void, OrchestrationGetSnapshotError>,
+          end: Effect.Effect<void>,
+        ) => Effect.Effect<void, never, Scope.Scope>);
     readonly liveQueue: Queue.Queue<OrchestrationEvent, OrchestrationGetSnapshotError>;
     readonly overflowedRef: Ref.Ref<boolean>;
     readonly replayMetrics: WsReplayMetrics;
@@ -628,20 +642,25 @@ export const makeOrchestrationStreamHelpers = (deps: {
           .push(event)
           .pipe(Effect.andThen(input.coalesceKey(event) === null ? Effect.void : armFlush));
 
-      yield* input.liveEvents.pipe(
-        Stream.runForEach((event) => input.onEvent(event, push)),
-        Effect.ensuring(
-          Effect.gen(function* () {
-            if (flushFiber !== undefined) {
-              yield* Fiber.interrupt(flushFiber).pipe(Effect.ignore);
-            }
-            yield* coalescer.flush.pipe(Effect.ignoreCause({ log: true }));
-            yield* Queue.shutdown(input.liveQueue);
-          }),
-        ),
-        Effect.ignoreCause({ log: true }),
-        Effect.forkScoped,
-      );
+      const endFeed = Effect.gen(function* () {
+        if (flushFiber !== undefined) {
+          yield* Fiber.interrupt(flushFiber).pipe(Effect.ignore);
+        }
+        yield* coalescer.flush.pipe(Effect.ignoreCause({ log: true }));
+        yield* Queue.shutdown(input.liveQueue);
+      });
+      const handle = (event: OrchestrationEvent) => input.onEvent(event, push);
+      if (typeof input.liveEvents === "function") {
+        yield* Effect.addFinalizer(() => endFeed);
+        yield* input.liveEvents(handle, endFeed);
+      } else {
+        yield* input.liveEvents.pipe(
+          Stream.runForEach(handle),
+          Effect.ensuring(endFeed),
+          Effect.ignoreCause({ log: true }),
+          Effect.forkScoped,
+        );
+      }
       return queuedBytesRef;
     });
 
@@ -843,12 +862,22 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
-        const liveEvents = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
         const overflowedRef = yield* Ref.make(false);
-        const replayBoundary = yield* makeReplayBoundaryTracker(snapshotSequence);
+        // Bounds the replay by what the shared router has routed (see threadEventRouter.ts).
+        // Captured once the router routed past the snapshot, then fixed (as in
+        // `makeReplayBoundaryTracker`).
+        let registration: ThreadEventRegistration | undefined;
+        let replayUpperBound: number | undefined;
+        const captureReplayUpperBound = Effect.sync((): Option.Option<number> => {
+          if (replayUpperBound !== undefined) return Option.some(replayUpperBound);
+          const routed = registration?.routedThrough() ?? 0;
+          if (routed <= snapshotSequence) return Option.none();
+          replayUpperBound = routed;
+          return Option.some(routed);
+        });
         const replayMetrics = yield* makeWsReplayMetrics({
           stream: "thread",
           subscriptionId: randomShortId(),
@@ -872,26 +901,28 @@ export const makeOrchestrationStreamHelpers = (deps: {
 
         const queuedBytesRef = yield* runLiveFeed({
           stream: "thread",
-          liveEvents,
+          liveEvents: (handle, end) =>
+            registerThreadEventSubscriber(orchestrationEngine, threadId, {
+              onEvent: handle,
+              onEnd: end,
+            }).pipe(
+              Effect.map((registered) => {
+                registration = registered;
+              }),
+            ),
           liveQueue,
           overflowedRef,
           replayMetrics,
           coalesceKey: orchestrationProgressFrameKey,
           coalesceWindowMs: ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS,
-          onEvent: (event, push) =>
-            Effect.gen(function* () {
-              yield* replayBoundary.recordLiveSequence(event.sequence);
-              if (!isMatchingThreadEvent(event)) {
-                return;
-              }
-              yield* push(event);
-            }),
+          // The router hands over only this thread's detail events.
+          onEvent: (event, push) => push(event),
         });
 
         const readStreamEventsPage = deps.readStreamEventsPage;
         const replayStream = makeBoundedReplayStream({
           snapshotSequence,
-          captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
+          captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration thread events",
           ...(resumed && deps.readReplayFloor !== undefined
             ? {

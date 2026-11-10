@@ -65,6 +65,7 @@ import {
   ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES,
 } from "./context/constants.ts";
 import { observeArrays } from "./streamBatching.ts";
+import { loadSharedThreadWindow } from "./context/sharedThreadWindowLoads.ts";
 
 /**
  * Encoded size a thread window may reach. The relay carries 4 MiB per message;
@@ -380,26 +381,29 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         }),
       );
     }
-    return query({
+    const limits = {
+      messages: clamp(input.limits.messages, { minimum: 1, maximum: 200 }),
+      proposedPlans: clamp(input.limits.proposedPlans, {
+        minimum: 1,
+        maximum: 50,
+      }),
+      activities: clamp(input.limits.activities, {
+        minimum: 1,
+        maximum: 200,
+      }),
+      checkpoints: clamp(input.limits.checkpoints, {
+        minimum: 1,
+        maximum: 50,
+      }),
+    };
+    const load = query({
       threadId: input.threadId,
       ...(input.activityPayloads !== undefined ? { activityPayloads: input.activityPayloads } : {}),
-      limits: {
-        messages: clamp(input.limits.messages, { minimum: 1, maximum: 200 }),
-        proposedPlans: clamp(input.limits.proposedPlans, {
-          minimum: 1,
-          maximum: 50,
-        }),
-        activities: clamp(input.limits.activities, {
-          minimum: 1,
-          maximum: 200,
-        }),
-        checkpoints: clamp(input.limits.checkpoints, {
-          minimum: 1,
-          maximum: 50,
-        }),
-      },
-    }).pipe(
-      Effect.map((window) => fitThreadWindowToByteBudget(window)),
+      limits,
+    }).pipe(Effect.map((window) => fitThreadWindowToByteBudget(window)));
+    // Subscribers opening the same window at once share one read (sharedThreadWindowLoads.ts).
+    const key = JSON.stringify([input.threadId, limits, input.activityPayloads ?? "full"]);
+    return loadSharedThreadWindow(query, key, load).pipe(
       Effect.mapError((cause) =>
         Schema.is(OrchestrationThreadHistoryError)(cause)
           ? cause
