@@ -160,7 +160,11 @@ import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { CommandId, ThreadForkResult } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import type { EnvironmentApi, ThreadGoal } from "@ryco/contracts";
-import { DEFAULT_AGENT_TOKEN_MODE, type ModelSelection } from "@ryco/contracts/orchestration";
+import {
+  DEFAULT_AGENT_TOKEN_MODE,
+  type AgentTokenMode,
+  type ModelSelection,
+} from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   composeOutgoingPrompt,
@@ -316,6 +320,7 @@ import {
   setThreadSettled,
   setThreadInteractionMode,
   setThreadRuntimeMode,
+  setThreadTokenMode,
 } from "./sessionActions";
 import { answerThreadApproval, answerThreadUserInput } from "./threadRequestAnswers";
 import { useThreadChecks } from "./useThreadChecks";
@@ -349,7 +354,7 @@ import { useTerminalHeaderActivity } from "../terminal/useTerminalHeaderActivity
 import { ThreadTitlePill } from "./ThreadTitlePill";
 import { ThreadContextCard } from "./ThreadContextCard";
 import { machineStatusTone, threadContextCardRows } from "./threadContextCardModel";
-import { composerCaptionLabel } from "./composerCaptionModel";
+import { composerCaptionLabel } from "./composerFooterModel";
 import {
   COMPOSER_BUBBLE_HEIGHT,
   ComposerShrinkFade,
@@ -4036,6 +4041,20 @@ export function ThreadDetailScreen(props: {
               setThreadInteractionMode(ensureEnvironmentApi(environmentId), threadId, next),
             );
         }}
+        {...(thread
+          ? {
+              tokenMode: thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+              onSelectTokenMode: (mode: AgentTokenMode) => {
+                if (policyBusy || cachedView.actionsDisabled) return;
+                void applyPolicy(() =>
+                  setThreadTokenMode(ensureEnvironmentApi(environmentId), threadId, mode),
+                );
+              },
+            }
+          : {})}
+        contextFraction={contextWindow?.fraction ?? null}
+        onOpenContextDetails={() => setContextSheetVisible(true)}
+        onAddProviders={() => navigation.navigate("SettingsMachineProviders", { environmentId })}
         pendingHandoff={pendingHandoff}
         commandMenuContext={{
           environmentId,

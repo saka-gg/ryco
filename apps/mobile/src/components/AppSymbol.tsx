@@ -18,6 +18,16 @@ import IconArrowsMaximize from "@tabler/icons-react-native/IconArrowsMaximize";
 import IconArrowsMinimize from "@tabler/icons-react-native/IconArrowsMinimize";
 import IconBellRinging from "@tabler/icons-react-native/IconBellRinging";
 import IconBolt from "@tabler/icons-react-native/IconBolt";
+import IconPaperclip from "@tabler/icons-react-native/IconPaperclip";
+import IconStar from "@tabler/icons-react-native/IconStar";
+import IconStarFilled from "@tabler/icons-react-native/IconStarFilled";
+import IconBrain from "@tabler/icons-react-native/IconBrain";
+import IconBoltFilled from "@tabler/icons-react-native/IconBoltFilled";
+import IconRotate from "@tabler/icons-react-native/IconRotate";
+import IconCircleOff from "@tabler/icons-react-native/IconCircleOff";
+import IconScale from "@tabler/icons-react-native/IconScale";
+import IconSend from "@tabler/icons-react-native/IconSend";
+import IconMicrophone from "@tabler/icons-react-native/IconMicrophone";
 import IconBrandWindows from "@tabler/icons-react-native/IconBrandWindows";
 import IconCamera from "@tabler/icons-react-native/IconCamera";
 import IconCheck from "@tabler/icons-react-native/IconCheck";
@@ -92,6 +102,20 @@ import { Platform } from "react-native";
 import { SymbolView as ExpoSymbolView, type SFSymbol, type SymbolViewProps } from "expo-symbols";
 
 const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
+  // The composer footer and model picker (desktop parity).
+  "arrow.counterclockwise": IconRotate,
+  bolt: IconBolt,
+  "bolt.fill": IconBoltFilled,
+  "bolt.horizontal.fill": IconBoltFilled,
+  brain: IconBrain,
+  "circle.slash": IconCircleOff,
+  mic: IconMicrophone,
+  "mic.fill": IconMicrophone,
+  paperclip: IconPaperclip,
+  paperplane: IconSend,
+  scalemass: IconScale,
+  star: IconStar,
+  "star.fill": IconStarFilled,
   "arrow.branch": IconGitBranch,
   "arrow.clockwise": IconRefresh,
   "arrow.down.circle": IconArrowDownCircle,

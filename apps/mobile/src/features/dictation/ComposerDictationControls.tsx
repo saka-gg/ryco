@@ -167,10 +167,12 @@ export function ComposerDictationButton(props: {
   readonly disabled: boolean;
   /** The round target's diameter; 44 by default. */
   readonly size?: number;
+  /** Idle in the muted tone, like the composer footer's other controls. */
+  readonly muted?: boolean;
 }) {
   const size = props.size ?? 44;
   const { dictation } = props;
-  const iconColor = useThemeColor("--color-icon");
+  const iconColor = useThemeColor(props.muted ? "--color-icon-muted" : "--color-icon");
   const accentColor = useThemeColor("--color-primary");
   const holding = useRef(false);
   return (
@@ -198,7 +200,7 @@ export function ComposerDictationButton(props: {
     >
       <SymbolView
         name={dictation.active ? "mic.fill" : "mic"}
-        size={size < 44 ? 17 : 18}
+        size={size < 32 ? 15 : size < 44 ? 17 : 18}
         tintColor={(dictation.active ? accentColor : iconColor) as string}
         type="monochrome"
       />
