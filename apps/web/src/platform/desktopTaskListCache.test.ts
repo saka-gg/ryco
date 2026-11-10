@@ -53,7 +53,7 @@ beforeEach(async () => {
     },
   });
   await setDesktopThreadContentCacheEnabled(true);
-  installDesktopTaskListCache();
+  await installDesktopTaskListCache(useLocalTasksStore);
 });
 
 afterEach(() => {
@@ -106,6 +106,13 @@ describe("Desktop saved task lists", () => {
     useLocalTasksStore.getState().clear(environmentId);
     await hydrateDesktopTaskList(environmentId);
     expect(Object.keys(shown().tasks)).toEqual([]);
+  });
+
+  it("paints a machine's copy as soon as a surface starts reading its tasks", async () => {
+    stored = { version: 1, readAt: 3, tasks: [task("copy", "From the copy")] };
+    useLocalTasksStore.getState().setLoading(environmentId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(Object.values(shown().tasks).map((entry) => entry.title)).toEqual(["From the copy"]);
   });
 
   it("ignores an unreadable copy", async () => {

@@ -320,6 +320,15 @@ export function createDesktopThreadContentPublisher(input: {
     threadContentTimer = null;
   };
   noteTurnsAndRoute(useStore.getState());
+  // The machines' saved task lists follow the same setting; their module is
+  // its own chunk, loaded here rather than by any task surface.
+  if (bridge.getDesktopTaskList) {
+    void import("./desktopTaskListCache")
+      .then((cache) => {
+        if (!disposed) return cache.installDesktopTaskListCache();
+      })
+      .catch(() => undefined);
+  }
   globalThis.window?.addEventListener?.("pagehide", flushThreadContent);
   globalThis.window?.addEventListener?.("hashchange", onRouteChange);
   globalThis.document?.addEventListener?.("visibilitychange", flushThreadContentWhenHidden);

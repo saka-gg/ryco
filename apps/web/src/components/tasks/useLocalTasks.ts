@@ -21,6 +21,9 @@ import { useStore } from "~/store";
 
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
+/** The task store, for the Desktop's saved task lists (loaded on demand). */
+export { useLocalTasksStore } from "@ryco/client-runtime/state/tasks";
+
 /**
  * The data side of the Tasks page and the sidebar badge: one environment's
  * tasks kept live in `useLocalTasksStore` (client-runtime `state/tasks`)
@@ -55,15 +58,6 @@ const connections: LocalTasksConnections = {
  * connection, re-read when it comes back and when the window regains focus.
  */
 export function retainLocalTasksFor(environmentId: EnvironmentId): () => void {
-  // The Desktop paints the machine's saved list until its first read lands.
-  if (window.desktopBridge?.getDesktopTaskList) {
-    void import("~/platform/desktopTaskListCache")
-      .then((cache) => {
-        cache.installDesktopTaskListCache();
-        return cache.hydrateDesktopTaskList(environmentId);
-      })
-      .catch(() => undefined);
-  }
   return retainConnectedLocalTasks(environmentId, {
     connections,
     threads: useStore,
