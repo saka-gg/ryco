@@ -40,7 +40,7 @@ export const ONLINE_COMPACTION_PASS_OPTIONS: EventLogCompactionPassOptions = {
   // Deleting costs ~75 µs per event on the main connection (indexes, the statistics partial
   // index reads each payload, overflow pages): 200 events stay near 15 ms even when a batch of
   // large payloads follows a fast one.
-  deleteBatch: { initial: 100, min: 20, max: 200, targetMs: 8 },
+  deleteBatch: { initial: 25, min: 10, max: 200, targetMs: 8 },
   interBatchPauseMs: 8,
   idleRatio: 3,
   carryCapacity: 50_000,

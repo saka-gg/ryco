@@ -273,6 +273,7 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
   // The table only, as the repair's own guard: its two indexes commit with it. No backfill.
   "project-imports": (c) => c.has("table", "project_imports"),
   "automation-hooks": (c) => c.has("table", "automation_hooks"),
+  "event-log-turn-start-index": (c) => c.has("index", "idx_orch_events_thread_turn_starts"),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */
