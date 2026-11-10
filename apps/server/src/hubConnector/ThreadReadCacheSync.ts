@@ -1,6 +1,12 @@
+import { promisify } from "node:util";
+import * as Zlib from "node:zlib";
+
 import type { OrchestrationEvent, OrchestrationShellSettlementPolicy } from "@ryco/contracts";
 import { Effect, Option, Schema } from "effect";
-import { ThreadReadCacheBeginResponse } from "@ryco/contracts/thread-read-cache";
+import {
+  ThreadReadCacheBeginResponse,
+  ThreadReadCacheSnapshotResponse,
+} from "@ryco/contracts/thread-read-cache-upload";
 import { RELAY_PROTOCOL_MAJOR, RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
@@ -20,7 +26,22 @@ class ThreadReadCacheHttpError extends Error {
 }
 
 export const THREAD_READ_CACHE_CHANGE_COALESCE_MS = 250;
-export const THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS = 1_000;
+/**
+ * Least time between two uploads while changes keep coming (an agent streaming). A turn that ends
+ * is published at once (`isThreadReadCacheTurnEnd`), so what the cloud shows lags a running turn by
+ * at most this and a finished one not at all.
+ */
+export const THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS = 5_000;
+
+const deflate = promisify(Zlib.deflate);
+
+/** A turn ended (its session left `starting`/`running`, or its diff completed): publish now. */
+export function isThreadReadCacheTurnEnd(event: OrchestrationEvent): boolean {
+  if (event.type === "thread.turn-diff-completed") return true;
+  if (event.type !== "thread.session-set") return false;
+  const status = event.payload.session.status;
+  return status !== "starting" && status !== "running";
+}
 
 /** Opt-in content synchronization, independent of relay channel and heartbeat work. */
 export function startThreadReadCacheSync(deps: {
@@ -40,6 +61,9 @@ export function startThreadReadCacheSync(deps: {
   let changed = false;
   let scheduledAt = Infinity;
   let lastStartedAt = -Infinity;
+  let urgent = false;
+  /** Upload forms this generation's `begin` announced (`THREAD_READ_CACHE_FEATURES`). */
+  let hubFeatures: ReadonlyArray<string> = [];
   const abort = new AbortController();
   // Identity/key-store operations do not expose cancellation. Detach their
   // result on shutdown so they cannot hold the server's scope open; the post
@@ -90,6 +114,20 @@ export function startThreadReadCacheSync(deps: {
     ) {
       throw new ThreadReadCacheHttpError(0);
     }
+    const json = JSON.stringify({
+      ...body,
+      proof: {
+        nodeId: proof.nodeId,
+        protocolMajor: proof.protocolMajor,
+        protocolMinor: proof.protocolMinor,
+        nonce: Buffer.from(proof.nonce).toString("base64url"),
+        signature: Buffer.from(proof.signature).toString("base64url"),
+      },
+    });
+    // Compressed only for a Hub that announced it; the inflated body keeps the plain limit.
+    const compress = action === "snapshot" && hubFeatures.includes("deflate");
+    const payload = compress ? new Uint8Array(await deflate(json)) : json;
+    if (stopped) throw new ThreadReadCacheHttpError(0);
     const response = await fetchBoundedJson(
       fetch,
       `${deps.hubOrigin}/api/node/thread-cache/${action}`,
@@ -97,17 +135,10 @@ export function startThreadReadCacheSync(deps: {
         method: "POST",
         redirect: "error",
         signal: abort.signal,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          ...body,
-          proof: {
-            nodeId: proof.nodeId,
-            protocolMajor: proof.protocolMajor,
-            protocolMinor: proof.protocolMinor,
-            nonce: Buffer.from(proof.nonce).toString("base64url"),
-            signature: Buffer.from(proof.signature).toString("base64url"),
-          },
-        }),
+        headers: compress
+          ? { "content-type": "application/json", "content-encoding": "deflate" }
+          : { "content-type": "application/json" },
+        body: payload,
       },
       (failure) => {
         throw new ThreadReadCacheHttpError(
@@ -152,13 +183,17 @@ export function startThreadReadCacheSync(deps: {
           };
     },
     begin: async () => {
+      hubFeatures = [];
       const value = await post("begin", {});
       const decoded = Schema.decodeUnknownOption(ThreadReadCacheBeginResponse)(value);
       if (Option.isNone(decoded)) throw new ThreadReadCacheHttpError(0);
-      return decoded.value.generation;
+      hubFeatures = decoded.value.features ?? [];
+      return { generation: decoded.value.generation, features: hubFeatures };
     },
     upload: async (generation, items) => {
-      await post("snapshot", { generation, items });
+      const value = await post("snapshot", { generation, items });
+      const decoded = Schema.decodeUnknownOption(ThreadReadCacheSnapshotResponse)(value);
+      return Option.isSome(decoded) ? (decoded.value.stalePatches ?? []) : [];
     },
   });
   const tick = async () => {
@@ -198,15 +233,18 @@ export function startThreadReadCacheSync(deps: {
     timer = setTimeout(run, delay);
   };
   const changeDelay = () =>
-    Math.max(
-      THREAD_READ_CACHE_CHANGE_COALESCE_MS,
-      lastStartedAt + THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS - Date.now(),
-    );
+    urgent
+      ? THREAD_READ_CACHE_CHANGE_COALESCE_MS
+      : Math.max(
+          THREAD_READ_CACHE_CHANGE_COALESCE_MS,
+          lastStartedAt + THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS - Date.now(),
+        );
   const run = () => {
     timer = undefined;
     scheduledAt = Infinity;
     if (stopped || inFlight !== null) return;
     changed = false;
+    urgent = false;
     lastStartedAt = Date.now();
     inFlight = tick().then((delay) => {
       inFlight = null;
@@ -217,6 +255,7 @@ export function startThreadReadCacheSync(deps: {
   const notifyChanged = (_event?: OrchestrationEvent) => {
     if (stopped) return;
     changed = true;
+    if (event !== undefined && isThreadReadCacheTurnEnd(event)) urgent = true;
     // A domain-event storm must never bypass the failed upload's retry budget.
     if (inFlight === null && failures === 0) schedule(changeDelay());
   };

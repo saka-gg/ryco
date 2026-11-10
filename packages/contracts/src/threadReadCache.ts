@@ -1,7 +1,6 @@
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, MessageId, ThreadId, TurnId } from "./baseSchemas.ts";
-import { NodeHubProof } from "./nodeProof.ts";
 import { OrchestrationMessageRole, OrchestrationShellSnapshot } from "./orchestration.ts";
 
 export const THREAD_READ_CACHE_MESSAGE_LIMIT = 150;
@@ -45,14 +44,15 @@ export const ThreadReadCacheContent = Schema.Struct({
 );
 export type ThreadReadCacheContent = typeof ThreadReadCacheContent.Type;
 
-const SafeCounter = Schema.Number.check(
+/** A non-negative safe integer (generations, revisions, timestamps). */
+export const ThreadReadCacheSafeCounter = Schema.Number.check(
   Schema.makeFilter((value) => Number.isSafeInteger(value) && value >= 0),
 );
 const envelope = {
   protocolVersion: Schema.Literal(1),
-  generation: SafeCounter,
-  revision: SafeCounter,
-  storedAt: SafeCounter,
+  generation: ThreadReadCacheSafeCounter,
+  revision: ThreadReadCacheSafeCounter,
+  storedAt: ThreadReadCacheSafeCounter,
 };
 
 export const ThreadReadCacheShellResponse = Schema.Struct({
@@ -68,41 +68,5 @@ export const ThreadReadCacheThreadResponse = Schema.Struct({
 });
 export type ThreadReadCacheThreadResponse = typeof ThreadReadCacheThreadResponse.Type;
 
-/** Fresh node-identity challenge proof; signatures are verified by the Hub. */
-export const ThreadReadCacheProof = NodeHubProof;
-export type ThreadReadCacheProof = NodeHubProof;
-
-export const ThreadReadCacheBeginInput = Schema.Struct({ proof: ThreadReadCacheProof });
-export type ThreadReadCacheBeginInput = typeof ThreadReadCacheBeginInput.Type;
-export const ThreadReadCacheClearInput = ThreadReadCacheBeginInput;
-export type ThreadReadCacheClearInput = typeof ThreadReadCacheClearInput.Type;
-export const ThreadReadCacheBeginResponse = Schema.Struct({
-  protocolVersion: Schema.Literal(1),
-  generation: SafeCounter,
-});
-export type ThreadReadCacheBeginResponse = typeof ThreadReadCacheBeginResponse.Type;
-
-export const ThreadReadCacheSnapshotItem = Schema.Union([
-  Schema.Struct({
-    kind: Schema.Literal("shell"),
-    revision: SafeCounter,
-    snapshot: ThreadReadCacheShell,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("thread"),
-    threadId: ThreadId,
-    revision: SafeCounter,
-    snapshot: ThreadReadCacheContent,
-  }),
-  Schema.Struct({ kind: Schema.Literal("deleted"), threadId: ThreadId, revision: SafeCounter }),
-]);
-export type ThreadReadCacheSnapshotItem = typeof ThreadReadCacheSnapshotItem.Type;
-export const ThreadReadCacheSnapshotInput = Schema.Struct({
-  proof: ThreadReadCacheProof,
-  generation: SafeCounter,
-  items: Schema.Array(ThreadReadCacheSnapshotItem).check(
-    Schema.isMinLength(1),
-    Schema.isMaxLength(16),
-  ),
-});
-export type ThreadReadCacheSnapshotInput = typeof ThreadReadCacheSnapshotInput.Type;
+// What a node uploads (proofs, begin, snapshot items and patches) lives in
+// `@ryco/contracts/thread-read-cache-upload`: only nodes and the Hub load it, never a client boot.

@@ -3,10 +3,10 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   ThreadReadCacheContent,
-  ThreadReadCacheSnapshotInput,
   ThreadReadCacheShellResponse,
   ThreadReadCacheThreadResponse,
 } from "./threadReadCache.ts";
+import { ThreadReadCacheSnapshotInput } from "./threadReadCacheUpload.ts";
 
 const message = {
   id: "message-1",

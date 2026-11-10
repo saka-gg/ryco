@@ -1,14 +1,17 @@
 import {
+  type OrchestrationEvent,
   OrchestrationShellSnapshot,
   type OrchestrationShellSettlementPolicy,
 } from "@ryco/contracts";
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
+import { inflateSync } from "node:zlib";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { HubConnector } from "./HubConnector.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
-import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
+import { isThreadReadCacheTurnEnd, startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
 
 const origin = "https://hub.example.test";
 const nodeId = `node_${"a".repeat(22)}`;
@@ -70,6 +73,7 @@ function harness(
     getSnapshotSequence: getSequence,
     getShellSnapshot: getShell,
     getThreadWindow: getWindow,
+    getThreadShellById: () => Effect.succeed(Option.some(shell.threads[0]!)),
   };
   const http = vi.fn(async (url: string, _init?: RequestInit) =>
     url.endsWith("/begin") ? json({ protocolVersion: 1, generation: 1 }) : json({ ok: true }),
@@ -104,6 +108,22 @@ function harness(
   };
 }
 
+function sessionEvent(status: string): OrchestrationEvent {
+  return {
+    type: "thread.session-set",
+    aggregateKind: "thread",
+    aggregateId: "thread-1",
+    payload: { threadId: "thread-1", session: { status } },
+  } as unknown as OrchestrationEvent;
+}
+const turnEnded = sessionEvent("ready");
+const streamed = {
+  type: "thread.message-sent",
+  aggregateKind: "thread",
+  aggregateId: "thread-1",
+  payload: { threadId: "thread-1" },
+} as unknown as OrchestrationEvent;
+
 function body(call: [string, (RequestInit | undefined)?]) {
   return JSON.parse(String(call[1]?.body)) as Record<string, unknown>;
 }
@@ -116,7 +136,7 @@ afterEach(async () => {
 });
 
 describe("cloud thread history sync adapter", () => {
-  it("coalesces domain changes and limits sustained streams to one read per second", async () => {
+  it("coalesces domain changes, uploads a streaming turn every 5 s and a finished turn at once", async () => {
     const h = harness();
     for (let index = 0; index < 100; index++) h.notifyChanged();
     await vi.advanceTimersByTimeAsync(249);
@@ -126,17 +146,32 @@ describe("cloud thread history sync adapter", () => {
     expect(h.http).toHaveBeenCalledTimes(2);
     h.getSequence.mockReturnValue(Effect.succeed({ snapshotSequence: 2 }));
     h.getShell.mockReturnValue(Effect.succeed({ ...h.shell, snapshotSequence: 2 }));
-    for (let index = 0; index < 9; index++) {
+    // An agent streams: one upload per 5 s, not one per change.
+    for (let index = 0; index < 49; index++) {
       h.notifyChanged();
       await vi.advanceTimersByTimeAsync(100);
     }
-    expect(h.getSequence).toHaveBeenCalledOnce();
+    expect(h.http).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(100);
-    expect(h.getSequence).toHaveBeenCalledTimes(2);
     expect(h.http).toHaveBeenCalledTimes(3);
+    // The turn ends: published at once, not 5 s later.
+    h.getSequence.mockReturnValue(Effect.succeed({ snapshotSequence: 3 }));
+    h.getShell.mockReturnValue(Effect.succeed({ ...h.shell, snapshotSequence: 3 }));
+    h.notifyChanged(turnEnded);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(h.http).toHaveBeenCalledTimes(4);
     await h.stop();
     h.notifyChanged();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("tells a turn's end from its other events", () => {
+    expect(isThreadReadCacheTurnEnd(turnEnded)).toBe(true);
+    expect(isThreadReadCacheTurnEnd(sessionEvent("running"))).toBe(false);
+    expect(isThreadReadCacheTurnEnd(sessionEvent("starting"))).toBe(false);
+    expect(isThreadReadCacheTurnEnd(sessionEvent("error"))).toBe(true);
+    expect(isThreadReadCacheTurnEnd({ type: "thread.turn-diff-completed" } as never)).toBe(true);
+    expect(isThreadReadCacheTurnEnd(streamed)).toBe(false);
   });
 
   it("publishes the node's settlement rule with the shell and republishes it when it changes", async () => {
@@ -154,7 +189,7 @@ describe("cloud thread history sync adapter", () => {
 
     policy = { autoSettleAfterDays: null };
     h.notifySettlementPolicyChanged();
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(h.http).toHaveBeenCalledTimes(3);
     expect(shellItem(h.http.mock.calls[2]!)?.snapshot).toMatchObject({
       snapshotSequence: 1,
@@ -181,7 +216,10 @@ describe("cloud thread history sync adapter", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(h.getSequence).toHaveBeenCalledOnce();
     complete(json({ ok: true }));
-    await vi.advanceTimersByTimeAsync(250);
+    // Changes during the upload follow 5 s after it started (it started at 250 ms).
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(h.getSequence).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
     expect(h.getSequence).toHaveBeenCalledTimes(2);
     expect(h.http).toHaveBeenCalledTimes(3);
   });
@@ -382,5 +420,33 @@ describe("cloud thread history sync adapter", () => {
     expect(h.http).toHaveBeenCalledOnce();
     expect(h.getShell).not.toHaveBeenCalled();
     expect(h.reportFailure).toHaveBeenCalledOnce();
+  });
+
+  it("deflates uploads to a Hub that announced it, and sends plain JSON to an older one", async () => {
+    const plain = harness();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const plainUpload = plain.http.mock.calls[1]!;
+    expect(new Headers(plainUpload[1]?.headers).get("content-encoding")).toBeNull();
+    expect(body(plainUpload).generation).toBe(1);
+    await plain.stop();
+
+    const h = harness();
+    h.http.mockImplementation(async (url: string) =>
+      url.endsWith("/begin")
+        ? json({ protocolVersion: 1, generation: 4, features: ["patch-v1", "deflate", "later"] })
+        : json({ protocolVersion: 1, generation: 4, revision: 1 }),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    // Deflating runs on the zlib threadpool, outside the fake clock.
+    await vi.waitFor(() =>
+      expect(h.http.mock.calls.some(([url]) => url.endsWith("/snapshot"))).toBe(true),
+    );
+    const upload = h.http.mock.calls.find(([url]) => url.endsWith("/snapshot"))!;
+    expect(new Headers(upload[1]?.headers).get("content-encoding")).toBe("deflate");
+    const inflated = JSON.parse(
+      inflateSync(upload[1]?.body as Uint8Array).toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(inflated.generation).toBe(4);
+    expect((inflated.items as Array<{ kind: string }>).map((item) => item.kind)).toContain("shell");
   });
 });
