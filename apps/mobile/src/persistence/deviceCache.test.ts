@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./environmentSnapshotPersistence", () => ({
   listEnvironmentCacheStorage: mocks.snapshots,
   clearEnvironmentSnapshotCache: mocks.purge,
-  savedPullRequestBytes: mocks.savedPullRequests,
+  savedScreenAnswerBytes: mocks.savedPullRequests,
 }));
 vi.mock("../rpc/projectFilesAtoms", () => ({
   projectFilesCacheStats: mocks.files,

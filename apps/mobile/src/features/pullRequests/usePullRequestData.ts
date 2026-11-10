@@ -21,14 +21,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
 import { mobileHostedConnectionScopes } from "../../connection/hostedConnectionScopes";
 import {
-  loadSavedPullRequestRead,
   pullRequestActivityQuery,
   pullRequestDetailQuery,
   pullRequestDiffQuery,
   pullRequestListQuery,
-  type PullRequestInput,
-  type PullRequestListInput,
-  type PullRequestReadKind,
 } from "../../rpc/pullRequestAtoms";
 import { useMobileQuery, type MobileQueryResult } from "../../rpc/useMobileQuery";
 import { selectProjectByRef, useStore } from "../../state/threadsRuntime";
@@ -105,38 +101,6 @@ export function useSourceControlProvider(
   return provider;
 }
 
-/**
- * A read as the screen shows it: the live answer, or, while the screen's node
- * is offline and nothing live has come back, the copy kept on this device
- * (`persistence/pullRequestPersistence.ts`).
- */
-function useWithSavedCopy<T>(
-  kind: PullRequestReadKind,
-  input: PullRequestListInput | PullRequestInput,
-  offline: boolean,
-  live: MobileQueryResult<T>,
-): MobileQueryResult<T> {
-  const enabled = offline && live.data === null && (input.enabled ?? true);
-  // The effect reads the input back from its key, so it depends on nothing else.
-  const key = JSON.stringify(input);
-  const [saved, setSaved] = useState<{ readonly key: string; readonly data: T | null } | null>(
-    null,
-  );
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    const keyed = JSON.parse(key) as PullRequestListInput | PullRequestInput;
-    void loadSavedPullRequestRead(kind, keyed).then((data) => {
-      if (!cancelled) setSaved({ key, data: (data ?? null) as T | null });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, key, kind]);
-  const copy = enabled && saved !== null && saved.key === key ? saved.data : null;
-  return copy === null ? live : { ...live, data: copy, error: null, isLoading: false };
-}
-
 export interface PullRequestListData {
   readonly screen: PullRequestListScreen;
   readonly refreshing: boolean;
@@ -150,10 +114,7 @@ export function usePullRequestList(input: {
   readonly filters: PullRequestListFilters;
   readonly failingOnly?: boolean | undefined;
   readonly hideDrafts?: boolean | undefined;
-  /** The node is not connected: show the copy kept on this device while nothing live answers. */
-  readonly offline?: boolean | undefined;
 }): PullRequestListData {
-  const offline = input.offline === true;
   const { environmentId, cwd, provider, filters } = input;
   const failingOnly = input.failingOnly === true;
   const hideDrafts = input.hideDrafts === true;
@@ -165,24 +126,9 @@ export function usePullRequestList(input: {
   const stateInput = { environmentId, cwd, ...reads.state };
   const authoredInput = { environmentId, cwd, ...reads.authored };
   const reviewRequestedInput = { environmentId, cwd, ...reads.reviewRequested };
-  const state = useWithSavedCopy(
-    "list",
-    stateInput,
-    offline,
-    useMobileQuery(pullRequestListQuery, stateInput, environmentId),
-  );
-  const authored = useWithSavedCopy(
-    "list",
-    authoredInput,
-    offline,
-    useMobileQuery(pullRequestListQuery, authoredInput, environmentId),
-  );
-  const reviewRequested = useWithSavedCopy(
-    "list",
-    reviewRequestedInput,
-    offline,
-    useMobileQuery(pullRequestListQuery, reviewRequestedInput, environmentId),
-  );
+  const state = useMobileQuery(pullRequestListQuery, stateInput, environmentId);
+  const authored = useMobileQuery(pullRequestListQuery, authoredInput, environmentId);
+  const reviewRequested = useMobileQuery(pullRequestListQuery, reviewRequestedInput, environmentId);
   const screen = useMemo(
     () =>
       derivePullRequestListScreen({
@@ -209,8 +155,6 @@ export interface PullRequestReadInput {
   readonly cwd: string | null;
   readonly number: number | null;
   readonly provider: SourceControlProviderInfo | null;
-  /** The node is not connected: show the copy kept on this device while nothing live answers. */
-  readonly offline?: boolean | undefined;
 }
 
 export interface PullRequestDetailData {
@@ -223,12 +167,7 @@ export function usePullRequestDetail(input: PullRequestReadInput): PullRequestDe
   const { environmentId, cwd, number, provider } = input;
   const capabilities = derivePullRequestsCapabilities(provider);
   const detailInput = { environmentId, cwd, number };
-  const detail = useWithSavedCopy(
-    "detail",
-    detailInput,
-    input.offline === true,
-    useMobileQuery(pullRequestDetailQuery, detailInput, environmentId),
-  );
+  const detail = useMobileQuery(pullRequestDetailQuery, detailInput, environmentId);
   return { capabilities, detail };
 }
 
@@ -247,13 +186,7 @@ export function usePullRequest(input: PullRequestReadInput): PullRequestData {
   const { capabilities, detail } = usePullRequestDetail(input);
   // A host without activity reads (or one not known yet) is not asked.
   const activityInput = { environmentId, cwd, number, enabled: capabilities.activity };
-  const activity = useWithSavedCopy(
-    "activity",
-    // Offline the host is unknown; a kept activity is shown whatever it says.
-    input.offline === true ? { environmentId, cwd, number } : activityInput,
-    input.offline === true,
-    useMobileQuery(pullRequestActivityQuery, activityInput, environmentId),
-  );
+  const activity = useMobileQuery(pullRequestActivityQuery, activityInput, environmentId);
   const checks = useMemo(() => derivePullRequestSelectionChecks(detail.data, null), [detail.data]);
   const nextAction = useMemo(
     () => derivePullRequestSelectionNextAction(detail.data, activity.data, checks),

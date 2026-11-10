@@ -67,6 +67,7 @@ function render(tab: "conversation" | "checks" = "conversation") {
     isLoading: false,
     isFetching: false,
     error: null,
+    savedAt: null,
     refetch: async () => ({ data }),
   });
   return usePullRequestDetailItems({

@@ -11,23 +11,22 @@
 // sent by the pull request screen and refresh these reads afterwards. Node-owned
 // pull request content lives in the atom state, is never logged, and is dropped
 // from memory when the environment is torn down or the retained-key budget is
-// exceeded. Lists, details and activity are also kept on the device for reading
-// offline through `PullRequestReadStore` (persistence/pullRequestPersistence.ts),
-// under the same rules as the cached threads: only while "Keep recent
-// conversations on this device" is on, removed with the environment's snapshot
-// (forgetting the node, Hub sign-out, "Clear device cache"). Diffs are never
-// stored. A saved copy answers only when the node does not (offline, dropped,
-// no reply), never over an error the node returned; the next live read
-// replaces it.
+// exceeded. Lists, details and activity are also kept on the device (the saved
+// query cache, `persist`), under the same rules as the cached threads: only
+// while "Keep recent conversations on this device" is on, removed with the
+// environment's snapshot (forgetting the node, Hub sign-out, "Clear device
+// cache"). A saved copy is shown at once when a screen opens, and the live
+// read replaces it; an error the node returns stays visible over it. Diffs
+// and a repository's people and labels are never stored.
 import type {
-  ChangeRequest,
-  ChangeRequestActivity,
   ChangeRequestInvolvement,
   EnvironmentId,
   SourceControlAssigneeCandidate,
-  SourceControlChangeRequestDetail,
   SourceControlLabel,
 } from "@ryco/contracts";
+import { ChangeRequestActivity } from "@ryco/contracts/change-request-review";
+import { ChangeRequest, SourceControlChangeRequestDetail } from "@ryco/contracts/source-control";
+import * as Schema from "effect/Schema";
 import { KEY_SEP } from "@ryco/client-runtime/rpc";
 import type {
   ChangeRequestRefreshScope,
@@ -37,6 +36,7 @@ import type {
 import { readRpcClient } from "../connection/environmentApi";
 import { cachedPayloadBytes } from "../persistence/cacheSize";
 import { createMobileQueryCache, runWithRetry } from "./mobileQueryCache";
+import { schemaSavedQueryCodec } from "./savedQueryCodec";
 
 // A list or a pull request reopened within this window answers from cache; pull
 // to refresh and a reconnect always read again.
@@ -65,93 +65,10 @@ export class PullRequestNodeOfflineError extends Error {
   }
 }
 
-export type PullRequestReadKind = "list" | "detail" | "activity";
-
-/** Where reads are kept for offline viewing; installed by the persistence layer at startup. */
-export interface PullRequestReadStore {
-  readonly save: (
-    kind: PullRequestReadKind,
-    environmentId: EnvironmentId,
-    key: string,
-    data: unknown,
-  ) => void;
-  readonly load: (
-    kind: PullRequestReadKind,
-    environmentId: EnvironmentId,
-    key: string,
-  ) => Promise<unknown>;
-}
-
-let readStore: PullRequestReadStore | null = null;
-
-export function setPullRequestReadStore(store: PullRequestReadStore | null): void {
-  readStore = store;
-}
-
-/**
- * The copy kept for one read, for a screen that knows its node is offline
- * while the live read is still waiting on a connection. Null when nothing is
- * kept (or no store is installed).
- */
-export function loadSavedPullRequestRead(
-  kind: PullRequestReadKind,
-  input: PullRequestListInput | PullRequestInput,
-): Promise<unknown> {
-  const store = readStore;
-  if (store === null || input.environmentId === null || input.cwd === null) {
-    return Promise.resolve(null);
-  }
-  const key =
-    kind === "list"
-      ? listKey(input as PullRequestListInput)
-      : pullRequestKey(input as PullRequestInput);
-  return store.load(kind, input.environmentId, key);
-}
-
-/** Errors the node itself answered with (the host refused, auth): never hidden by a saved copy. */
-const NODE_ANSWER_TAGS: ReadonlySet<string> = new Set([
-  "SourceControlProviderError",
-  "AuthRpcError",
-]);
-
-function nodeAnswered(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "_tag" in error &&
-    typeof error._tag === "string" &&
-    NODE_ANSWER_TAGS.has(error._tag)
-  );
-}
-
-/**
- * A live read that is also kept for offline viewing; when the node does not
- * answer (not connected, the connection dropped, no reply), the copy kept from
- * the last live read answers instead.
- */
-function withSavedCopy<T>(
-  kind: PullRequestReadKind,
-  environmentId: EnvironmentId,
-  key: string,
-  read: () => Promise<T>,
-): Promise<T> {
-  // `read` throws the offline error synchronously; as a rejection it reaches the fallback.
-  return Promise.resolve()
-    .then(read)
-    .then(
-      (data) => {
-        readStore?.save(kind, environmentId, key, data);
-        return data;
-      },
-      async (error: unknown) => {
-        const store = readStore;
-        if (store === null || nodeAnswered(error)) throw error;
-        const saved = await store.load(kind, environmentId, key);
-        if (saved === null || saved === undefined) throw error;
-        return saved as T;
-      },
-    );
-}
+/** Saved on the device: bump a version when its contract shape changes. */
+const SAVED_LIST = schemaSavedQueryCodec(Schema.Array(ChangeRequest), 1);
+const SAVED_DETAIL = schemaSavedQueryCodec(SourceControlChangeRequestDetail, 1);
+const SAVED_ACTIVITY = schemaSavedQueryCodec(ChangeRequestActivity, 1);
 
 function sourceControlClient(environmentId: EnvironmentId) {
   const client = readRpcClient(environmentId);
@@ -190,16 +107,15 @@ export const pullRequestListQuery = pullRequestCache.defineQuery<
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: listKey,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  persist: SAVED_LIST,
   run: (input) =>
-    withSavedCopy("list", input.environmentId as EnvironmentId, listKey(input), () =>
-      runWithRetry(() =>
-        sourceControlClient(input.environmentId as EnvironmentId).listChangeRequests({
-          cwd: input.cwd as string,
-          state: input.state,
-          limit: input.limit,
-          ...(input.involvement ? { involvement: input.involvement } : {}),
-        }),
-      ),
+    runWithRetry(() =>
+      sourceControlClient(input.environmentId as EnvironmentId).listChangeRequests({
+        cwd: input.cwd as string,
+        state: input.state,
+        limit: input.limit,
+        ...(input.involvement ? { involvement: input.involvement } : {}),
+      }),
     ),
 });
 
@@ -237,15 +153,14 @@ export const pullRequestDetailQuery = pullRequestCache.defineQuery<
   isEnabled: pullRequestEnabled,
   buildKey: pullRequestKey,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  persist: SAVED_DETAIL,
   run: (input) =>
-    withSavedCopy("detail", input.environmentId as EnvironmentId, pullRequestKey(input), () =>
-      runWithRetry(() =>
-        sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDetail({
-          cwd: input.cwd as string,
-          reference: String(input.number),
-          fullContent: true,
-        }),
-      ),
+    runWithRetry(() =>
+      sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDetail({
+        cwd: input.cwd as string,
+        reference: String(input.number),
+        fullContent: true,
+      }),
     ),
 });
 
@@ -259,14 +174,13 @@ export const pullRequestActivityQuery = pullRequestCache.defineQuery<
   isEnabled: pullRequestEnabled,
   buildKey: pullRequestKey,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  persist: SAVED_ACTIVITY,
   run: (input) =>
-    withSavedCopy("activity", input.environmentId as EnvironmentId, pullRequestKey(input), () =>
-      runWithRetry(() =>
-        sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestActivity({
-          cwd: input.cwd as string,
-          reference: String(input.number),
-        }),
-      ),
+    runWithRetry(() =>
+      sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestActivity({
+        cwd: input.cwd as string,
+        reference: String(input.number),
+      }),
     ),
 });
 

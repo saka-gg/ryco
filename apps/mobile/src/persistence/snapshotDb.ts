@@ -72,26 +72,42 @@ export interface SnapshotDb {
   }) => Promise<void>;
   readonly clearAll: () => Promise<void>;
   /**
-   * Pull request reads kept for offline viewing, one row per read (`key`),
-   * under the same rules as the environment's snapshot: removing the
-   * environment's snapshot removes them too.
+   * Node reads kept so a screen can show its last answer at once (the saved
+   * query cache, persistence/savedQueryStore.ts), one row per read under the
+   * same rules as the environment's snapshot: removing the environment's
+   * snapshot removes them too.
    */
-  readonly loadPullRequestRead: (
+  readonly loadSavedQuery: (
     environmentId: string,
     key: string,
-  ) => Promise<StoredSnapshotRow | null>;
-  readonly savePullRequestRead: (input: {
+  ) => Promise<StoredSavedQueryRow | null>;
+  readonly saveSavedQuery: (input: {
     readonly environmentId: string;
     readonly key: string;
     readonly schemaVersion: number;
     readonly payload: string;
+    readonly payloadBytes: number;
     readonly updatedAt: number;
-    /** Keep at most this many reads for the environment, newest first. */
-    readonly keep: number;
   }) => Promise<void>;
-  readonly pullRequestReadBytes: (environmentId: string) => Promise<number>;
-  /** Every environment's pull request reads (the device setting was turned off). */
-  readonly clearPullRequestReads: () => Promise<void>;
+  /** Size and age of every saved read (no payloads), for the eviction budget. */
+  readonly listSavedQueryStats: () => Promise<ReadonlyArray<SavedQueryStat>>;
+  readonly removeSavedQueries: (
+    entries: ReadonlyArray<{ readonly environmentId: string; readonly key: string }>,
+  ) => Promise<void>;
+  readonly savedQueryBytes: (environmentId: string) => Promise<number>;
+  /** Every environment's saved reads (the device setting was turned off). */
+  readonly clearSavedQueries: () => Promise<void>;
+}
+
+export interface StoredSavedQueryRow extends StoredSnapshotRow {
+  readonly updatedAt: number;
+}
+
+export interface SavedQueryStat {
+  readonly environmentId: string;
+  readonly key: string;
+  readonly payloadBytes: number;
+  readonly updatedAt: number;
 }
 
 async function openExpoSqliteHandle(): Promise<SnapshotDbHandle> {
@@ -138,14 +154,15 @@ CREATE TABLE IF NOT EXISTS environment_snapshots (
   payload_bytes INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS pull_request_reads (
+DROP TABLE IF EXISTS pull_request_reads;
+CREATE TABLE IF NOT EXISTS saved_queries (
   environment_id TEXT NOT NULL,
-  read_key TEXT NOT NULL,
+  query_key TEXT NOT NULL,
   schema_version INTEGER NOT NULL,
   payload TEXT NOT NULL,
   payload_bytes INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  PRIMARY KEY (environment_id, read_key)
+  PRIMARY KEY (environment_id, query_key)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hub_node_roster (
   singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
@@ -236,9 +253,7 @@ export function createSnapshotDb(
       await handle.runAsync("DELETE FROM environment_snapshots WHERE environment_id = ?", [
         environmentId,
       ]);
-      await handle.runAsync("DELETE FROM pull_request_reads WHERE environment_id = ?", [
-        environmentId,
-      ]);
+      await handle.runAsync("DELETE FROM saved_queries WHERE environment_id = ?", [environmentId]);
     },
     listEnvironmentSnapshotStats: async () => {
       const handle = await acquire();
@@ -276,26 +291,32 @@ export function createSnapshotDb(
     clearAll: async () => {
       const handle = await acquire();
       await handle.runAsync("DELETE FROM environment_snapshots", []);
-      await handle.runAsync("DELETE FROM pull_request_reads", []);
+      await handle.runAsync("DELETE FROM saved_queries", []);
       await handle.runAsync("DELETE FROM hub_node_roster", []);
     },
-    loadPullRequestRead: async (environmentId, key) => {
+    loadSavedQuery: async (environmentId, key) => {
       const handle = await acquire();
-      const row = await handle.getFirstAsync<{ schema_version: number; payload: string }>(
-        `SELECT schema_version, payload
-           FROM pull_request_reads
-          WHERE environment_id = ? AND read_key = ?`,
+      const row = await handle.getFirstAsync<{
+        schema_version: number;
+        payload: string;
+        updated_at: number;
+      }>(
+        `SELECT schema_version, payload, updated_at
+           FROM saved_queries
+          WHERE environment_id = ? AND query_key = ?`,
         [environmentId, key],
       );
-      return row ? { schemaVersion: row.schema_version, payload: row.payload } : null;
+      return row
+        ? { schemaVersion: row.schema_version, payload: row.payload, updatedAt: row.updated_at }
+        : null;
     },
-    savePullRequestRead: async (input) => {
+    saveSavedQuery: async (input) => {
       const handle = await acquire();
       await handle.runAsync(
-        `INSERT INTO pull_request_reads
-           (environment_id, read_key, schema_version, payload, payload_bytes, updated_at)
+        `INSERT INTO saved_queries
+           (environment_id, query_key, schema_version, payload, payload_bytes, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (environment_id, read_key) DO UPDATE SET
+         ON CONFLICT (environment_id, query_key) DO UPDATE SET
            schema_version = excluded.schema_version,
            payload = excluded.payload,
            payload_bytes = excluded.payload_bytes,
@@ -305,33 +326,47 @@ export function createSnapshotDb(
           input.key,
           input.schemaVersion,
           input.payload,
-          payloadByteLength(input.payload),
+          input.payloadBytes,
           input.updatedAt,
         ],
       );
-      await handle.runAsync(
-        `DELETE FROM pull_request_reads
-          WHERE environment_id = ?
-            AND read_key NOT IN (
-              SELECT read_key FROM pull_request_reads
-               WHERE environment_id = ?
-               ORDER BY updated_at DESC
-               LIMIT ?
-            )`,
-        [input.environmentId, input.environmentId, input.keep],
-      );
     },
-    pullRequestReadBytes: async (environmentId) => {
+    listSavedQueryStats: async () => {
+      const handle = await acquire();
+      const rows = await handle.getAllAsync<{
+        environment_id: string;
+        query_key: string;
+        payload_bytes: number;
+        updated_at: number;
+      }>("SELECT environment_id, query_key, payload_bytes, updated_at FROM saved_queries", []);
+      return rows.map((row) => ({
+        environmentId: row.environment_id,
+        key: row.query_key,
+        payloadBytes: row.payload_bytes,
+        updatedAt: row.updated_at,
+      }));
+    },
+    removeSavedQueries: async (entries) => {
+      if (entries.length === 0) return;
+      const handle = await acquire();
+      for (const entry of entries) {
+        await handle.runAsync(
+          "DELETE FROM saved_queries WHERE environment_id = ? AND query_key = ?",
+          [entry.environmentId, entry.key],
+        );
+      }
+    },
+    savedQueryBytes: async (environmentId) => {
       const handle = await acquire();
       const row = await handle.getFirstAsync<{ bytes: number | null }>(
-        "SELECT SUM(payload_bytes) AS bytes FROM pull_request_reads WHERE environment_id = ?",
+        "SELECT SUM(payload_bytes) AS bytes FROM saved_queries WHERE environment_id = ?",
         [environmentId],
       );
       return row?.bytes ?? 0;
     },
-    clearPullRequestReads: async () => {
+    clearSavedQueries: async () => {
       const handle = await acquire();
-      await handle.runAsync("DELETE FROM pull_request_reads", []);
+      await handle.runAsync("DELETE FROM saved_queries", []);
     },
   };
 }

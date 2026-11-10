@@ -33,8 +33,12 @@ import {
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
 } from "./environmentSnapshotCodec";
 import { purgeEnvironmentDeviceData } from "./environmentDevicePurge";
-import { setPullRequestReadStore } from "../rpc/pullRequestAtoms";
-import { createPullRequestReadStore, pullRequestReadsBytes } from "./pullRequestPersistence";
+import { setSavedQueryStore } from "../rpc/savedQueries";
+import {
+  createSavedQueryStore,
+  savedQueryBytes,
+  type SavedQueryStoreHandle,
+} from "./savedQueryStore";
 import { purgeTaskCache } from "../features/tasks/taskCacheKeys";
 import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
@@ -422,8 +426,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
         contentWasEnabled = enabled;
         if (!enabled) {
           void purgeAllStoredContent().catch(warn("could not remove stored conversation text"));
-          // Saved pull requests follow the same setting.
-          void deps.db.clearPullRequestReads().catch(warn("could not remove saved pull requests"));
+          // Saved screen answers follow the same setting.
+          void deps.db.clearSavedQueries().catch(warn("could not remove saved answers"));
           return;
         }
         for (const [environmentId, state] of Object.entries(
@@ -675,6 +679,8 @@ export type SnapshotPersistenceRuntime = ReturnType<typeof createSnapshotPersist
 let sharedDb: SnapshotDb | null = null;
 let activeRuntime: SnapshotPersistenceRuntime | null = null;
 let uninstallSelectionPersistence: (() => void) | null = null;
+let activeSavedQueryStore: SavedQueryStoreHandle | null = null;
+let uninstallSavedQueryFlush: (() => void) | null = null;
 
 function getSharedSnapshotDb(): SnapshotDb {
   return (sharedDb ??= createSnapshotDb());
@@ -752,14 +758,16 @@ export async function initializeMobileSnapshotPersistence(deps: {
     ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
   });
   activeRuntime = runtime;
-  setPullRequestReadStore(
-    createPullRequestReadStore({
-      db: getSharedSnapshotDb(),
-      isEnabled: contentCache.isEnabled,
-      ...(contentCache.ready ? { ready: contentCache.ready } : {}),
-      now: () => Date.now(),
-    }),
-  );
+  const savedQueryStore = createSavedQueryStore({
+    db: getSharedSnapshotDb(),
+    isEnabled: contentCache.isEnabled,
+    ...(contentCache.ready ? { ready: contentCache.ready } : {}),
+    now: () => Date.now(),
+  });
+  activeSavedQueryStore = savedQueryStore;
+  // Answers waiting to be written go before the OS may suspend the app.
+  uninstallSavedQueryFlush = deps.subscribeBackground?.(() => void savedQueryStore.flush()) ?? null;
+  setSavedQueryStore(savedQueryStore);
   for (const environmentId of dirtyBeforeInitialization) runtime.markDirty(environmentId);
   dirtyBeforeInitialization.clear();
   await runtime.hydrate();
@@ -767,7 +775,11 @@ export async function initializeMobileSnapshotPersistence(deps: {
 }
 
 export function resetMobileSnapshotPersistenceForTests(): void {
-  setPullRequestReadStore(null);
+  setSavedQueryStore(null);
+  activeSavedQueryStore?.dispose();
+  activeSavedQueryStore = null;
+  uninstallSavedQueryFlush?.();
+  uninstallSavedQueryFlush = null;
   activeRuntime?.dispose();
   activeRuntime = null;
   dirtyBeforeInitialization.clear();
@@ -776,9 +788,9 @@ export function resetMobileSnapshotPersistenceForTests(): void {
   uninstallSelectionPersistence = null;
 }
 
-/** Bytes of one environment's saved pull requests (Settings' device cache sizes). */
-export function savedPullRequestBytes(environmentId: EnvironmentId): Promise<number> {
-  return pullRequestReadsBytes(getSharedSnapshotDb(), environmentId);
+/** Bytes of one environment's saved screen answers (Settings' device cache sizes). */
+export function savedScreenAnswerBytes(environmentId: EnvironmentId): Promise<number> {
+  return savedQueryBytes(getSharedSnapshotDb(), environmentId);
 }
 
 /** Storage settings reports stored payload bytes, not SQLite allocation or free disk space. */

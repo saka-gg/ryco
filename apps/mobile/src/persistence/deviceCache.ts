@@ -11,7 +11,7 @@ import { readTaskCacheBytes } from "../features/tasks/taskCacheKeys";
 import {
   clearEnvironmentSnapshotCache,
   listEnvironmentCacheStorage,
-  savedPullRequestBytes,
+  savedScreenAnswerBytes,
 } from "./environmentSnapshotPersistence";
 
 export interface DeviceCacheUsage {
@@ -32,11 +32,11 @@ export async function readDeviceCacheUsage(
   for (const snapshot of snapshots)
     if (!byId.has(snapshot.environmentId as EnvironmentId))
       byId.set(snapshot.environmentId as EnvironmentId, "Cached device");
-  const savedPullRequests = new Map(
+  const savedAnswers = new Map(
     await Promise.all(
       [...byId.keys()].map(
         async (environmentId) =>
-          [environmentId, await savedPullRequestBytes(environmentId)] as const,
+          [environmentId, await savedScreenAnswerBytes(environmentId)] as const,
       ),
     ),
   );
@@ -57,11 +57,11 @@ export async function readDeviceCacheUsage(
         checkpointDiffCacheBytes(environmentId) +
         pullRequestCacheBytes(environmentId) +
         projectExplorerCacheBytes(environmentId);
-      // Saved pull requests and the machine's task list copy live beside the
+      // Saved screen answers and the machine's task list copy live beside the
       // snapshot and are cleared with it.
       const snapshotBytes =
         (snapshot?.payloadBytes ?? 0) +
-        (savedPullRequests.get(environmentId) ?? 0) +
+        (savedAnswers.get(environmentId) ?? 0) +
         (taskBytes.get(environmentId) ?? 0);
       return {
         environmentId,

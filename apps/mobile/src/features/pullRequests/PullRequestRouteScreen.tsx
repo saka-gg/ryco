@@ -601,7 +601,6 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     cwd: checkout.cwd,
     number,
     provider,
-    offline,
   });
   const [tab, setTab] = useState<PullRequestDetailTab>("conversation");
   const diff = usePullRequestDiff({
