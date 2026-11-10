@@ -341,6 +341,103 @@ it("an early archive Undo waits for automatic navigation to finish before reopen
   expect(route).toBe("thread");
   s.history.dispose();
 });
+it("leaves before the acknowledgment when asked, keeping the Undo notice", async () => {
+  const s = setup();
+  let route = "thread";
+  let finish!: (value: { sequence: number }) => void;
+  s.dispatch.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const reopen = vi.fn(() => {
+    route = "thread";
+  });
+  const original = s.history.archive(
+    target,
+    CommandId.make("archive"),
+    {
+      currentRoute: () => route,
+      shouldLeave: () => true,
+      leave: async () => {
+        route = "fallback";
+        return route;
+      },
+      reopen,
+    },
+    { leaveBeforeAck: true },
+  );
+  await vi.waitFor(() => expect(route).toBe("fallback"));
+  expect(s.read()).toMatchObject([{ action: "archive", target }]);
+  finish({ sequence: 1 });
+  await original;
+  expect(route).toBe("fallback");
+  expect(reopen).not.toHaveBeenCalled();
+  await s.history.undo(s.read()[0]!.id);
+  expect(reopen).toHaveBeenCalledTimes(1);
+  s.history.dispose();
+});
+it("comes back to the thread when an archive that left early fails", async () => {
+  const s = setup();
+  let route = "thread";
+  let fail!: (error: Error) => void;
+  s.dispatch.mockImplementationOnce(
+    () =>
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      }),
+  );
+  const reopen = vi.fn(() => {
+    route = "thread";
+  });
+  const original = s.history.archive(
+    target,
+    CommandId.make("archive"),
+    {
+      currentRoute: () => route,
+      shouldLeave: () => true,
+      leave: async () => {
+        route = "fallback";
+        return route;
+      },
+      reopen,
+    },
+    { leaveBeforeAck: true },
+  );
+  await vi.waitFor(() => expect(route).toBe("fallback"));
+  fail(new Error("refused"));
+  await expect(original).rejects.toThrow("refused");
+  expect(reopen).toHaveBeenCalledTimes(1);
+  expect(route).toBe("thread");
+  expect(s.read()).toEqual([]);
+});
+it("stays where the user went when an archive that left early fails", async () => {
+  const s = setup();
+  let route = "thread";
+  s.dispatch.mockImplementationOnce(async () => {
+    route = "another-thread";
+    throw new Error("refused");
+  });
+  const reopen = vi.fn();
+  await expect(
+    s.history.archive(
+      target,
+      CommandId.make("archive"),
+      {
+        currentRoute: () => route,
+        shouldLeave: () => true,
+        leave: async () => {
+          route = "fallback";
+          return route;
+        },
+        reopen,
+      },
+      { leaveBeforeAck: true },
+    ),
+  ).rejects.toThrow("refused");
+  expect(reopen).not.toHaveBeenCalled();
+});
 it("does not navigate on a stale archive acknowledgment", async () => {
   const s = setup();
   let finish!: (value: { sequence: number }) => void;

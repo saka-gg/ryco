@@ -346,6 +346,11 @@ export function createSidebarUndoHistory(deps: {
         },
       };
     },
+    /**
+     * Archives the thread a screen shows and leaves it. By default the screen leaves once the
+     * node acknowledged the archive; with `leaveBeforeAck` it leaves at once (the Undo notice
+     * is up from the start) and comes back to the thread if the archive fails.
+     */
     async archive(
       target: ScopedThreadRef,
       commandId: CommandId,
@@ -355,6 +360,7 @@ export function createSidebarUndoHistory(deps: {
         leave: () => Promise<string | null>;
         reopen: () => void | Promise<void>;
       },
+      options?: { readonly leaveBeforeAck?: boolean },
     ): Promise<void> {
       const generation = readContext(target)?.generation;
       const originRoute = navigation.currentRoute();
@@ -363,8 +369,19 @@ export function createSidebarUndoHistory(deps: {
       const originalFinished = new Promise<void>((resolve) => {
         finishOriginal = resolve;
       });
+      const leaveIfStillShown = async () => {
+        if (
+          generation &&
+          readContext(target)?.generation === generation &&
+          originRoute !== null &&
+          navigation.currentRoute() === originRoute &&
+          navigation.shouldLeave()
+        ) {
+          displacedRoute = await navigation.leave();
+        }
+      };
       try {
-        await history.dispatch(
+        const dispatched = history.dispatch(
           target,
           { type: "thread.archive", commandId, threadId: target.threadId },
           async (isCurrent) => {
@@ -377,14 +394,22 @@ export function createSidebarUndoHistory(deps: {
               await navigation.reopen();
           },
         );
-        if (
-          generation &&
-          readContext(target)?.generation === generation &&
-          originRoute !== null &&
-          navigation.currentRoute() === originRoute &&
-          navigation.shouldLeave()
-        ) {
-          displacedRoute = await navigation.leave();
+        if (options?.leaveBeforeAck !== true || generation === undefined) {
+          await dispatched;
+          await leaveIfStillShown();
+          return;
+        }
+        // Handled below, once the screen has left; not an unhandled rejection meanwhile.
+        dispatched.catch(() => {});
+        await leaveIfStillShown();
+        try {
+          await dispatched;
+        } catch (error) {
+          // Nothing was archived: back to the thread, unless the user moved on meanwhile.
+          if (displacedRoute !== null && navigation.currentRoute() === displacedRoute) {
+            await navigation.reopen();
+          }
+          throw error;
         }
       } finally {
         finishOriginal();

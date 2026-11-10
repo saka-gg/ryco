@@ -311,6 +311,13 @@ import { mobileSecretRequestCards } from "./secretRequestCardModel";
 import { resolveThreadSendAction, sendThreadTurn } from "./sendThreadTurn";
 import { startOptimisticDispatch } from "./optimisticSend";
 import {
+  displayedThreadTitle,
+  renameSettled,
+  threadStopping,
+  type PendingRename,
+  type PendingStop,
+} from "./optimisticThreadActionsModel";
+import {
   mergeRestoredDraft,
   removeOptimisticUserMessage,
   failOptimisticUserMessage,
@@ -1184,6 +1191,16 @@ export function ThreadDetailScreen(props: {
       worktree,
     ],
   );
+  // A rename on its way: the new title shows until the node's title moves off the old one.
+  const [pendingRename, setPendingRename] = useState<
+    (PendingRename & { readonly key: string }) | null
+  >(null);
+  const activePendingRename = pendingRename?.key === outboxThreadKey ? pendingRename : null;
+  const headerTitle = displayedThreadTitle(headerModel?.title, activePendingRename);
+  const renameDone = renameSettled(headerModel?.title, activePendingRename);
+  useEffect(() => {
+    if (renameDone) setPendingRename(null);
+  }, [renameDone]);
 
   // The capability gates key off the DRIVER, not the instance id, so resolve the
   // thread's provider instance through the server config first. A null/lagging
@@ -2713,9 +2730,23 @@ export function ThreadDetailScreen(props: {
   const agentRunning =
     !cachedView.headerForcedOffline &&
     (thread?.latestTurn?.state === "running" || thread?.session?.status === "running");
-  const runningSince = agentRunning
-    ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
-    : null;
+  // A Stop on its way (`threadStopping`): the turn shows as stopping until the node ends it.
+  const runningTurnKey = thread?.session?.activeTurnId ?? thread?.latestTurn?.turnId ?? null;
+  const [pendingStop, setPendingStop] = useState<(PendingStop & { readonly key: string }) | null>(
+    null,
+  );
+  const stopping = threadStopping({
+    pending: pendingStop?.key === outboxThreadKey ? pendingStop : null,
+    running: agentRunning,
+    activeTurnId: runningTurnKey,
+  });
+  useEffect(() => {
+    if (pendingStop !== null && !stopping) setPendingStop(null);
+  }, [pendingStop, stopping]);
+  const runningSince =
+    agentRunning && !stopping
+      ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
+      : null;
   // Whether the feed follows its end as messages arrive (t3code's live follow): only the
   // reader's own drag stops it; reaching the end again, or "jump to latest", resumes it.
   // Kept per chat: a retargeted screen starts out following the new chat's end.
@@ -3165,24 +3196,30 @@ export function ThreadDetailScreen(props: {
   const mutationBusy = actionBusy || cachedView.actionsDisabled;
 
   const stopTurn = () => {
+    if (stopping) return;
+    const session = selectThreadByRef(
+      useStore.getState(),
+      scopeThreadRef(environmentId, threadId),
+    )?.session;
     // Stop means stop: hold the queue before the turn can settle, and undo only if the
     // interrupt never reached the server. A node that keeps the follow-up queue holds its own
     // in the same batch.
-    const held = holdThreadOutboxForInterrupt(
-      outboxThreadKey,
-      selectThreadByRef(useStore.getState(), scopeThreadRef(environmentId, threadId))?.session
-        ?.activeTurnId ?? null,
-    );
+    const held = holdThreadOutboxForInterrupt(outboxThreadKey, session?.activeTurnId ?? null);
     const holdQueue = serverFollowUpQueueSupported;
-    void runAction(async () => {
+    // The turn shows as stopping at once; the node's answer (the turn ends) takes over.
+    const pending = { key: outboxThreadKey, turnId: runningTurnKey };
+    setPendingStop(pending);
+    void (async () => {
       try {
         await interruptThreadTurn(ensureEnvironmentApi(environmentId), threadId, { holdQueue });
       } catch (error) {
         held.undo();
-        throw error;
+        setPendingStop((current) => (current === pending ? null : current));
+        Alert.alert("Could not stop", actionFailureMessage(error));
+        return;
       }
       offerToStopDelegatedTasks(environmentId, threadId);
-    });
+    })();
   };
   const compactNow = () => {
     if (!headerModel?.compactAction || headerModel.compactAction.disabled) return;
@@ -3218,31 +3255,49 @@ export function ThreadDetailScreen(props: {
         shouldArchive,
         (command) =>
           command.type === "thread.archive"
-            ? sidebarUndo.archive({ environmentId, threadId }, command.commandId, {
-                currentRoute: () => {
-                  const state = navigation.getState();
-                  return state?.routes[state.index]?.key ?? null;
+            ? sidebarUndo.archive(
+                { environmentId, threadId },
+                command.commandId,
+                {
+                  currentRoute: () => {
+                    const state = navigation.getState();
+                    return state?.routes[state.index]?.key ?? null;
+                  },
+                  shouldLeave: () => navigation.canGoBack(),
+                  leave: async () => {
+                    const state = navigation.getState();
+                    const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
+                    navigation.goBack();
+                    return fallbackKey;
+                  },
+                  reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
                 },
-                shouldLeave: () => navigation.canGoBack(),
-                leave: async () => {
-                  const state = navigation.getState();
-                  const fallbackKey = state?.routes[state.index - 1]?.key ?? null;
-                  navigation.goBack();
-                  return fallbackKey;
-                },
-                reopen: () => navigation.navigate("Thread", { environmentId, threadId }),
-              })
+                // Back to the list at once; the Undo notice is up, and a failure reopens it.
+                { leaveBeforeAck: true },
+              )
             : sidebarUndo.dispatch({ environmentId, threadId }, command),
       );
     });
   // Android has no native text prompt: its rename is a small sheet (kept per chat, like the others).
   const [renameSheetFor, setRenameSheetFor] = useState<string | null>(null);
   const renameSheetVisible = renameSheetFor === outboxThreadKey;
-  const saveThreadTitle = (title: string) =>
-    void runAction(() => renameThread(ensureEnvironmentApi(environmentId), threadId, title));
+  // The new title shows at once; the node's title moving off the old one ends the overlay.
+  const saveThreadTitle = (title: string) => {
+    if (!headerModel || title.trim().length === 0) return;
+    const pending = { key: outboxThreadKey, from: headerModel.title, to: title.trim() };
+    setPendingRename(pending);
+    void (async () => {
+      try {
+        await renameThread(ensureEnvironmentApi(environmentId), threadId, title);
+      } catch (error) {
+        setPendingRename((current) => (current === pending ? null : current));
+        Alert.alert("Could not rename", actionFailureMessage(error));
+      }
+    })();
+  };
   const renameCurrentThread = () => {
-    if (!headerModel) return;
-    const current = headerModel.title;
+    if (!headerModel || headerTitle === null) return;
+    const current = headerTitle;
     const save = (value: string | undefined) => {
       const title = resolveThreadRename(current, value);
       if (title !== null) saveThreadTitle(title);
@@ -3338,8 +3393,8 @@ export function ThreadDetailScreen(props: {
             ),
           ),
   });
-  const pillTitle = headerModel?.title ?? null;
-  const pillStatus = headerModel?.statusLabel ?? null;
+  const pillTitle = headerTitle;
+  const pillStatus = stopping ? "Stopping" : (headerModel?.statusLabel ?? null);
   const pillProject = headerModel?.projectLabel ?? null;
   const pillWorktree = headerModel?.worktreeLabel ?? null;
   const pillBranch = headerModel?.branchLabel ?? null;
@@ -3391,7 +3446,7 @@ export function ThreadDetailScreen(props: {
             environmentId,
             projectId: thread.projectId,
             link: { kind: "thread", threadId },
-            linkLabel: `Chat: ${headerModel.title}`,
+            linkLabel: `Chat: ${headerTitle ?? headerModel.title}`,
             openDetails: (taskEnvironmentId, taskId) =>
               navigation.navigate("TaskDetail", { environmentId: taskEnvironmentId, taskId }),
           });
@@ -3546,7 +3601,7 @@ export function ThreadDetailScreen(props: {
   // Delete: the node trashes the chat and purges it shortly after, with its attachments and
   // terminal history.
   const deleteCurrentThread = () => {
-    const title = headerModel?.title ?? "this chat";
+    const title = headerTitle ?? "this chat";
     Alert.alert(
       `Delete "${title}"?`,
       "The chat, its attachments and its terminal history are removed for good.",
@@ -4099,7 +4154,7 @@ export function ThreadDetailScreen(props: {
       <ThreadComposer
         ref={composerRef}
         shrink={composerShrink.binding}
-        running={headerModel?.moreActions.includes("stop") === true}
+        running={headerModel?.moreActions.includes("stop") === true && !stopping}
         onStop={mutationBusy ? undefined : stopTurn}
         goalAvailable={thread !== undefined}
         onOpenSideChat={
@@ -4274,7 +4329,7 @@ export function ThreadDetailScreen(props: {
       {headerModel ? (
         <ThreadRenameSheet
           visible={renameSheetVisible}
-          currentTitle={headerModel.title}
+          currentTitle={headerTitle ?? headerModel.title}
           onClose={() => setRenameSheetFor(null)}
           onSave={saveThreadTitle}
         />
