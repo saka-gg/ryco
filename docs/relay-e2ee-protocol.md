@@ -435,6 +435,7 @@ name, exactly as `RELAY_CAPABILITY_LITERALS` exists so §8.3 element 11 can.
 | Relay connection   | `RELAY_CLOSE_REASONS`                      | The relay contract's closed close-reason set ([relay-protocol.md](./relay-protocol.md)); named, deliberately not enumerated here | The vocabulary every close on a relay channel draws from. This protocol uses exactly one member, `channel_rejected`, and **adds none** (§1.1, §11.1); the relay contract's defining module remains authoritative for the members, and this row exists only so §11.1 states membership over one name rather than asserting the set's contents                                                                                                                                                                                                                                                                        |
 | Relay connection   | `RELAY_MAX_CHANNELS`                       | 8                                                                                                                                | Maximum simultaneous channels on one relay connection. The Hub asserts `maxChannels` in the `ready` frame, but the frame schema rejects any value above this bound, so the untrusted Hub can lower it and cannot raise it. Combined with §4.4's one-handshake-per-channel rule this is the **structural** bound on a node's concurrent handshakes (§15)                                                                                                                                                                                                                                                             |
 | RPC keepalive      | `RPC_KEEPALIVE_INTERVAL`                   | 8,000 ms                                                                                                                         | Period of the pinned RPC client's keepalive fiber (§3.2.2 L1), including the client-local authenticated trust-commit window                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| RPC keepalive      | `RELAY_RPC_KEEPALIVE_INTERVAL`             | 10,000 ms                                                                                                                        | Period of the RPC keepalive on Hub relay channels (§3.2.2 L6). At least `RPC_KEEPALIVE_INTERVAL`, and bounded above by the client's view-resume grace                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 _Note (non-normative)_: the relay-chunking rows were cross-checked against
 `packages/shared/src/relayMessageChunks.ts:28-30` (prelude bytes) and
@@ -540,6 +541,8 @@ L4  E2EE_PAIRING_WINDOW ≤ E2EE_PAIRING_RESERVATION_LIFETIME
                         < E2EE_PENDING_CLIENT_RETENTION
 L5  2 · T_CLOSE + T_CLOSE_LINGER_MAX + T_KEEPALIVE_FLUSH_MARGIN
                                                     ≤ RPC_KEEPALIVE_INTERVAL
+L6  RPC_KEEPALIVE_INTERVAL ≤ RELAY_RPC_KEEPALIVE_INTERVAL
+                           ≤ VIEW_RESUME_HEARTBEAT_GRACE_MS − 2,000 ms
 ```
 
 **L1 — the negotiating window fits inside one keepalive period.** While a channel is
@@ -633,6 +636,28 @@ L1, L5 binds the client only: the node runs no keepalive fiber. The suspend/resu
 synthesized-`Pong` facility permitted for `negotiating` above MAY equally be used across a close
 phase, under the identical conditions — nothing synthesized reaches the wire, the facility stops
 when the channel ends, and L5 MUST still hold.
+
+**L6 — a relay channel may ping less often, but not so rarely that a resumed view gives up on
+it.** L1 and L5 bound the keepalive period from **below**: each says that a window in which the
+client cannot write its `Ping` fits inside one period. Lengthening the period keeps both true, so
+`RPC_KEEPALIVE_INTERVAL` is the shortest period any client runs, and a socket may run a longer one.
+The pinned client (`patches/effect@4.0.5.patch`, `makePinger`) takes the period as an option and
+declares the peer dead only when a tick finds its earlier `Ping` unanswered **and** no frame of any
+kind for twice the period, so a longer period also lengthens the dead-peer bound in proportion.
+
+A relay channel needs the keepalive least: the Hub already watches the path with its own relay and
+session heartbeats (relay-protocol.md, hub-session-protocol.md), closes the client's channels when
+the node's connection ends, and on a phone every ping wakes the radio. Hub relay channels therefore
+run `RELAY_RPC_KEEPALIVE_INTERVAL`; direct sockets keep the default.
+
+The ceiling does not come from this document but from the client's lifecycle: when a hidden view
+comes back, the client reconnects every connection that has not answered a `Pong` within
+`VIEW_RESUME_HEARTBEAT_GRACE_MS` (12 s, `packages/client-runtime/src/connection/supervision.ts`).
+One full period plus a slow round trip (2,000 ms is allowed) must fit inside that grace, or a
+healthy relay channel would be reconnected after every resume. L6 is checked at module load next
+to L1 (`relayE2eeInitiator.ts`) and by a test against the supervision constant. A longer period
+needs the resume check to count any received frame as liveness instead of `Pong`s alone; that is a
+change to the lifecycle rules, not to this protocol.
 
 ### 3.3 Wire layouts
 

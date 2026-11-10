@@ -735,3 +735,38 @@ describe("WsTransport reconnect wakes", () => {
     expect(sockets).toHaveLength(2);
   });
 });
+
+describe("WsTransport keepalive", () => {
+  const pings = (socket: FakeWebSocket) =>
+    socket.sent.filter((frame) => (JSON.parse(frame) as { _tag: string })._tag === "Ping");
+
+  it.each([
+    [undefined, 8_000],
+    [10_000, 10_000],
+  ] as const)("pings every %s ms (default 8 s)", async (keepaliveIntervalMs, expected) => {
+    vi.useFakeTimers();
+    try {
+      const transport = new WsTransport("ws://relay.test/relay", fakeSocketPlatform(sockets), {
+        preserveSocketPath: true,
+        shouldReconnect: () => false,
+        recordConnectionState: false,
+        ...(keepaliveIntervalMs === undefined ? {} : { keepaliveIntervalMs }),
+      });
+      transports.push(transport);
+      subscribeProposals(transport, () => undefined);
+      for (let turn = 0; turn < 50 && sockets.length === 0; turn += 1) {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      sockets[0]!.open();
+      await vi.advanceTimersByTimeAsync(expected - 1);
+      expect(pings(sockets[0]!)).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(pings(sockets[0]!)).toHaveLength(1);
+      sockets[0]!.reply({ _tag: "Pong" });
+      await vi.advanceTimersByTimeAsync(expected);
+      expect(pings(sockets[0]!)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
