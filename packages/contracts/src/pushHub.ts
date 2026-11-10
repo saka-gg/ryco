@@ -7,7 +7,7 @@
 import * as Schema from "effect/Schema";
 
 import { NodeHubProof } from "./nodeProof.ts";
-import { Base64Url, PushAlertKind } from "./push.ts";
+import { Base64Url } from "./push.ts";
 import { NativeE2eeEnrollmentId } from "./relay.ts";
 
 const SafeCounter = Schema.Number.check(
