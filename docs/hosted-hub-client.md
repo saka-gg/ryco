@@ -289,6 +289,17 @@ record per environment.
   alone. Revoking native account authorization withdraws every record's role and session before
   the call returns, ahead of any asynchronous channel teardown. A terminal failure of the account's
   Hub session reaches every record.
+- **Background stay (iPhone).** A short app switch does not suspend. When the app leaves the
+  foreground while the account is revalidated and every running record is adoptable (none still
+  establishing), an iOS background task keeps the records as they are for up to 25 seconds
+  (`bindConnectivityRecovery` with `createHostedBackgroundStayPolicy`). Nothing is established or
+  recovered during the stay. It ends, and every record is suspended exactly as above, when its
+  time runs out, iOS announces suspension, a kept record stops being adoptable (its relay dropped
+  or it was replaced), or the device goes offline. A return inside the stay keeps the records only
+  when each is still adoptable with the same generation and its connection answers heartbeats
+  (an old heartbeat gets 4 seconds); otherwise the ordinary suspension and resume run. The relay's
+  E2EE provider still aborts a channel that negotiates while the app is in the background, and a
+  stay never starts while one could.
 - **Resume.** No record keeps its authority across a resume: one that no suspension reached, as
   after a rotated Hub session, is suspended when the resume starts. Resuming revalidates the Hub
   session and the authorized directory first. Only then does the platform re-plan its connections —

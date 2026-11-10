@@ -106,6 +106,10 @@
       "types": "./src/authorization/index.ts",
       "import": "./src/authorization/index.ts"
     },
+    "./authorization/hostedBackgroundStay": {
+      "types": "./src/authorization/hostedBackgroundStay.ts",
+      "import": "./src/authorization/hostedBackgroundStay.ts"
+    },
     "./authorization/capabilities": {
       "types": "./src/authorization/capabilities.ts",
       "import": "./src/authorization/capabilities.ts"

@@ -3,7 +3,9 @@ import { bindConnectivityRecovery } from "@ryco/client-runtime/connection";
 import { useEffect } from "react";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
+import { rycoAppRuntimeNative } from "../platform/appRuntimeNative";
 import { getMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
+import { createMobileBackgroundStayPolicy } from "./backgroundStay";
 import { createRetainedWake } from "./retainedWake";
 import { hostedHubController, hostedHubStore, useHostedHubStore } from "./state";
 
@@ -11,8 +13,11 @@ import { hostedHubController, hostedHubStore, useHostedHubStore } from "./state"
  * Drives the hosted browser lifecycle from app foreground/background and
  * connectivity — the mobile analogue of the web hosted lifecycle.
  *
- * iOS tears down sockets on background, so the runtime must be told to suspend
- * rather than discovering a dead socket later. Mount this ONCE, above the
+ * iOS tears down sockets once it suspends the app, so the runtime must be told
+ * to suspend rather than discovering a dead socket later. A short app switch
+ * keeps the connections: an iOS background task holds them open for a
+ * background stay, and a return inside it only checks their heartbeats
+ * (`bindConnectivityRecovery`, findings F1). Mount this ONCE, above the
  * hosted surfaces — including the locked identity screen: an account whose
  * launch-time access check could not reach the Hub keeps its stored session,
  * and foreground/online is what re-runs that check. What a recovery runs is
@@ -41,6 +46,7 @@ export function useHostedAppLifecycle(): void {
         retainedWake.cancel();
         getMobileHostedConnectionCoordinator().cancelPendingRecovery();
       },
+      backgroundStay: createMobileBackgroundStayPolicy(rycoAppRuntimeNative()),
     });
     // Effect cleanup cancels pending recovery, including during Fast Refresh.
     // A remount in an already-revalidated foreground needs to unpause the

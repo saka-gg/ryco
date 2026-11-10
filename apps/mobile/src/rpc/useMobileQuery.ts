@@ -1,14 +1,17 @@
 // React binding over a mobile query cache (mobileQueryCache): retain a key while
 // the screen is mounted, read its atom state, and expose an imperative refetch
 // for pull-to-refresh, with web's connection-identity fencing folded in — the
-// live connection is read off the supervisor.
+// live connection is read off the supervisor. After a reconnect only the screen
+// on view reads again at once (reconnectRefetchGate.ts).
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
 import type { EnvironmentId } from "@ryco/contracts";
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { NavigationContext } from "@react-navigation/native";
+import { use, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { useConnectionRegistry } from "../providers/ConnectionRegistryProvider";
 import type { MobileQuery, MobileQueryState } from "./mobileQueryCache";
+import { createReconnectRefetchGate } from "./reconnectRefetchGate";
 
 export interface MobileQueryResult<T> extends MobileQueryState<T> {
   readonly refetch: () => Promise<{ readonly data: T | null }>;
@@ -37,30 +40,28 @@ export function useMobileQuery<TInput, TData>(
 ): MobileQueryResult<TData> {
   const cacheKey = query.keyOf(input);
   const connection = useEnvironmentConnection(environmentId);
+  // The screen's own navigation (absent outside a navigator: always on screen).
+  // Read in effects and listeners only, so focus changes never re-render.
+  const navigation = use(NavigationContext);
+  const [gate] = useState(createReconnectRefetchGate<EnvironmentConnection>);
 
-  // The effect is keyed on the cache key and the connection identity; `input` is
-  // read through a ref so a fresh object per render never re-subscribes.
+  // The watch is keyed on the cache key alone; `input` is read through a ref so
+  // a fresh object per render never re-subscribes.
   const inputRef = useRef(input);
   inputRef.current = input;
-  // `undefined` until the first effect: "not looked yet" is not "was offline".
-  const lastConnectionRef = useRef<EnvironmentConnection | null | undefined>(undefined);
+  useEffect(() => query.watch(inputRef.current), [query, cacheKey]);
 
+  // After a reconnect the screen on view reads again at once, one further down
+  // the stack once it comes back into focus (reconnectRefetchGate.ts).
   useEffect(() => {
-    const previous = lastConnectionRef.current;
-    // A new client after an old one, or the first client after the screen saw
-    // the node offline (whatever it read then was an error or a saved copy).
-    const isReconnect = previous !== undefined && previous !== connection;
-    lastConnectionRef.current = connection;
-    const release = query.watch(inputRef.current);
-    // staleTime alone would keep answering with what the dead client returned,
-    // so a reconnect forces one refetch — UNCONDITIONALLY. An in-flight fetch is
-    // not a reason to skip it: that fetch may have been issued by the replaced
-    // client, and only the refresh's fetchToken bump fences its late result out.
-    if (isReconnect && connection !== null) {
-      query.refresh(cacheKey);
-    }
-    return release;
-  }, [query, cacheKey, connection]);
+    gate.onConnection(connection, navigation?.isFocused() ?? true, query, cacheKey);
+  }, [gate, query, cacheKey, connection, navigation]);
+  useEffect(() => {
+    if (navigation === undefined) return undefined;
+    return navigation.addListener("focus", () => {
+      gate.onFocus(connection !== null, query, cacheKey);
+    });
+  }, [gate, query, cacheKey, connection, navigation]);
 
   const state = useAtomValue(query.getAtom(cacheKey));
 

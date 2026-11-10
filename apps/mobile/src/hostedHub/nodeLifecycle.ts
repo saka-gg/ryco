@@ -201,3 +201,16 @@ export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
 export function resetMobileHostedEnvironmentConnectionsForTests(): void {
   environmentConnections.clear();
 }
+
+/**
+ * Whether the hosted connection of `generation` answered a heartbeat recently,
+ * for a return inside a background stay (`createHostedBackgroundStayPolicy`).
+ */
+export function readHostedConnectionHeartbeat(
+  environmentId: EnvironmentId,
+  generation: number,
+): "fresh" | "stale" | "missing" {
+  const current = environmentConnections.get(environmentId);
+  if (current === undefined || current.generation !== generation) return "missing";
+  return current.connection.client.isHeartbeatFresh() ? "fresh" : "stale";
+}

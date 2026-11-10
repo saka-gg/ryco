@@ -15,6 +15,8 @@ const fixture = vi.hoisted(() => ({
   wake: vi.fn(),
   cancel: vi.fn(),
   recover: vi.fn(async () => undefined),
+  stayPolicy: undefined as unknown,
+  createStayPolicy: vi.fn(),
 }));
 
 vi.mock("react", () => ({
@@ -36,6 +38,13 @@ vi.mock("../connection/hostedConnectionCoordinator", () => ({
     cancelPendingRecovery: fixture.cancel,
     releaseNonRetainedForBackground: async () => undefined,
   }),
+}));
+vi.mock("../platform/appRuntimeNative", () => ({ rycoAppRuntimeNative: () => null }));
+vi.mock("./backgroundStay", () => ({
+  createMobileBackgroundStayPolicy: (native: unknown) => {
+    fixture.createStayPolicy(native);
+    return fixture.stayPolicy;
+  },
 }));
 vi.mock("./state", () => ({
   useHostedHubStore: (selector: (state: typeof fixture.state) => unknown) =>
@@ -60,6 +69,7 @@ beforeEach(() => {
   fixture.state = { accountStatus: "authenticated", browserStatus: "current" };
   fixture.foreground = true;
   fixture.online = true;
+  fixture.stayPolicy = undefined;
   vi.clearAllMocks();
 });
 afterEach(() => {
@@ -94,5 +104,28 @@ describe("mobile hosted lifecycle binding", () => {
     fixture[field] = false;
     useHostedAppLifecycle();
     expect(fixture.wake).not.toHaveBeenCalled();
+  });
+
+  it("keeps the connections through a short app switch when the binary can", async () => {
+    const stay = {
+      eligible: () => true,
+      begin: vi.fn(() => ({ remainingMs: Number.POSITIVE_INFINITY, end: vi.fn() })),
+      confirmKept: vi.fn(async () => true),
+      resumeKept: vi.fn(),
+    };
+    fixture.stayPolicy = stay;
+    useHostedAppLifecycle();
+    expect(fixture.createStayPolicy).toHaveBeenCalledWith(null);
+    fixture.foreground = false;
+    for (const listener of fixture.lifecycle) listener("background");
+    expect(stay.begin).toHaveBeenCalledOnce();
+    expect(fixture.cancel).not.toHaveBeenCalled();
+    fixture.foreground = true;
+    for (const listener of fixture.lifecycle) listener("foreground");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(stay.confirmKept).toHaveBeenCalledOnce();
+    expect(stay.resumeKept).toHaveBeenCalledOnce();
+    expect(fixture.recover).not.toHaveBeenCalled();
   });
 });

@@ -4,7 +4,11 @@ import type {
   ServerConfig,
   ServerProvider,
 } from "@ryco/contracts";
-import { CLI_PROXY_HUB_POLL_INTERVAL_MS, type CliProxyHubRead } from "@ryco/client-runtime/usage";
+import {
+  CLI_PROXY_HUB_POLL_INTERVAL_MS,
+  CliProxyHubReads,
+  type CliProxyHubRead,
+} from "@ryco/client-runtime/usage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { SUBSCRIPTION_USAGE_WIDGET_KIND } from "./widgetKinds";
@@ -17,6 +21,7 @@ import {
 const NOW = Date.parse("2026-10-31T10:00:00Z");
 const ENV = "env-1" as EnvironmentId;
 const OTHER = "env-2" as EnvironmentId;
+const THIRD = "env-3" as EnvironmentId;
 
 function provider(usedPercent: number, overrides: Record<string, unknown> = {}): ServerProvider {
   return {
@@ -324,5 +329,95 @@ describe("the widgets runtime", () => {
     expect(h.read).not.toHaveBeenCalled();
     expect(h.native.writeTimeline).toHaveBeenCalledTimes(1);
     await runtime.stop();
+  });
+
+  /**
+   * Hub reads (one RPC per machine) for three machines over iOS app states, with the app port
+   * following `isAppInFront` (only `background` leaves the app).
+   */
+  async function hubRpcs(script: ReadonlyArray<[number, string]>) {
+    const configs = store(
+      new Map([
+        [ENV, config([])],
+        [OTHER, config([])],
+        [THIRD, config([])],
+      ]),
+    );
+    vi.setSystemTime(NOW);
+    let rpcs = 0;
+    const reads = new CliProxyHubReads(
+      {
+        readHubs: async () => {
+          rpcs += 1;
+          return { hubs: [] };
+        },
+      },
+      { now: () => Date.now() },
+    );
+    const listeners = new Set<(active: boolean) => void>();
+    let active = true;
+    const runtime = startWidgetsRuntime({
+      native: { writeTimeline: async () => undefined, clear: async () => undefined },
+      configs,
+      hubs: {
+        snapshot: () => reads.snapshot(),
+        subscribe: (listener) => reads.subscribe(listener),
+        read: (environmentId) => reads.read(environmentId),
+      },
+      appState: {
+        isActive: () => active,
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      },
+      url: "ryco-dev://usage?tab=limits",
+      now: () => Date.now(),
+      onError: () => undefined,
+    });
+    runtime.setEnvironments([owner(ENV), owner(OTHER), owner(THIRD)]);
+    await vi.advanceTimersByTimeAsync(0);
+    const launch = rpcs;
+    for (const [atMs, state] of script) {
+      await vi.advanceTimersByTimeAsync(atMs - (Date.now() - NOW));
+      const next = state !== "background";
+      if (next === active) continue;
+      active = next;
+      for (const listener of listeners) listener(next);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    await runtime.stop();
+    return { launch, afterLaunch: rpcs - launch };
+  }
+
+  // Before (raw `AppState === "active"` port, every return read every machine past the 30 s
+  // reuse): 9 RPCs for the three pulls and 3 for the app switch.
+  it("reads no hubs again for Notification Center pulls or a short app switch", async () => {
+    const pulls: Array<[number, string]> = [
+      [60_000, "inactive"],
+      [63_000, "active"],
+      [120_000, "inactive"],
+      [123_000, "active"],
+      [180_000, "inactive"],
+      [183_000, "active"],
+    ];
+    expect(await hubRpcs(pulls)).toEqual({ launch: 3, afterLaunch: 0 });
+
+    const appSwitch: Array<[number, string]> = [
+      [60_000, "inactive"],
+      [60_200, "background"],
+      [62_000, "inactive"],
+      [62_200, "active"],
+    ];
+    expect(await hubRpcs(appSwitch)).toEqual({ launch: 3, afterLaunch: 0 });
+  });
+
+  it("reads the hubs again on a return two minutes after their last answer", async () => {
+    expect(
+      await hubRpcs([
+        [60_000, "background"],
+        [120_000, "active"],
+      ]),
+    ).toEqual({ launch: 3, afterLaunch: 3 });
   });
 });

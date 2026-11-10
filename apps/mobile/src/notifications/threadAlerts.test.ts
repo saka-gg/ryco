@@ -22,6 +22,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 vi.mock("expo-notifications", () => ({}));
 vi.mock("expo-linking", () => ({}));
 vi.mock("react-native", () => ({}));
+vi.mock("../platform/appInFront", () => ({ isAppInFront: () => true }));
 
 import type { Preferences } from "../state/preferencesStore";
 import type { MobileThreadAlert } from "./threadAlerts.logic";

@@ -16,7 +16,9 @@
  *   one replaces it: a turn that completes right after an approval sends one
  *   alert.
  * - Per device: the kinds it asked for, minus action kinds for a viewer, and
- *   nothing while it is in front (its local alerts cover the screen).
+ *   nothing while it is in front (its local alerts cover the screen). Each
+ *   sealed alert carries the node's "needs you" count (`b`, the Live Activity's
+ *   rule) for the device's app icon badge.
  * - One signal per pass (split at 32 deliveries), each with a fresh sequence
  *   persisted before it is sent. A failed send is retried once with the same
  *   sequence and payload, then dropped: alerts are perishable. A Hub without
@@ -190,6 +192,8 @@ export function sealAttentionDeliveries(input: {
   readonly sequence: number;
   readonly issuedAt: number;
   readonly recipients: ReadonlyArray<AttentionRecipient>;
+  /** This node's "needs you" count, for the device's app icon badge (`b`). */
+  readonly needsYou?: number | undefined;
 }): ReadonlyArray<PushAttentionDelivery> {
   return input.recipients.map(({ registration, candidate }) => {
     const plaintext: PushAlertPlaintext = {
@@ -202,6 +206,7 @@ export function sealAttentionDeliveries(input: {
       ...sealedApprovalRequestIdField(candidate),
       q: input.sequence,
       at: input.issuedAt,
+      ...(input.needsYou === undefined ? {} : { b: input.needsYou }),
     };
     return {
       enrollmentId: registration.enrollmentId as PushAttentionDelivery["enrollmentId"],
@@ -435,6 +440,14 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       registrations,
       isForeground: (enrollmentId) => foreground.has(enrollmentId),
     });
+    // The rows the passes keep are current for every thread an alert is about.
+    const { needsYou } = countNodeAgentActivity({
+      environmentId,
+      threads: rows.values(),
+      worktrees,
+      autoSettleAfterDays,
+      nowMs: deps.now(),
+    }).counts;
     for (const recipients of chunks) {
       if (stopped) return;
       const sequence = await deps.reserveSequence();
@@ -442,7 +455,13 @@ export function startAttentionPublisher(deps: AttentionPublisherDeps): Attention
       const signal = {
         sequence,
         issuedAt,
-        deliveries: sealAttentionDeliveries({ environmentId, sequence, issuedAt, recipients }),
+        deliveries: sealAttentionDeliveries({
+          environmentId,
+          sequence,
+          issuedAt,
+          recipients,
+          needsYou,
+        }),
       };
       const result = await sendWithRetry(
         () => deps.send(signal),

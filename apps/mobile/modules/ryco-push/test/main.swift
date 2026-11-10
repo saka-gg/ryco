@@ -152,6 +152,7 @@ for vector in document["vectors"] as! [[String: Any]] {
         "turnId": $0.turnId as Any,
         "requestId": $0.requestId as Any,
         "categoryIdentifier": $0.categoryIdentifier,
+        "badgeCount": $0.badgeCount.map { NSNumber(value: $0) } as Any,
       ]
     } as Any,
     "alertRejects": [
@@ -182,9 +183,18 @@ for vector in document["vectors"] as! [[String: Any]] {
   ])
 }
 
+// One machine's new count replaces its own and keeps the others'.
+let merged = PushAlertOpener.badge(
+  counts: ["env_a": 2, "env_b": 1], environmentId: "env_a", count: 0)
+let added = PushAlertOpener.badge(counts: merged.counts, environmentId: "env_c", count: 3)
+
 let output: [String: Any] = [
   "vectors": report, "kindTitles": PushAlertOpener.kindTitles,
   "kindCategories": PushAlertOpener.kindCategories,
+  "badge": [
+    "replaced": ["counts": merged.counts, "total": merged.total],
+    "added": ["counts": added.counts, "total": added.total],
+  ],
 ]
 print(
   String(

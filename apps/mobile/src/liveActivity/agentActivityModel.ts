@@ -269,6 +269,15 @@ export function agentActivityModelName(
   return model ? getModelDisplayName(model, { preferShortName: true }) : selection.model;
 }
 
+/** A machine whose threads count: connected (or read-only) with a current shell. */
+export function isAgentActivityEnvironmentLive(environment: InboxEnvironment): boolean {
+  return (
+    environment.stale !== true &&
+    environment.shellCurrent === true &&
+    (environment.connectionState === "connected" || environment.connectionState === "read-only")
+  );
+}
+
 /**
  * The Inbox's rows as `summarizeAgentActivity` takes them: the same row state and resting rule
  * the Inbox shows, and live only on a machine that is connected with a current shell. The phone
@@ -300,12 +309,7 @@ export function agentActivityThreads(input: {
       const thread = threadsByKey.get(row.key);
       if (thread === undefined) return [];
       const environment = environments.get(row.environmentId);
-      const live =
-        environment !== undefined &&
-        environment.stale !== true &&
-        environment.shellCurrent === true &&
-        (environment.connectionState === "connected" ||
-          environment.connectionState === "read-only");
+      const live = environment !== undefined && isAgentActivityEnvironmentLive(environment);
       const updatedAtMs = Date.parse(row.updatedAt);
       return [
         {

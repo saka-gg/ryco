@@ -92,11 +92,17 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         readonly vectors: ReadonlyArray<HarnessVector>;
         readonly kindTitles: Readonly<Record<string, string>>;
         readonly kindCategories: Readonly<Record<string, string>>;
+        readonly badge: Readonly<Record<string, unknown>>;
       };
 
       expect(output.kindTitles).toEqual(expectedKindTitles);
       // The extension's categories are the ones the app registers.
       expect(output.kindCategories).toEqual(expectedKindCategories);
+      // The badge is every machine's last known count, the sending one's replaced.
+      expect(output.badge).toEqual({
+        replaced: { counts: { env_a: 0, env_b: 1 }, total: 1 },
+        added: { counts: { env_a: 0, env_b: 1, env_c: 3 }, total: 4 },
+      });
       expect(output.vectors.map((vector) => vector.name)).toEqual(
         vectors.map((vector) => vector.name),
       );
@@ -108,6 +114,7 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           readonly th: string;
           readonly tu: string | null;
           readonly rq?: string;
+          readonly b?: number;
         };
         // Only an approval names its request.
         const requestId = plaintext.k === "approval" ? (plaintext.rq ?? null) : null;
@@ -127,6 +134,8 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           turnId: plaintext.tu,
           requestId,
           categoryIdentifier: notificationCategoryForKind(plaintext.k),
+          // Older nodes seal no count.
+          badgeCount: plaintext.b ?? null,
         });
         expect(opened.alertRejects).toEqual({
           stale: true,

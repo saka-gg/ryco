@@ -6,7 +6,9 @@
  * read on first use and written atomically through one lock. Presence is
  * memory only: a device that says it is in front is skipped for
  * {@link PUSH_FOREGROUND_HOLD_MS} unless it says so again, so a phone that
- * died in front gets push again within a minute.
+ * died in front gets push again within two minutes. Every status answer
+ * announces the hold (`foregroundHoldMs`): a device repeats its presence
+ * within half of it, and assumes the older 45 s hold when it is absent.
  *
  * @module push/nodePushRegistryStore
  */
@@ -35,7 +37,7 @@ import {
 } from "./pushRegistrations.ts";
 
 /** How long a device's "I'm in front" holds without being said again. */
-export const PUSH_FOREGROUND_HOLD_MS = 45_000;
+export const PUSH_FOREGROUND_HOLD_MS = 90_000;
 
 const toStatus = (
   registration: PushRegistration | undefined,
@@ -46,6 +48,7 @@ const toStatus = (
   keyId: registration?.keyId ?? null,
   kinds: registration === undefined ? [] : effectivePushKinds(registration),
   hubDelivery,
+  foregroundHoldMs: PUSH_FOREGROUND_HOLD_MS,
 });
 
 export const makeNodePushRegistry = (options: {

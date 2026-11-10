@@ -104,6 +104,12 @@ export const PushDeviceStatus = Schema.Struct({
   /** What the node sends this device once its role is applied. */
   kinds: Schema.Array(PushAlertKind),
   hubDelivery: PushHubDelivery,
+  /**
+   * How long the node holds this device's `foreground` presence without hearing it again. A
+   * device repeats it well inside that. Older nodes leave it out (they hold 45 s), and older
+   * devices ignore it.
+   */
+  foregroundHoldMs: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 export type PushDeviceStatus = typeof PushDeviceStatus.Type;
 

@@ -11,9 +11,10 @@ import {
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import * as Linking from "expo-linking";
 import * as Notifications from "expo-notifications";
-import { AppState, Platform } from "react-native";
+import { Platform } from "react-native";
 
 import { requestSavedThreadBody } from "../persistence/savedThreadBodies";
+import { isAppInFront } from "../platform/appInFront";
 import type { Preferences } from "../state/preferencesStore";
 import {
   NOTIFICATION_CATEGORIES,
@@ -123,7 +124,8 @@ export function createExpoThreadAlertsPlatform(
   /** Responses already routed: the one that launched the app also arrives as an event. */
   const routed = new Set<string>();
   return {
-    isAppActive: () => AppState.currentState === "active",
+    // The test push presence uses (`isAppInFront`), so the two never disagree.
+    isAppActive: isAppInFront,
     prepare: () =>
       Promise.all([ensureThreadAlertChannel(), ensureThreadAlertCategories()]).then(
         () => undefined,
@@ -214,7 +216,8 @@ export async function requestThreadAlertPermission(): Promise<boolean> {
   Notifications.clearLastNotificationResponse();
   await ensureThreadAlertChannel();
   const permission = await Notifications.requestPermissionsAsync({
-    ios: { allowAlert: true, allowSound: true },
+    // The badge counts what needs the person (`badge/AppBadgeFeed`).
+    ios: { allowAlert: true, allowSound: true, allowBadge: true },
   });
   return permission.granted;
 }
