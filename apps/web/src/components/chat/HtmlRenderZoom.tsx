@@ -7,7 +7,6 @@ import {
   wheelHtmlRenderZoom,
   type HtmlRenderContentWidth,
 } from "@ryco/shared/htmlRenderZoom";
-import { MinusIcon, MoveHorizontalIcon, PlusIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -23,6 +22,30 @@ import { Group, GroupSeparator } from "../ui/group";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useHtmlRenderZoomSetting } from "./htmlRenderZoomStore";
+
+/**
+ * Lucide's minus, plus and move-horizontal glyphs, inlined: as lucide imports
+ * they joined the shared icon chunks and regrouped icons the chat route loads.
+ */
+function ZoomGlyph(props: { readonly paths: ReadonlyArray<string> }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className="size-3.5 fill-none stroke-current"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {props.paths.map((d) => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
+  );
+}
+const MINUS_PATHS = ["M5 12h14"];
+const PLUS_PATHS = ["M5 12h14", "M12 5v14"];
+const MOVE_HORIZONTAL_PATHS = ["m18 8 4 4-4 4", "M2 12h20", "m6 8-4 4 4 4"];
 
 /**
  * Zoom of an agent page shown at full size (the expanded view, the page tab):
@@ -195,7 +218,7 @@ export function HtmlRenderZoomControls(props: {
           disabled={props.disabled}
           onClick={zoom.zoomOut}
         >
-          <MinusIcon className="size-3.5" />
+          <ZoomGlyph paths={MINUS_PATHS} />
         </ZoomButton>
         <GroupSeparator />
         <Tooltip>
@@ -224,7 +247,7 @@ export function HtmlRenderZoomControls(props: {
           disabled={props.disabled}
           onClick={zoom.zoomIn}
         >
-          <PlusIcon className="size-3.5" />
+          <ZoomGlyph paths={PLUS_PATHS} />
         </ZoomButton>
       </Group>
       <Tooltip>
@@ -240,7 +263,7 @@ export function HtmlRenderZoomControls(props: {
             />
           }
         >
-          <MoveHorizontalIcon className="size-3.5" />
+          <ZoomGlyph paths={MOVE_HORIZONTAL_PATHS} />
         </TooltipTrigger>
         <TooltipPopup>Fit the page's width</TooltipPopup>
       </Tooltip>

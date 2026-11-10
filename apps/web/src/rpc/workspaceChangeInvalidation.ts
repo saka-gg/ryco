@@ -4,7 +4,6 @@ import { projectScriptCwd } from "@ryco/shared/projectScripts";
 
 import { selectEnvironmentState, useStore } from "~/store";
 import { notifyCheckoutFilesChanged } from "./checkoutFileChanges";
-import { invalidateProjectSearchEntries } from "./projectAtoms";
 import { invalidateCheckpointDiffChanges } from "./providerAtoms";
 
 /** The checkout a thread's composer searches: its worktree, else its project root. */
@@ -22,7 +21,8 @@ export function resolveThreadCheckoutCwd(
 
 /**
  * The web binding of the shared workspace change queue: a flush drops the
- * `@` search, file tree and file reads of the changed checkouts and only the
+ * `@` search, file tree and file reads of the changed checkouts (their lazily
+ * loaded caches listen through `onCheckoutFilesChanged`) and only the
  * checkpoint diffs whose ranges changed.
  */
 export function createWebWorkspaceChangeQueue() {
@@ -31,10 +31,7 @@ export function createWebWorkspaceChangeQueue() {
     // module's imports may still be initializing (they import the runtime).
     resolveThreadCwd: (environmentId, threadId) =>
       resolveThreadCheckoutCwd(environmentId, threadId),
-    invalidateCheckout: (environmentId, cwd) => {
-      invalidateProjectSearchEntries(cwd === null ? { environmentId } : { environmentId, cwd });
-      notifyCheckoutFilesChanged(environmentId, cwd);
-    },
+    invalidateCheckout: (environmentId, cwd) => notifyCheckoutFilesChanged(environmentId, cwd),
     invalidateCheckpointDiffs: (changes) => invalidateCheckpointDiffChanges(changes),
   });
 }
