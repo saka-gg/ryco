@@ -1281,6 +1281,107 @@ describe("VcsStatusBroadcaster", () => {
     }),
   );
 
+  it.effect("shares one summary source per folder across streams and keeps it briefly", () =>
+    Effect.gen(function* () {
+      const summary: VcsRefSummary = {
+        isRepo: true,
+        refName: "feature/badge",
+        isDefaultRef: false,
+        hasPrimaryRemote: true,
+        hasUpstream: true,
+        sourceControlProvider: baseLocalStatus.sourceControlProvider ?? null,
+        pr: null,
+      };
+      const calls = { summary: 0 };
+      const testLayer = VcsStatusBroadcaster.layer.pipe(
+        Layer.provide(
+          Layer.mock(GitWorkflowService.GitWorkflowService)({
+            refSummary: () =>
+              Effect.sync(() => {
+                calls.summary += 1;
+                return summary;
+              }),
+            invalidateLocalStatus: () => Effect.void,
+            invalidateRemoteStatus: () => Effect.void,
+          }),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const settle = Effect.gen(function* () {
+          for (let step = 0; step < 10; step += 1) yield* Effect.yieldNow;
+        });
+        /** A row's summary stream (polling every 30 s, as the setting asks), open until closed. */
+        const openRow = Effect.gen(function* () {
+          const scope = yield* Scope.make();
+          const first = yield* Deferred.make<void>();
+          yield* broadcaster
+            .streamStatus({
+              cwd: "/repo",
+              view: "summary",
+              automaticRemoteRefreshIntervalMs: 30_000,
+            })
+            .pipe(
+              Stream.runForEach(() => Deferred.succeed(first, undefined)),
+              Effect.forkIn(scope),
+            );
+          yield* Deferred.await(first);
+          return scope;
+        });
+
+        // Three rows (two clients, two threads of one checkout) of one folder: one read.
+        const rows = [yield* openRow, yield* openRow, yield* openRow];
+        assert.strictEqual(calls.summary, 1);
+
+        // The slow poll (at least a minute) reads once for all of them, not once per row.
+        yield* TestClock.adjust(Duration.seconds(61));
+        yield* settle;
+        assert.strictEqual(calls.summary, 2);
+
+        // Rows scrolled away and back within the linger find the source running.
+        for (const scope of rows) yield* Scope.close(scope, Exit.void);
+        yield* TestClock.adjust(Duration.seconds(10));
+        const back = yield* openRow;
+        assert.strictEqual(calls.summary, 2);
+        yield* Scope.close(back, Exit.void);
+
+        // Past the linger nothing polls the folder any more.
+        yield* TestClock.adjust(Duration.seconds(31));
+        yield* settle;
+        yield* TestClock.adjust(Duration.minutes(5));
+        yield* settle;
+        assert.strictEqual(calls.summary, 2);
+        const later = yield* openRow;
+        assert.strictEqual(calls.summary, 3);
+
+        yield* Scope.close(later, Exit.void);
+
+        // Without polling, a stream joining a source whose summary is older than a minute
+        // reads it again; a recent one answers at once.
+        const quietRow = Effect.gen(function* () {
+          const scope = yield* Scope.make();
+          const first = yield* Deferred.make<void>();
+          yield* broadcaster.streamStatus({ cwd: "/quiet", view: "summary" }).pipe(
+            Stream.runForEach(() => Deferred.succeed(first, undefined)),
+            Effect.forkIn(scope),
+          );
+          yield* Deferred.await(first);
+          return scope;
+        });
+        const quiet = yield* quietRow;
+        assert.strictEqual(calls.summary, 4);
+        yield* TestClock.adjust(Duration.seconds(30));
+        const recent = yield* quietRow;
+        assert.strictEqual(calls.summary, 4);
+        yield* TestClock.adjust(Duration.seconds(31));
+        const stale = yield* quietRow;
+        assert.strictEqual(calls.summary, 5);
+        for (const scope of [quiet, recent, stale]) yield* Scope.close(scope, Exit.void);
+      }).pipe(Effect.provide(testLayer));
+    }),
+  );
+
   it.effect("delivers a folder's own events however busy other folders are", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,

@@ -239,3 +239,31 @@ describe("involved change requests RPC contracts", () => {
     expect(result.sources[1]?.skippedRows).toBe(2);
   });
 });
+
+describe("sourceControl.getChangeRequestDetail fresh reads", () => {
+  const payload = WsRpcGroup.requests.get(WS_METHODS.sourceControlGetChangeRequestDetail)!
+    .payloadSchema as unknown as Schema.Codec<unknown, unknown>;
+  // The payload an older server (before `fresh`) decodes with.
+  const olderServerPayload = Schema.Struct({
+    cwd: Schema.String,
+    reference: Schema.String,
+    fullContent: Schema.optional(Schema.Boolean),
+    view: Schema.optional(Schema.Literals(["row"])),
+  });
+
+  it("carries an explicit refresh to servers that know it", () => {
+    expect(
+      Schema.decodeUnknownSync(payload)({ cwd: "/repo", reference: "42", fresh: true }),
+    ).toEqual({ cwd: "/repo", reference: "42", fresh: true });
+  });
+
+  it("is dropped, not refused, by an older server; an older client never sends it", () => {
+    expect(
+      Schema.decodeUnknownSync(olderServerPayload)({ cwd: "/repo", reference: "42", fresh: true }),
+    ).toEqual({ cwd: "/repo", reference: "42" });
+    expect(Schema.decodeUnknownSync(payload)({ cwd: "/repo", reference: "42" })).toEqual({
+      cwd: "/repo",
+      reference: "42",
+    });
+  });
+});

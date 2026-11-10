@@ -716,10 +716,12 @@ describe("mutations refresh exactly what they change", () => {
     await flush();
 
     expect(readCounts()).toEqual({ ...NO_READS, detail: 1, activity: 1 });
+    // The detail on screen is read again in full, not from a server-side share.
     expect(client.getChangeRequestDetail).toHaveBeenCalledWith({
       cwd: CWD,
       reference: "7",
       fullContent: true,
+      fresh: true,
     });
     release();
   });

@@ -688,3 +688,27 @@ export function decodeGitHubLinkStatesJson(raw: string): Result.Result<GitHubLin
   }
   return Result.succeed({ pullRequests, issues });
 }
+
+/**
+ * The list version `GET repos/{owner}/{name}/pulls?state=all&sort=updated&direction=desc&per_page=1`
+ * answers: the most recently updated pull request's number and update time (`empty` for a
+ * repository without one). Opening a pull request or changing anything the change request
+ * index holds (title, state, draft, branches, a push) moves it. Null for a body that is not
+ * that list.
+ */
+export function decodeGitHubPullRequestListVersion(raw: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  if (parsed.length === 0) return "empty";
+  const first: unknown = parsed[0];
+  if (typeof first !== "object" || first === null) return null;
+  const { number, updated_at: updatedAt } = first as Record<string, unknown>;
+  return typeof number === "number" && typeof updatedAt === "string" && updatedAt.length > 0
+    ? `${number}@${updatedAt}`
+    : null;
+}

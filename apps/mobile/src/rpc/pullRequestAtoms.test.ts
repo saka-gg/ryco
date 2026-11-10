@@ -20,6 +20,7 @@ import {
   pullRequestRepositoryLabelsQuery,
   pullRequestRepositoryPeopleQuery,
   pullRequestDetailQuery,
+  requestFreshPullRequestDetail,
   pullRequestDiffQuery,
   pullRequestListQuery,
   PullRequestNodeOfflineError,
@@ -120,6 +121,25 @@ describe("pull request reads", () => {
     expect(
       pullRequestDetailQuery.getSnapshot(pullRequestDetailQuery.keyOf(input)).data?.number,
     ).toBe(7);
+    release();
+  });
+
+  it("asks the node to read the host now only on a pull to refresh", async () => {
+    const getChangeRequestDetail = vi.fn(async (_input: object) => ({ ...row(7), body: "" }));
+    setSourceControl(ENV, { getChangeRequestDetail });
+    const input = { environmentId: ENV, cwd: CWD, number: 7 };
+    const release = pullRequestDetailQuery.watch(input);
+    await flush();
+    const key = pullRequestDetailQuery.keyOf(input);
+    requestFreshPullRequestDetail(input);
+    await pullRequestDetailQuery.refreshAsync(key);
+    // Reads that are not a pull to refresh (a later refresh) may be answered from a share.
+    await pullRequestDetailQuery.refreshAsync(key);
+    expect(getChangeRequestDetail.mock.calls.map(([call]) => call)).toEqual([
+      { cwd: CWD, reference: "7", fullContent: true },
+      { cwd: CWD, reference: "7", fullContent: true, fresh: true },
+      { cwd: CWD, reference: "7", fullContent: true },
+    ]);
     release();
   });
 

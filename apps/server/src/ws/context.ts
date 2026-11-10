@@ -595,6 +595,15 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       readonly cwd: string;
       readonly kind: "pr" | "issue";
       readonly reference: string;
+      /**
+       * The pull request's state as the read that triggers this refresh just got it from the
+       * forge (a full detail read): its links then need no forge call of their own.
+       */
+      readonly reported?: {
+        readonly state: KnownPullRequestState["state"];
+        readonly isDraft: boolean;
+        readonly terminalAt: string | null;
+      };
     }) =>
       Effect.gen(function* () {
         const parsed = Number.parseInt(input.reference, 10);
@@ -607,10 +616,26 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           number: parsed,
         });
         if (linked.length === 0) return;
+        const reported = input.kind === "pr" ? input.reported : undefined;
+        const known =
+          reported === undefined
+            ? {}
+            : {
+                knownPullRequestStates: (cwd: string) =>
+                  knownPullRequestStatesFor(undefined)(cwd).pipe(
+                    Effect.map((states) =>
+                      new Map(states).set(parsed, {
+                        state: reported.state,
+                        isDraft: reported.isDraft,
+                        reported: { terminalAt: reported.terminalAt },
+                      }),
+                    ),
+                  ),
+              };
         yield* Effect.forEach(
           linked,
           (worktreeId) =>
-            refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest }).pipe(
+            refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest, ...known }).pipe(
               ignoreCauseLogOnceEvery(sourceControlRefreshFailureLog(worktreeId)),
             ),
           { concurrency: LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY, discard: true },

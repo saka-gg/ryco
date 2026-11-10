@@ -1459,6 +1459,12 @@ export const WsSourceControlGetChangeRequestDetailRpc = Rpc.make(
        * other row reads of the same repository. Older servers ignore it and read fresh.
        */
       view: Schema.optional(Schema.Literals(["row"])),
+      /**
+       * Read from the host now (an explicit refresh). Without it the server may answer a
+       * focused read from a detail a few seconds old that other surfaces and clients share,
+       * or one its fingerprint shows unchanged. Older servers ignore it and read fresh.
+       */
+      fresh: Schema.optional(Schema.Boolean),
     }),
     success: SourceControlChangeRequestDetail,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),

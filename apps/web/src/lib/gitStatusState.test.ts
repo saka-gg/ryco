@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import { resetAppAtomRegistryForTests } from "@ryco/client-runtime/rpc";
 import {
+  GIT_STATUS_HIDDEN_PAUSE_MS,
+  GIT_STATUS_UNWATCH_LINGER_MS,
   getGitStatusSnapshot,
   readLocalGitRefName,
   resetGitStatusStateForTests,
@@ -231,8 +233,78 @@ describe("gitStatusState", () => {
     releaseA();
     expect(gitStatusListeners.size).toBe(1);
 
-    releaseB();
-    expect(gitStatusListeners.size).toBe(0);
+    vi.useFakeTimers();
+    try {
+      releaseB();
+      // Kept a while for rows scrolled out and back, then closed.
+      expect(gitStatusListeners.size).toBe(1);
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
+      expect(gitStatusListeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reuses a released stream watched again within the linger", () => {
+    vi.useFakeTimers();
+    try {
+      const release = watchGitStatus(TARGET, gitClient, { view: "summary" });
+      release();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS - 1);
+      const again = watchGitStatus(TARGET, gitClient, { view: "summary" });
+      expect(gitClient.onStatus).toHaveBeenCalledOnce();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
+      expect(gitStatusListeners.size).toBe(1);
+      again();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
+      expect(gitStatusListeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes status streams while the window stays hidden and reopens them when shown", () => {
+    const documentEvents = new EventTarget();
+    let visibilityState: "visible" | "hidden" = "visible";
+    vi.stubGlobal("window", new EventTarget());
+    vi.stubGlobal(
+      "document",
+      Object.defineProperty(documentEvents, "visibilityState", { get: () => visibilityState }),
+    );
+    vi.useFakeTimers();
+    try {
+      const release = watchGitStatus(TARGET, gitClient, { view: "summary" });
+      expect(gitStatusListeners.size).toBe(1);
+      emitGitStatus(BASE_STATUS);
+
+      // A short switch away keeps it.
+      visibilityState = "hidden";
+      documentEvents.dispatchEvent(new Event("visibilitychange"));
+      vi.advanceTimersByTime(GIT_STATUS_HIDDEN_PAUSE_MS - 1);
+      expect(gitStatusListeners.size).toBe(1);
+      visibilityState = "visible";
+      documentEvents.dispatchEvent(new Event("visibilitychange"));
+      expect(gitClient.onStatus).toHaveBeenCalledOnce();
+
+      // Hidden for a minute: closed, the last status still shown.
+      visibilityState = "hidden";
+      documentEvents.dispatchEvent(new Event("visibilitychange"));
+      vi.advanceTimersByTime(GIT_STATUS_HIDDEN_PAUSE_MS);
+      expect(gitStatusListeners.size).toBe(0);
+      expect(getGitStatusSnapshot(TARGET, "summary").data).toEqual(BASE_STATUS);
+
+      // Shown again: reopened.
+      visibilityState = "visible";
+      documentEvents.dispatchEvent(new Event("visibilitychange"));
+      expect(gitStatusListeners.size).toBe(1);
+      expect(gitClient.onStatus).toHaveBeenCalledTimes(2);
+      release();
+    } finally {
+      // Removes the lifecycle listener while the stubbed document still exists.
+      resetGitStatusStateForTests();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("watches the summary view apart from full status of the same folder", () => {
@@ -268,11 +340,17 @@ describe("gitStatusState", () => {
     expect(getGitStatusSnapshot(TARGET).data).toEqual(BASE_STATUS);
     expect(getGitStatusSnapshot(TARGET, "summary").data).toEqual(summary);
 
-    releaseSummaryA();
-    releaseSummaryB();
-    releaseFull();
-    expect(summaryListeners.size).toBe(0);
-    expect(fullListeners.size).toBe(0);
+    vi.useFakeTimers();
+    try {
+      releaseSummaryA();
+      releaseSummaryB();
+      releaseFull();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
+      expect(summaryListeners.size).toBe(0);
+      expect(fullListeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("marks data whose remote half the stream has not delivered yet", () => {
@@ -557,9 +635,12 @@ describe("readLocalGitRefName", () => {
   });
 
   it("reads an unwatched cwd from a short-lived stream snapshot, ignoring stale data", async () => {
+    vi.useFakeTimers();
     const earlier = watchGitStatus(TARGET, gitClient);
     emitGitStatus({ ...BASE_STATUS, refName: "stale" });
     earlier();
+    vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
+    vi.useRealTimers();
 
     const read = readLocalGitRefName(TARGET, { client: gitClient });
     expect(gitStatusListeners.size).toBe(1);

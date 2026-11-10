@@ -1044,6 +1044,10 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
         .getPullRequestActivity({ cwd: input.cwd, reference: input.reference })
         .pipe(Effect.mapError((error) => providerError("getChangeRequestActivity", error))),
     // The pull request's own URL names the repository and host, whichever checkout reads it.
+    getChangeRequestListVersion: (input) =>
+      github.getPullRequestListVersion === undefined
+        ? Effect.succeed(null)
+        : github.getPullRequestListVersion({ cwd: input.cwd }),
     getChangeRequestWatchFingerprint: (input) => {
       const identity = parseGitHubRepositoryIdentityFromUrl(input.url);
       if (!identity) return Effect.succeed(null);

@@ -143,6 +143,16 @@ function pullRequestKey(input: PullRequestInput): string {
   return `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.number}`;
 }
 
+// Pull requests whose next detail read is a pull to refresh: it asks the node to read the
+// host now instead of answering from a detail other surfaces share or one its fingerprint
+// shows unchanged (older nodes ignore the field and always read in full).
+const freshDetailKeys = new Set<string>();
+
+/** The next read of this pull request's detail is an explicit refresh (pull to refresh). */
+export function requestFreshPullRequestDetail(input: PullRequestInput): void {
+  if (pullRequestEnabled(input)) freshDetailKeys.add(pullRequestKey(input));
+}
+
 export const pullRequestDetailQuery = pullRequestCache.defineQuery<
   PullRequestInput,
   SourceControlChangeRequestDetail
@@ -154,14 +164,17 @@ export const pullRequestDetailQuery = pullRequestCache.defineQuery<
   buildKey: pullRequestKey,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
   persist: SAVED_DETAIL,
-  run: (input) =>
-    runWithRetry(() =>
+  run: (input) => {
+    const fresh = freshDetailKeys.delete(pullRequestKey(input));
+    return runWithRetry(() =>
       sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDetail({
         cwd: input.cwd as string,
         reference: String(input.number),
         fullContent: true,
+        ...(fresh ? { fresh: true } : {}),
       }),
-    ),
+    );
+  },
 });
 
 export const pullRequestActivityQuery = pullRequestCache.defineQuery<
@@ -323,4 +336,5 @@ export function clearPullRequestCache(environmentId: EnvironmentId): void {
 
 export function resetPullRequestAtomsForTests(): void {
   pullRequestCache.resetForTests();
+  freshDetailKeys.clear();
 }
