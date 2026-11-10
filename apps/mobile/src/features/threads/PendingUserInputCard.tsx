@@ -38,6 +38,8 @@ export function PendingUserInputCard(props: {
   ) => Promise<void>;
   /** Cached/degraded threads render the prompt but cannot answer it. */
   readonly disabled?: boolean;
+  /** A question a background alert described, until the live detail loads (`alertExcerpts.ts`). */
+  readonly fromAlert?: { readonly partial: boolean };
 }) {
   const draftKey = questionDraftKey({
     environmentId: props.environmentId,
@@ -75,6 +77,7 @@ export function PendingUserInputCard(props: {
     answers,
     disabled: props.disabled === true,
     submitting,
+    fromAlert: props.fromAlert,
   });
 
   const respond = (submittedAnswers: Record<string, string | string[]>) =>

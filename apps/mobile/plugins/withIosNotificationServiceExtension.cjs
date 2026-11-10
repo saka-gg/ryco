@@ -7,6 +7,7 @@ const {
   withXcodeProject,
 } = require("expo/config-plugins");
 
+const { addWidgetsAppGroup } = require("./withIosWidgetExtension.cjs");
 const {
   addAppExtensionTarget,
   extensionInfoPlist,
@@ -20,8 +21,9 @@ const {
  * Background push alerts (`docs/push-alerts.md`) need a Notification Service
  * Extension: the Hub sends generic text plus a payload sealed to this device,
  * and only the extension can open it. This adds the `RycoNotificationService`
- * target and the keychain group the app and the extension share for the push
- * key (`modules/ryco-push`).
+ * target, the keychain group the app and the extension share for the push
+ * key (`modules/ryco-push`), and the App Group where the extension leaves an
+ * approval's or question's excerpt for the app (`AlertExcerptStore.swift`).
  *
  * Personal Team builds cannot sign an extension or a shared keychain group, so
  * app.config.ts leaves this plugin out for them; without the group the push
@@ -30,6 +32,9 @@ const {
 const TARGET_NAME = "RycoNotificationService";
 const ACCESS_GROUP_INFO_KEY = "RycoPushKeychainGroup";
 const APP_SCHEME_INFO_KEY = "RycoAppScheme";
+/** Names the App Group where the extension leaves alert excerpts for the app (`AlertExcerptStore`). */
+const APP_GROUP_INFO_KEY = "RycoAppGroup";
+const APP_GROUPS_ENTITLEMENT = "com.apple.security.application-groups";
 const MODULE_DIR = path.join(__dirname, "..", "modules", "ryco-push");
 /** Sources compiled into the extension; `PushKeyStore.swift` is shared with the app's module. */
 const EXTENSION_SOURCES = [
@@ -37,6 +42,7 @@ const EXTENSION_SOURCES = [
   path.join(MODULE_DIR, "extension", "PushAlertOpener.swift"),
   path.join(MODULE_DIR, "extension", "PushSealOpener.swift"),
   path.join(MODULE_DIR, "ios", "PushKeyStore.swift"),
+  path.join(MODULE_DIR, "ios", "AlertExcerptStore.swift"),
 ];
 const ENTITLEMENTS_FILE = `${TARGET_NAME}.entitlements`;
 
@@ -47,6 +53,11 @@ function requireBundleIdentifier(config) {
 /** The extension's bundle id, under the app's. */
 function notificationServiceBundleIdentifier(bundleIdentifier) {
   return `${bundleIdentifier}.${TARGET_NAME}`;
+}
+
+/** The App Group the app shares with its extensions (also the widgets' and sharing's). */
+function appGroup(bundleIdentifier) {
+  return `group.${bundleIdentifier}`;
 }
 
 /** The keychain group the app and its extension share for the push key. */
@@ -82,12 +93,16 @@ function notificationServiceInfoPlist(config) {
       NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).NotificationService",
     },
     [ACCESS_GROUP_INFO_KEY]: pushKeychainGroup(bundleIdentifier),
+    [APP_GROUP_INFO_KEY]: appGroup(bundleIdentifier),
     ...(scheme === null ? {} : { [APP_SCHEME_INFO_KEY]: scheme }),
   });
 }
 
 function notificationServiceEntitlements(bundleIdentifier) {
-  return { "keychain-access-groups": [pushKeychainGroup(bundleIdentifier)] };
+  return {
+    "keychain-access-groups": [pushKeychainGroup(bundleIdentifier)],
+    [APP_GROUPS_ENTITLEMENT]: [appGroup(bundleIdentifier)],
+  };
 }
 
 /**
@@ -125,11 +140,15 @@ const withIosNotificationServiceExtension = (config) => {
     entitlements: notificationServiceEntitlements(bundleIdentifier),
   });
   config = withEntitlementsPlist(config, (modConfig) => {
-    modConfig.modResults = addPushKeychainGroup(modConfig.modResults, bundleIdentifier);
+    modConfig.modResults = addWidgetsAppGroup(
+      addPushKeychainGroup(modConfig.modResults, bundleIdentifier),
+      bundleIdentifier,
+    );
     return modConfig;
   });
   config = withInfoPlist(config, (modConfig) => {
     modConfig.modResults[ACCESS_GROUP_INFO_KEY] = pushKeychainGroup(bundleIdentifier);
+    modConfig.modResults[APP_GROUP_INFO_KEY] = appGroup(bundleIdentifier);
     return modConfig;
   });
   config = withDangerousMod(config, [

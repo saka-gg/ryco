@@ -1,59 +1,18 @@
 /**
  * Push alerts beyond the device's own registration (`docs/push-alerts.md`):
- * the opened payload, the node's attention signal to its Hub, and the
- * device's APNs registration with the Hub.
+ * the node's attention signal to its Hub, the device's APNs registration with
+ * the Hub, and Live Activity counts. The opened payload itself is in
+ * `pushAlert.ts` (`@ryco/contracts/push-alert`), which the web app never loads.
  */
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { NodeHubProof } from "./nodeProof.ts";
-import { Base64Url, PushAlertKind } from "./push.ts";
+import { Base64Url } from "./push.ts";
 import { NativeE2eeEnrollmentId } from "./relay.ts";
 
 const SafeCounter = Schema.Number.check(
   Schema.makeFilter((value) => Number.isSafeInteger(value) && value >= 0),
 );
-
-// --- The sealed payload ---------------------------------------------------------
-
-/** Longest thread title a sealed payload carries, in UTF-16 code units. */
-export const PUSH_ALERT_TITLE_MAX_LENGTH = 120;
-/** Longest approval request id a sealed payload carries; a longer one is left out. */
-export const PUSH_ALERT_REQUEST_ID_MAX_LENGTH = 160;
-
-/**
- * The opened payload. Short keys keep the sealed blob small: APNs caps the
- * whole notification at 4 KB, and the Hub adds its own fields around it.
- */
-export const PushAlertPlaintext = Schema.Struct({
-  v: Schema.Literal(1),
-  k: PushAlertKind,
-  /** Thread title, at most {@link PUSH_ALERT_TITLE_MAX_LENGTH}. */
-  t: Schema.String.check(Schema.isMaxLength(PUSH_ALERT_TITLE_MAX_LENGTH)),
-  /** The node's Hub environment id, the id the device knows the node by. */
-  e: TrimmedNonEmptyString,
-  th: TrimmedNonEmptyString,
-  tu: Schema.NullOr(TrimmedNonEmptyString),
-  /**
-   * An approval alert's request: an Approve or Deny tapped on the alert answers this approval
-   * only. Left out of other kinds, from older nodes, and when longer than
-   * {@link PUSH_ALERT_REQUEST_ID_MAX_LENGTH}.
-   */
-  rq: Schema.optionalKey(
-    TrimmedNonEmptyString.check(Schema.isMaxLength(PUSH_ALERT_REQUEST_ID_MAX_LENGTH)),
-  ),
-  /** The signal's sequence; also bound into the seal's associated data. */
-  q: SafeCounter,
-  /** When the node sealed it, epoch milliseconds. */
-  at: SafeCounter,
-  /**
-   * How many of this node's threads need the person when it was sealed (the Inbox's "needs you",
-   * the Live Activity's count): the device's extension sets the app icon badge from it, summed
-   * with its other machines. Left out by older nodes; older devices ignore it.
-   */
-  b: Schema.optionalKey(SafeCounter),
-});
-export type PushAlertPlaintext = typeof PushAlertPlaintext.Type;
 
 // --- Node → Hub: `POST /api/node/attention/signal` --------------------------------
 
@@ -61,8 +20,18 @@ export const PUSH_ATTENTION_SIGNAL_PATH = "/api/node/attention/signal";
 export const PUSH_ATTENTION_MAX_DELIVERIES = 32;
 /** base64url of 1 version byte, a 32-byte key, a 16-byte tag and some plaintext. */
 export const PUSH_SEALED_MIN_LENGTH = 66;
-/** base64url of a 1,024-byte blob. */
-export const PUSH_SEALED_MAX_LENGTH = 1_366;
+/** The bytes a seal adds to its plaintext: the version byte, the ephemeral key and the tag. */
+export const PUSH_SEALED_OVERHEAD_BYTES = 49;
+/**
+ * base64url of a 1,024-byte blob: what every Hub takes. A node seals to this until the Hub's
+ * answer names a larger {@link PushAttentionSignalResult.fields.sealedMaxLength}.
+ */
+export const PUSH_SEALED_LEGACY_MAX_LENGTH = 1_366;
+/**
+ * base64url of a 2,048-byte blob: room for an excerpt. With the Hub's own fields the APNs
+ * payload stays near 3 KB, well under its 4 KB limit.
+ */
+export const PUSH_SEALED_MAX_LENGTH = 2_731;
 
 /** One device's sealed alert. The Hub routes it by enrollment and never opens it. */
 export const PushAttentionDelivery = Schema.Struct({
@@ -104,6 +73,11 @@ export type PushAttentionDeliveryStatus = typeof PushAttentionDeliveryStatus.Typ
 export const PushAttentionSignalResult = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   sequence: SafeCounter,
+  /**
+   * The longest `sealed` this Hub takes, between {@link PUSH_SEALED_LEGACY_MAX_LENGTH} and
+   * {@link PUSH_SEALED_MAX_LENGTH}. Absent from older Hubs, which take the legacy length only.
+   */
+  sealedMaxLength: Schema.optionalKey(SafeCounter),
   results: Schema.Array(
     Schema.Struct({
       enrollmentId: NativeE2eeEnrollmentId,
@@ -142,6 +116,11 @@ export const NativePushCapability = Schema.Struct({
    * (`docs/live-activity-push.md`). Absent from Hubs without them.
    */
   liveActivities: Schema.optional(Schema.Boolean),
+  /**
+   * The Hub also takes push-to-start tokens (iOS 17.2+) and starts a card when a node asks
+   * (`docs/live-activity-push.md`). Absent from Hubs without it.
+   */
+  liveActivityStart: Schema.optional(Schema.Boolean),
 });
 export type NativePushCapability = typeof NativePushCapability.Type;
 
@@ -160,6 +139,14 @@ export const NativePushRegistrationInput = Schema.Struct({
    * Hub whose capability says `liveActivities`; a registration without it drops the earlier one.
    */
   liveActivityToken: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64,512}$/u))),
+  /**
+   * The app's push-to-start token, hex: only while the person turned on starting a card when a
+   * task begins, and only to a Hub whose capability says `liveActivityStart`. A registration
+   * without it drops the earlier one.
+   */
+  liveActivityStartToken: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[0-9a-f]{64,512}$/u)),
+  ),
 });
 export type NativePushRegistrationInput = typeof NativePushRegistrationInput.Type;
 
@@ -200,6 +187,12 @@ export type PushActivityCounts = typeof PushActivityCounts.Type;
 export const PushActivityEntry = Schema.Struct({
   enrollmentId: NativeE2eeEnrollmentId,
   counts: PushActivityCounts,
+  /**
+   * A turn began on this node while, as far as it knows, the device shows no card: the Hub may
+   * start one with these counts when the device registered a push-to-start token. Older Hubs
+   * ignore it.
+   */
+  start: Schema.optionalKey(Schema.Literal(true)),
 });
 export type PushActivityEntry = typeof PushActivityEntry.Type;
 
@@ -217,11 +210,14 @@ export type PushActivitySignalInput = typeof PushActivitySignalInput.Type;
 
 /**
  * What the Hub did with one entry: `accepted` (it holds these counts for the device and sends
- * the sum when it changes), `no-token` (the device shows no card that takes pushes; nothing is
- * kept), `not-authorized` (the node forgets the device), `rate-limited` (try again later).
+ * the sum when it changes), `started` (it asked iOS to start a card with them, and holds them),
+ * `no-token` (the device shows no card that takes pushes; nothing is kept), `not-authorized`
+ * (the node forgets the device), `rate-limited` (try again later). Only an entry with `start`
+ * can be answered `started`.
  */
 export const PushActivityEntryStatus = Schema.Literals([
   "accepted",
+  "started",
   "no-token",
   "not-authorized",
   "rate-limited",

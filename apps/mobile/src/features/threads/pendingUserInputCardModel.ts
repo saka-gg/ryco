@@ -26,7 +26,24 @@ export function pendingUserInputCardView(input: {
   readonly answers: Readonly<Record<string, string | string[]>> | null;
   readonly disabled: boolean;
   readonly submitting: boolean;
+  /**
+   * The card stands for a question a background alert described (`alertExcerpts.ts`) until the
+   * thread's live detail loads: choices can be made and stay in the draft, sending waits.
+   * `partial`: the alert left questions or options out.
+   */
+  readonly fromAlert?: { readonly partial: boolean } | undefined;
 }): PendingUserInputCardView {
+  if (input.fromAlert !== undefined) {
+    return {
+      title: "Input needed",
+      hint: input.fromAlert.partial
+        ? "Some questions or options did not fit the alert. They show once Ryco reaches this machine."
+        : "Ryco is reaching this machine. Your choices stay here, and Submit works once it is connected.",
+      editable: !input.disabled,
+      canSubmit: false,
+      canDismiss: false,
+    };
+  }
   const editable =
     !input.disabled &&
     !input.submitting &&

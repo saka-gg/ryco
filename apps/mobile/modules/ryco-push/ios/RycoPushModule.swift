@@ -39,6 +39,23 @@ public final class RycoPushModule: Module {
 
     AsyncFunction("deleteKey") { () -> Void in
       try Self.requireStore().delete()
+      // What the extension saved from alerts goes with the key that opened them.
+      AlertExcerptStore.fromMainBundle()?.removeAll()
+    }
+
+    /// The excerpt record the extension saved for a thread's latest approval or question alert
+    /// (`AlertExcerptStore`), as JSON, or nil. The app checks its age and shape.
+    AsyncFunction("readAlertExcerpt") { (environmentId: String, threadId: String) -> String? in
+      guard
+        let data = AlertExcerptStore.fromMainBundle()?.read(
+          environmentId: environmentId, threadId: threadId)
+      else { return nil }
+      return String(data: data, encoding: .utf8)
+    }
+
+    /// Forgets a thread's excerpt once the thread's own detail shows its requests.
+    AsyncFunction("removeAlertExcerpt") { (environmentId: String, threadId: String) -> Void in
+      AlertExcerptStore.fromMainBundle()?.remove(environmentId: environmentId, threadId: threadId)
     }
 
     // The app icon badge: each machine's "needs you" count, the ones the app sees live written

@@ -20,6 +20,12 @@ struct PushAlert: Equatable {
   let threadIdentifier: String
   /// The thread's deep link, when the app's scheme is known.
   let url: String?
+  /// What the person is asked, when the node sent an excerpt: the alert's body line.
+  let excerptLine: String?
+  /// The excerpt as the app reads it (`AlertExcerptStore`): only its known keys, as JSON.
+  let excerpt: Data?
+  /// When the node sealed it, epoch ms.
+  let sealedAt: Int64
   /// How many of the sending machine's threads need the person (`b`); nil from older nodes.
   let badgeCount: Int64?
 }
@@ -39,6 +45,14 @@ enum PushAlertOpener {
   private static let maxTitleLength = 120
   /// `PUSH_ALERT_REQUEST_ID_MAX_LENGTH`; a longer id is left out.
   private static let maxRequestIdLength = 160
+  /// `PUSH_ALERT_EXCERPT_MAX_BYTES`; a larger excerpt is not one a node sends.
+  private static let maxExcerptBytes = 1_024
+  /// The approval card's words for each request kind (`PendingApprovalCard`).
+  static let requestKindLabels: [String: String] = [
+    "command": "Run command",
+    "file-read": "Read file",
+    "file-change": "Change file",
+  ]
 
   /// One line per kind. Must equal `THREAD_ALERT_COPY` in
   /// `@ryco/client-runtime/state/settings`; `pushSealOpener.test.ts` checks it.
@@ -127,6 +141,7 @@ enum PushAlertOpener {
     else { return nil }
     let nowMilliseconds = Int64((now.timeIntervalSince1970 * 1000).rounded(.down))
     guard nowMilliseconds - sealedAt <= maxAgeMilliseconds else { return nil }
+    let excerpt = Self.excerpt(kind: kind, value: payload["x"])
 
     return PushAlert(
       kind: kind,
@@ -141,8 +156,76 @@ enum PushAlertOpener {
       categoryIdentifier: category,
       threadIdentifier: "\(envelope.environmentId)/\(threadId)",
       url: appScheme.flatMap { threadLink(scheme: $0, environmentId: envelope.environmentId, threadId: threadId) },
+      excerptLine: excerpt?.line,
+      excerpt: excerpt?.json,
+      sealedAt: sealedAt,
       badgeCount: exactInteger(payload["b"])
     )
+  }
+
+  /// An approval's or question's excerpt (`x`), checked key by key; anything else is ignored, so
+  /// the alert shows as it did before excerpts. Older builds never read `x` at all.
+  static func excerpt(kind: String, value: Any?) -> (line: String, json: Data)? {
+    guard let value = value as? [String: Any] else { return nil }
+    var clean: [String: Any]
+    let line: String
+    if kind == "approval", let approval = value["a"] as? [String: Any] {
+      guard let requestKind = approval["k"] as? String, let label = requestKindLabels[requestKind]
+      else { return nil }
+      var fields: [String: Any] = ["k": requestKind]
+      if let detail = approval["d"] { guard let text = detail as? String else { return nil }; fields["d"] = text }
+      if let reason = approval["r"] { guard let text = reason as? String else { return nil }; fields["r"] = text }
+      clean = ["a": fields]
+      let detail = (fields["d"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      line = detail.isEmpty ? label : "\(label): \(detail)"
+    } else if kind == "input", let input = value["u"] as? [String: Any] {
+      guard let requestId = nonEmptyString(input["rq"]), let rawQuestions = input["qs"] as? [Any],
+        !rawQuestions.isEmpty
+      else { return nil }
+      var questions: [[String: Any]] = []
+      for raw in rawQuestions {
+        guard let question = raw as? [String: Any], let id = nonEmptyString(question["id"]),
+          let text = question["q"] as? String
+        else { return nil }
+        var fields: [String: Any] = ["id": id, "q": text]
+        if let header = question["h"] { guard let text = header as? String else { return nil }; fields["h"] = text }
+        if let options = question["o"] {
+          guard let labels = options as? [String] else { return nil }
+          fields["o"] = labels
+        }
+        if let multi = question["m"] {
+          guard let flag = multi as? Bool, flag else { return nil }
+          fields["m"] = true
+        }
+        questions.append(fields)
+      }
+      var fields: [String: Any] = ["rq": requestId, "qs": questions]
+      if let event = input["ev"] { guard let text = nonEmptyString(event) else { return nil }; fields["ev"] = text }
+      if let cut = input["c"] { guard let flag = cut as? Bool, flag else { return nil }; fields["c"] = true }
+      clean = ["u": fields]
+      line = (questions[0]["q"] as? String) ?? ""
+    } else {
+      return nil
+    }
+    guard
+      let json = try? JSONSerialization.data(withJSONObject: clean, options: [.sortedKeys]),
+      json.count <= maxExcerptBytes * 2
+    else { return nil }
+    return (line, json)
+  }
+
+  /// The record the app reads for the thread (`AlertExcerptStore`), or nil without an excerpt.
+  static func excerptRecord(_ alert: PushAlert) -> Data? {
+    guard let excerpt = alert.excerpt,
+      let value = try? JSONSerialization.jsonObject(with: excerpt)
+    else { return nil }
+    var record: [String: Any] = [
+      "v": 1, "e": alert.environmentId, "th": alert.threadId, "k": alert.kind,
+      "at": NSNumber(value: alert.sealedAt), "x": value,
+    ]
+    if let turnId = alert.turnId { record["tu"] = turnId }
+    if let requestId = alert.requestId { record["rq"] = requestId }
+    return try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
   }
 
   /// The app icon badge once one machine reported its count: every machine's last known count

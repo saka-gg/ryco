@@ -23,6 +23,11 @@ const PREFERENCES_KEY = "ryco.preferences";
 export interface Preferences {
   readonly favorites?: ReadonlyArray<ModelFavorite>;
   readonly liveActivitiesEnabled?: boolean;
+  /**
+   * The Hub may start the Live Activity by push when a task begins while Ryco is closed
+   * (iOS 17.2+, `docs/live-activity-push.md`). Unset means off.
+   */
+  readonly liveActivityStartByPush?: boolean;
   readonly baseFontSize?: number;
   readonly terminalFontSize?: number | null;
   readonly markdownFontSize?: number;
@@ -65,6 +70,7 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   const preferences: {
     favorites?: ReadonlyArray<ModelFavorite>;
     liveActivitiesEnabled?: boolean;
+    liveActivityStartByPush?: boolean;
     baseFontSize?: number;
     terminalFontSize?: number | null;
     markdownFontSize?: number;
@@ -86,6 +92,9 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
     preferences.liveActivitiesEnabled = parsed.liveActivitiesEnabled;
+  }
+  if (typeof parsed.liveActivityStartByPush === "boolean") {
+    preferences.liveActivityStartByPush = parsed.liveActivityStartByPush;
   }
   if (typeof parsed.baseFontSize === "number") preferences.baseFontSize = parsed.baseFontSize;
   if (typeof parsed.terminalFontSize === "number" || parsed.terminalFontSize === null) {

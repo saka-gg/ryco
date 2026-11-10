@@ -299,6 +299,7 @@ import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { useNotificationThreadAction } from "../../notifications/useNotificationThreadAction";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import { useAlertExcerptPrompts } from "../../notifications/push/useAlertExcerptPrompts";
 import {
   resolveOptionalAnswerRoute,
   sendOptionalAnswerAsMessage,
@@ -970,6 +971,19 @@ export function ThreadDetailScreen(props: {
   const answerableApprovals = threadLiveDetailLoaded ? pendingApprovals : NO_PENDING_APPROVALS;
   const pendingUserInputs = built?.viewModel.pendingUserInputs ?? [];
   const optionalUserInputs = built?.viewModel.optionalUserInputs ?? [];
+  // What a background alert described, until the live detail loads (`alertExcerpts.ts`).
+  const alertExcerpt = useAlertExcerptPrompts({
+    environmentId,
+    threadId,
+    liveLoaded: threadLiveDetailLoaded,
+  });
+  // A saved or live card for the same request wins: the alert's card never shows twice.
+  const alertApprovals = alertExcerpt.approvals.filter(
+    (approval) => !pendingApprovals.some((shown) => shown.requestId === approval.requestId),
+  );
+  const alertUserInputs = alertExcerpt.userInputs.filter(
+    (userInput) => !pendingUserInputs.some((shown) => shown.requestId === userInput.requestId),
+  );
   // When each pending approval was first on screen: a send declines only approvals shown long
   // enough to have been read.
   const approvalSightingsRef = useRef<ApprovalSightings>(new Map());
@@ -2953,6 +2967,8 @@ export function ThreadDetailScreen(props: {
   const errorBannerMessage =
     failedNotice !== null && visibleError === failedNotice.detail ? null : visibleError;
   const hasPrompts =
+    alertApprovals.length > 0 ||
+    alertUserInputs.length > 0 ||
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
@@ -3969,6 +3985,24 @@ export function ThreadDetailScreen(props: {
               threadId={threadId}
               approval={approval}
               disabled={promptsDisabled}
+            />
+          ))}
+          {alertApprovals.map((approval) => (
+            <PendingApprovalCard
+              key={`alert:${approval.requestId}`}
+              environmentId={environmentId}
+              threadId={threadId}
+              approval={approval}
+              fromAlert
+            />
+          ))}
+          {alertUserInputs.map((userInput) => (
+            <PendingUserInputCard
+              key={`alert:${userInput.requestId}`}
+              environmentId={environmentId}
+              threadId={threadId}
+              userInput={userInput}
+              fromAlert={{ partial: alertExcerpt.partial }}
             />
           ))}
           {[...pendingUserInputs, ...optionalUserInputs].map((userInput) => (

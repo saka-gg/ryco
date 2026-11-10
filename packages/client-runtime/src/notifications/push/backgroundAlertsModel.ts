@@ -106,6 +106,11 @@ export interface BackgroundAlertsSnapshot {
    * Live Activity is on: a new card asks for an update token (`docs/live-activity-push.md`).
    */
   readonly liveActivityUpdates: boolean;
+  /**
+   * The Hub also starts a card by push when a task begins (iOS 17.2+), so the setting for it can
+   * be offered; it holds with `liveActivityUpdates`.
+   */
+  readonly liveActivityStart: boolean;
 }
 
 export function initialBackgroundAlertsSnapshot(
@@ -118,6 +123,7 @@ export function initialBackgroundAlertsSnapshot(
     device: "idle",
     environments: new Map(),
     liveActivityUpdates: false,
+    liveActivityStart: false,
   };
 }
 

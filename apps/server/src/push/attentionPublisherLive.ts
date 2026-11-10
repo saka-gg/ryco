@@ -12,6 +12,7 @@ import { mapThreadShellSummary, mapWorktreeShellSummary } from "@ryco/client-run
 import type { EnvironmentId, OrchestrationThreadShell } from "@ryco/contracts";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { Effect, Option, Stream } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import type { HubConnector } from "../hubConnector/HubConnector.ts";
 import type { HubIdentityRuntimeShape } from "../hubConnector/HubIdentityRuntime.ts";
@@ -24,6 +25,8 @@ import { startAttentionPublisher } from "./attentionPublisher.ts";
 import { makeActivitySignalSender, makeAttentionSignalSender } from "./attentionSignalHttp.ts";
 import type { NodePushRegistryShape } from "./NodePushRegistry.ts";
 
+const loadAlertExcerptSource = () => import("./alertExcerptSource.ts");
+
 /** Runs in the connector's scope; does nothing without a shell or an engine. */
 export const startNodeAttentionPublisher = (input: {
   readonly hubOrigin: string;
@@ -35,6 +38,7 @@ export const startNodeAttentionPublisher = (input: {
     const query = yield* Effect.serviceOption(ProjectionSnapshotQuery);
     const engine = yield* Effect.serviceOption(OrchestrationEngineService);
     if (Option.isNone(query) || Option.isNone(engine)) return;
+    const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
     const push = input.registry;
     const shell = query.value;
     const abort = new AbortController();
@@ -88,6 +92,18 @@ export const startNodeAttentionPublisher = (input: {
               : null;
           },
           isSnoozed: isThreadSnoozed,
+          readExcerpt: Option.isNone(sql)
+            ? undefined
+            : async (excerpt) => {
+                // Loaded on the first approval or question alert: the reader derives requests
+                // with the clients' session rules, which no boot path needs.
+                const { readAlertExcerpt } = await loadAlertExcerptSource();
+                return run(
+                  readAlertExcerpt(excerpt).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql.value),
+                  ),
+                );
+              },
           registrations: () => run(push.list),
           foregroundEnrollments: (nowMs) => run(push.foregroundEnrollments(nowMs)),
           reserveSequence: () => run(push.reserveSequence),

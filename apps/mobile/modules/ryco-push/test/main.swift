@@ -183,6 +183,43 @@ for vector in document["vectors"] as! [[String: Any]] {
   ])
 }
 
+// Payloads sealed by the test itself, with excerpts (`x`): what the extension shows and what it
+// leaves for the app.
+var excerptReport: [[String: Any]] = []
+if CommandLine.arguments.count > 2 {
+  let cases =
+    try JSONSerialization.jsonObject(
+      with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))) as! [[String: Any]]
+  for item in cases {
+    let privateKey = try Curve25519.KeyAgreement.PrivateKey(
+      rawRepresentation: hexBytes(item["recipientSecretKey"] as! String))
+    let enrollmentId = item["enrollmentId"] as! String
+    let opened = PushAlertOpener.alert(
+      userInfo: apnsPayload(
+        environmentId: item["environmentId"] as! String, sequence: item["sequence"]!,
+        sealed: item["sealed"] as! String, enrollmentId: enrollmentId),
+      privateKey: privateKey,
+      storedEnrollmentId: enrollmentId,
+      now: Date(timeIntervalSince1970: (item["now"] as! NSNumber).doubleValue / 1000),
+      appScheme: "ryco-dev"
+    )
+    excerptReport.append([
+      "name": item["name"] as! String,
+      "alert": opened.map { alert -> [String: Any] in
+        [
+          "kind": alert.kind,
+          "body": alert.body,
+          "excerptLine": alert.excerptLine as Any,
+          "badgeCount": alert.badgeCount.map { NSNumber(value: $0) } as Any,
+          "excerpt": alert.excerpt.map { String(decoding: $0, as: UTF8.self) } as Any,
+          "record": PushAlertOpener.excerptRecord(alert).map { String(decoding: $0, as: UTF8.self) }
+            as Any,
+        ]
+      } as Any,
+    ])
+  }
+}
+
 // One machine's new count replaces its own and keeps the others'.
 let merged = PushAlertOpener.badge(
   counts: ["env_a": 2, "env_b": 1], environmentId: "env_a", count: 0)
@@ -190,7 +227,8 @@ let added = PushAlertOpener.badge(counts: merged.counts, environmentId: "env_c",
 
 let output: [String: Any] = [
   "vectors": report, "kindTitles": PushAlertOpener.kindTitles,
-  "kindCategories": PushAlertOpener.kindCategories,
+  "kindCategories": PushAlertOpener.kindCategories, "excerpts": excerptReport,
+  "requestKindLabels": PushAlertOpener.requestKindLabels,
   "badge": [
     "replaced": ["counts": merged.counts, "total": merged.total],
     "added": ["counts": added.counts, "total": added.total],

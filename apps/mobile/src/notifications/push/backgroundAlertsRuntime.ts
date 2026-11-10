@@ -20,6 +20,7 @@ import { isAppInFront, subscribeAppInFront } from "../../platform/appInFront";
 import { readMobileNativePlatform, readMobilePushBuild } from "../../platform/config";
 import {
   readLiveActivityPushToken,
+  readLiveActivityPushToStartToken,
   subscribeLiveActivityPushToken,
 } from "../../liveActivity/liveActivityTokenStore";
 import { mobileKV } from "../../platform/kv";
@@ -118,6 +119,7 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
           // The node sends only the rest (`effectivePushKinds`).
           mutedKinds: preferences.mutedAlertKinds,
           liveActivity: preferences.liveActivitiesEnabled === true,
+          liveActivityStart: preferences.liveActivityStartByPush === true,
         };
       },
       subscribe: subscribePreferences,
@@ -143,6 +145,7 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
     pushKey,
     liveActivity: {
       readToken: readLiveActivityPushToken,
+      readStartToken: readLiveActivityPushToStartToken,
       subscribe: subscribeLiveActivityPushToken,
     },
     hubRemoval: createHubRemovalMarker(mobileKV),

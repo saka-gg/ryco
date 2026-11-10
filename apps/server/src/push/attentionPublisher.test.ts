@@ -1,6 +1,11 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import { ApprovalRequestId, EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
-import type { PushAttentionSignalInput } from "@ryco/contracts/push-hub";
+import type { PushAlertExcerpt } from "@ryco/contracts/push-alert";
+import {
+  PUSH_SEALED_LEGACY_MAX_LENGTH,
+  PUSH_SEALED_MAX_LENGTH,
+  type PushAttentionSignalInput,
+} from "@ryco/contracts/push-hub";
 import { openPushPayload, pushSealAssociatedData } from "@ryco/shared/pushSeal";
 import { e2eeX25519KeyPair } from "@ryco/shared/relayE2eeKeys";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
@@ -77,6 +82,9 @@ function harness(
     readonly foreground?: ReadonlySet<string>;
     readonly online?: boolean;
     readonly send?: (signal: Omit<PushAttentionSignalInput, "proof">) => AttentionSendOutcome;
+    readonly readExcerpt?: () => Promise<PushAlertExcerpt | null>;
+    /** What the Hub's answers say it takes; absent like an older Hub. */
+    readonly sealedMaxLength?: number;
   } = {},
 ) {
   let row = summary();
@@ -90,6 +98,7 @@ function harness(
     readShell: async () => ({ sequence: 1, threads: [row] }),
     readThread: async () => row,
     isSnoozed: isThreadSnoozed,
+    readExcerpt: options.readExcerpt,
     registrations: async () => options.registrations ?? [registration()],
     foregroundEnrollments: async () => options.foreground ?? new Set(),
     reserveSequence: async () => sequence++,
@@ -103,6 +112,9 @@ function harness(
           result: {
             protocolVersion: 1,
             sequence: signal.sequence,
+            ...(options.sealedMaxLength === undefined
+              ? {}
+              : { sealedMaxLength: options.sealedMaxLength }),
             results: signal.deliveries.map((item) => ({
               enrollmentId: item.enrollmentId,
               status: "sent" as const,
@@ -330,6 +342,84 @@ describe("attention publisher", () => {
     expect(test.sent.map((signal) => signal.deliveries.length)).toEqual([32, 8]);
     expect(test.sent[0]!.sequence).not.toBe(test.sent[1]!.sequence);
     expect(open(test.sent[1]!)).toMatchObject({ q: test.sent[1]!.sequence });
+    await test.publisher.stop();
+  });
+
+  it("carries the approval's excerpt, at the legacy size until the Hub says it takes more", async () => {
+    const command = `deploy ${"--flag value ".repeat(150)}`;
+    const reads: string[] = [];
+    const test = harness({
+      sealedMaxLength: PUSH_SEALED_MAX_LENGTH,
+      readExcerpt: async () => {
+        reads.push("read");
+        return { a: { k: "command", d: command } };
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await test.update(
+      summary({
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make("approval-a"),
+      }),
+      2,
+    );
+    await test.settle();
+    const first = test.sent[0]!;
+    expect(first.deliveries[0]!.sealed.length).toBeLessThanOrEqual(PUSH_SEALED_LEGACY_MAX_LENGTH);
+    const firstExcerpt = open(first).x.a.d as string;
+    expect(firstExcerpt.endsWith("…")).toBe(true);
+    // The Hub's answer named a larger size: the next alert carries more of the command.
+    await test.update(
+      summary({
+        hasPendingApprovals: true,
+        pendingApprovalRequestId: ApprovalRequestId.make("approval-b"),
+      }),
+      3,
+    );
+    await test.settle();
+    const second = test.sent[1]!;
+    expect(second.deliveries[0]!.sealed.length).toBeGreaterThan(PUSH_SEALED_LEGACY_MAX_LENGTH);
+    expect(second.deliveries[0]!.sealed.length).toBeLessThanOrEqual(PUSH_SEALED_MAX_LENGTH);
+    expect((open(second).x.a.d as string).length).toBeGreaterThan(firstExcerpt.length);
+    // One read per alert; a completion reads nothing.
+    await test.update(completed(), 4);
+    await test.settle();
+    expect(open(test.sent[2]!)).not.toHaveProperty("x");
+    expect(reads).toHaveLength(2);
+    await test.publisher.stop();
+  });
+
+  it("still sends an alert whose excerpt could not be read, without one", async () => {
+    const test = harness({
+      readExcerpt: async () => {
+        throw new Error("database busy");
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await test.update(summary({ hasPendingUserInput: true }), 2);
+    await test.settle();
+    expect(test.sent).toHaveLength(1);
+    expect(open(test.sent[0]!)).toMatchObject({ k: "input" });
+    expect(open(test.sent[0]!)).not.toHaveProperty("x");
+    await test.publisher.stop();
+  });
+
+  it("splits signals of large payloads so each body stays under the Hub's limit", async () => {
+    const registrations = Array.from({ length: 40 }, (_, index) =>
+      registration({ enrollmentId: `enr_device${String(index).padStart(17, "0")}` }),
+    );
+    const test = harness({ registrations, sealedMaxLength: PUSH_SEALED_MAX_LENGTH });
+    await vi.advanceTimersByTimeAsync(0);
+    await test.update(completed(), 2);
+    await test.settle();
+    // The first pass still uses the legacy size: the Hub has not answered yet.
+    expect(test.sent.map((signal) => signal.deliveries.length)).toEqual([32, 8]);
+    await test.update(summary({ hasPendingUserInput: true }), 3);
+    await test.settle();
+    expect(test.sent.slice(2).map((signal) => signal.deliveries.length)).toEqual([19, 19, 2]);
+    for (const signal of test.sent) {
+      expect(JSON.stringify(signal).length).toBeLessThan(64 * 1_024);
+    }
     await test.publisher.stop();
   });
 });
