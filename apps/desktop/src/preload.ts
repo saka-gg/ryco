@@ -43,6 +43,7 @@ const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
 const MENU_ACTION_CHANNEL = "desktop:menu-action";
 const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
+const DATABASE_COMPACTION_STATE_CHANNEL = "desktop:database-compaction-state";
 const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
@@ -159,6 +160,21 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 
 contextBridge.exposeInMainWorld("desktopBridge", {
   saveThreadExport: (input) => ipcRenderer.invoke("desktop:save-thread-export", input),
+  databaseCompaction: {
+    getState: () => ipcRenderer.invoke("desktop:database-compaction-get-state"),
+    start: () => ipcRenderer.invoke("desktop:database-compaction-start"),
+    cancel: () => ipcRenderer.invoke("desktop:database-compaction-cancel"),
+    onState: (listener) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
+        if (typeof state !== "object" || state === null) return;
+        listener(state as Parameters<typeof listener>[0]);
+      };
+      ipcRenderer.on(DATABASE_COMPACTION_STATE_CHANNEL, wrappedListener);
+      return () => {
+        ipcRenderer.removeListener(DATABASE_COMPACTION_STATE_CHANNEL, wrappedListener);
+      };
+    },
+  },
   browser: {
     getState: () => ipcRenderer.invoke("desktop:browser:state"),
     open: (input) => ipcRenderer.invoke("desktop:browser:open", input),

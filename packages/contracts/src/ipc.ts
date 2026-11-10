@@ -964,8 +964,54 @@ export const DESKTOP_PASTE_AS_TEXT_MENU_ACTION = "paste-as-text";
 export const DESKTOP_NAVIGATE_BACK_MENU_ACTION = "navigate-back";
 export const DESKTOP_NAVIGATE_FORWARD_MENU_ACTION = "navigate-forward";
 
+/**
+ * The desktop app's one-click database compaction: it stops its own server, runs the doctor's
+ * copy-and-swap and starts the server again (`apps/desktop/src/databaseCompaction.ts`).
+ */
+export type DesktopDatabaseCompactionState =
+  | { readonly phase: "idle" }
+  | {
+      readonly phase: "running";
+      readonly startedAt: string;
+      /** The doctor's current step and its progress, in words. */
+      readonly text: string;
+      readonly detail: string | null;
+      /** 0..1 within the current step; null when unknown. */
+      readonly fraction: number | null;
+      /** Cancel still stops it before the database file is replaced. */
+      readonly cancellable: boolean;
+    }
+  | {
+      readonly phase: "finished";
+      readonly startedAt: string;
+      readonly finishedAt: string;
+      readonly status:
+        | "repaired"
+        | "compacted"
+        | "already-compact"
+        | "refused"
+        | "failed"
+        | "cancelled";
+      readonly message: string;
+      readonly beforeBytes: number | null;
+      readonly afterBytes: number | null;
+      /** From stopping the server to it answering again. */
+      readonly downtimeMs: number | null;
+    };
+
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
+  /**
+   * One-click compaction of this app's own database. Absent in desktop builds that predate it.
+   * The renderer starts it only when its server says nothing would be cut off.
+   */
+  databaseCompaction?: {
+    getState(): Promise<DesktopDatabaseCompactionState>;
+    start(): Promise<DesktopDatabaseCompactionState>;
+    /** Stops the run while it is still `cancellable`; the database file stays as it was. */
+    cancel(): Promise<void>;
+    onState(listener: (state: DesktopDatabaseCompactionState) => void): () => void;
+  };
   /** Install the `ryco` command for terminals. Absent in desktop builds that predate it. */
   cliCommand?: {
     getState(): Promise<DesktopCliCommandState>;
