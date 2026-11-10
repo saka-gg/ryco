@@ -628,8 +628,11 @@ describe("pull request page handlers", () => {
       // A moved fingerprint reads at once.
       fingerprint = { ...fingerprint, status: "OPEN MERGEABLE abc FAILURE:1,SUCCESS:2" };
       expect(yield* poll()).toMatchObject({ version: 4 });
-      // An explicit refresh reads in full whatever the fingerprint says.
+      // An explicit refresh reads in full whatever the fingerprint says, and later reads
+      // stand on it, not on the read before it.
       expect(yield* read({ fresh: true })).toMatchObject({ version: 5 });
+      expect(yield* read()).toMatchObject({ version: 5 });
+      expect(yield* poll()).toMatchObject({ version: 5 });
       expect(lanes.every((lane) => lane === "interactive")).toBe(true);
     }),
   );

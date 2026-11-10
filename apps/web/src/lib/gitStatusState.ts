@@ -205,16 +205,19 @@ let stopWatchingLifecycle: (() => void) | null = null;
 /** Pauses every status stream once the window stayed hidden, and reopens them when shown. */
 function watchGitStatusLifecycle(): void {
   if (stopWatchingLifecycle !== null) return;
+  const schedulePause = () => {
+    hiddenPauseTimer ??= setTimeout(() => {
+      hiddenPauseTimer = null;
+      if (webAppLifecycle.isForeground()) return;
+      for (const watched of watchedGitStatuses.values()) {
+        watched.unsubscribe?.();
+        watched.unsubscribe = null;
+      }
+    }, GIT_STATUS_HIDDEN_PAUSE_MS);
+  };
   stopWatchingLifecycle = webAppLifecycle.subscribe((event) => {
     if (event === "background") {
-      hiddenPauseTimer ??= setTimeout(() => {
-        hiddenPauseTimer = null;
-        if (webAppLifecycle.isForeground()) return;
-        for (const watched of watchedGitStatuses.values()) {
-          watched.unsubscribe?.();
-          watched.unsubscribe = null;
-        }
-      }, GIT_STATUS_HIDDEN_PAUSE_MS);
+      schedulePause();
       return;
     }
     if ((event === "foreground" || event === "resume") && webAppLifecycle.isForeground()) {
@@ -227,6 +230,8 @@ function watchGitStatusLifecycle(): void {
       }
     }
   });
+  // First watched in a window that is already hidden: no event will say so.
+  if (!webAppLifecycle.isForeground()) schedulePause();
 }
 
 export function refreshGitStatus(

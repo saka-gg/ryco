@@ -1,4 +1,4 @@
-import { DateTime, Effect, Option } from "effect";
+import { Effect, Option } from "effect";
 import {
   PullRequestWatchError,
   SourceControlProviderError,
@@ -8,7 +8,6 @@ import {
   type ChangeRequestState,
   type ChangeRequestUpdateAction,
   type OrchestrationCommand,
-  type SourceControlChangeRequestDetail,
   type WorktreeId,
 } from "@ryco/contracts";
 import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
@@ -45,36 +44,6 @@ const DEFAULT_CHANGE_REQUEST_LIST_LIMIT = 20;
  * ask together, and mutations and remote refreshes drop it at once.
  */
 export const CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS = 10_000;
-
-/**
- * How long focused reads (the thread's overview, the active row, the pull request page) of
- * one change request share a detail across surfaces, checkouts and clients. Short: past it a
- * read stands on the host's fingerprint, or reads again.
- */
-export const CHANGE_REQUEST_FOCUSED_DETAIL_CACHE_TTL_MS = 5_000;
-
-/**
- * A focused read standing on an unmoved fingerprint is read in full again after this long
- * anyway, for what the fingerprint cannot see (a re-run check that ends as before, an edited
- * review, merge settings). An explicit refresh (`fresh`) always reads in full.
- */
-export const CHANGE_REQUEST_FOCUSED_REREAD_MS = 5 * 60_000;
-
-/** The state a detail read just got from the host, as linked workspaces record it. */
-function reportedChangeRequestState(detail: SourceControlChangeRequestDetail) {
-  if (detail.isDraft === undefined) return undefined;
-  const terminal =
-    detail.state === "merged"
-      ? (detail.mergedAt ?? detail.closedAt)
-      : detail.state === "closed"
-        ? detail.closedAt
-        : undefined;
-  return {
-    state: detail.state,
-    isDraft: detail.isDraft,
-    terminalAt: terminal === undefined ? null : DateTime.formatIso(terminal),
-  };
-}
 
 /** Actions that change the head branch, review gate, or open state, so linked worktrees must re-sync. */
 function isLifecycleChangingAction(action: ChangeRequestUpdateAction): boolean {
@@ -661,86 +630,42 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         ownerEffect(
           WS_METHODS.sourceControlGetChangeRequestDetail,
           Effect.suspend(() => {
-            const read = sourceControlRegistry.resolve({ cwd }).pipe(
-              Effect.flatMap((provider) =>
-                provider.getChangeRequestDetail({
-                  cwd,
-                  reference,
-                  ...(fullContent !== undefined ? { fullContent } : {}),
-                }),
-              ),
-              // The detail carries the state its links need: no forge read of their own.
-              Effect.tap((detail) => {
-                const reported = reportedChangeRequestState(detail);
-                return refreshStateForLinkedReference({
-                  cwd,
-                  kind: "pr",
-                  reference,
-                  ...(reported === undefined ? {} : { reported }),
-                });
-              }),
-            );
             const provider = sourceControlRegistry.resolve({ cwd });
-            if (view !== "row") {
-              // An explicit refresh asks the host now.
-              if (fresh === true) return read;
-              // Focused surfaces poll the change request every 30 s each, in every client:
-              // one read serves them all for a few seconds, and past that the host's
-              // fingerprint stands in for a full read until it moves (or the re-read age).
-              const focusedKey = JSON.stringify([
-                "changeRequestDetail",
-                "focused",
-                reference,
-                fullContent ?? false,
-              ]);
-              return loadRowRevalidation.pipe(
-                Effect.flatMap((reads) =>
-                  gitWorkflow.cachedRepositoryList({
-                    cwd,
-                    key: focusedKey,
-                    load: read,
-                    ttlMs: CHANGE_REQUEST_FOCUSED_DETAIL_CACHE_TTL_MS,
-                    revalidate: (changes) =>
-                      reads.read({
-                        cwd,
-                        key: focusedKey,
-                        changes,
-                        load: read,
-                        provider,
-                        rereadAfterMs: CHANGE_REQUEST_FOCUSED_REREAD_MS,
-                      }),
-                  }),
-                ),
-              );
-            }
-            // Passive row glyphs: every visible row polls its change request,
-            // which is several forge children each. They queue in the
-            // background lane behind the focused surfaces, and rows of the
-            // same repository share one read for a few seconds. Past that, a
-            // row is read again only when the host's fingerprint moved (see
-            // `changeRequestRowRevalidation`). While the forge is rate
-            // limiting, a row keeps its last good detail.
-            const key = JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]);
-            return loadRowRevalidation.pipe(
-              Effect.flatMap((rows) =>
-                gitWorkflow.cachedRepositoryList({
+            const detail = loadRowRevalidation.pipe(
+              Effect.flatMap((reads) =>
+                reads.readDetail({
                   cwd,
-                  key,
-                  load: read,
-                  ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
-                  lastGood: fullContent !== true,
-                  revalidate: (changes) =>
-                    rows.read({
+                  reference,
+                  fullContent,
+                  // Passive row glyphs: every visible row polls its change request, which is
+                  // several forge children each. They queue in the background lane behind
+                  // the focused surfaces, and keep their last good detail while the forge is
+                  // rate limiting.
+                  row: view === "row",
+                  fresh: fresh === true,
+                  rowTtlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
+                  cachedRepositoryList: gitWorkflow.cachedRepositoryList,
+                  load: provider.pipe(
+                    Effect.flatMap((loaded) =>
+                      loaded.getChangeRequestDetail({
+                        cwd,
+                        reference,
+                        ...(fullContent !== undefined ? { fullContent } : {}),
+                      }),
+                    ),
+                  ),
+                  refreshLinked: (reported) =>
+                    refreshStateForLinkedReference({
                       cwd,
-                      key,
-                      changes,
-                      load: read,
-                      provider,
+                      kind: "pr",
+                      reference,
+                      ...(reported === undefined ? {} : { reported }),
                     }),
+                  provider,
                 }),
               ),
-              inBackgroundProcessLane,
             );
+            return view === "row" ? detail.pipe(inBackgroundProcessLane) : detail;
           }),
         ),
         {

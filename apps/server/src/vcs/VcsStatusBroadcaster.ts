@@ -33,7 +33,7 @@ import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { logOnceEvery } from "../logOnceEvery.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
-import { readCheckoutHead } from "./gitCheckoutHead.ts";
+import type { RefSummarySources } from "./refSummarySources.ts";
 
 const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.seconds(30);
 /** Folders whose last status stays cached; older ones reload on the next read. */
@@ -49,8 +49,6 @@ const REF_SUMMARY_HEAD_POLL_INTERVAL = Duration.seconds(5);
 /** A polled ref summary re-reads change requests no more often than the shared index refreshes. */
 const REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL = Duration.seconds(60);
 const REF_SUMMARY_TRIGGER_DEBOUNCE = Duration.millis(250);
-/** A folder's shared ref summary source outlives its last stream this long. */
-const REF_SUMMARY_SOURCE_LINGER = Duration.seconds(30);
 const EMPTY_WORKING_TREE: VcsStatusLocalResult["workingTree"] = Object.freeze({
   files: [],
   insertions: 0,
@@ -78,19 +76,6 @@ interface CachedValue<T> {
 interface CachedVcsStatus {
   readonly local: CachedValue<VcsStatusLocalResult> | null;
   readonly remote: CachedValue<VcsStatusRemoteResult | null> | null;
-}
-
-/** A folder's shared ref summary reads (see `acquireRefSummarySource`). */
-interface RefSummarySource {
-  readonly key: string;
-  readonly pubsub: PubSub.PubSub<VcsRefSummary>;
-  /** The last summary it read; streams that join start from it while it is recent. */
-  latest: VcsRefSummary | null;
-  latestAtMs: number;
-  subscribers: number;
-  fiber: Fiber.Fiber<void, never> | null;
-  /** Ends the source when nobody joins within the linger. */
-  linger: Fiber.Fiber<void, never> | null;
 }
 
 interface ActiveRemotePoller {
@@ -772,163 +757,41 @@ export const layer = Layer.effect(
         }),
       );
 
-    /**
-     * One ref summary source per folder and poll interval, shared by every summary stream
-     * (each sidebar and inbox row of each client): one HEAD check every few seconds and one
-     * slow poll per folder, not one per stream. It outlives its last stream briefly, so rows
-     * scrolled out and back (or a client resubscribing) find it running.
-     */
-    const refSummarySources = new Map<string, RefSummarySource>();
-    yield* Effect.addFinalizer(() =>
-      Effect.forEach(refSummarySources.values(), (source) => stopRefSummarySource(source), {
-        discard: true,
-      }),
+    // Summary streams of one folder share one source (`refSummarySources`), loaded with the
+    // first summary stream, off the boot path.
+    let refSummarySources: RefSummarySources | null = null;
+    const loadRefSummarySources = yield* Effect.cached(
+      Effect.promise(() => import("./refSummarySources.ts")).pipe(
+        Effect.map(({ makeRefSummarySources }) => {
+          refSummarySources = makeRefSummarySources({
+            refSummary: (cwd) => inBackgroundProcessLane(workflow.refSummary(cwd)),
+            subscribeFolder,
+            scope: broadcasterScope,
+            headPollInterval: REF_SUMMARY_HEAD_POLL_INTERVAL,
+            minPollInterval: REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL,
+            triggerDebounce: REF_SUMMARY_TRIGGER_DEBOUNCE,
+            channelCapacity: FOLDER_CHANNEL_CAPACITY,
+          });
+          return refSummarySources;
+        }),
+      ),
     );
-
-    const stopRefSummarySource = (source: RefSummarySource) =>
-      Effect.suspend(() => {
-        if (refSummarySources.get(source.key) === source) refSummarySources.delete(source.key);
-        const fibers = [source.fiber, source.linger].filter(
-          (fiber): fiber is Fiber.Fiber<void, never> => fiber !== null,
-        );
-        source.fiber = null;
-        source.linger = null;
-        return Effect.forEach(fibers, (fiber) => Fiber.interrupt(fiber), { discard: true }).pipe(
-          Effect.andThen(PubSub.shutdown(source.pubsub)),
-        );
-      });
-
-    const runRefSummarySource = (source: RefSummarySource, cwd: string, pollIntervalMs: number) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          // Status work for many folders at once yields to interactive git.
-          const readSummary = inBackgroundProcessLane(workflow.refSummary(cwd));
-          const subscription = yield* subscribeFolder(cwd);
-          // Recompute on: a publication for this folder (a refresh after a git action or
-          // agent turn), a checkout switch seen on disk, and — when polling is enabled — a
-          // slow periodic re-read of change requests.
-          const triggers = Stream.mergeAll(
-            [
-              Stream.fromSubscription(subscription).pipe(Stream.as("published")),
-              Stream.tick(REF_SUMMARY_HEAD_POLL_INTERVAL).pipe(
-                Stream.mapEffect(() => readCheckoutHead(cwd)),
-                Stream.map((head) => head?.branch ?? null),
-                Stream.changes,
-                Stream.drop(1),
-                Stream.as("head"),
-              ),
-              pollIntervalMs > 0
-                ? Stream.tick(Duration.millis(pollIntervalMs)).pipe(
-                    Stream.drop(1),
-                    Stream.as("poll"),
-                  )
-                : Stream.empty,
-            ],
-            { concurrency: "unbounded" },
-          );
-          yield* triggers.pipe(
-            Stream.debounce(REF_SUMMARY_TRIGGER_DEBOUNCE),
-            Stream.mapEffect(() => readSummary.pipe(Effect.catchCause(() => Effect.succeed(null)))),
-            Stream.runForEach((summary) =>
-              summary === null ? Effect.void : publishRefSummary(source, summary),
-            ),
-          );
-        }),
-      );
-
-    const publishRefSummary = (source: RefSummarySource, summary: VcsRefSummary) =>
-      Effect.flatMap(Clock.currentTimeMillis, (nowMs) => {
-        source.latest = summary;
-        source.latestAtMs = nowMs;
-        return PubSub.publish(source.pubsub, summary).pipe(Effect.asVoid);
-      });
-
-    const acquireRefSummarySource = (cwd: string, pollIntervalMs: number) =>
-      Effect.acquireRelease(
-        Effect.gen(function* () {
-          const key = `${pollIntervalMs}\u0000${cwd}`;
-          let source = refSummarySources.get(key);
-          if (source === undefined) {
-            const pubsub = yield* PubSub.sliding<VcsRefSummary>(FOLDER_CHANNEL_CAPACITY);
-            source = refSummarySources.get(key);
-            if (source !== undefined) {
-              yield* PubSub.shutdown(pubsub);
-            } else {
-              const created: RefSummarySource = {
-                key,
-                pubsub,
-                latest: null,
-                latestAtMs: 0,
-                subscribers: 0,
-                fiber: null,
-                linger: null,
-              };
-              refSummarySources.set(key, created);
-              created.fiber = yield* runRefSummarySource(created, cwd, pollIntervalMs).pipe(
-                Effect.catchCause(() => Effect.void),
-                Effect.forkIn(broadcasterScope),
-              );
-              source = created;
-            }
-          }
-          source.subscribers += 1;
-          const linger = source.linger;
-          source.linger = null;
-          if (linger !== null) yield* Fiber.interrupt(linger);
-          return source;
-        }),
-        (source) =>
-          Effect.gen(function* () {
-            source.subscribers -= 1;
-            if (source.subscribers > 0 || refSummarySources.get(source.key) !== source) return;
-            source.linger = yield* Effect.sleep(REF_SUMMARY_SOURCE_LINGER).pipe(
-              Effect.andThen(
-                Effect.suspend(() =>
-                  source.subscribers > 0
-                    ? Effect.void
-                    : // Clear the own handle first: stopping interrupts it.
-                      Effect.sync(() => {
-                        source.linger = null;
-                      }).pipe(Effect.andThen(stopRefSummarySource(source))),
-                ),
-              ),
-              Effect.forkIn(broadcasterScope),
-            );
-          }),
-      );
+    yield* Effect.addFinalizer(() =>
+      Effect.suspend(() => (refSummarySources === null ? Effect.void : refSummarySources.stopAll)),
+    );
 
     const streamRefSummary = (
       input: VcsStatusInput,
     ): Stream.Stream<VcsStatusStreamEvent, GitManagerServiceError> =>
       Stream.unwrap(
-        Effect.gen(function* () {
-          const cwd = normalizeCwd(input.cwd);
-          const requestedMs = input.automaticRemoteRefreshIntervalMs ?? 0;
-          const pollIntervalMs =
-            requestedMs > 0
-              ? Math.max(requestedMs, Duration.toMillis(REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL))
-              : 0;
-          const source = yield* acquireRefSummarySource(cwd, pollIntervalMs);
-          // Subscribed before the first value is taken, so nothing published meanwhile is lost.
-          const subscription = yield* PubSub.subscribe(source.pubsub);
-          // A recent shared summary answers at once. An older one (a quiet folder whose source
-          // has nothing to re-read on) is read again, as a new stream always did, through the
-          // workflow's own short cache, and shared with the source's other streams.
-          const nowMs = yield* Clock.currentTimeMillis;
-          const recent =
-            source.latest !== null &&
-            nowMs - source.latestAtMs < Duration.toMillis(REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL)
-              ? source.latest
-              : null;
-          const initial = recent ?? (yield* inBackgroundProcessLane(workflow.refSummary(cwd)));
-          if (recent === null) yield* publishRefSummary(source, initial);
-          return Stream.concat(Stream.make(initial), Stream.fromSubscription(subscription)).pipe(
-            Stream.map(refSummaryToStatusEvent),
-            Stream.changesWith(
-              (left, right) => fingerprintStatusPart(left) === fingerprintStatusPart(right),
-            ),
-          );
-        }),
+        Effect.map(loadRefSummarySources, (sources) =>
+          sources.stream(normalizeCwd(input.cwd), input.automaticRemoteRefreshIntervalMs ?? 0),
+        ),
+      ).pipe(
+        Stream.map(refSummaryToStatusEvent),
+        Stream.changesWith(
+          (left, right) => fingerprintStatusPart(left) === fingerprintStatusPart(right),
+        ),
       );
 
     return VcsStatusBroadcaster.of({

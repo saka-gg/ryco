@@ -799,15 +799,17 @@ function readChangeRequestDetail(
     const shared = reusableChangeRequestDetail(environmentId, compositeKey);
     if (shared !== null) return Promise.resolve(shared);
   }
-  // `refresh` zeroes `lastFetchedAt` of an entry that has data: someone asked for the host's
-  // current answer, which the server then reads in full instead of standing on its
-  // fingerprint (older servers always do).
+  // A read of a detail already shown that `refresh` (zeroed `lastFetchedAt`) or an
+  // invalidation (cleared `hasData`: a refresh button, a retry, a change made here) asked for
+  // again wants the host's current answer: the server then reads it in full instead of
+  // standing on its fingerprint (older servers always do). Polls do not.
   const controller = compositeKey === null ? undefined : controllers.get(compositeKey);
   const fresh =
     input.view !== "row" &&
     controller !== undefined &&
-    controller.hasData &&
-    controller.lastFetchedAt === 0;
+    compositeKey !== null &&
+    changeRequestDetailState(compositeKey).data !== null &&
+    (controller.lastFetchedAt === 0 || !controller.hasData);
   const startedAt = Date.now();
   return sourceControlClient(environmentId)
     .getChangeRequestDetail({

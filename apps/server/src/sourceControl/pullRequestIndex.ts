@@ -61,6 +61,12 @@ const PULL_REQUEST_INDEX_CAPACITY = 256;
  * checkout reading it at the same moment.
  */
 const LIST_VERSION_TTL = Duration.seconds(5);
+/**
+ * A listing kept on an unchanged version is listed again after this long anyway: the
+ * version has one-second precision and comes from a REST replica, so two changes within a
+ * second, or a replica a moment behind, must not pin a listing for hours in a quiet repository.
+ */
+const LISTING_MAX_AGE_MS = 10 * 60_000;
 
 export const BRANCH_CHANGE_REQUEST_LIMIT = 20;
 /**
@@ -247,7 +253,11 @@ export const makePullRequestIndex = Effect.gen(function* () {
   // it: kept through expiry and invalidation, so an unchanged version answers without a list.
   const listed = new Map<
     string,
-    { readonly listing: PullRequestIndexListing; readonly version: string | null }
+    {
+      readonly listing: PullRequestIndexListing;
+      readonly version: string | null;
+      readonly listedAtMs: number;
+    }
   >();
 
   // The repository's list version, shared by both scopes and concurrent readers; never fails
@@ -274,8 +284,14 @@ export const makePullRequestIndex = Effect.gen(function* () {
       const read = Effect.gen(function* () {
         // Read before the list, so the listing is at least as new as the version kept with it.
         const version = yield* Cache.get(versions, repository);
+        const nowMs = yield* Clock.currentTimeMillis;
         const previous = listed.get(key);
-        if (version !== null && previous !== undefined && previous.version === version) {
+        if (
+          version !== null &&
+          previous !== undefined &&
+          previous.version === version &&
+          nowMs - previous.listedAtMs < LISTING_MAX_AGE_MS
+        ) {
           return previous.listing;
         }
         const items = yield* lookup.provider.listChangeRequests({
@@ -291,7 +307,7 @@ export const makePullRequestIndex = Effect.gen(function* () {
           complete: items.length < PULL_REQUEST_INDEX_LIMIT,
         };
         listed.delete(key);
-        listed.set(key, { listing, version });
+        listed.set(key, { listing, version, listedAtMs: nowMs });
         for (const oldest of listed.keys()) {
           if (listed.size <= PULL_REQUEST_INDEX_CAPACITY) break;
           listed.delete(oldest);
@@ -387,16 +403,19 @@ export const makePullRequestIndex = Effect.gen(function* () {
       ),
     invalidate: (repository, options?) =>
       Effect.gen(function* () {
-        if (options?.periodic === true) return;
-        yield* Cache.invalidate(versions, repository);
-        generations.delete(repository);
-        generations.set(repository, ++nextGeneration);
-        for (const oldest of generations.keys()) {
-          if (generations.size <= BRANCH_CAPACITY) break;
-          generations.delete(oldest);
+        // A poll keeps the listings and branch answers; it still releases holds whose pause
+        // the forge has ended (below).
+        if (options?.periodic !== true) {
+          yield* Cache.invalidate(versions, repository);
+          generations.delete(repository);
+          generations.set(repository, ++nextGeneration);
+          for (const oldest of generations.keys()) {
+            if (generations.size <= BRANCH_CAPACITY) break;
+            generations.delete(oldest);
+          }
+          yield* Cache.invalidate(cache, indexKey(repository, "all"));
+          yield* Cache.invalidate(cache, indexKey(repository, "open"));
         }
-        yield* Cache.invalidate(cache, indexKey(repository, "all"));
-        yield* Cache.invalidate(cache, indexKey(repository, "open"));
         const nowMs = yield* Clock.currentTimeMillis;
         const holding = [...holds.values()].some(
           (hold) => hold.repository === repository && hold.untilMs > nowMs,

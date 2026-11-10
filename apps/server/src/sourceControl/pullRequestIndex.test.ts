@@ -314,12 +314,20 @@ describe("pull request index revalidation by list version", () => {
       assert.strictEqual(yield* index.read(input), first);
       assert.deepStrictEqual([state.lists, state.versions], [2, 2]);
 
+      // Kept at most 10 minutes on one version, whatever it says.
+      yield* TestClock.adjust("8 minutes");
+      assert.strictEqual(yield* index.read(input), first);
+      yield* TestClock.adjust("61 seconds");
+      const relisted = yield* index.read(input);
+      assert.notStrictEqual(relisted, first);
+      assert.deepStrictEqual([state.lists, state.versions], [3, 4]);
+
       // A pull request opened or changed moves the version: listed again.
       state.version = "8@2026-11-10T00:01:00Z";
       yield* TestClock.adjust("61 seconds");
       const next = yield* index.read(input);
-      assert.notStrictEqual(next, first);
-      assert.deepStrictEqual([state.lists, state.versions], [3, 3]);
+      assert.notStrictEqual(next, relisted);
+      assert.deepStrictEqual([state.lists, state.versions], [4, 5]);
     }),
   );
 
@@ -368,5 +376,28 @@ describe("pull request index revalidation by list version", () => {
       yield* index.read(input);
       assert.deepStrictEqual([state.lists, state.versions], [2, 3]);
     }),
+  );
+});
+
+describe("pull request index polls and rate-limit holds", () => {
+  it.effect("a poll keeps the listing but releases a hold whose pause has ended", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const index = yield* makePullRequestIndex;
+      const { calls, forge, provider } = limitingForge();
+      const input = { repository, scope: "all" as const, cwd: "/repo", provider };
+
+      forge.limit = { retryAt: T0 + 15 * 60_000 };
+      yield* index.read(input).pipe(Effect.flip);
+      assert.strictEqual(calls.count, 1);
+
+      // The forge recovered early: a poll that learns so lets the next read through.
+      forge.limit = null;
+      yield* TestClock.adjust("11 seconds");
+      yield* index.invalidate(repository, { periodic: true, keepHeldWhile: Effect.succeed(false) });
+      const listing = yield* index.read(input);
+      assert.strictEqual(listing.items.length, 1);
+      assert.strictEqual(calls.count, 2);
+    }).pipe(Effect.provideService(ForgeRateLimits, new ForgeRateLimitStore())),
   );
 });

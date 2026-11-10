@@ -169,6 +169,8 @@ export interface GitManagerShape {
     readonly load: Effect.Effect<A, E, R>;
     /** Shorter lifetime for reads that go stale faster than lists (details). */
     readonly ttlMs?: number;
+    /** A finished read older than this is read again (0: an explicit refresh); in-flight ones are joined. */
+    readonly maxAgeMs?: number;
     /**
      * Keep the last good value for background readers while the forge is rate limiting
      * (see `lastGoodWhilePaused`): for reads background readers make, not for large ones.
@@ -1511,6 +1513,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
               key: input.key,
               load: input.load,
               ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
+              ...(input.maxAgeMs !== undefined ? { maxAgeMs: input.maxAgeMs } : {}),
               ...(input.lastGood !== undefined ? { lastGood: input.lastGood } : {}),
               ...(input.revalidate !== undefined ? { revalidate: input.revalidate } : {}),
             }),
