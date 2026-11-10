@@ -237,4 +237,26 @@ describe("progressive mobile statistics", () => {
       ),
     ).toMatchObject({ nodes: [], loading: true, refreshing: false });
   });
+
+  it("shows a device's saved answer while it is asked, and keeps it beside an error", () => {
+    const savedNode = { environment, activity: { generatedAt: "saved" } as never };
+    const saved = new Map([[environment.environmentId, { scope: "activity", node: savedNode }]]);
+    expect(
+      deriveStatisticsView([environment], new Map(), "activity", "7d", 0, saved),
+    ).toMatchObject({ nodes: [savedNode], loading: true, refreshing: true });
+    // A saved answer of another view is not shown.
+    expect(deriveStatisticsView([environment], new Map(), "limits", "7d", 0, saved)).toMatchObject({
+      nodes: [],
+      refreshing: false,
+    });
+    // The device answered with an error: the saved answer stays, with the error.
+    const failed = { environment, error: "This device is reconnecting." };
+    const answers = new Map<EnvironmentId, NodeAnswer>([
+      [environment.environmentId, nodeAnswer(environment, "activity", "7d", 0, failed)],
+    ]);
+    expect(deriveStatisticsView([environment], answers, "activity", "7d", 0, saved)).toMatchObject({
+      nodes: [{ activity: { generatedAt: "saved" }, error: "This device is reconnecting." }],
+      loading: false,
+    });
+  });
 });

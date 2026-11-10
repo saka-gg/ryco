@@ -340,6 +340,16 @@
       "types": "./src/server.ts",
       "import": "./src/server.ts",
       "require": "./src/server.ts"
+    },
+    "./statistics": {
+      "types": "./src/statistics.ts",
+      "import": "./src/statistics.ts",
+      "require": "./src/statistics.ts"
+    },
+    "./cli-proxy": {
+      "types": "./src/cliProxy.ts",
+      "import": "./src/cliProxy.ts",
+      "require": "./src/cliProxy.ts"
     }
   },
   "scripts": {
