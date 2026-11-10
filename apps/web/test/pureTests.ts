@@ -230,7 +230,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/pullRequestsRoute.test.ts",
   "src/rightPanelRouteSearch.test.ts",
   "src/rightPanelTabs.logic.test.ts",
-  "src/rpc/projectSearchInvalidation.test.ts",
   "src/rpc/sourceControlRefreshPolicy.test.ts",
   "src/sessionTabs.selectors.test.ts",
   "src/settingsTarget.test.ts",

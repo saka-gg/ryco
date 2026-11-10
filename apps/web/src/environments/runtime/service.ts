@@ -55,8 +55,7 @@ import { markPromotedDraftThreadByRef, useComposerDraftStore } from "~/composerD
 import { useMessageQueueStore } from "~/messageQueueStore";
 import { ensureLocalApi } from "~/localApi";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
-import { createProjectSearchInvalidationQueue } from "~/rpc/projectSearchInvalidation";
-import { invalidateAllCheckpointDiffs } from "~/rpc/providerAtoms";
+import { createWebWorkspaceChangeQueue } from "~/rpc/workspaceChangeInvalidation";
 import { getPrimaryKnownEnvironment } from "../primary";
 import { issuePrimaryWebSocketToken } from "../primary/auth";
 import {
@@ -147,8 +146,8 @@ function isSavedEnvironmentConnectionCancelledError(
 }
 
 let needsProviderInvalidation = false;
-// `@` search caches are invalidated per changed checkout, not globally.
-const projectSearchInvalidations = createProjectSearchInvalidationQueue();
+// File caches are invalidated per changed checkout, and diffs per changed range, not globally.
+const workspaceChanges = createWebWorkspaceChangeQueue();
 const environmentStateSink = createWebEnvironmentStateSink({
   markProviderInvalidationNeeded: () => {
     needsProviderInvalidation = true;
@@ -156,8 +155,7 @@ const environmentStateSink = createWebEnvironmentStateSink({
   },
   flushProviderInvalidation: () => {
     needsProviderInvalidation = false;
-    invalidateAllCheckpointDiffs();
-    projectSearchInvalidations.flush();
+    workspaceChanges.flush();
   },
   supervisor: getEnvironmentSupervisor,
 });
@@ -195,7 +193,7 @@ function getEnvironmentSupervisor() {
       ),
     resetProviderInvalidation: () => {
       needsProviderInvalidation = false;
-      projectSearchInvalidations.reset();
+      workspaceChanges.reset();
     },
     // Hosted connections are opened only through the lifecycle owner's
     // connect port (`connectHostedEnvironment`); the primary path only ever
@@ -677,7 +675,7 @@ function applyRecoveredEventBatch(
   );
 
   if (batchEffects.needsProviderInvalidation) {
-    projectSearchInvalidations.noteEvents(environmentId, events);
+    workspaceChanges.note(environmentId, batchEffects);
     environmentStateSink.markProviderInvalidationNeeded();
   }
 

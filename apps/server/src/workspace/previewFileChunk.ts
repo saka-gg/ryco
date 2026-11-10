@@ -66,11 +66,14 @@ export async function readStableFileChunk(
   filePath: string,
   offset: number,
   expectedFingerprint: string | undefined,
+  /** The client holds these bytes when the file still has this fingerprint: none are read. */
+  knownFingerprint?: string,
 ): Promise<{
   readonly bytes: Buffer;
   readonly totalBytes: number;
   readonly mimeType: string;
   readonly fingerprint: string;
+  readonly unchanged?: true;
 }> {
   const { handle, stat } = await openPreviewFile(filePath);
   try {
@@ -89,6 +92,9 @@ export async function readStableFileChunk(
     const header = await readExactly(handle, 0, Math.min(PREVIEW_HEADER_BYTES, totalBytes));
     const mimeType = detectChunkedPreviewMimeType(header);
     if (mimeType === null) throw new Error(UNSUPPORTED_PREVIEW_FILE);
+    if (offset === 0 && knownFingerprint === fingerprint) {
+      return { bytes: Buffer.alloc(0), totalBytes, mimeType, fingerprint, unchanged: true };
+    }
     const bytes = await readExactly(
       handle,
       offset,

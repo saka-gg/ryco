@@ -26,12 +26,13 @@ export function useComparison(input: {
       createComparisonController({
         storage: webKV,
         storageKey: comparisonStorageKey(environmentId ?? "", repositoryPath ?? ""),
-        read: (selection) => {
+        read: (selection, knownRevision) => {
           if (!environmentId || !cwd) return Promise.reject(new Error("Repository unavailable."));
           return ensureEnvironmentApi(environmentId).vcs.readComparison({
             cwd,
             selection,
             ignoreWhitespace,
+            ...(knownRevision ? { knownRevision } : {}),
           });
         },
       }),

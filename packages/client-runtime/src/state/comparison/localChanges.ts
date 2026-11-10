@@ -36,7 +36,11 @@ function commitMessageFailure(error: unknown): string | null {
 /** In-memory review. Transport owns authorization/readiness; uncertain writes are never replayed. */
 export function createLocalChangesController(input: {
   cwd: string;
-  read: () => Promise<GitLocalChangesResult>;
+  /**
+   * `knownRevision`: the review held, sent so a node with nothing new answers
+   * `unchanged` without the patches (older nodes ignore it).
+   */
+  read: (knownRevision?: string) => Promise<GitLocalChangesResult>;
   apply: (input: GitApplyIndexPatchInput) => Promise<void>;
 }) {
   let state: LocalChangesState = {
@@ -64,9 +68,16 @@ export function createLocalChangesController(input: {
     if (writing) return Promise.resolve();
     if (pending) return pending;
     const ticket = ++generation;
+    const held = state.data;
     publish({ ...state, isLoading: true, error: null, commitError: null });
     const request = Promise.resolve()
-      .then(input.read)
+      .then(() => input.read(held?.revision))
+      .then((data) => {
+        if (data.unchanged !== true) return data;
+        // The same object: nothing downstream parses the patches again.
+        if (held && held.revision === data.revision) return held;
+        return input.read();
+      })
       .then(
         (data) => {
           if (ticket === generation) publish({ ...state, data, isLoading: false });

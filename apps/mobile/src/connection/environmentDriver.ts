@@ -1,4 +1,9 @@
-import type { AuthSessionState, EnvironmentId, OrchestrationEvent } from "@ryco/contracts";
+import type {
+  AuthSessionState,
+  EnvironmentId,
+  OrchestrationEvent,
+  ThreadId,
+} from "@ryco/contracts";
 import {
   checkSavedEnvironmentSession,
   createEnvironmentConnection,
@@ -19,6 +24,7 @@ import {
   type SavedEnvironmentRuntimeState,
 } from "@ryco/client-runtime/connection";
 import { createKnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
+import { createWorkspaceChangeQueue } from "@ryco/client-runtime/state/orchestration";
 import { WS_URL_PROVIDER_TIMEOUT_MS } from "@ryco/client-runtime/rpc";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
@@ -32,9 +38,9 @@ import {
 } from "@ryco/client-runtime/state/threads/threadBodyResidency";
 import { useComposerDraftStore } from "../state/composerDraftStore";
 import { useMessageQueueStore } from "../state/messageQueueStore";
-import { useStore } from "../state/threadsRuntime";
-import { invalidateAllCheckpointDiffs } from "../rpc/checkpointDiffAtoms";
-import { invalidateProjectFilesState } from "../rpc/projectFilesAtoms";
+import { selectEnvironmentState, useStore } from "../state/threadsRuntime";
+import { invalidateCheckpointDiffChanges } from "../rpc/checkpointDiffAtoms";
+import { invalidateProjectFilesForCheckout } from "../rpc/projectFilesAtoms";
 import { markEnvironmentSnapshotDirty } from "../persistence/environmentSnapshotPersistence";
 import { createHostedPrimaryConnectionIfLoaded } from "../hostedHub/primaryConnectionFactory";
 import { subscribeAppStateResume } from "./appStateResume";
@@ -173,6 +179,23 @@ export interface MobileEnvironmentDriver {
 }
 
 /**
+ * The checkout a thread's files screen lists, as far as the thread itself says:
+ * its worktree, else its project's checkout. Null when that is not certain (a
+ * worktree known only by id), so the caller drops the whole node's file caches.
+ */
+function resolveMobileThreadCheckoutCwd(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): string | null {
+  const environment = selectEnvironmentState(useStore.getState(), environmentId);
+  const shell = environment.threadShellById[threadId];
+  if (!shell) return null;
+  if (shell.worktreePath) return shell.worktreePath;
+  if (shell.worktreeId) return null;
+  return environment.projectById[shell.projectId]?.cwd ?? null;
+}
+
+/**
  * Wires the shared `createEnvironmentConnectionSupervisor` factory (no forked
  * runtime logic) to the mobile adapters/stores, modeled on the web
  * environments/runtime/service.ts. On a paired environment the supervisor opens
@@ -198,10 +221,16 @@ export function createMobileEnvironmentDriver(
   // workspace file listings/reads/searches — mirroring the web service
   // (apps/web/src/environments/runtime/service.ts).
   let needsProviderInvalidation = false;
+  // Per changed checkout and per changed diff range (shared with web), not every
+  // node's files and every open diff.
+  const workspaceChanges = createWorkspaceChangeQueue({
+    resolveThreadCwd: resolveMobileThreadCheckoutCwd,
+    invalidateCheckout: invalidateProjectFilesForCheckout,
+    invalidateCheckpointDiffs: invalidateCheckpointDiffChanges,
+  });
   const flushProviderInvalidation = () => {
     needsProviderInvalidation = false;
-    invalidateAllCheckpointDiffs();
-    invalidateProjectFilesState();
+    workspaceChanges.flush();
   };
 
   // Give the sink the supervisor handle so live thread-upserted/removed events
@@ -230,6 +259,7 @@ export function createMobileEnvironmentDriver(
     (threadDetailEvents ??= createThreadDetailEventApplier({
       stateSink,
       getSupervisor,
+      workspaceChanges,
       ...deps.threadDetailEventScheduling,
     }));
 
@@ -579,6 +609,7 @@ export function createMobileEnvironmentDriver(
       }, 100),
     resetProviderInvalidation: () => {
       needsProviderInvalidation = false;
+      workspaceChanges.reset();
     },
     // The direct plane has no primary environment, so this stays `null` for a
     // direct-only build — including at supervisor `start()`. It becomes non-null

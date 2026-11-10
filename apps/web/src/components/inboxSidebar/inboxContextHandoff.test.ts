@@ -27,6 +27,8 @@ const older = {
   modelSlug: "older-model",
   modelDisplayName: "Older model",
 };
+const makeActivity = activity;
+const makeRelocation = (sequence: number) => relocation(sequence);
 function activity(
   sequence: number,
   status = "consumed",
@@ -40,7 +42,7 @@ function activity(
     summary: "Context handoff",
     turnId: null,
     sequence,
-    createdAt: "2026-09-05T00:00:00.000Z",
+    createdAt: `2026-09-05T00:00:${String(sequence).padStart(2, "0")}.000Z`,
     payload: {
       schemaVersion: 1,
       handoffId: `handoff-${sequence}`,
@@ -145,5 +147,43 @@ describe("inbox context handoff", () => {
     expect(await load(apiWith([activity(1, "failed")]))).toBeNull();
     expect(await load(apiWith([{ ...activity(1), payload: {} }]))).toBeNull();
     expect(await load(apiWith([]))).toBeNull();
+  });
+  it("reads only the newest window on a later hover of the same thread (D10)", async () => {
+    // Windows and history pages carry no `sequence`: the place is the creation time.
+    const withoutSequence = (item: OrchestrationThreadActivity): OrchestrationThreadActivity => {
+      const { sequence: _sequence, ...rest } = item;
+      return rest;
+    };
+    const activity = (...args: Parameters<typeof makeActivity>) =>
+      withoutSequence(makeActivity(...args));
+    const relocation = (sequence: number) => withoutSequence(makeRelocation(sequence));
+    const api = apiWith([]);
+    const page = (items: ReadonlyArray<OrchestrationThreadActivity>, more: boolean) => ({
+      collection: "activities",
+      items,
+      page: more ? { ...end, hasMoreBefore: true, oldestCursor: `c${items[0]?.sequence}` } : end,
+    });
+    api.orchestration.getThreadWindow.mockResolvedValue({
+      thread: { activities: [relocation(30)] },
+      history: { activities: { ...end, hasMoreBefore: true, oldestCursor: "c30" } },
+    } as never);
+    api.orchestration.getThreadHistoryPage
+      .mockResolvedValueOnce(page([relocation(20)], true))
+      .mockResolvedValueOnce(page([activity(10)], false));
+    expect((await load(api))?.source.modelDisplayName).toBe("Opus 5");
+    expect(api.orchestration.getThreadHistoryPage).toHaveBeenCalledTimes(2);
+
+    // Hovered again: one window, nothing further back.
+    expect((await load(api))?.source.modelDisplayName).toBe("Opus 5");
+    expect(api.orchestration.getThreadWindow).toHaveBeenCalledTimes(2);
+    expect(api.orchestration.getThreadHistoryPage).toHaveBeenCalledTimes(2);
+
+    // A newer transfer in the window wins over the remembered one.
+    api.orchestration.getThreadWindow.mockResolvedValue({
+      thread: { activities: [activity(31, "consumed", older), relocation(30)] },
+      history: { activities: { ...end, hasMoreBefore: true, oldestCursor: "c30" } },
+    } as never);
+    expect((await load(api))?.source.providerInstanceId).toBe("copilot");
+    expect(api.orchestration.getThreadHistoryPage).toHaveBeenCalledTimes(2);
   });
 });

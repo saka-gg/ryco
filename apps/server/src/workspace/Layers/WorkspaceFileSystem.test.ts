@@ -339,6 +339,34 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
 
+    it.effect("answers unchanged when the client already holds the file's version (D4)", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const text = "export const value = 1;\n".repeat(20_000);
+        yield* writeTextFile(cwd, "src/big.ts", text);
+
+        const first = yield* workspaceFileSystem.readFile({ cwd, relativePath: "src/big.ts" });
+        const again = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "src/big.ts",
+          knownVersion: first.version,
+        });
+        expect(again).toEqual({ ...first, contents: "", unchanged: true });
+        expect(JSON.stringify(first).length).toBeGreaterThan(480_000);
+        expect(JSON.stringify(again).length).toBeLessThan(200);
+
+        yield* writeTextFile(cwd, "src/big.ts", `${text}// edited\n`);
+        const edited = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "src/big.ts",
+          knownVersion: first.version,
+        });
+        expect(edited.unchanged).toBeUndefined();
+        expect(edited.contents.endsWith("// edited\n")).toBe(true);
+      }),
+    );
+
     it.effect("normalizes UTF-8 BOM and CRLF files while retaining their format metadata", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem;
@@ -790,6 +818,34 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
           offset: 0,
         });
         expect(pdf.mimeType).toBe("application/pdf");
+      }),
+    );
+
+    it.effect("answers unchanged to a first chunk that names the held fingerprint (D7)", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeBinaryFile(cwd, "docs/big.pdf", pdfBytes(600_000));
+        const first = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/big.pdf",
+          offset: 0,
+        });
+        const again = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/big.pdf",
+          offset: 0,
+          knownFingerprint: first.fingerprint,
+        });
+        expect(again).toEqual({ ...first, dataBase64: "", unchanged: true });
+        const stale = yield* workspaceFileSystem.readFileChunk({
+          cwd,
+          relativePath: "docs/big.pdf",
+          offset: 0,
+          knownFingerprint: "stat:other",
+        });
+        expect(stale.unchanged).toBeUndefined();
+        expect(stale.dataBase64).toBe(first.dataBase64);
       }),
     );
 

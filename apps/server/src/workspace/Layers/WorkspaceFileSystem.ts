@@ -490,12 +490,16 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
         });
       }
 
+      const version = fileVersion(bytes);
+      const unchanged = input.knownVersion === version;
       return {
         relativePath: target.relativePath,
-        contents: normalizeLineEndings(contents),
-        version: fileVersion(bytes),
+        // The client holds these bytes already: the answer carries no text.
+        contents: unchanged ? "" : normalizeLineEndings(contents),
+        version,
         encoding: hasUtf8Bom ? "utf8-bom" : "utf8",
         lineEnding: detectLineEnding(contents),
+        ...(unchanged ? { unchanged: true as const } : {}),
       };
     },
   );
@@ -536,7 +540,12 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
       try: async () => {
         // Loaded on the first chunked preview, outside the server's boot chunks.
         const { readStableFileChunk } = await import("../previewFileChunk.ts");
-        return readStableFileChunk(realTargetPath, input.offset, input.expectedFingerprint);
+        return readStableFileChunk(
+          realTargetPath,
+          input.offset,
+          input.expectedFingerprint,
+          input.knownFingerprint,
+        );
       },
       catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFileChunk"),
     });
@@ -548,6 +557,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
       dataBase64: chunk.bytes.toString("base64"),
       mimeType: chunk.mimeType,
       fingerprint: chunk.fingerprint,
+      ...(chunk.unchanged ? { unchanged: true as const } : {}),
     };
   });
 

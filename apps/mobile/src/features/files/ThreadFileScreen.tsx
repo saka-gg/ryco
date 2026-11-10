@@ -37,6 +37,8 @@ import { cn } from "../../lib/cn";
 import { openWebLink } from "../../lib/openWebLink";
 import { resolveMobileCodeSurface } from "../../lib/appearancePreferences";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { refreshProjectReadFile } from "../../rpc/projectFilesAtoms";
+import { useProjectFileWatch } from "../../rpc/useProjectFileWatch";
 import { useProjectReadFile, useProjectReadFileBinary } from "../../rpc/useProjectFiles";
 import {
   useWsConnectionStatusForEnvironment,
@@ -605,6 +607,21 @@ export function ThreadFileScreen(props: {
     cwd: workspaceRoot,
     relativePath: path,
     enabled: kind !== null && shouldReadWorkspaceFile(kind) && !readsBinary,
+  });
+  // The open text file stays fresh while the app is in front (nodes that watch files).
+  useProjectFileWatch({
+    environmentId,
+    cwd: workspaceRoot,
+    relativePath: path,
+    heldVersion:
+      !readsBinary && read.data !== null && read.data.relativePath === path
+        ? read.data.version
+        : null,
+    onStale: () => {
+      if (workspaceRoot !== null && path !== null) {
+        refreshProjectReadFile(environmentId, workspaceRoot, path);
+      }
+    },
   });
   const binaryRead = useProjectReadFileBinary({
     environmentId,

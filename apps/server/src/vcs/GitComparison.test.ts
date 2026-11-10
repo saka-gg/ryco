@@ -103,6 +103,32 @@ describe("Git comparison", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("answers unchanged to a client that holds the comparison (D5)", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const input = {
+        cwd: f.cwd,
+        selection: { ref: "main", mode: "mergeBase" as const },
+        ignoreWhitespace: false,
+      };
+      const first = yield* readGitComparison(f.driver.execute, input);
+      expect(first.patch).toContain("+feature");
+      const again = yield* readGitComparison(f.driver.execute, {
+        ...input,
+        knownRevision: first.source.revision,
+      });
+      expect(again).toEqual({ ...first, patch: "", unchanged: true });
+      yield* f.write("feature.txt", "feature changed\n");
+      yield* f.commit("feature changed");
+      const moved = yield* readGitComparison(f.driver.execute, {
+        ...input,
+        knownRevision: first.source.revision,
+      });
+      expect(moved.unchanged).toBeUndefined();
+      expect(moved.patch).toContain("+feature changed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("reads the same patch whatever the repository's diff config says", () =>
     Effect.gen(function* () {
       const f = yield* fixture;

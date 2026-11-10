@@ -3,7 +3,10 @@ import type {
   EnvironmentConnectionSupervisor,
   EnvironmentStateSink,
 } from "@ryco/client-runtime/connection";
-import { deriveOrchestrationBatchEffects } from "@ryco/client-runtime/state/orchestration";
+import {
+  deriveOrchestrationBatchEffects,
+  type WorkspaceChangeQueue,
+} from "@ryco/client-runtime/state/orchestration";
 import {
   createEnvironmentEventBatcher,
   type EnvironmentEventBatcherDeps,
@@ -49,6 +52,8 @@ export type ThreadDetailEventScheduling = Pick<
 export function createThreadDetailEventApplier(
   input: {
     readonly stateSink: EnvironmentStateSink;
+    /** Collects the checkouts and diff ranges a batch changed for the next flush. */
+    readonly workspaceChanges?: Pick<WorkspaceChangeQueue, "note">;
     readonly getSupervisor: () => Pick<
       EnvironmentConnectionSupervisor,
       "reconcileThreadDetailSubscriptionEvictionForEnvironment"
@@ -64,6 +69,7 @@ export function createThreadDetailEventApplier(
     const batchEffects = deriveOrchestrationBatchEffects(events);
 
     if (batchEffects.needsProviderInvalidation) {
+      input.workspaceChanges?.note(environmentId, batchEffects);
       input.stateSink.markProviderInvalidationNeeded();
     }
 

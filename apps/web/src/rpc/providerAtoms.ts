@@ -47,6 +47,7 @@ export const {
   watchCheckpointDiff,
   evictCheckpointDiffsForThread,
   invalidateCheckpointDiff,
+  invalidateCheckpointDiffChanges,
   invalidateAllCheckpointDiffs,
   clearCheckpointDiffState,
 } = store;

@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Atom from "effect/reactivity/Atom";
 
+import type { CheckpointDiffChange } from "../state/orchestration/orchestrationEventEffects.ts";
 import { appAtomRegistry } from "./atomRegistry.ts";
 
 export interface CheckpointDiffInput {
@@ -190,6 +191,11 @@ export interface CheckpointDiffStore {
    */
   readonly evictCheckpointDiffsForThread: (threadId: ThreadId) => void;
   readonly invalidateCheckpointDiff: (threadId: ThreadId) => void;
+  /**
+   * Refetches only the diffs a change can have altered (see
+   * `CheckpointDiffChange`); a diff between two fixed checkpoints never changes.
+   */
+  readonly invalidateCheckpointDiffChanges: (changes: ReadonlyArray<CheckpointDiffChange>) => void;
   readonly invalidateAllCheckpointDiffs: () => void;
   /** Drops every unwatched diff of one environment; watched ones stay. */
   readonly clearUnwatchedCheckpointDiffsForEnvironment: (environmentId: EnvironmentId) => void;
@@ -521,6 +527,30 @@ export function createCheckpointDiffStore(
     }
   }
 
+  function isAffectedByCheckpointChange(
+    entry: CheckpointDiffEntry,
+    fromTurnCount: number | null,
+  ): boolean {
+    if (fromTurnCount === null || !entry.hasResolved) return true;
+    return (
+      (entry.input.fromTurnCount ?? 0) >= fromTurnCount ||
+      (entry.input.toTurnCount ?? 0) >= fromTurnCount
+    );
+  }
+
+  function invalidateCheckpointDiffChanges(changes: ReadonlyArray<CheckpointDiffChange>): void {
+    for (const change of changes) {
+      const keys = checkpointDiffKeysByThread.get(change.threadId);
+      if (!keys) continue;
+      for (const key of keys) {
+        const entry = checkpointDiffEntries.get(key);
+        if (entry && isAffectedByCheckpointChange(entry, change.fromTurnCount)) {
+          invalidateCheckpointDiffEntry(entry);
+        }
+      }
+    }
+  }
+
   function invalidateAllCheckpointDiffs(): void {
     for (const entry of checkpointDiffEntries.values()) {
       invalidateCheckpointDiffEntry(entry);
@@ -568,6 +598,7 @@ export function createCheckpointDiffStore(
     watchCheckpointDiff,
     evictCheckpointDiffsForThread,
     invalidateCheckpointDiff,
+    invalidateCheckpointDiffChanges,
     invalidateAllCheckpointDiffs,
     clearUnwatchedCheckpointDiffsForEnvironment,
     readUnwatchedCheckpointDiffResults,
