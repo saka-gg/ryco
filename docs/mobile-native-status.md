@@ -21,7 +21,11 @@ work is load-bearing.
 - **Native identity v2 is merged**, not on a blocker branch. `6ff51502c` landed 2026-08-13 via
   PRs #352/#353 (polish in #354 the next day): additive v2 contracts, DPoP-mint transport, and
   the full-screen access gate — the workspace navigator mounts only after a revalidated native
-  Hub session or a saved direct node with readable credential material. A Hub must explicitly
+  Hub session or a saved direct node with readable credential material. Since 2026-11 a retained
+  Hub sign-in also opens it: the stored session credential plus the Hub's confirmation of that
+  session within the last 72 hours show the saved, read-only workspace before the Hub has answered
+  and while it cannot be reached (`apps/mobile/src/hostedHub/retainedSessionAccess.ts`). It grants
+  no connection and no mutation authority, and ends when the Hub says the session is gone. A Hub must explicitly
   advertise the `nativeIdentity` v2 capability or the protocol stays dark and direct pairing
   remains available. Browser identity v1 stays cookie/CSRF; native session material is staged in
   SecretKV and published as a bearer credential only after a durable write/read-back;

@@ -6,11 +6,19 @@ import {
 import { Image } from "expo-image";
 import * as Linking from "expo-linking";
 import { readLaunchURL } from "../../lib/launchUrl";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { View } from "react-native";
 
 import { ConnectionsNewRouteScreen, NativeIdentityScreen } from "../../navigation/lazyRouteScreens";
+import {
+  deriveRetainedHubSession,
+  readHubSessionConfirmedAt,
+  readStoredHubSession,
+  subscribeStoredHubSession,
+} from "../../hostedHub/retainedSessionAccess";
 import { useHostedHubStore, ensureMobileHostedSession } from "../../hostedHub/state";
+import { mobileKV } from "../../platform/kv";
+import { mobileRuntimeStartupBarrier } from "../../runtime/startupBarrier";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useConnectionRegistry } from "../../providers/ConnectionRegistryProvider";
 import { RootStack } from "../../Stack";
@@ -63,8 +71,19 @@ export function AppAccessGate(props: {
   readonly theme: Parameters<typeof WorkspaceNavigation>[0]["theme"];
 }) {
   const { catalog } = useConnectionRegistry();
-  const hostedAuthenticated = useHostedHubStore((state) => state.accountStatus === "authenticated");
+  const accountStatus = useHostedHubStore((state) => state.accountStatus);
+  const hostedAuthenticated = accountStatus === "authenticated";
   const [hostedHydrated, setHostedHydrated] = useState(false);
+  // The launch check itself settled, unlike `hostedHydrated`, which the launch
+  // deadline also sets: only then is the account status the check's answer.
+  const [hostedCheckSettled, setHostedCheckSettled] = useState(false);
+  const storedHubSession = useSyncExternalStore(subscribeStoredHubSession, readStoredHubSession);
+  const [hubSessionConfirmedAt, setHubSessionConfirmedAt] = useState<number | null>(null);
+  const [savedWorkspaceRead, setSavedWorkspaceRead] = useState(() =>
+    mobileRuntimeStartupBarrier.isHydrated(),
+  );
+  // The retained sign-in's window is measured once, at launch.
+  const [launchedAt] = useState(() => Date.now());
   const [directHydrated, setDirectHydrated] = useState(false);
   const [directCredentialReadable, setDirectCredentialReadable] = useState(false);
   const pendingWorkspaceLink = useRef<string | null>(null);
@@ -81,8 +100,21 @@ export function AppAccessGate(props: {
     }, HOSTED_LAUNCH_DECISION_DEADLINE_MS);
     void ensureMobileHostedSession().finally(() => {
       clearTimeout(deadline);
-      if (active) setHostedHydrated(true);
+      if (!active) return;
+      setHostedCheckSettled(true);
+      setHostedHydrated(true);
     });
+    // What a retained sign-in opens is the saved workspace, so it waits for
+    // that to be read; and it needs to know when the Hub last confirmed it.
+    void readHubSessionConfirmedAt(mobileKV).then((confirmedAt) => {
+      if (active) setHubSessionConfirmedAt(confirmedAt);
+    });
+    mobileRuntimeStartupBarrier.runAfterHydration(
+      () => {
+        if (active) setSavedWorkspaceRead(true);
+      },
+      () => undefined,
+    );
     return () => {
       active = false;
       clearTimeout(deadline);
@@ -101,6 +133,15 @@ export function AppAccessGate(props: {
   const access = deriveAppAccess({
     hostedHydrated,
     hostedSessionRevalidated: hostedAuthenticated,
+    hostedSessionRetained:
+      savedWorkspaceRead &&
+      deriveRetainedHubSession({
+        storedSession: storedHubSession,
+        confirmedAt: hubSessionConfirmedAt,
+        now: launchedAt,
+        accessCheckSettled: hostedCheckSettled,
+        accountStatus,
+      }),
     directHydrated,
     directCredentialReadable,
   });

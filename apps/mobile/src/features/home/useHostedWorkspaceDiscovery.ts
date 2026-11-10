@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { MAX_MOBILE_HOSTED_CONNECTIONS } from "../../connection/hostedConnectionCoordinator";
 import { mobileHostedConnectionScopes } from "../../connection/hostedConnectionScopes";
 import { createHostedWorkspaceDiscovery } from "../../connection/hostedWorkspaceDiscovery";
 import { mobileAppLifecycle } from "../../platform/appLifecycle";
@@ -16,9 +17,14 @@ const retainDiscovery = (
   environmentId: Parameters<typeof mobileHostedConnectionScopes.retain>[0],
 ) => mobileHostedConnectionScopes.retain(environmentId, { type: "workspace-discovery" });
 
-/** Home needs all machines' metadata, not a manually selected machine. */
+/**
+ * Home needs all machines' metadata, not a manually selected machine: it asks
+ * for as many machines at once as the connection bound allows.
+ */
 export function useHostedWorkspaceDiscovery(focused: boolean): void {
-  const [discovery] = useState(() => createHostedWorkspaceDiscovery(retainDiscovery));
+  const [discovery] = useState(() =>
+    createHostedWorkspaceDiscovery(retainDiscovery, MAX_MOBILE_HOSTED_CONNECTIONS),
+  );
   const foreground = useSyncExternalStore(
     mobileAppLifecycle.subscribe,
     mobileAppLifecycle.isForeground,

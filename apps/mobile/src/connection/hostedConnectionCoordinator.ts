@@ -40,7 +40,14 @@ import type {
  * background release, staggered wake-up, and a five-node bound assertion.
  */
 export const MAX_MOBILE_HOSTED_CONNECTIONS = UNIFIED_WORKSPACE_MAX_CONNECTIONS;
-export const MOBILE_HOSTED_WAKE_STAGGER_MS = 750;
+/**
+ * The step between two connects of one plan. It only orders them: the machine
+ * in view asks the Hub first and the others follow closely, so their relay
+ * attempts overlap. A step of 750 ms made three machines take 1.5 s longer to
+ * load and bought no capacity: one step refills less than one upgrade token
+ * (docs/relay-capacity-assessment-3b.md), and one phone spends at most three.
+ */
+export const MOBILE_HOSTED_WAKE_STAGGER_MS = 150;
 
 /** One hosted environment's session, as the mobile surfaces read it. */
 export interface MobileHostedConnectionState {

@@ -11,6 +11,7 @@ import {
 import { createMobileRemoteEnvironmentApi } from "../connection/remoteApi";
 import { createSavedSessionHints } from "../connection/savedSessionHints";
 import { mobileKV } from "../platform/kv";
+import { watchHubSessionConfirmation } from "../hostedHub/retainedSessionAccess";
 import { initializeWsConnectionState } from "../rpc/wsConnectionState";
 import {
   configureMobileHostedConnectionCoordinator,
@@ -112,6 +113,7 @@ export function createMobileConnectionRegistry(overrides?: {
 let initialized = false;
 let stopEnvironmentDriver: (() => void) | null = null;
 let stopHostedAccountWatch: (() => void) | null = null;
+let stopHubSessionConfirmationWatch: (() => void) | null = null;
 
 /**
  * One-time runtime initialization run from the app root. Seeds the ws
@@ -176,6 +178,14 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       nodeForId: (nodeId) =>
         hostedHubStore.getState().nodes.find((node) => node.id === nodeId) ?? null,
       isDirectEnvironment: (environmentId) => registry.catalog.get(environmentId) !== null,
+    });
+    // Each time the Hub confirms the session is stamped, which is what lets a
+    // later launch open the saved workspace before the Hub has answered.
+    stopHubSessionConfirmationWatch = watchHubSessionConfirmation({
+      kv: mobileKV,
+      now: () => Date.now(),
+      readAccountStatus: () => hostedHubStore.getState().accountStatus,
+      subscribe: (listener) => hostedHubStore.subscribe(listener),
     });
     let previousHostedState = hostedHubStore.getState();
     let artworkAccountId = previousHostedState.account?.id ?? null;
@@ -263,6 +273,8 @@ export function resetMobileRuntimeInitForTests(): void {
   appDriver = null;
   stopHostedAccountWatch?.();
   stopHostedAccountWatch = null;
+  stopHubSessionConfirmationWatch?.();
+  stopHubSessionConfirmationWatch = null;
   mobileHostedConnectionScopes.reset();
   resetMobileHostedConnectionCoordinatorForTests();
 }

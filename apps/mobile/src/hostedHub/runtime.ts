@@ -55,6 +55,7 @@ import { createHostedEnvironmentConnection } from "./primaryConnection";
 import { installHostedEnvironmentConnectionFactory } from "./primaryConnectionFactory";
 import { configureAuthoritativeNodeTrustSource } from "../features/home/authoritativeNodeTrustSource";
 import { MobileHostedRelaySocket, mobileHostedRelayUrl } from "./relaySocket";
+import { publishStoredHubSession } from "./retainedSessionAccess";
 import {
   getMobileHostedEndpoint,
   getMobileHostedHttpClient,
@@ -525,7 +526,10 @@ export function ensureMobileHostedSession(): Promise<void> {
     // profile hydration completed. Re-resolve now so a compatible saved domain
     // becomes authoritative before any secret is read or request is sent.
     invalidateMobileHostedRuntimeConfig();
-    if (!isMobileHostedModeConfigured()) return false;
+    if (!isMobileHostedModeConfigured()) {
+      publishStoredHubSession(false);
+      return false;
+    }
     // The token and trust reads are independent keychain round trips, so they
     // overlap. The hardware key is needed only to restore a stored session:
     // its load starts the moment the token read finds one, still overlapping
@@ -546,6 +550,12 @@ export function ensureMobileHostedSession(): Promise<void> {
       () => undefined,
     );
     const [token, trust] = await Promise.allSettled([tokenRead, mobileE2eeTrustStore.hydrate()]);
+    // The access gate may open the saved workspace on a retained sign-in. It
+    // hears of the stored session only here: the Hub profile is authoritative,
+    // and the trust store the saved machines are listed against has loaded.
+    publishStoredHubSession(
+      token.status === "fulfilled" && trust.status === "fulfilled" && hasStoredSession(),
+    );
     if (token.status === "rejected") {
       setMobileHostedModeAvailable(false, "credential-storage");
       return false;
