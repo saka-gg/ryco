@@ -18,16 +18,19 @@ import {
   getEnvironmentServerConfigsSnapshot,
   getReportedThreadCapabilitiesSnapshot,
   getShellSettlementRulesSnapshot,
+  isEnvironmentServerConfigSaved,
   isEnvironmentServerConfigShown,
   patchEnvironmentServerSettings,
   readEnvironmentServerConfig,
   recordEnvironmentShellSettlementPolicy,
   resetEnvironmentServerConfigsForTests,
   resolveEnvironmentThreadCapabilities,
+  serverConfigForDevice,
   startActiveEnvironmentServerConfigProjection,
   subscribeEnvironmentServerConfigs,
   subscribeReportedThreadCapabilities,
   writeEnvironmentServerConfig,
+  writeSavedEnvironmentServerConfig,
 } from "./environmentServerConfigs.ts";
 import {
   applyProvidersUpdated,
@@ -773,5 +776,56 @@ describe("a connection writing its config before any projection runs", () => {
     } as ServerConfigStreamEvent);
 
     expect(readEnvironmentServerConfig(NODE_A)).toBe(stored);
+  });
+});
+
+describe("saved environment server configs", () => {
+  it("shows a saved config until the node's own replaces it, and never over a live one", () => {
+    const saved = config(NODE_A, ["codex"]);
+    expect(writeSavedEnvironmentServerConfig(NODE_A, saved)).toBe(true);
+    expect(readEnvironmentServerConfig(NODE_A)).toBe(saved);
+    expect(isEnvironmentServerConfigSaved(NODE_A)).toBe(true);
+    // A saved config states nothing about thread capabilities.
+    expect(getReportedThreadCapabilitiesSnapshot().has(NODE_A)).toBe(false);
+
+    const live = config(NODE_A, ["codex", "claudeAgent"]);
+    writeEnvironmentServerConfig(NODE_A, live);
+    expect(readEnvironmentServerConfig(NODE_A)).toBe(live);
+    expect(isEnvironmentServerConfigSaved(NODE_A)).toBe(false);
+    expect(writeSavedEnvironmentServerConfig(NODE_A, saved)).toBe(false);
+    expect(readEnvironmentServerConfig(NODE_A)).toBe(live);
+  });
+
+  it("blanks every secret before a config is kept on a device", () => {
+    const base = config(NODE_A, ["codex"]);
+    const withSecrets = {
+      ...base,
+      settings: {
+        ...base.settings,
+        providerInstances: {
+          codex: {
+            driver: "codex",
+            environment: [
+              { name: "OPENAI_API_KEY", value: "sk-secret", sensitive: true },
+              { name: "PLAIN", value: "visible", sensitive: false },
+            ],
+            config: { serverPassword: "hunter2", serverUrl: "https://user:pw@example.com/x" },
+          },
+        },
+        cliProxyHubs: {
+          hub: {
+            url: "https://a:b@hub.example.com",
+            managementKey: "mk",
+            cloudflareAccessClientSecret: "cf",
+            enabled: true,
+          },
+        },
+      },
+    } as unknown as ServerConfig;
+    const kept = JSON.stringify(serverConfigForDevice(withSecrets));
+    for (const secret of ["sk-secret", "hunter2", "user:pw", "a:b@", '"mk"', '"cf"']) {
+      expect(kept).not.toContain(secret);
+    }
+    expect(kept).toContain("visible");
   });
 });

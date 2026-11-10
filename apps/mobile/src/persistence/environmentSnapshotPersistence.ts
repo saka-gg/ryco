@@ -40,6 +40,7 @@ import {
   type SavedQueryStoreHandle,
 } from "./savedQueryStore";
 import { purgeTaskCache } from "../features/tasks/taskCacheKeys";
+import { hydrateSavedServerConfigs, installServerConfigSaving } from "./serverConfigPersistence";
 import { createSnapshotDb, payloadByteLength, type SnapshotDb } from "./snapshotDb";
 
 /**
@@ -681,6 +682,7 @@ let activeRuntime: SnapshotPersistenceRuntime | null = null;
 let uninstallSelectionPersistence: (() => void) | null = null;
 let activeSavedQueryStore: SavedQueryStoreHandle | null = null;
 let uninstallSavedQueryFlush: (() => void) | null = null;
+let uninstallServerConfigSaving: (() => void) | null = null;
 
 function getSharedSnapshotDb(): SnapshotDb {
   return (sharedDb ??= createSnapshotDb());
@@ -771,6 +773,13 @@ export async function initializeMobileSnapshotPersistence(deps: {
   for (const environmentId of dirtyBeforeInitialization) runtime.markDirty(environmentId);
   dirtyBeforeInitialization.clear();
   await runtime.hydrate();
+  // Every environment the cache could show gets its saved config (pickers,
+  // provider status, settings) without waiting for its node; not awaited.
+  void hydrateSavedServerConfigs(
+    savedQueryStore,
+    Object.keys(useStore.getState().environmentStateById) as EnvironmentId[],
+  ).catch(warn("could not hydrate saved server configs"));
+  uninstallServerConfigSaving = installServerConfigSaving(savedQueryStore);
   runtime.installHostedRosterMirror(hostedHubStore);
 }
 
@@ -780,6 +789,8 @@ export function resetMobileSnapshotPersistenceForTests(): void {
   activeSavedQueryStore = null;
   uninstallSavedQueryFlush?.();
   uninstallSavedQueryFlush = null;
+  uninstallServerConfigSaving?.();
+  uninstallServerConfigSaving = null;
   activeRuntime?.dispose();
   activeRuntime = null;
   dirtyBeforeInitialization.clear();
