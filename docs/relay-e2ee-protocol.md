@@ -892,6 +892,21 @@ chunk-support latch is fed only by inbound evidence (verified against
 `packages/shared/src/relayMessageChunks.ts:135-174` and
 `packages/client-runtime/src/relay/relayEngine.ts:198-206`, 2026-07-30).
 
+_Note (non-normative) — packing several messages into one record was measured and not adopted
+(2026-11-10)._ The idea: put the node-to-client RPC messages of the same ~10 ms into one record, to
+save per-record framing and one AEAD operation each. The pinned RPC server already does most of
+it: on an acknowledged transport such as the relay, a stream sends its next `Chunk` only after the
+client's `Ack`, so every event that arrives meanwhile travels in one message. On the ten busiest
+real threads of a production node (42,190 events), a thread window sends about 0.6 messages per
+event at a 30 to 120 ms round trip; in the busiest real minute (352 events) it sent about 150
+messages, 2.5 a second, and no two of them within 10 ms of each other. What packing could still
+merge are messages of different subscriptions that happen to coincide, chiefly a thread-list row
+update next to a window message, which the shared thread list sends at most about once a second
+per streaming thread. That is at most about 100 bytes of framing and one 250-byte seal (5.3 µs on
+a desktop CPU, a few times that on a phone) per second, against a change to the record format, the
+close anchor and the fixture corpus. The record layer is therefore unchanged: one RPC message per
+record.
+
 ### 4.3 Receive pipeline and post-strip discrimination
 
 A receiver MUST process every inbound `data.payload` in exactly this order:
