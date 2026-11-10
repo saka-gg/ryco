@@ -4723,6 +4723,11 @@ function runStoreMutationBarriers(): void {
 }
 
 interface AppStore extends AppState {
+  /**
+   * Applies a pure transition defined outside this module (a platform's saved
+   * thread bodies, `threadBodyCache.ts`) in order with every other write.
+   */
+  applyStateTransition: (transition: (state: AppState) => AppState) => void;
   setActiveEnvironmentId: (environmentId: EnvironmentId) => void;
   removeEnvironmentState: (environmentId: EnvironmentId) => void;
   hydrateEnvironmentStateFromCache: (
@@ -4837,6 +4842,10 @@ export const useStore = create<AppStore>((set, get) => {
 
   return {
     ...initialState,
+    applyStateTransition: (transition) => {
+      shellCoalescer.flush();
+      set((state) => transition(state));
+    },
     setActiveEnvironmentId: (environmentId) => {
       shellCoalescer.flush();
       set((state) => setActiveEnvironmentId(state, environmentId));

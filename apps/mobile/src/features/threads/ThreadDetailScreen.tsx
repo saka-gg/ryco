@@ -200,6 +200,7 @@ import {
   selectAgentControlProposalsForThread,
   useAgentControlStore,
 } from "../../state/agentControlRuntime";
+import { useHasSavedThreadBody } from "../../persistence/savedThreadBodies";
 import { useAgentControlSync } from "../../state/agentControlSync";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
@@ -783,6 +784,9 @@ export function ThreadDetailScreen(props: {
   const threadLiveDetailLoaded = useStore((state) =>
     selectThreadLiveDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
   );
+  // A saved body (text, open cards) is read from the device when the thread opens: until it is
+  // in the store the list shows no empty state, rather than one that is wrong for a moment.
+  const savedBodyPending = useHasSavedThreadBody(environmentId, threadId) && !threadDetailLoaded;
   const queuesByThreadKey = useMessageQueueStore((state) => state.queuesByThreadKey);
   const outboxMessages = useSyncExternalStore(
     subscribeThreadOutbox,
@@ -960,6 +964,8 @@ export function ThreadDetailScreen(props: {
   const { worktrees } = useHomeWorkspaceData();
   const environments = useHomeEnvironments();
   const pendingApprovals = built?.viewModel.pendingApprovals ?? NO_PENDING_APPROVALS;
+  // Approvals a send may decline: only those the node's own window confirmed, never saved cards.
+  const answerableApprovals = threadLiveDetailLoaded ? pendingApprovals : NO_PENDING_APPROVALS;
   const pendingUserInputs = built?.viewModel.pendingUserInputs ?? [];
   const optionalUserInputs = built?.viewModel.optionalUserInputs ?? [];
   // When each pending approval was first on screen: a send declines only approvals shown long
@@ -1096,6 +1102,8 @@ export function ThreadDetailScreen(props: {
       }),
     [built?.timeline.length, degradedReason, environmentRow?.staleDetail, hydratedFromCacheAt],
   );
+  // Cards from the saved body are shown, not answered: the node's own window confirms them.
+  const promptsDisabled = cachedView.promptsDisabled || !threadLiveDetailLoaded;
   const deliveryRecord = useMobileHostedConnectionsStore((state) =>
     selectThreadDeliveryRecord(state.selectedNodes, environmentId),
   );
@@ -2434,7 +2442,7 @@ export function ThreadDetailScreen(props: {
     // A message sent while approvals wait declines the ones on screen and steers the turn
     // (`resolveApprovalRedirect`, the decision the placeholder shows). Any other message queues
     // behind them as before.
-    const approvalsAtSend = pendingApprovals;
+    const approvalsAtSend = answerableApprovals;
     const redirectApprovals = async (message: QueuedThreadMessage) => {
       // A notification reply answers no approval: it queues behind them.
       if (notificationReply) return "queue" as const;
@@ -2954,7 +2962,7 @@ export function ThreadDetailScreen(props: {
     thread !== undefined &&
     selectedModelSelection !== null &&
     resolveApprovalRedirect({
-      approvals: pendingApprovals,
+      approvals: answerableApprovals,
       runtimeSessionId: thread.session?.runtimeSessionId,
       activeTurnId: thread.session?.activeTurnId,
       steerAllowed: getSteerEligibility({
@@ -3809,7 +3817,7 @@ export function ThreadDetailScreen(props: {
                         navigation.goBack();
                     }}
                   />
-                ) : (
+                ) : savedBodyPending ? null : (
                   <View className="px-4 py-16">
                     <EmptyState
                       variant="plain"
@@ -3955,7 +3963,7 @@ export function ThreadDetailScreen(props: {
               environmentId={environmentId}
               threadId={threadId}
               approval={approval}
-              disabled={cachedView.promptsDisabled}
+              disabled={promptsDisabled}
             />
           ))}
           {[...pendingUserInputs, ...optionalUserInputs].map((userInput) => (
@@ -3966,7 +3974,7 @@ export function ThreadDetailScreen(props: {
               userInput={userInput}
               route={resolveOptionalAnswerRoute({ userInput, session: thread?.session })}
               onSendAsMessage={sendOptionalAnswer}
-              disabled={cachedView.promptsDisabled}
+              disabled={promptsDisabled}
             />
           ))}
           {secretRequests.requests.map((request) => (

@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, OrchestrationThreadActivity } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -6,7 +6,6 @@ import {
   MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES,
 } from "@ryco/client-runtime/state/workspace";
 import {
-  createThreadContentCapture,
   fullThreadEntry,
   isArchivedThreadStub,
   THREAD_CONTENT_CACHE_MAX_THREADS,
@@ -21,18 +20,20 @@ import type {
   ThreadSession,
 } from "../state/threadsRuntime";
 import {
-  boundStoredEnvironmentSnapshot,
-  captureEnvironmentContentCandidates,
-  captureEnvironmentSnapshotRecord,
-  createEnvironmentSnapshotSerializer,
+  createEnvironmentRowSerializer,
+  decodeStoredEnvironmentEnvelope,
   decodeStoredEnvironmentSnapshot,
+  decodeStoredEnvironmentThread,
+  decodeStoredThreadBody,
+  encodeStoredThreadBody,
+  environmentRowsFromLegacyRecord,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
   MAX_SNAPSHOT_CONTENT_BYTES_PER_ENVIRONMENT,
   MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT,
-  toCachedEnvironmentShellSnapshot,
   toWorkspaceMetadataSnapshot,
-  withoutStoredContent,
+  type StoredEnvironmentSnapshot,
 } from "./environmentSnapshotCodec";
+import { payloadHash } from "./snapshotDb";
 
 const ENV = "env-codec" as EnvironmentId;
 
@@ -127,337 +128,6 @@ function environmentState(threads: ReadonlyArray<string>): EnvironmentState {
   };
 }
 
-describe("environment snapshot codec", () => {
-  it("captures the settled projection with sessions and liveness stripped", () => {
-    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
-    expect(record.schemaVersion).toBe(ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION);
-    expect(record.capturedAt).toBe(123);
-    expect(record.projects).toHaveLength(1);
-    expect(record.threads).toHaveLength(1);
-    expect(fullThreadEntry(record.threads[0]?.summary)?.session).toBeNull();
-    expect(fullThreadEntry(record.threads[0]?.summary)?.backgroundLiveness).toBeNull();
-  });
-
-  it("round-trips through encode and decode", () => {
-    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
-    const { payload } = boundStoredEnvironmentSnapshot(record);
-    expect(decodeStoredEnvironmentSnapshot(payload, ENV)).toEqual(record);
-  });
-
-  it("projects the byte-compatible mobile record into shared metadata", () => {
-    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
-    const shared = toWorkspaceMetadataSnapshot(record);
-    expect(shared).toMatchObject({
-      schemaVersion: 1,
-      environmentId: ENV,
-      capturedAt: 123,
-      projects: [{ environmentId: ENV, id: "project-1" }],
-      threads: [
-        {
-          environmentId: ENV,
-          id: "thread-1",
-          projectId: "project-1",
-          deliveryUnknown: false,
-        },
-      ],
-    });
-    expect(shared).not.toHaveProperty("messages");
-    expect(shared.threads[0]).not.toHaveProperty("session");
-  });
-
-  it("keeps a valid shell lineage in shared metadata and drops a malformed one", () => {
-    const lineage = {
-      parentThreadId: "thread-parent" as never,
-      rootThreadId: "thread-parent" as never,
-      relationship: "delegated",
-    };
-    const state = environmentState(["thread-valid", "thread-malformed", "thread-root"]);
-    const record = captureEnvironmentSnapshotRecord(
-      {
-        ...state,
-        threadShellById: {
-          ...state.threadShellById,
-          ["thread-valid" as never]: shell("thread-valid", { lineage }),
-          ["thread-malformed" as never]: shell("thread-malformed", {
-            lineage: { parentThreadId: "", relationship: 7 } as never,
-          }),
-        },
-      },
-      ENV,
-      123,
-    );
-    const threads = new Map(
-      toWorkspaceMetadataSnapshot(record).threads.map((thread) => [thread.id, thread]),
-    );
-    expect(threads.get("thread-valid" as never)?.lineage).toEqual(lineage);
-    expect(threads.get("thread-malformed" as never)).not.toHaveProperty("lineage");
-    expect(threads.get("thread-root" as never)).not.toHaveProperty("lineage");
-  });
-
-  it("discards a record whose schemaVersion literal it does not know — a bump in either direction", () => {
-    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
-    const { payload } = boundStoredEnvironmentSnapshot(record);
-    for (const schemaVersion of [ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION + 1, 0]) {
-      const bumped = JSON.stringify({
-        ...(JSON.parse(payload) as Record<string, unknown>),
-        schemaVersion,
-      });
-      expect(decodeStoredEnvironmentSnapshot(bumped, ENV)).toBeNull();
-    }
-  });
-
-  const archivedStub = (id: string): ArchivedThreadStub => ({
-    shellDetail: "archived-stub",
-    id: id as never,
-    environmentId: ENV,
-    projectId: "project-1" as never,
-    title: id,
-    createdAt: "2026-08-01T00:00:00.000Z",
-    updatedAt: "2026-08-02T00:00:00.000Z",
-    archivedAt: "2026-08-02T00:00:00.000Z",
-    branch: null,
-    worktreePath: null,
-    worktreeId: null,
-    latestUserMessageAt: null,
-    lineage: null,
-  });
-  const withStub = (state: EnvironmentState, id: string): EnvironmentState => ({
-    ...state,
-    threadIds: [...state.threadIds, id as never],
-    threadShellById: { ...state.threadShellById, [id]: archivedStub(id) } as never,
-    sidebarThreadSummaryById: {
-      ...state.sidebarThreadSummaryById,
-      [id]: archivedStub(id),
-    } as never,
-  });
-
-  it("writes stubs whole and round-trips them", () => {
-    const record = captureEnvironmentSnapshotRecord(
-      withStub(environmentState(["thread-1"]), "archived-1"),
-      ENV,
-      123,
-    );
-    expect(record.schemaVersion).toBe(ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION);
-    const stored = record.threads.find((thread) => thread.shell.id === "archived-1");
-    expect(isArchivedThreadStub(stored?.shell)).toBe(true);
-    // A stub claims no live state; it is stored as is.
-    expect(stored?.summary).toEqual(archivedStub("archived-1"));
-    const { payload } = boundStoredEnvironmentSnapshot(record);
-    expect(decodeStoredEnvironmentSnapshot(payload, ENV)).toEqual(record);
-    // The incremental serializer writes the same bytes.
-    const serialized = createEnvironmentSnapshotSerializer().serialize(
-      withStub(environmentState(["thread-1"]), "archived-1"),
-      ENV,
-      123,
-    );
-    expect(serialized.payload).toBe(payload);
-  });
-
-  it("still reads a v1 record, which only ever held full shells", () => {
-    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
-    const legacy = JSON.stringify({ ...record, schemaVersion: 1 });
-    const decoded = decodeStoredEnvironmentSnapshot(legacy, ENV);
-    expect(decoded?.threads.map((thread) => thread.shell.id)).toEqual(["thread-1"]);
-  });
-
-  it("still reads a v2 record, stubs included, which carries no content", () => {
-    const record = captureEnvironmentSnapshotRecord(
-      withStub(environmentState(["thread-1"]), "archived-1"),
-      ENV,
-      123,
-    );
-    const legacy = JSON.stringify({
-      ...record,
-      schemaVersion: 2,
-      // A v2 writer never stored content; a stray key is not read as it.
-      content: { "thread-1": { messages: [] } },
-    });
-    const decoded = decodeStoredEnvironmentSnapshot(legacy, ENV);
-    expect(decoded?.schemaVersion).toBe(2);
-    expect(decoded?.threads.map((thread) => thread.shell.id)).toEqual(["thread-1", "archived-1"]);
-    expect(decoded).not.toHaveProperty("content");
-  });
-
-  it("discards a v1 record that claims a stub, and half a stub in any record", () => {
-    const record = captureEnvironmentSnapshotRecord(
-      withStub(environmentState([]), "archived-1"),
-      ENV,
-      123,
-    );
-    const { payload } = boundStoredEnvironmentSnapshot(record);
-    expect(
-      decodeStoredEnvironmentSnapshot(
-        JSON.stringify({ ...(JSON.parse(payload) as object), schemaVersion: 1 }),
-        ENV,
-      ),
-    ).toBeNull();
-    const half = JSON.parse(payload) as { threads: Array<{ summary: unknown }> };
-    half.threads[0]!.summary = summary("archived-1");
-    expect(decodeStoredEnvironmentSnapshot(JSON.stringify(half), ENV)).toBeNull();
-  });
-
-  it("projects a stored stub into shared metadata as a marked stub", () => {
-    const record = captureEnvironmentSnapshotRecord(
-      withStub(environmentState(["thread-1"]), "archived-1"),
-      ENV,
-      123,
-    );
-    const threads = new Map(
-      toWorkspaceMetadataSnapshot(record).threads.map((thread) => [thread.id, thread]),
-    );
-    expect(threads.get("archived-1" as never)).toMatchObject({
-      shellDetail: "archived-stub",
-      archivedAt: "2026-08-02T00:00:00.000Z",
-      modelSelection: null,
-    });
-    expect(threads.get("thread-1" as never)).not.toHaveProperty("shellDetail");
-  });
-
-  it("discards corrupt JSON and identity mismatches", () => {
-    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
-    const { payload } = boundStoredEnvironmentSnapshot(record);
-    expect(decodeStoredEnvironmentSnapshot("{not-json", ENV)).toBeNull();
-    expect(decodeStoredEnvironmentSnapshot(payload, "other-env" as EnvironmentId)).toBeNull();
-  });
-
-  it("caps threads at the per-environment bound, dropping archived and oldest first", () => {
-    const state = environmentState(["old", "archived", "new"]);
-    const shells = state.threadShellById as Record<string, ThreadShell>;
-    shells["archived"] = shell("archived", { archivedAt: "2026-08-02T00:00:00.000Z" });
-    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
-    summaries["old"] = summary("old", { updatedAt: "2026-08-01T00:00:00.000Z" });
-    summaries["archived"] = summary("archived", { updatedAt: "2026-08-03T00:00:00.000Z" });
-    summaries["new"] = summary("new", { updatedAt: "2026-08-04T00:00:00.000Z" });
-
-    const record = captureEnvironmentSnapshotRecord(state, ENV, 1);
-    const { record: bounded } = boundStoredEnvironmentSnapshot(record, {
-      maxThreads: 1,
-      maxPayloadBytes: 10_000_000,
-    });
-    expect(bounded.threads.map((thread) => thread.shell.id)).toEqual(["new"]);
-  });
-
-  it("re-serializes under the byte cap by shedding threads while keeping projects", () => {
-    const state = environmentState(["a", "b", "c", "d"]);
-    const record = captureEnvironmentSnapshotRecord(state, ENV, 1);
-    const { record: bounded, payload } = boundStoredEnvironmentSnapshot(record, {
-      maxThreads: 100,
-      maxPayloadBytes: 1_200,
-    });
-    expect(bounded.threads.length).toBeLessThan(4);
-    expect(bounded.projects).toHaveLength(1);
-    expect(new TextEncoder().encode(payload).byteLength).toBeLessThanOrEqual(1_200);
-  });
-});
-
-describe("incremental environment snapshot serializer", () => {
-  const caps = { maxThreads: 100, maxPayloadBytes: 10_000_000 };
-  function expectSameAsFullSerialization(
-    state: EnvironmentState,
-    serialized: { readonly payload: string; readonly payloadBytes: number },
-    capturedAt: number,
-    bounds = caps,
-  ) {
-    const full = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, capturedAt),
-      bounds,
-    );
-    expect(serialized.payload).toBe(full.payload);
-    expect(serialized.payloadBytes).toBe(new TextEncoder().encode(serialized.payload).byteLength);
-    expect(serialized.payloadBytes).toBe(full.payloadBytes);
-  }
-
-  it("writes the payload the full serialization writes, byte for byte", () => {
-    const state = environmentState(["a", "b", "c"]);
-    const shells = state.threadShellById as Record<string, ThreadShell>;
-    // Non-ASCII, astral and lone-surrogate text all measure like TextEncoder.
-    shells["b"] = shell("b", { title: "Grüße 👋 \ud800 end" });
-    const serializer = createEnvironmentSnapshotSerializer(caps);
-    expectSameAsFullSerialization(state, serializer.serialize(state, ENV, 5), 5);
-    expectSameAsFullSerialization(
-      environmentState([]),
-      createEnvironmentSnapshotSerializer(caps).serialize(environmentState([]), ENV, 5),
-      5,
-    );
-  });
-
-  it("re-serializes only the threads whose shell or summary changed", () => {
-    const state = environmentState(["a", "b", "c", "d"]);
-    const serializer = createEnvironmentSnapshotSerializer(caps);
-    serializer.serialize(state, ENV, 1);
-    expect(serializer.serializedThreadCount()).toBe(4);
-
-    // A streaming turn bumps one thread's updatedAt: its shell and summary are
-    // replaced, every other row keeps its store objects.
-    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
-    const shells = state.threadShellById as Record<string, ThreadShell>;
-    const next: EnvironmentState = {
-      ...state,
-      threadShellById: { ...shells, c: { ...shells["c"]!, updatedAt: "2026-08-05T00:00:00.000Z" } },
-      sidebarThreadSummaryById: {
-        ...summaries,
-        c: { ...summaries["c"]!, updatedAt: "2026-08-05T00:00:00.000Z" },
-      },
-    } as EnvironmentState;
-    const serialized = serializer.serialize(next, ENV, 2);
-    expect(serializer.serializedThreadCount()).toBe(5);
-    expectSameAsFullSerialization(next, serialized, 2);
-
-    // Nothing changed: nothing is re-serialized.
-    serializer.serialize(next, ENV, 3);
-    expect(serializer.serializedThreadCount()).toBe(5);
-  });
-
-  it("drops a removed thread and bounds threads like the full serialization", () => {
-    const state = environmentState(["old", "archived", "new"]);
-    const shells = state.threadShellById as Record<string, ThreadShell>;
-    shells["archived"] = shell("archived", { archivedAt: "2026-08-02T00:00:00.000Z" });
-    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
-    summaries["old"] = summary("old", { updatedAt: "2026-08-01T00:00:00.000Z" });
-    summaries["archived"] = summary("archived", { updatedAt: "2026-08-03T00:00:00.000Z" });
-    summaries["new"] = summary("new", { updatedAt: "2026-08-04T00:00:00.000Z" });
-
-    const byCount = { maxThreads: 1, maxPayloadBytes: 10_000_000 };
-    const serializer = createEnvironmentSnapshotSerializer(byCount);
-    const serialized = serializer.serialize(state, ENV, 1);
-    expect(serialized.threads).toBe(1);
-    expectSameAsFullSerialization(state, serialized, 1, byCount);
-
-    const removed = { ...state, threadIds: ["old", "new"] } as unknown as EnvironmentState;
-    expectSameAsFullSerialization(removed, serializer.serialize(removed, ENV, 2), 2, byCount);
-  });
-
-  it("serializes and retains only the threads that survive the count cap", () => {
-    const ids = Array.from({ length: 12 }, (_, index) => `t${index}`);
-    const state = environmentState(ids);
-    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
-    // Shuffled recency, so the survivors are not a prefix of the store order.
-    ids.forEach((id, index) => {
-      const minute = String((index * 7) % 12).padStart(2, "0");
-      summaries[id] = summary(id, { updatedAt: `2026-08-01T00:${minute}:00.000Z` });
-    });
-    const byCount = { maxThreads: 4, maxPayloadBytes: 10_000_000 };
-    const serializer = createEnvironmentSnapshotSerializer(byCount);
-    const serialized = serializer.serialize(state, ENV, 1);
-    expect(serialized.threads).toBe(4);
-    expect(serializer.serializedThreadCount()).toBe(4);
-    expectSameAsFullSerialization(state, serialized, 1, byCount);
-
-    // An unchanged capture reuses the survivors' fragments.
-    expectSameAsFullSerialization(state, serializer.serialize(state, ENV, 2), 2, byCount);
-    expect(serializer.serializedThreadCount()).toBe(4);
-  });
-
-  it("sheds threads under the byte cap exactly like the full serialization", () => {
-    const state = environmentState(["a", "b", "c", "d", "e", "f"]);
-    const byBytes = { maxThreads: 100, maxPayloadBytes: 1_500 };
-    const serialized = createEnvironmentSnapshotSerializer(byBytes).serialize(state, ENV, 1);
-    expect(serialized.threads).toBeLessThan(6);
-    expect(serialized.payloadBytes).toBeLessThanOrEqual(1_500);
-    expectSameAsFullSerialization(state, serialized, 1, byBytes);
-  });
-});
-
 function chatMessage(id: string, text: string): ChatMessage {
   return {
     id: id as never,
@@ -496,138 +166,266 @@ function withMessages(
 }
 
 const utf8Length = (value: string) => new TextEncoder().encode(value).byteLength;
+const roomy = { maxThreads: 400, maxPayloadBytes: 10_000_000 };
 
-describe("recent conversation content", () => {
-  const roomy = { maxThreads: 400, maxPayloadBytes: 10_000_000 };
+/** The rows of a state, decoded back. */
+function decodedRows(state: EnvironmentState, caps = roomy) {
+  const rows = createEnvironmentRowSerializer(caps).serialize(state, ENV);
+  return {
+    rows,
+    envelope: decodeStoredEnvironmentEnvelope(rows.envelope.payload, ENV),
+    threads: rows.threads.map((row) => decodeStoredEnvironmentThread(row.payload, ENV)),
+  };
+}
+
+const archivedStub = (id: string): ArchivedThreadStub => ({
+  shellDetail: "archived-stub",
+  id: id as never,
+  environmentId: ENV,
+  projectId: "project-1" as never,
+  title: id,
+  createdAt: "2026-08-01T00:00:00.000Z",
+  updatedAt: "2026-08-02T00:00:00.000Z",
+  archivedAt: "2026-08-02T00:00:00.000Z",
+  branch: null,
+  worktreePath: null,
+  worktreeId: null,
+  latestUserMessageAt: null,
+  lineage: null,
+});
+const withStub = (state: EnvironmentState, id: string): EnvironmentState => ({
+  ...state,
+  threadIds: [...state.threadIds, id as never],
+  threadShellById: { ...state.threadShellById, [id]: archivedStub(id) } as never,
+  sidebarThreadSummaryById: {
+    ...state.sidebarThreadSummaryById,
+    [id]: archivedStub(id),
+  } as never,
+});
+
+/** A single-row record as a v1 to v3 build wrote it. */
+function legacyRecord(
+  state: EnvironmentState,
+  schemaVersion: 1 | 2 | 3,
+  extra: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    schemaVersion,
+    environmentId: ENV,
+    capturedAt: 123,
+    projects: state.projectIds.map((id) => state.projectById[id]),
+    worktrees: [],
+    threads: state.threadIds.map((id) => ({
+      shell: state.threadShellById[id],
+      summary: isArchivedThreadStub(state.sidebarThreadSummaryById[id])
+        ? state.sidebarThreadSummaryById[id]
+        : { ...state.sidebarThreadSummaryById[id], session: null, backgroundLiveness: null },
+    })),
+    ...extra,
+  });
+}
+
+describe("environment rows", () => {
+  it("writes the envelope without capture time and threads with sessions and liveness stripped", () => {
+    const { rows, envelope, threads } = decodedRows(environmentState(["thread-1"]));
+    expect(envelope).toMatchObject({
+      schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
+      environmentId: ENV,
+      projects: [{ id: "project-1" }],
+    });
+    expect(JSON.parse(rows.envelope.payload)).not.toHaveProperty("capturedAt");
+    expect(rows.projectCount).toBe(1);
+    expect(threads).toHaveLength(1);
+    expect(fullThreadEntry(threads[0]?.summary)?.session).toBeNull();
+    expect(fullThreadEntry(threads[0]?.summary)?.backgroundLiveness).toBeNull();
+    for (const row of rows.threads) {
+      expect(row.bytes).toBe(utf8Length(row.payload));
+      expect(row.hash).toBe(payloadHash(row.payload));
+    }
+    expect(rows.envelope.bytes).toBe(utf8Length(rows.envelope.payload));
+  });
+
+  it("measures non-ASCII, astral and lone-surrogate text like TextEncoder", () => {
+    const state = environmentState(["a", "b"]);
+    (state.threadShellById as Record<string, ThreadShell>)["b"] = shell("b", {
+      title: "Grüße 👋 \ud800 end",
+    });
+    const { rows } = decodedRows(state);
+    let total = rows.envelope.bytes;
+    for (const row of rows.threads) {
+      expect(row.bytes).toBe(utf8Length(row.payload));
+      total += row.bytes;
+    }
+    expect(rows.bytes).toBe(total);
+  });
+
+  it("writes stubs whole and reads them back; half a stub is left out", () => {
+    const { threads } = decodedRows(withStub(environmentState(["thread-1"]), "archived-1"));
+    const stored = threads.find((thread) => thread?.shell.id === "archived-1");
+    expect(isArchivedThreadStub(stored?.shell)).toBe(true);
+    expect(stored?.summary).toEqual(archivedStub("archived-1"));
+    const half = JSON.stringify({
+      shell: archivedStub("archived-1"),
+      summary: summary("archived-1"),
+    });
+    expect(decodeStoredEnvironmentThread(half, ENV)).toBeNull();
+  });
+
+  it("discards an envelope of another version or machine, and corrupt rows", () => {
+    const { rows } = decodedRows(environmentState(["thread-1"]));
+    for (const schemaVersion of [ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION + 1, 3, 0]) {
+      const bumped = JSON.stringify({ ...JSON.parse(rows.envelope.payload), schemaVersion });
+      expect(decodeStoredEnvironmentEnvelope(bumped, ENV)).toBeNull();
+    }
+    expect(
+      decodeStoredEnvironmentEnvelope(rows.envelope.payload, "other" as EnvironmentId),
+    ).toBeNull();
+    expect(decodeStoredEnvironmentEnvelope("{not-json", ENV)).toBeNull();
+    expect(decodeStoredEnvironmentThread("{not-json", ENV)).toBeNull();
+    expect(
+      decodeStoredEnvironmentThread(rows.threads[0]!.payload, "other" as EnvironmentId),
+    ).toBeNull();
+  });
+
+  it("caps threads at the per-environment bound, dropping archived and oldest first", () => {
+    const state = environmentState(["old", "archived", "new"]);
+    const shells = state.threadShellById as Record<string, ThreadShell>;
+    shells["archived"] = shell("archived", { archivedAt: "2026-08-02T00:00:00.000Z" });
+    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
+    summaries["old"] = summary("old", { updatedAt: "2026-08-01T00:00:00.000Z" });
+    summaries["archived"] = summary("archived", { updatedAt: "2026-08-03T00:00:00.000Z" });
+    summaries["new"] = summary("new", { updatedAt: "2026-08-04T00:00:00.000Z" });
+
+    const serializer = createEnvironmentRowSerializer({
+      maxThreads: 1,
+      maxPayloadBytes: 10_000_000,
+    });
+    expect(serializer.serialize(state, ENV).threads.map((row) => row.threadId)).toEqual(["new"]);
+    // Threads beyond the cap are not even serialized.
+    expect(serializer.serializedThreadCount()).toBe(1);
+  });
+
+  it("sheds threads under the byte cap while keeping projects", () => {
+    const state = environmentState(["a", "b", "c", "d"]);
+    const rows = createEnvironmentRowSerializer({
+      maxThreads: 100,
+      maxPayloadBytes: 1_200,
+    }).serialize(state, ENV);
+    expect(rows.threads.length).toBeLessThan(4);
+    expect(rows.projectCount).toBe(1);
+    expect(rows.bytes).toBeLessThanOrEqual(1_200);
+  });
+
+  it("re-serializes only the threads whose shell or summary changed", () => {
+    const state = environmentState(["a", "b", "c", "d"]);
+    const serializer = createEnvironmentRowSerializer(roomy);
+    const first = serializer.serialize(state, ENV);
+    expect(serializer.serializedThreadCount()).toBe(4);
+
+    // A streaming turn bumps one thread's updatedAt: its shell and summary are
+    // replaced, every other row keeps its store objects.
+    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
+    const shells = state.threadShellById as Record<string, ThreadShell>;
+    const next: EnvironmentState = {
+      ...state,
+      threadShellById: { ...shells, c: { ...shells["c"]!, updatedAt: "2026-08-05T00:00:00.000Z" } },
+      sidebarThreadSummaryById: {
+        ...summaries,
+        c: { ...summaries["c"]!, updatedAt: "2026-08-05T00:00:00.000Z" },
+      },
+    } as EnvironmentState;
+    const second = serializer.serialize(next, ENV);
+    expect(serializer.serializedThreadCount()).toBe(5);
+    const changed = second.threads.filter((row, index) => row.hash !== first.threads[index]?.hash);
+    expect(changed.map((row) => row.threadId)).toEqual(["c"]);
+    expect(second.envelope.payload).toBe(first.envelope.payload);
+
+    serializer.serialize(next, ENV);
+    expect(serializer.serializedThreadCount()).toBe(5);
+  });
+});
+
+describe("thread bodies", () => {
   const conversations = () =>
     withMessages(environmentState(["thread-1", "thread-2", "thread-3"]), {
       "thread-1": [chatMessage("m1", "first conversation"), chatMessage("m2", "its reply")],
       "thread-2": [chatMessage("m3", "second conversation, with naïve 日本語 text")],
     });
-  const candidatesOf = (state: EnvironmentState) =>
-    captureEnvironmentContentCandidates(state, ENV, createThreadContentCapture());
 
-  it("round-trips bounded message text with the shell", () => {
+  it("keeps bodies only while asked to, for threads with messages, least recent first", () => {
     const state = conversations();
-    const { record, payload } = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 123),
-      roomy,
-      candidatesOf(state),
-    );
-    expect(Object.keys(record.content ?? {})).toEqual(["thread-1", "thread-2"]);
-    const decoded = decodeStoredEnvironmentSnapshot(payload, ENV);
-    expect(decoded).toEqual(record);
-    expect(decoded?.content?.["thread-1"]?.messages.map((entry) => entry.text)).toEqual([
+    const serializer = createEnvironmentRowSerializer(roomy);
+    expect(serializer.serialize(state, ENV).bodies).toEqual([]);
+    const rows = serializer.serialize(state, ENV, { content: true });
+    expect(rows.bodies.map((body) => body.threadId)).toEqual(["thread-1", "thread-2"]);
+    const decoded = decodeStoredThreadBody(rows.bodies[0]!.payload);
+    expect(decoded?.content?.messages.map((entry) => entry.text)).toEqual([
       "first conversation",
       "its reply",
     ]);
-    expect(decoded?.threads).toHaveLength(3);
-  });
-
-  it("writes no content key when there is nothing to keep", () => {
-    const state = environmentState(["thread-1"]);
-    const { payload } = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      roomy,
-      candidatesOf(state),
+    expect(decoded?.prompts).toEqual([]);
+    expect(rows.bytes).toBe(
+      rows.envelope.bytes +
+        rows.threads.reduce((sum, row) => sum + row.bytes, 0) +
+        rows.bodies.reduce((sum, row) => sum + row.bytes, 0),
     );
-    expect(JSON.parse(payload)).not.toHaveProperty("content");
   });
 
-  it("lists the least recently active conversations first, at most the shared thread limit", () => {
+  it("saves each body with the sequence its thread window was current to", () => {
+    const rows = createEnvironmentRowSerializer(roomy).serialize(conversations(), ENV, {
+      content: true,
+      readSequence: (threadId) => (threadId === "thread-1" ? 42 : null),
+    });
+    expect(rows.bodies.map((body) => [body.threadId, body.sequence])).toEqual([
+      ["thread-1", 42],
+      ["thread-2", null],
+    ]);
+  });
+
+  it("lists at most the shared thread limit, the newest kept", () => {
     const ids = Array.from({ length: THREAD_CONTENT_CACHE_MAX_THREADS + 8 }, (_, i) => `t${i}`);
     const state = withMessages(
       environmentState(ids),
       Object.fromEntries(ids.map((id) => [id, [chatMessage(`m-${id}`, id)]])),
     );
-    const candidates = candidatesOf(state);
-    expect(candidates).toHaveLength(THREAD_CONTENT_CACHE_MAX_THREADS);
-    // Activity follows the order of `ids`, so the newest conversation is last
-    // and the eight oldest are the ones left out.
-    expect(candidates.at(0)?.threadId).toBe("t8");
-    expect(candidates.at(-1)?.threadId).toBe(ids.at(-1));
+    const bodies = createEnvironmentRowSerializer(roomy).serialize(state, ENV, {
+      content: true,
+    }).bodies;
+    expect(bodies).toHaveLength(THREAD_CONTENT_CACHE_MAX_THREADS);
+    expect(bodies.at(0)?.threadId).toBe("t8");
+    expect(bodies.at(-1)?.threadId).toBe(ids.at(-1));
   });
 
-  it("drops the least recently active content first and never a thread of the shell", () => {
+  it("drops the least recently active bodies first under both caps, never a thread", () => {
     const text = (label: string) => `${label} ${"x".repeat(2_000)}`;
     const state = withMessages(environmentState(["old", "middle", "new"]), {
       old: [chatMessage("m1", text("old"))],
       middle: [chatMessage("m2", text("middle"))],
       new: [chatMessage("m3", text("new"))],
     });
-    const candidates = candidatesOf(state);
-    const shellOnly = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      roomy,
-    );
-    const body = shellOnly.payloadBytes + utf8Length(',"content":');
-    const entryBytes = (id: string) => candidates.find((c) => c.threadId === id)!.entryBytes;
+    const all = createEnvironmentRowSerializer(roomy).serialize(state, ENV, { content: true });
+    const shellBytes = all.bytes - all.bodies.reduce((sum, body) => sum + body.bytes, 0);
+    const bytesOf = (id: string) => all.bodies.find((body) => body.threadId === id)!.bytes;
+    // `trimContentToBudget` counts two braces and a comma between entries.
+    const room = 2 + bytesOf("middle") + bytesOf("new") + 1;
+    const kept = (caps: { maxPayloadBytes: number; maxContentBytes?: number }) =>
+      createEnvironmentRowSerializer({ maxThreads: 400, ...caps }).serialize(state, ENV, {
+        content: true,
+      });
 
-    // Room for two of the three entries: the oldest is dropped.
-    const twoEntries = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      { ...roomy, maxPayloadBytes: body + 2 + entryBytes("middle") + entryBytes("new") + 1 },
-      candidates,
-    );
-    expect(Object.keys(twoEntries.record.content ?? {})).toEqual(["middle", "new"]);
-    expect(twoEntries.record.threads).toHaveLength(3);
-    expect(twoEntries.payloadBytes).toBe(utf8Length(twoEntries.payload));
+    const byPayload = kept({ maxPayloadBytes: shellBytes + room });
+    expect(byPayload.bodies.map((body) => body.threadId)).toEqual(["middle", "new"]);
+    expect(byPayload.threads).toHaveLength(3);
+    expect(kept({ maxPayloadBytes: shellBytes + room - 1 }).bodies.map((b) => b.threadId)).toEqual([
+      "new",
+    ]);
+    const byContent = kept({ maxPayloadBytes: 10_000_000, maxContentBytes: room });
+    expect(byContent.bodies.map((body) => body.threadId)).toEqual(["middle", "new"]);
+    const none = kept({ maxPayloadBytes: shellBytes });
+    expect(none.bodies).toEqual([]);
+    expect(none.threads).toHaveLength(3);
 
-    // One byte less and the next entry goes too.
-    const oneEntry = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      { ...roomy, maxPayloadBytes: body + 2 + entryBytes("middle") + entryBytes("new") },
-      candidates,
-    );
-    expect(Object.keys(oneEntry.record.content ?? {})).toEqual(["new"]);
-
-    // A cap the shell alone fills leaves no content, and still the whole shell.
-    const none = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      { ...roomy, maxPayloadBytes: shellOnly.payloadBytes },
-      candidates,
-    );
-    expect(none.record).not.toHaveProperty("content");
-    expect(none.record.threads).toHaveLength(3);
-    expect(none.payload).toBe(shellOnly.payload);
-  });
-
-  it("holds message text to its own cap, below the record cap", () => {
-    const text = (label: string) => `${label} ${"x".repeat(2_000)}`;
-    const state = withMessages(environmentState(["old", "middle", "new"]), {
-      old: [chatMessage("m1", text("old"))],
-      middle: [chatMessage("m2", text("middle"))],
-      new: [chatMessage("m3", text("new"))],
-    });
-    const candidates = candidatesOf(state);
-    const entryBytes = (id: string) => candidates.find((c) => c.threadId === id)!.entryBytes;
-    const contentObjectBytes = 2 + entryBytes("middle") + entryBytes("new") + 1;
-
-    // The record cap leaves room for all three; the text cap keeps the two newest.
-    const capped = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      { ...roomy, maxContentBytes: contentObjectBytes },
-      candidates,
-    );
-    expect(Object.keys(capped.record.content ?? {})).toEqual(["middle", "new"]);
-    expect(capped.record.threads).toHaveLength(3);
-
-    const tighter = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      { ...roomy, maxContentBytes: contentObjectBytes - 1 },
-      candidates,
-    );
-    expect(Object.keys(tighter.record.content ?? {})).toEqual(["new"]);
-
-    // The incremental serializer holds to the same cap.
-    const serialized = createEnvironmentSnapshotSerializer({
-      ...roomy,
-      maxContentBytes: contentObjectBytes,
-    }).serialize(state, ENV, 1, { content: true });
-    expect(serialized.contentThreads).toBe(2);
-    expect(serialized.payload).toBe(capped.payload);
-
-    // By default the cap is an equal share of the total cache budget.
+    // By default the text cap is an equal share of the total cache budget.
     expect(MAX_SNAPSHOT_CONTENT_BYTES_PER_ENVIRONMENT).toBe(
       MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES / MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS,
     );
@@ -636,7 +434,7 @@ describe("recent conversation content", () => {
     );
   });
 
-  it("keeps content only for threads the shell keeps", () => {
+  it("keeps bodies only for threads the machine keeps", () => {
     const state = withMessages(environmentState(["old", "new"]), {
       old: [chatMessage("m1", "old text")],
       new: [chatMessage("m2", "new text")],
@@ -644,172 +442,181 @@ describe("recent conversation content", () => {
     const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
     summaries["old"] = summary("old", { updatedAt: "2026-08-01T00:00:00.000Z" });
     summaries["new"] = summary("new", { updatedAt: "2026-08-09T00:00:00.000Z" });
-    const { record } = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 1),
-      { maxThreads: 1, maxPayloadBytes: 10_000_000 },
-      candidatesOf(state),
-    );
-    expect(record.threads.map((thread) => thread.shell.id)).toEqual(["new"]);
-    expect(Object.keys(record.content ?? {})).toEqual(["new"]);
+    const rows = createEnvironmentRowSerializer({
+      maxThreads: 1,
+      maxPayloadBytes: 10_000_000,
+    }).serialize(state, ENV, { content: true });
+    expect(rows.threads.map((row) => row.threadId)).toEqual(["new"]);
+    expect(rows.bodies.map((row) => row.threadId)).toEqual(["new"]);
   });
 
-  it("ignores content that does not decode and keeps the rest of the record", () => {
+  it("re-captures only the bodies whose messages or activities changed", () => {
     const state = conversations();
-    const { payload } = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 123),
-      roomy,
-      candidatesOf(state),
-    );
-    const stored = JSON.parse(payload) as { content: Record<string, unknown> };
-    const decode = (content: unknown) =>
-      decodeStoredEnvironmentSnapshot(JSON.stringify({ ...stored, content }), ENV);
-
-    const partial = decode({
-      "thread-1": { messages: "not a list" },
-      "thread-2": stored.content["thread-2"],
-      "thread-3": { messages: [{ id: "" }] },
-      "no-such-thread": stored.content["thread-1"],
+    const serializer = createEnvironmentRowSerializer(roomy);
+    const first = serializer.serialize(state, ENV, { content: true });
+    expect(serializer.serializedBodyCount()).toBe(2);
+    const changed = withMessages(state, {
+      "thread-1": [chatMessage("m1", "first conversation"), chatMessage("m2", "its reply")],
+      "thread-2": [chatMessage("m3", "second"), chatMessage("m4", "more")],
     });
-    expect(Object.keys(partial?.content ?? {})).toEqual(["thread-2"]);
-    expect(partial?.threads).toHaveLength(3);
-
-    for (const garbage of ["text", 7, null, [], { "thread-1": 4 }]) {
-      const decoded = decode(garbage);
-      expect(decoded?.threads).toHaveLength(3);
-      expect(decoded).not.toHaveProperty("content");
-    }
+    // `withMessages` rebuilds every thread's slices: both are captured again,
+    // and only the one whose text changed hashes differently.
+    const second = serializer.serialize(changed, ENV, { content: true });
+    expect(second.bodies[0]?.hash).toBe(first.bodies[0]?.hash);
+    expect(second.bodies[1]?.hash).not.toBe(first.bodies[1]?.hash);
+    const before = serializer.serializedBodyCount();
+    serializer.serialize(changed, ENV, { content: true });
+    expect(serializer.serializedBodyCount()).toBe(before);
   });
 
-  it("hands stored content to the store only when asked to", () => {
-    const state = conversations();
-    const { record } = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 123),
-      roomy,
-      candidatesOf(state),
-    );
-    const shown = toCachedEnvironmentShellSnapshot(record, { includeContent: true });
-    expect(
-      Object.fromEntries(
-        shown.threads.map((thread) => [thread.shell.id, thread.content?.messages.length]),
+  it("saves open approval and question cards with a thread's body, and nothing answered", () => {
+    const activity = (
+      id: string,
+      kind: string,
+      payload: Record<string, unknown>,
+      createdAt: string,
+    ): OrchestrationThreadActivity =>
+      ({
+        id,
+        kind,
+        tone: "approval",
+        summary: kind,
+        payload,
+        turnId: "turn-1",
+        createdAt,
+      }) as never;
+    const activities = [
+      activity(
+        "a1",
+        "approval.requested",
+        { requestId: "req-open", requestKind: "command", detail: "rm -rf build", secretToken: "x" },
+        "2026-08-02T00:00:00.000Z",
       ),
-    ).toEqual({ "thread-1": 2, "thread-2": 1, "thread-3": undefined });
-
-    const hidden = toCachedEnvironmentShellSnapshot(record, { includeContent: false });
-    expect(hidden.threads).toBe(record.threads);
-    expect(hidden.threads.some((thread) => "content" in thread)).toBe(false);
+      activity(
+        "a2",
+        "approval.requested",
+        { requestId: "req-done", requestKind: "command" },
+        "2026-08-02T00:01:00.000Z",
+      ),
+      activity("a3", "approval.resolved", { requestId: "req-done" }, "2026-08-02T00:02:00.000Z"),
+      activity("a4", "tool.completed", { output: "long tool output" }, "2026-08-02T00:03:00.000Z"),
+    ];
+    const state = {
+      ...conversations(),
+      activityIdsByThreadId: { "thread-1": activities.map((entry) => entry.id) },
+      activityByThreadId: {
+        "thread-1": Object.fromEntries(activities.map((entry) => [entry.id, entry])),
+      },
+    } as unknown as EnvironmentState;
+    const rows = createEnvironmentRowSerializer(roomy).serialize(state, ENV, { content: true });
+    const body = decodeStoredThreadBody(rows.bodies[0]!.payload);
+    expect(body?.prompts.map((entry) => entry.id)).toEqual(["a1"]);
+    expect(body?.prompts[0]?.payload).toEqual({
+      requestId: "req-open",
+      requestKind: "command",
+      detail: "rm -rf build",
+    });
   });
 
-  it("removes stored content from a payload and leaves the shell as written", () => {
-    const state = conversations();
-    const withContent = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 123),
-      roomy,
-      candidatesOf(state),
-    );
-    const shellOnly = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 123),
-      roomy,
-    );
-    expect(withoutStoredContent(withContent.payload)).toBe(shellOnly.payload);
-    expect(withoutStoredContent(shellOnly.payload)).toBeNull();
-    expect(withoutStoredContent("{not-json")).toBeNull();
-    expect(withoutStoredContent("[]")).toBeNull();
+  it("reads back what it wrote and drops what does not decode", () => {
+    const encoded = encodeStoredThreadBody({
+      content: { messages: [chatMessage("m1", "hello")] },
+      prompts: [],
+    });
+    expect(decodeStoredThreadBody(encoded!)?.content?.messages[0]?.text).toBe("hello");
+    expect(encodeStoredThreadBody({ content: { messages: [] }, prompts: [] })).toBeNull();
+    for (const garbage of ["{not-json", "[]", '{"messages":"x"}', '{"messages":[{"id":""}]}']) {
+      expect(decodeStoredThreadBody(garbage)).toBeNull();
+    }
   });
 });
 
-describe("incremental serializer with content", () => {
-  const roomy = { maxThreads: 400, maxPayloadBytes: 10_000_000 };
-  const ids = ["a", "b", "c", "d"];
-  const stateWithMessages = () =>
-    withMessages(environmentState(ids), {
-      a: [chatMessage("ma", "Grüße 👋 \ud800 from a")],
-      b: [chatMessage("mb", "plain b"), chatMessage("mb2", "second b")],
-      c: [chatMessage("mc", "c")],
-    });
-
-  function expectSameAsFull(
-    state: EnvironmentState,
-    serialized: { readonly payload: string; readonly payloadBytes: number },
-    caps = roomy,
-  ) {
-    const full = boundStoredEnvironmentSnapshot(
-      captureEnvironmentSnapshotRecord(state, ENV, 5),
-      caps,
-      captureEnvironmentContentCandidates(state, ENV, createThreadContentCapture()),
-    );
-    expect(serialized.payload).toBe(full.payload);
-    expect(serialized.payloadBytes).toBe(utf8Length(serialized.payload));
-    expect(serialized.payloadBytes).toBe(full.payloadBytes);
-  }
-
-  it("writes the payload the full serialization writes, byte for byte", () => {
-    const state = stateWithMessages();
-    const serialized = createEnvironmentSnapshotSerializer(roomy).serialize(state, ENV, 5, {
-      content: true,
-    });
-    expect(serialized.contentThreads).toBe(3);
-    expect(JSON.parse(serialized.payload).content).toHaveProperty("a");
-    expectSameAsFull(state, serialized);
-    expect(decodeStoredEnvironmentSnapshot(serialized.payload, ENV)?.content).toBeDefined();
-  });
-
-  it("writes no content unless asked, even when threads hold messages", () => {
-    const state = stateWithMessages();
-    const serializer = createEnvironmentSnapshotSerializer(roomy);
-    const without = serializer.serialize(state, ENV, 5);
-    expect(without.contentThreads).toBe(0);
-    expect(without.payload).toBe(
-      boundStoredEnvironmentSnapshot(captureEnvironmentSnapshotRecord(state, ENV, 5), roomy)
-        .payload,
-    );
-    expect(serializer.serialize(state, ENV, 5, { content: false }).payload).toBe(without.payload);
-    // Turned on again, the content is back.
-    expect(serializer.serialize(state, ENV, 5, { content: true }).contentThreads).toBe(3);
-  });
-
-  it("follows changes to a thread's messages and to the threads kept", () => {
-    const state = stateWithMessages();
-    const serializer = createEnvironmentSnapshotSerializer(roomy);
-    expectSameAsFull(state, serializer.serialize(state, ENV, 5, { content: true }));
-
-    const changed = withMessages(state, {
-      a: [chatMessage("ma", "Grüße 👋 \ud800 from a")],
-      b: [chatMessage("mb", "plain b"), chatMessage("mb2", "second b"), chatMessage("mb3", "new")],
-      c: [chatMessage("mc", "c")],
-    });
-    expectSameAsFull(changed, serializer.serialize(changed, ENV, 5, { content: true }));
-
-    const removed = { ...changed, threadIds: ["a", "c"] } as unknown as EnvironmentState;
-    const serialized = serializer.serialize(removed, ENV, 5, { content: true });
-    expectSameAsFull(removed, serialized);
-    expect(Object.keys(JSON.parse(serialized.payload).content)).toEqual(["a", "c"]);
-  });
-
-  it("trims content to the byte cap exactly like the full serialization", () => {
-    const state = withMessages(environmentState(["x", "y", "z"]), {
-      x: [chatMessage("mx", `x ${"1".repeat(3_000)}`)],
-      y: [chatMessage("my", `y ${"2".repeat(3_000)}`)],
-      z: [chatMessage("mz", `z ${"3".repeat(3_000)}`)],
-    });
-    const shellBytes = createEnvironmentSnapshotSerializer(roomy).serialize(
-      state,
+describe("single-row records of older builds", () => {
+  it("still reads v1, v2 and v3 records", () => {
+    const state = withStub(environmentState(["thread-1"]), "archived-1");
+    expect(
+      decodeStoredEnvironmentSnapshot(legacyRecord(environmentState(["thread-1"]), 1), ENV)
+        ?.threads,
+    ).toHaveLength(1);
+    const v2 = decodeStoredEnvironmentSnapshot(
+      // A v2 writer never stored content; a stray key is not read as it.
+      legacyRecord(state, 2, { content: { "thread-1": { messages: [] } } }),
       ENV,
-      5,
-    ).payloadBytes;
-    for (const room of [0, 3_500, 7_000, 12_000]) {
-      const caps = { ...roomy, maxPayloadBytes: shellBytes + room };
-      const serialized = createEnvironmentSnapshotSerializer(caps).serialize(state, ENV, 5, {
-        content: true,
-      });
-      expect(serialized.payloadBytes).toBeLessThanOrEqual(caps.maxPayloadBytes);
-      expectSameAsFull(state, serialized, caps);
+    );
+    expect(v2?.threads.map((thread) => thread.shell.id)).toEqual(["thread-1", "archived-1"]);
+    expect(v2).not.toHaveProperty("content");
+    const v3 = decodeStoredEnvironmentSnapshot(
+      legacyRecord(state, 3, {
+        content: {
+          "thread-1": { messages: [chatMessage("m1", "kept")] },
+          "no-such-thread": { messages: [chatMessage("m2", "dropped")] },
+          "archived-1": { messages: "not a list" },
+        },
+      }),
+      ENV,
+    );
+    expect(Object.keys(v3?.content ?? {})).toEqual(["thread-1"]);
+  });
+
+  it("discards a record of an unknown version, a v1 stub, half a stub, corrupt JSON and another machine", () => {
+    const state = withStub(environmentState([]), "archived-1");
+    for (const schemaVersion of [ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION, 0]) {
+      expect(
+        decodeStoredEnvironmentSnapshot(legacyRecord(state, 3, { schemaVersion }), ENV),
+      ).toBeNull();
     }
-    // The tightest cap keeps every shell thread and no content.
-    const tight = createEnvironmentSnapshotSerializer({
-      ...roomy,
-      maxPayloadBytes: shellBytes,
-    }).serialize(state, ENV, 5, { content: true });
-    expect(tight.threads).toBe(3);
-    expect(tight.contentThreads).toBe(0);
+    expect(decodeStoredEnvironmentSnapshot(legacyRecord(state, 1), ENV)).toBeNull();
+    const half = JSON.parse(legacyRecord(state, 2)) as { threads: Array<{ summary: unknown }> };
+    half.threads[0]!.summary = summary("archived-1");
+    expect(decodeStoredEnvironmentSnapshot(JSON.stringify(half), ENV)).toBeNull();
+    expect(decodeStoredEnvironmentSnapshot("{not-json", ENV)).toBeNull();
+    expect(
+      decodeStoredEnvironmentSnapshot(legacyRecord(state, 2), "other-env" as EnvironmentId),
+    ).toBeNull();
+  });
+
+  it("moves a record into rows, its text into bodies", () => {
+    const record = decodeStoredEnvironmentSnapshot(
+      legacyRecord(environmentState(["thread-1", "thread-2"]), 3, {
+        content: { "thread-2": { messages: [chatMessage("m1", "kept text")] } },
+      }),
+      ENV,
+    ) as StoredEnvironmentSnapshot;
+    const rows = environmentRowsFromLegacyRecord(record);
+    expect(decodeStoredEnvironmentEnvelope(rows.envelope.payload, ENV)?.projects).toHaveLength(1);
+    expect(
+      rows.threads.map((row) => decodeStoredEnvironmentThread(row.payload, ENV)?.shell.id),
+    ).toEqual(["thread-1", "thread-2"]);
+    expect(rows.bodies.map((row) => row.threadId)).toEqual(["thread-2"]);
+    expect(decodeStoredThreadBody(rows.bodies[0]!.payload)?.content?.messages[0]?.text).toBe(
+      "kept text",
+    );
+  });
+
+  it("projects a record into shared metadata, stubs marked and lineage checked", () => {
+    const lineage = {
+      parentThreadId: "thread-parent" as never,
+      rootThreadId: "thread-parent" as never,
+      relationship: "delegated",
+    };
+    const state = withStub(environmentState(["thread-valid", "thread-malformed"]), "archived-1");
+    (state.threadShellById as Record<string, ThreadShell>)["thread-valid"] = shell("thread-valid", {
+      lineage,
+    });
+    (state.threadShellById as Record<string, ThreadShell>)["thread-malformed"] = shell(
+      "thread-malformed",
+      { lineage: { parentThreadId: "", relationship: 7 } as never },
+    );
+    const record = decodeStoredEnvironmentSnapshot(legacyRecord(state, 2), ENV)!;
+    const shared = toWorkspaceMetadataSnapshot(record);
+    expect(shared).toMatchObject({ schemaVersion: 1, environmentId: ENV, capturedAt: 123 });
+    expect(shared.threads[0]).not.toHaveProperty("session");
+    const threads = new Map(shared.threads.map((thread) => [thread.id, thread]));
+    expect(threads.get("thread-valid" as never)?.lineage).toEqual(lineage);
+    expect(threads.get("thread-malformed" as never)).not.toHaveProperty("lineage");
+    expect(threads.get("archived-1" as never)).toMatchObject({
+      shellDetail: "archived-stub",
+      modelSelection: null,
+    });
   });
 });

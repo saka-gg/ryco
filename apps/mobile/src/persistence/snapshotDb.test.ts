@@ -1,60 +1,307 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { createSnapshotDb, payloadByteLength, type SnapshotDbHandle } from "./snapshotDb";
+import {
+  createSnapshotDb,
+  payloadByteLength,
+  payloadHash,
+  type SnapshotDb,
+  type SnapshotDbHandle,
+} from "./snapshotDb";
 
-// Real SQL against node:sqlite, adapted to the expo-sqlite method names the
-// store uses. This exercises the actual DDL and upsert paths; the expo-sqlite
-// native module itself cannot load in the node runner.
+import { createTestSnapshotDb } from "./snapshotDb.testSupport";
+
 async function openNodeSqliteHandle(): Promise<SnapshotDbHandle> {
-  const { DatabaseSync } = await import("node:sqlite");
-  const db = new DatabaseSync(":memory:");
+  return (await createTestSnapshotDb()).handle;
+}
+
+function rowsWrite(
+  environmentId: string,
+  overrides: Partial<Parameters<SnapshotDb["writeEnvironmentRows"]>[0]> = {},
+): Parameters<SnapshotDb["writeEnvironmentRows"]>[0] {
   return {
-    execAsync: async (source) => {
-      db.exec(source);
-    },
-    runAsync: async (source, params) => db.prepare(source).run(...params),
-    getAllAsync: async (source, params) => db.prepare(source).all(...params) as never,
-    getFirstAsync: async (source, params) => (db.prepare(source).get(...params) ?? null) as never,
+    environmentId,
+    schemaVersion: 4,
+    updatedAt: 1,
+    envelope: { payload: "{}", bytes: 2, threadCount: 0, projectCount: 0 },
+    upsertThreads: [],
+    threadPositions: [],
+    deleteThreads: [],
+    upsertBodies: [],
+    bodySequences: [],
+    deleteBodies: [],
+    ...overrides,
   };
 }
 
-describe("snapshotDb", () => {
-  it("round-trips an environment snapshot and upserts in place", async () => {
-    const db = createSnapshotDb(openNodeSqliteHandle);
-    await db.saveEnvironmentSnapshot({
-      environmentId: "env-1",
-      schemaVersion: 1,
-      payload: '{"v":1}',
-      updatedAt: 100,
-    });
-    await db.saveEnvironmentSnapshot({
-      environmentId: "env-1",
-      schemaVersion: 1,
-      payload: '{"v":2}',
-      updatedAt: 200,
-    });
+const row = (threadId: string, payload: string) => ({
+  threadId,
+  payload,
+  bytes: payloadByteLength(payload),
+  hash: payloadHash(payload),
+});
+const threadRow = (threadId: string, payload: string, position = 0) => ({
+  ...row(threadId, payload),
+  position,
+});
 
-    expect(await db.loadEnvironmentSnapshot("env-1")).toEqual({
-      schemaVersion: 1,
-      payload: '{"v":2}',
-      updatedAt: 200,
+describe("snapshotDb", () => {
+  it("writes a machine's rows in one go and reads envelopes most recent first", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    await db.writeEnvironmentRows(
+      rowsWrite("env-old", {
+        envelope: { payload: '{"e":1}', bytes: 7, threadCount: 1, projectCount: 1 },
+        upsertThreads: [threadRow("t1", '{"t":1}')],
+      }),
+    );
+    await db.writeEnvironmentRows(
+      rowsWrite("env-new", {
+        updatedAt: 5,
+        envelope: { payload: '{"e":2}', bytes: 7, threadCount: 2, projectCount: 0 },
+        upsertThreads: [threadRow("t1", '{"t":1}'), threadRow("t2", '{"t":2}')],
+        upsertBodies: [{ ...row("t2", '{"messages":[]}'), sequence: 9 }],
+      }),
+    );
+
+    expect(await db.loadEnvironmentEnvelopes()).toEqual([
+      {
+        environmentId: "env-new",
+        schemaVersion: 4,
+        payload: '{"e":2}',
+        threadCount: 2,
+        projectCount: 0,
+        updatedAt: 5,
+      },
+      {
+        environmentId: "env-old",
+        schemaVersion: 4,
+        payload: '{"e":1}',
+        threadCount: 1,
+        projectCount: 1,
+        updatedAt: 1,
+      },
+    ]);
+    expect(
+      (await db.loadEnvironmentThreads("env-new")).toSorted((a, b) =>
+        a.threadId.localeCompare(b.threadId),
+      ),
+    ).toEqual([
+      { threadId: "t1", payload: '{"t":1}' },
+      { threadId: "t2", payload: '{"t":2}' },
+    ]);
+    expect(await db.loadThreadBody("env-new", "t2")).toEqual({
+      payload: '{"messages":[]}',
+      sequence: 9,
     });
-    expect(await db.listEnvironmentSnapshotStats()).toEqual([
-      { environmentId: "env-1", payloadBytes: payloadByteLength('{"v":2}'), updatedAt: 200 },
+    expect(await db.loadThreadBody("env-new", "t1")).toBeNull();
+    expect(await db.loadThreadBodySequence("env-new", "t2")).toBe(9);
+    expect(await db.listThreadBodyKeys()).toEqual([{ environmentId: "env-new", threadId: "t2" }]);
+  });
+
+  it("keeps an unchanged envelope payload and updates only what a capture names", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        envelope: { payload: '{"e":1}', bytes: 7, threadCount: 2, projectCount: 1 },
+        upsertThreads: [threadRow("t1", '{"t":1}'), threadRow("t2", '{"t":2}')],
+        upsertBodies: [{ ...row("t1", '{"messages":[1]}'), sequence: 1 }],
+      }),
+    );
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        updatedAt: 9,
+        envelope: { bytes: 7, threadCount: 1, projectCount: 1 },
+        upsertThreads: [threadRow("t1", '{"t":"1b"}')],
+        deleteThreads: ["t2"],
+        bodySequences: [{ threadId: "t1", sequence: 4 }],
+      }),
+    );
+
+    const [envelope] = await db.loadEnvironmentEnvelopes();
+    expect(envelope).toMatchObject({ payload: '{"e":1}', threadCount: 1, updatedAt: 9 });
+    expect(await db.loadEnvironmentThreads("env-1")).toEqual([
+      { threadId: "t1", payload: '{"t":"1b"}' },
+    ]);
+    expect(await db.loadThreadBody("env-1", "t1")).toEqual({
+      payload: '{"messages":[1]}',
+      sequence: 4,
+    });
+    const hashes = await db.loadEnvironmentRowHashes("env-1");
+    expect([...hashes.threads]).toEqual([["t1", { hash: payloadHash('{"t":"1b"}'), position: 0 }]]);
+    expect([...hashes.bodies]).toEqual([
+      ["t1", { hash: payloadHash('{"messages":[1]}'), sequence: 4 }],
     ]);
   });
 
-  it("removes a snapshot and reports a miss as null", async () => {
+  it("reads a machine's threads in list order and moves a thread without rewriting it", async () => {
     const db = createSnapshotDb(openNodeSqliteHandle);
-    await db.saveEnvironmentSnapshot({
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        upsertThreads: [threadRow("b", '{"t":"b"}', 0), threadRow("a", '{"t":"a"}', 1)],
+      }),
+    );
+    expect((await db.loadEnvironmentThreads("env-1")).map((entry) => entry.threadId)).toEqual([
+      "b",
+      "a",
+    ]);
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        envelope: { bytes: 2, threadCount: 2, projectCount: 0 },
+        threadPositions: [
+          { threadId: "a", position: 0 },
+          { threadId: "b", position: 1 },
+        ],
+      }),
+    );
+    expect((await db.loadEnvironmentThreads("env-1")).map((entry) => entry.threadId)).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("sums a machine's rows for its size and keeps its counts beside them", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    // Multi-byte text, an astral character and a lone surrogate.
+    const text = `${"naïve 日本語 🚀 \ud800 ".repeat(2_000)}end`;
+    const body = JSON.stringify({ messages: [{ text }] });
+    await db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        envelope: { payload: '{"e":1}', bytes: 7, threadCount: 1, projectCount: 3 },
+        upsertThreads: [threadRow("t1", '{"t":1}')],
+        upsertBodies: [{ ...row("t1", body), sequence: null }],
+      }),
+    );
+    const [stat] = await db.listEnvironmentCacheStats();
+    expect(stat).toEqual({
       environmentId: "env-1",
+      bytes: 7 + 7 + new TextEncoder().encode(body).byteLength,
+      updatedAt: 1,
+      threadCount: 1,
+      projectCount: 3,
+    });
+
+    await db.removeThreadBodies("env-1");
+    expect((await db.listEnvironmentCacheStats())[0]?.bytes).toBe(14);
+  });
+
+  it("removes a machine's rows and saved answers together, and leaves the others", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    for (const environmentId of ["env-1", "env-2"]) {
+      await db.writeEnvironmentRows(
+        rowsWrite(environmentId, {
+          upsertThreads: [threadRow("t1", "{}")],
+          upsertBodies: [{ ...row("t1", '{"messages":[]}'), sequence: null }],
+        }),
+      );
+      await db.saveSavedQuery({
+        environmentId,
+        key: "k",
+        schemaVersion: 1,
+        payload: "{}",
+        payloadBytes: 2,
+        updatedAt: 1,
+      });
+    }
+    await db.removeEnvironment("env-1");
+    expect((await db.loadEnvironmentEnvelopes()).map((env) => env.environmentId)).toEqual([
+      "env-2",
+    ]);
+    expect(await db.loadEnvironmentThreads("env-1")).toEqual([]);
+    expect(await db.loadThreadBody("env-1", "t1")).toBeNull();
+    expect(await db.loadSavedQuery("env-1", "k")).toBeNull();
+    expect(await db.loadThreadBody("env-2", "t1")).not.toBeNull();
+
+    await db.removeThreadBodies();
+    expect(await db.listThreadBodyKeys()).toEqual([]);
+    await db.clearAll();
+    expect(await db.loadEnvironmentEnvelopes()).toEqual([]);
+    expect(await db.loadSavedQuery("env-2", "k")).toBeNull();
+  });
+
+  it("rolls a failed write back whole, and runs two machines' writes one after the other", async () => {
+    const test = await createTestSnapshotDb();
+    await test.db.writeEnvironmentRows(
+      rowsWrite("env-1", { upsertThreads: [threadRow("t1", "{}")] }),
+    );
+    // A thread id the table cannot take (NOT NULL) fails the write after its first statement.
+    await expect(
+      test.db.writeEnvironmentRows(
+        rowsWrite("env-1", {
+          deleteThreads: ["t1"],
+          upsertThreads: [{ ...threadRow("t2", "{}"), threadId: null as never }],
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(await test.db.loadEnvironmentThreads("env-1")).toEqual([
+      { threadId: "t1", payload: "{}" },
+    ]);
+
+    await Promise.all([
+      test.db.writeEnvironmentRows(rowsWrite("env-a", { upsertThreads: [threadRow("t", "{}")] })),
+      test.db.writeEnvironmentRows(rowsWrite("env-b", { upsertThreads: [threadRow("t", "{}")] })),
+    ]);
+    expect((await test.db.loadEnvironmentEnvelopes()).length).toBe(3);
+  });
+
+  it("never lets another write land inside a machine's transaction that then rolls back", async () => {
+    const test = await createTestSnapshotDb();
+    await test.db.writeEnvironmentRows(
+      rowsWrite("env-1", {
+        upsertBodies: [{ ...row("t1", '{"messages":[]}'), sequence: null }],
+      }),
+    );
+    // A statement takes a turn of the event loop, so writes started together interleave
+    // unless they share one queue.
+    const slow = {
+      ...test.handle,
+      runAsync: async (source: string, params: Array<string | number | null>) => {
+        await new Promise((resolve) => setImmediate(resolve));
+        return test.handle.runAsync(source, params);
+      },
+    };
+    const db = createSnapshotDb(async () => slow);
+    const failing = db.writeEnvironmentRows(
+      rowsWrite("env-2", {
+        upsertThreads: [
+          threadRow("t1", "{}"),
+          { ...threadRow("t2", "{}"), threadId: null as never },
+        ],
+      }),
+    );
+    const removal = db.removeThreadBodies();
+    const roster = db.saveHubNodeRoster({
       schemaVersion: 1,
-      payload: "{}",
+      payload: '{"nodes":[]}',
       updatedAt: 1,
     });
-    await db.removeEnvironmentSnapshot("env-1");
-    expect(await db.loadEnvironmentSnapshot("env-1")).toBeNull();
-    expect(await db.loadEnvironmentSnapshot("never-written")).toBeNull();
+    await expect(failing).rejects.toThrow();
+    await Promise.all([removal, roster]);
+    expect(await test.db.listThreadBodyKeys()).toEqual([]);
+    expect(await test.db.loadHubNodeRoster()).toEqual({
+      schemaVersion: 1,
+      payload: '{"nodes":[]}',
+    });
+    expect(await test.db.loadEnvironmentThreads("env-2")).toEqual([]);
+  });
+
+  it("reads and removes single-row snapshots of older builds", async () => {
+    const test = await createTestSnapshotDb();
+    await test.insertLegacyRow({
+      environmentId: "env-old",
+      schemaVersion: 3,
+      payload: '{"v":3}',
+      updatedAt: 7,
+    });
+    expect(await test.db.loadLegacyEnvironmentSnapshots()).toEqual([
+      { environmentId: "env-old", schemaVersion: 3, payload: '{"v":3}', updatedAt: 7 },
+    ]);
+    await test.db.removeLegacyEnvironmentSnapshot("env-old");
+    expect(await test.db.loadLegacyEnvironmentSnapshots()).toEqual([]);
+  });
+
+  it("hashes payloads to a stable 53-bit number", () => {
+    expect(payloadHash('{"a":1}')).toBe(payloadHash('{"a":1}'));
+    expect(payloadHash('{"a":1}')).not.toBe(payloadHash('{"a":2}'));
+    expect(Number.isSafeInteger(payloadHash("x".repeat(10_000)))).toBe(true);
   });
 
   it("stores the roster as a singleton row", async () => {
@@ -88,69 +335,6 @@ describe("snapshotDb", () => {
     }
   });
 
-  it("reads every snapshot in one query, most recently written first", async () => {
-    const db = createSnapshotDb(openNodeSqliteHandle);
-    await db.saveEnvironmentSnapshot({
-      environmentId: "env-old",
-      schemaVersion: 1,
-      payload: "{}",
-      updatedAt: 1,
-    });
-    await db.saveEnvironmentSnapshot({
-      environmentId: "env-new",
-      schemaVersion: 2,
-      payload: '{"n":1}',
-      payloadBytes: 7,
-      updatedAt: 5,
-    });
-    expect(await db.loadEnvironmentSnapshots()).toEqual([
-      { environmentId: "env-new", schemaVersion: 2, payload: '{"n":1}', updatedAt: 5 },
-      { environmentId: "env-old", schemaVersion: 1, payload: "{}", updatedAt: 1 },
-    ]);
-    expect(
-      (await db.listEnvironmentSnapshotStats()).find((stat) => stat.environmentId === "env-new")
-        ?.payloadBytes,
-    ).toBe(7);
-  });
-
-  it("accounts for stored conversation text in the payload bytes", async () => {
-    const db = createSnapshotDb(openNodeSqliteHandle);
-    const record = (text: string) =>
-      JSON.stringify({
-        threads: [],
-        content: { "thread-1": { messages: [{ id: "m1", role: "user", text }] } },
-      });
-    // Multi-byte text, an astral character and a lone surrogate, about 2 MB.
-    const text = `${"naïve 日本語 🚀 \ud800 ".repeat(70_000)}end`;
-    const payload = record(text);
-    expect(new TextEncoder().encode(payload).byteLength).toBeGreaterThan(1_800_000);
-
-    await db.saveEnvironmentSnapshot({
-      environmentId: "env-content",
-      schemaVersion: 3,
-      payload,
-      updatedAt: 1,
-    });
-    expect(await db.loadEnvironmentSnapshot("env-content")).toEqual({
-      schemaVersion: 3,
-      payload,
-      updatedAt: 1,
-    });
-    const [stat] = await db.listEnvironmentSnapshotStats();
-    expect(stat?.payloadBytes).toBe(new TextEncoder().encode(payload).byteLength);
-
-    // Rewritten without the text, the row is accounted for at its new size.
-    const shellOnly = JSON.stringify({ threads: [] });
-    await db.saveEnvironmentSnapshot({
-      environmentId: "env-content",
-      schemaVersion: 3,
-      payload: shellOnly,
-      payloadBytes: payloadByteLength(shellOnly),
-      updatedAt: 1,
-    });
-    expect((await db.listEnvironmentSnapshotStats())[0]?.payloadBytes).toBe(shellOnly.length);
-  });
-
   it("stores saved answers per environment and removes them with its snapshot", async () => {
     const db = createSnapshotDb(openNodeSqliteHandle);
     const save = (environmentId: string, key: string, updatedAt: number) =>
@@ -177,7 +361,7 @@ describe("snapshotDb", () => {
     await db.removeSavedQueries([{ environmentId: "env-1", key: "b" }]);
     expect(await db.loadSavedQuery("env-1", "b")).toBeNull();
 
-    await db.removeEnvironmentSnapshot("env-1");
+    await db.removeEnvironment("env-1");
     expect(await db.loadSavedQuery("env-1", "a")).toBeNull();
     expect(await db.loadSavedQuery("env-2", "a")).not.toBeNull();
 

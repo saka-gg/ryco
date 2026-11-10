@@ -162,6 +162,9 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
             mobileAppLifecycle.subscribe((event) => {
               if (event === "background") listener();
             }),
+          // Saved with each thread's body: the window position it was current to.
+          readThreadSequence: (environmentId, threadId) =>
+            registry.driver.supervisor.readThreadDetailSequence(environmentId, threadId),
         });
       },
       (error: unknown) => {

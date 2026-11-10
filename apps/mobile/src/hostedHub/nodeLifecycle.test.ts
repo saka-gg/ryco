@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const fixture = vi.hoisted(() => {
   const connections = new Map<string, { readonly environmentId: string }>();
   return {
-    hydrated: true,
+    directReady: true,
     deferred: [] as Array<() => Promise<void>>,
     directEnvironments: new Set<string>(),
     setActive: vi.fn(),
@@ -56,8 +56,8 @@ vi.mock("../runtime/bootstrap", () => ({
 }));
 vi.mock("../runtime/startupBarrier", () => ({
   mobileRuntimeStartupBarrier: {
-    isHydrated: () => fixture.hydrated,
-    runAfterHydration: (work: () => void, onFailure: (error: unknown) => void) => {
+    isDirectReady: () => fixture.directReady,
+    runAfterDirectReady: (work: () => void, onFailure: (error: unknown) => void) => {
       fixture.deferred.push(() => Promise.resolve().then(work).catch(onFailure));
     },
   },
@@ -216,7 +216,7 @@ function lifecyclePortCalls(): number {
 beforeEach(async () => {
   vi.clearAllMocks();
   built.length = 0;
-  fixture.hydrated = true;
+  fixture.directReady = true;
   fixture.deferred.length = 0;
   fixture.directEnvironments.clear();
   fixture.connections.clear();
@@ -395,8 +395,8 @@ describe("mobile hosted node lifecycle with retained environment sessions", () =
     expect(fixture.demote).toHaveBeenCalledExactlyOnceWith(envA);
   });
 
-  it("waits for the cached projections and opens nothing for a generation replaced meanwhile", async () => {
-    fixture.hydrated = false;
+  it("waits for the saved-machine catalog and opens nothing for a generation replaced meanwhile", async () => {
+    fixture.directReady = false;
     await acquire(nodeA);
     await acquire(nodeB);
     expect(environmentFactory).not.toHaveBeenCalled();
@@ -406,6 +406,16 @@ describe("mobile hosted node lifecycle with retained environment sessions", () =
 
     expect(built.map((connection) => connection.environmentId)).toEqual([envB]);
     expect(fixture.connections.has(envA)).toBe(false);
+  });
+
+  it("starts the relay handshake while the snapshot cache is still being read", async () => {
+    // Only the catalog stage gates a Hub machine's connection: the launch read
+    // of saved machines runs alongside it (this mock has no hydration stage).
+    fixture.directReady = true;
+    await acquire(nodeA);
+    expect(environmentFactory).toHaveBeenCalledOnce();
+    expect(fixture.connections.has(envA)).toBe(true);
+    expect(fixture.deferred).toHaveLength(0);
   });
 
   it("never reaches an environment the direct plane owns through the relay", async () => {
