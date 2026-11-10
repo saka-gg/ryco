@@ -187,8 +187,9 @@ developer's Mac or EAS. Metro reads workspace sources, so it builds nothing
 first and restores no Turbo cache. It does restore Metro's own transform cache
 (`actions/cache`, saved by `main`): Metro keys each entry by the module's
 content and the transform configuration, so only unchanged modules skip Babel,
-and the cache key carries the lockfile, the patches and the Metro and Babel
-and app configs, including what `metro.config.js` folds into Metro's `cacheVersion`. It has no `run-*` input and reads `mobile`
+and the cache key carries the lockfile, the patches and the Metro, Babel and
+app configs, including what `metro.config.js` folds into Metro's
+`cacheVersion`. It has no `run-*` input and reads `mobile`
 from the test-matrix outputs: runtime changes to the app or a workspace it
 consumes, plus the same conservative fallback as the other scoped jobs.
 

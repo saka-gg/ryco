@@ -625,8 +625,8 @@ jobs:
       # Metro keeps each module's transform (Babel with the React Compiler)
       # in a file store under the temp directory, keyed by the module's
       # content and the transform configuration, so a restored store only
-      # skips work for modules that did not change: about 100 of the job's
-      # 190 seconds. apps/mobile/metro.config.js ties Metro's cacheVersion to
+      # skips work for modules that did not change: the export took 86
+      # seconds warm against 202 cold. apps/mobile/metro.config.js ties Metro's cacheVersion to
       # the lockfile and the patches, so the same inputs prefix the key and an
       # entry no run can use is never restored. The key is per run, so main
       # saves a fresh entry (about 55 MB) whenever it transformed something.
