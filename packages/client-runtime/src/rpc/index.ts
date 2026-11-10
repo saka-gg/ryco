@@ -13,3 +13,4 @@ export * from "./serverState.ts";
 export * from "./wsConnectionState.ts";
 export * from "./wsRpcClient.ts";
 export * from "./wsTransport.ts";
+export * from "./retryJitter.ts";

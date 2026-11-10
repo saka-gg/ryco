@@ -245,6 +245,8 @@ class RpcTransport<Client> {
   private lastSocketOpenedAt = 0;
   private readonly makeClient: () => Effect.Effect<Client, never, RpcClient.Protocol | Scope.Scope>;
   private readonly subscriptionRetryWakeups = new Set<() => void>();
+  /** Ends the pending retry wait of each subscription; a socket opened. */
+  private readonly subscriptionSocketOpenWakeups = new Set<() => void>();
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
 
   constructor(
@@ -384,6 +386,9 @@ class RpcTransport<Client> {
     const unsubscribeAdmission =
       this.lifecycleHandlers?.subscribeAdmissionChanges?.(admissionChanged) ?? NOOP;
     this.subscriptionRetryWakeups.add(admissionChanged);
+    // Only a wait under way ends: an attempt already out is not retried again.
+    const socketOpened = () => wakeRetry();
+    this.subscriptionSocketOpenWakeups.add(socketOpened);
     const waitForRetry = (delayMs: number, observedRevision: number) => {
       // Register before the stream starts and compare revisions afterwards:
       // readiness can change between refusal and the rejection reaching us.
@@ -524,6 +529,7 @@ class RpcTransport<Client> {
     })().finally(() => {
       unsubscribeAdmission();
       this.subscriptionRetryWakeups.delete(admissionChanged);
+      this.subscriptionSocketOpenWakeups.delete(socketOpened);
     });
 
     return () => {
@@ -609,7 +615,7 @@ class RpcTransport<Client> {
             this.lastSocketOpenedAt = Date.now();
             this.lifecycleHandlers?.onOpen?.();
             // Subscriptions waiting out a failure resubscribe on the new socket now.
-            for (const wake of this.subscriptionRetryWakeups) wake();
+            for (const wake of this.subscriptionSocketOpenWakeups) wake();
           },
           onRequestStart: (info) => {
             this.lifecycleHandlers?.onRequestStart?.(info);

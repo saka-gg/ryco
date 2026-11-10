@@ -27,6 +27,7 @@ import {
   recordWsConnectionOpened,
   resetWsConnectionStateForTests,
 } from "../rpc/wsConnectionState";
+import { setRetryJitterForTests } from "@ryco/client-runtime/rpc";
 import { WsTransport } from "./wsTransport";
 import { DesktopWorkspaceIpcSocketFactory } from "../platform/desktopWorkspaceSocket";
 
@@ -128,6 +129,8 @@ function createTransport(...args: ConstructorParameters<typeof WsTransport>): Ws
 
 beforeEach(() => {
   vi.useRealTimers();
+  // The reconnect schedules below are timed exactly.
+  setRetryJitterForTests({ enabled: false });
   sockets.length = 0;
   transports.length = 0;
   resetRequestLatencyStateForTests();
@@ -154,6 +157,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  setRetryJitterForTests(null);
   await Promise.allSettled(transports.map((transport) => transport.dispose()));
   transports.length = 0;
   globalThis.WebSocket = originalWebSocket;

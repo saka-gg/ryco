@@ -18,10 +18,12 @@ import {
 } from "./store.ts";
 import {
   isLocalTasksRetained,
+  LOCAL_TASKS_FOCUS_REFRESH_MS,
   LOCAL_TASKS_FORBIDDEN_ERROR,
   LOCAL_TASKS_MAX_PAGES,
   LOCAL_TASKS_PAGE_SIZE,
   LOCAL_TASKS_READ_ERROR,
+  LOCAL_TASKS_RECONNECT_WORD_WAIT_MS,
   LOCAL_TASKS_CHANGE_READ_DELAY_MS,
   LOCAL_TASKS_THREAD_REFRESH_DELAY_MS,
   LOCAL_TASKS_UNSUPPORTED_ERROR,
@@ -643,5 +645,292 @@ describe("retainLocalTasks", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(list).toHaveBeenCalledTimes(3);
     release();
+  });
+});
+
+/**
+ * List page requests one event costs with 250 tasks (3 pages of 100). The
+ * numbers before this change are in each test's comment.
+ */
+describe("list reads per event", () => {
+  const TASK_COUNT = 250;
+  const id = (index: number) => `t${String(index).padStart(4, "0")}`;
+  const delegatedTask = (index: number, threadId: ThreadId) =>
+    task(id(index), {
+      delegations: [
+        {
+          commandId: CommandId.make(`command-${index}`),
+          threadId,
+          messageId: MessageId.make(`message-${index}`),
+          sequence: 1,
+          branch: null,
+          dispatched: true,
+          status: "running",
+          error: null,
+          createdAt: "2026-10-18T00:00:00.000Z",
+        },
+      ],
+    });
+  const allTasks = Array.from({ length: TASK_COUNT }, (_, index) =>
+    index === 7 ? delegatedTask(index, THREAD) : task(id(index)),
+  );
+
+  /** The node's paged list, stamped at `position()`. */
+  function pagedList(position: () => LocalTaskChangePosition | undefined) {
+    return vi.fn<ListFn>(async (input) => {
+      const start =
+        input.afterId === undefined ? 0 : allTasks.findIndex((t) => t.taskId > input.afterId!);
+      const tasks = allTasks.slice(start, start + LOCAL_TASKS_PAGE_SIZE);
+      const last = start + LOCAL_TASKS_PAGE_SIZE >= allTasks.length;
+      const at = position();
+      return {
+        tasks,
+        nextCursor: last ? null : tasks.at(-1)!.taskId,
+        ...(at === undefined ? {} : { position: at }),
+      };
+    });
+  }
+
+  /** A node with a change stream and `getLocalTask`; `fail` stops the stream for good. */
+  function node(position: () => LocalTaskChangePosition | undefined = () => at(0)) {
+    const list = pagedList(position);
+    const get = vi.fn(async ({ taskId }: { readonly taskId: string }) =>
+      allTasks.find((t) => t.taskId === taskId)!,
+    );
+    let listener: (change: LocalTaskChange) => void = () => {};
+    let onError: (() => void) | undefined;
+    const api: LocalTasksApi = {
+      listLocalTasks: list,
+      getLocalTask: get,
+      subscribeLocalTaskChanges: (next, options) => {
+        listener = next;
+        onError = options?.onError;
+        return () => {};
+      },
+    };
+    return {
+      api,
+      list,
+      get,
+      emit: (change: LocalTaskChange) => listener(change),
+      fail: () => onError?.(),
+    };
+  }
+
+  it("(a) one open task's chat moving reads that task, not the list (before: 3 pages)", async () => {
+    vi.useFakeTimers();
+    const { api, list, get, emit } = node();
+    let running = true;
+    let notify = () => {};
+    const summary = (): LocalTaskThreadSummary => ({
+      session: null,
+      latestTurn: null,
+      interactionMode: "default",
+      hasPendingApprovals: false,
+      hasPendingUserInput: running,
+      hasActionableProposedPlan: false,
+      branch: null,
+    });
+    const release = retainLocalTasks(api, ENV, {
+      threadActivity: {
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {};
+        },
+        getSummary: (threadId) => (threadId === THREAD ? summary() : undefined),
+      },
+    });
+    emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(taskIds()).toHaveLength(TASK_COUNT);
+    list.mockClear();
+
+    running = false;
+    notify();
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_THREAD_REFRESH_DELAY_MS);
+    expect(list).toHaveBeenCalledTimes(0);
+    expect(get.mock.calls.map(([input]) => input.taskId)).toEqual([id(7)]);
+    release();
+  });
+
+  it("(a) falls back to the list on a node without getLocalTask", async () => {
+    vi.useFakeTimers();
+    const list = pagedList(() => undefined);
+    let running = true;
+    let notify = () => {};
+    const release = retainLocalTasks({ listLocalTasks: list }, ENV, {
+      threadActivity: {
+        subscribe: (listener) => {
+          notify = listener;
+          return () => {};
+        },
+        getSummary: () => ({
+          session: null,
+          latestTurn: null,
+          interactionMode: "default",
+          hasPendingApprovals: false,
+          hasPendingUserInput: running,
+          hasActionableProposedPlan: false,
+          branch: null,
+        }),
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear();
+    running = false;
+    notify();
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_THREAD_REFRESH_DELAY_MS);
+    expect(list).toHaveBeenCalledTimes(3);
+    release();
+  });
+
+  it("(b) a focus 20 s after the last read reads nothing while the stream is live (before: 3 pages)", async () => {
+    vi.useFakeTimers();
+    const { api, list, emit, fail } = node();
+    let focus: (options?: { staleAfterMs?: number }) => void = () => {};
+    const release = retainLocalTasks(api, ENV, {
+      triggers: (refresh) => {
+        focus = refresh;
+        return () => {};
+      },
+    });
+    emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear();
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    focus({ staleAfterMs: LOCAL_TASKS_FOCUS_REFRESH_MS });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(0);
+    // An explicit refresh (the button, a write) still reads.
+    await refreshLocalTasks(ENV);
+    expect(list).toHaveBeenCalledTimes(3);
+    list.mockClear();
+
+    // A stream that stopped for good no longer keeps the tasks current.
+    fail();
+    await vi.advanceTimersByTimeAsync(20_000);
+    focus({ staleAfterMs: LOCAL_TASKS_FOCUS_REFRESH_MS });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(3);
+    release();
+  });
+
+  it("(b) a focus reads as before on a node without a change stream", async () => {
+    vi.useFakeTimers();
+    const list = pagedList(() => undefined);
+    let focus: (options?: { staleAfterMs?: number }) => void = () => {};
+    const release = retainLocalTasks({ listLocalTasks: list }, ENV, {
+      triggers: (refresh) => {
+        focus = refresh;
+        return () => {};
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear();
+    await vi.advanceTimersByTimeAsync(20_000);
+    focus({ staleAfterMs: LOCAL_TASKS_FOCUS_REFRESH_MS });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(3);
+    release();
+  });
+
+  it("(c) a new connection reads only when the node changed meanwhile (before: 3 pages)", async () => {
+    vi.useFakeTimers();
+    let sequence = 0;
+    const first = node(() => at(sequence));
+    const release = retainLocalTasks(first.api, ENV);
+    first.emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.list).toHaveBeenCalledTimes(3);
+
+    // Nothing changed while away: the new stream's word is covered.
+    const second = node(() => at(sequence));
+    const next = retainLocalTasks(second.api, ENV);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.list).toHaveBeenCalledTimes(0);
+    second.emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_RECONNECT_WORD_WAIT_MS);
+    expect(second.list).toHaveBeenCalledTimes(0);
+    expect(taskIds()).toHaveLength(TASK_COUNT);
+
+    // Something changed while away: one read of the list.
+    sequence = 2;
+    const third = node(() => at(sequence));
+    const last = retainLocalTasks(third.api, ENV);
+    next();
+    third.emit({ position: at(2) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(third.list).toHaveBeenCalledTimes(3);
+    last();
+  });
+
+  it("(c) a new connection reads the list when the word does not come or the stream fails", async () => {
+    vi.useFakeTimers();
+    const first = node();
+    const release = retainLocalTasks(first.api, ENV);
+    first.emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const silent = node();
+    const next = retainLocalTasks(silent.api, ENV);
+    release();
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_RECONNECT_WORD_WAIT_MS - 1);
+    expect(silent.list).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(silent.list).toHaveBeenCalledTimes(3);
+
+    const failing = node();
+    const last = retainLocalTasks(failing.api, ENV);
+    next();
+    failing.fail();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failing.list).toHaveBeenCalledTimes(3);
+    last();
+  });
+
+  it("(c) the same connection coming back leaves the catch-up to a live stream (before: 3 pages)", async () => {
+    vi.useFakeTimers();
+    let sequence = 0;
+    const { api, list, emit } = node(() => at(sequence));
+    let reconnected: (options?: { catchUp?: boolean }) => void = () => {};
+    const release = retainLocalTasks(api, ENV, {
+      triggers: (refresh) => {
+        reconnected = refresh;
+        return () => {};
+      },
+    });
+    emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+    list.mockClear();
+
+    // The shell snapshot comes back, then the resubscribed stream's word: nothing changed.
+    reconnected({ catchUp: true });
+    emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(0);
+
+    // Something changed: the word reads the list once.
+    sequence = 1;
+    reconnected({ catchUp: true });
+    emit({ position: at(1) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(3);
+    release();
+  });
+
+  it("(c) a reconnect without a change stream reads the list as before", async () => {
+    vi.useFakeTimers();
+    const first = pagedList(() => undefined);
+    const release = retainLocalTasks({ listLocalTasks: first }, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    const second = pagedList(() => undefined);
+    const next = retainLocalTasks({ listLocalTasks: second }, ENV);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second).toHaveBeenCalledTimes(3);
+    next();
   });
 });

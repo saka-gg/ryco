@@ -7,7 +7,7 @@ import type {
 
 import { isAuthRpcError } from "../../rpc/wsTransport.ts";
 import { createSingleFlightReader, type SingleFlightReader } from "../singleFlightReader.ts";
-import { delegatedThreadSignature } from "./logic.ts";
+import { delegatedThreadStates, tasksWithMovedChats } from "./logic.ts";
 import {
   selectLocalTasksEnvironment,
   selectOpenTaskViews,
@@ -38,10 +38,19 @@ export const LOCAL_TASKS_PAGE_SIZE = 100;
  * page forever. Tasks past where it stopped are kept as they were.
  */
 export const LOCAL_TASKS_MAX_PAGES = 200;
-/** The window regaining focus re-reads only when the last read is older than this. */
+/**
+ * The window regaining focus re-reads only when the last read is older than
+ * this, and only while no live change stream keeps the tasks current.
+ */
 export const LOCAL_TASKS_FOCUS_REFRESH_MS = 15_000;
-/** How long a change in a task chat's live state waits before the tasks are re-read. */
+/** How long a change in a task chat's live state waits before its tasks are re-read. */
 export const LOCAL_TASKS_THREAD_REFRESH_DELAY_MS = 750;
+/**
+ * How long a new connection waits for its change stream's first word, which
+ * says whether anything changed since the last read, before reading the list
+ * anyway.
+ */
+export const LOCAL_TASKS_RECONNECT_WORD_WAIT_MS = 3_000;
 /** How long changes the node reports are gathered before the changed tasks are read. */
 export const LOCAL_TASKS_CHANGE_READ_DELAY_MS = 200;
 /** More changed tasks than this at once are read as one list instead. */
@@ -123,8 +132,17 @@ function positionCovers(
 }
 
 export interface LocalTasksRefreshOptions {
-  /** Skips the read when the last one landed less than this many ms ago. */
+  /**
+   * Skips the read when the last one landed less than this many ms ago, and
+   * while a live change stream keeps the tasks current (see `catchUp`).
+   */
   readonly staleAfterMs?: number;
+  /**
+   * The read only catches up on changes that may have been missed (the same
+   * connection coming back): skipped while the node's change stream is live,
+   * since the stream's word after a drop reads exactly when something changed.
+   */
+  readonly catchUp?: boolean;
 }
 
 /**
@@ -147,8 +165,8 @@ export interface LocalTasksRetainOptions {
   readonly triggers?: LocalTasksRefreshTriggers;
   /**
    * When given, a chat of an open task moving between states (see
-   * `delegatedThreadSignature`) re-reads the tasks once the moves settle, so
-   * the node's status follows the chats without polling.
+   * `delegatedThreadStates`) re-reads the tasks it belongs to once the moves
+   * settle, so the node's status follows the chats without polling.
    */
   readonly threadActivity?: LocalTasksThreadActivitySource;
 }
@@ -156,6 +174,16 @@ export interface LocalTasksRetainOptions {
 interface ThreadWatch {
   /** Takes the current chat states as read, so only later moves re-read. */
   readonly rebase: () => void;
+  readonly stop: () => void;
+}
+
+interface ChangeWatch {
+  /**
+   * The stream delivered on this connection and has not failed: it reports
+   * every change, and after a drop it starts again with a word that reads
+   * whatever the drop missed.
+   */
+  readonly live: () => boolean;
   readonly stop: () => void;
 }
 
@@ -168,9 +196,15 @@ interface RetainedTasks {
   stopTriggers: (() => void) | null;
   threadWatch: ThreadWatch | null;
   /** The node's change stream on the current connection, while it has one. */
-  stopChanges: (() => void) | null;
-  /** The change position the last landed read holds every change up to, when known. */
+  changes: ChangeWatch | null;
+  /**
+   * The change position the last landed read holds every change up to, when
+   * known. A position names the node process's feed, so it stays comparable
+   * across connections to the same node.
+   */
   covered: LocalTaskChangePosition | null;
+  /** A new connection waits for its stream's first word instead of reading at once. */
+  reconnectWait: ReturnType<typeof setTimeout> | null;
   /** A read is out on the current reader. */
   reading: boolean;
   /** A read-all word that came while a read was out; decided once that read lands. */
@@ -274,6 +308,13 @@ function refreshEntry(
       (environment.readAt !== null && Date.now() - environment.readAt < options.staleAfterMs))
   )
     return Promise.resolve();
+  // The change stream keeps a landed list current; a read on a hunch adds nothing.
+  if (
+    (options?.staleAfterMs !== undefined || options?.catchUp === true) &&
+    environment.status === "ready" &&
+    entry.changes?.live() === true
+  )
+    return Promise.resolve();
   if (environment.status !== "ready") store.setLoading(environmentId);
   return entry.reader.refresh();
 }
@@ -281,30 +322,136 @@ function refreshEntry(
 function watchThreads(
   environmentId: EnvironmentId,
   source: LocalTasksThreadActivitySource,
-  refresh: () => void,
+  readTasks: (taskIds: ReadonlyArray<string>) => void,
 ): ThreadWatch {
-  const signatureNow = () =>
-    delegatedThreadSignature(
+  const statesNow = () =>
+    delegatedThreadStates(
       selectOpenTaskViews(useLocalTasksStore.getState(), environmentId),
       source.getSummary,
     );
-  let last = signatureNow();
+  let last = statesNow();
+  const moved = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   const unsubscribe = source.subscribe(() => {
-    const next = signatureNow();
-    if (next === last) return;
+    const next = statesNow();
+    for (const taskId of tasksWithMovedChats(last, next)) moved.add(taskId);
     last = next;
     // One read per burst of moves, at most a delay after the first of them.
-    if (timer !== null) return;
+    if (moved.size === 0 || timer !== null) return;
     timer = setTimeout(() => {
       timer = null;
-      refresh();
+      const taskIds = [...moved];
+      moved.clear();
+      readTasks(taskIds);
     }, LOCAL_TASKS_THREAD_REFRESH_DELAY_MS);
   });
   return {
     rebase: () => {
-      last = signatureNow();
+      last = statesNow();
     },
+    stop: () => {
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      moved.clear();
+    },
+  };
+}
+
+/**
+ * Reads the named tasks one by one (`getLocalTask`), or the whole list when
+ * the node has no such method or there are too many of them. A task that
+ * cannot be read (deleted) reads the list. `isCurrent` says whether the read
+ * still belongs to the retained connection.
+ */
+function readChangedTasks(
+  environmentId: EnvironmentId,
+  api: LocalTasksApi,
+  taskIds: ReadonlyArray<string>,
+  isCurrent: () => boolean,
+  refresh: () => void,
+): void {
+  if (taskIds.length === 0 || !isCurrent()) return;
+  const get = api.getLocalTask;
+  if (!get || taskIds.length > LOCAL_TASKS_CHANGE_READ_MAX) {
+    refresh();
+    return;
+  }
+  const known = selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).tasks;
+  for (const taskId of taskIds) {
+    // Deleted here while the read was out (its change may come after): it stays deleted.
+    const wasKnown = taskId in known;
+    get({ taskId }).then(
+      (task) => {
+        if (!isCurrent()) return;
+        const store = useLocalTasksStore.getState();
+        if (wasKnown && !(taskId in selectLocalTasksEnvironment(store, environmentId).tasks))
+          return;
+        store.applyTask(environmentId, task);
+      },
+      // Deleted, or unreadable now: the list says what is left.
+      () => {
+        if (isCurrent()) refresh();
+      },
+    );
+  }
+}
+
+/**
+ * Follows the node's task changes (another client, an agent through Agent
+ * Control): each burst reads the tasks it names, and a task that cannot be
+ * read (deleted) or a large burst reads the whole list. The word to read
+ * every task goes to `readAll` with the position it covers; the stream
+ * stopping for good goes to `failed`. `isCurrent` says whether the read
+ * still belongs to the retained connection.
+ */
+function watchChanges(
+  environmentId: EnvironmentId,
+  api: LocalTasksApi,
+  isCurrent: () => boolean,
+  refresh: () => void,
+  readAll: (position: LocalTaskChangePosition | undefined) => void,
+  failed: () => void,
+): ChangeWatch | null {
+  const subscribe = api.subscribeLocalTaskChanges;
+  if (!subscribe) return null;
+  const pending = new Set<string>();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let delivered = false;
+  let stopped = false;
+  const flush = () => {
+    timer = null;
+    const taskIds = [...pending];
+    pending.clear();
+    readChangedTasks(environmentId, api, taskIds, isCurrent, refresh);
+  };
+  const unsubscribe = subscribe(
+    (change) => {
+      if (!isCurrent()) return;
+      delivered = true;
+      // The stream's first word, once it listens (again, after a reconnect), or in place of
+      // changes it fell too far behind on: read everything a read already out or landed misses.
+      if (change.taskId === undefined) {
+        readAll(change.position);
+        return;
+      }
+      if (change.deleted) {
+        pending.delete(change.taskId);
+        useLocalTasksStore.getState().removeTask(environmentId, change.taskId);
+        return;
+      }
+      pending.add(change.taskId);
+      if (timer === null) timer = setTimeout(flush, LOCAL_TASKS_CHANGE_READ_DELAY_MS);
+    },
+    {
+      onError: () => {
+        stopped = true;
+        if (isCurrent()) failed();
+      },
+    },
+  );
+  return {
+    live: () => delivered && !stopped,
     stop: () => {
       unsubscribe();
       if (timer !== null) clearTimeout(timer);
@@ -313,89 +460,28 @@ function watchThreads(
   };
 }
 
-/**
- * Follows the node's task changes (another client, an agent through Agent
- * Control): each burst reads the tasks it names, and a task that cannot be
- * read (deleted) or a large burst reads the whole list. The word to read
- * every task goes to `readAll` with the position it covers. `isCurrent` says
- * whether the read still belongs to the retained connection.
- */
-function watchChanges(
-  environmentId: EnvironmentId,
-  api: LocalTasksApi,
-  isCurrent: () => boolean,
-  refresh: () => void,
-  readAll: (position: LocalTaskChangePosition | undefined) => void,
-): (() => void) | null {
-  const subscribe = api.subscribeLocalTaskChanges;
-  if (!subscribe) return null;
-  const get = api.getLocalTask;
-  const pending = new Set<string>();
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const flush = () => {
-    timer = null;
-    const taskIds = [...pending];
-    pending.clear();
-    if (!isCurrent()) return;
-    if (!get || taskIds.length > LOCAL_TASKS_CHANGE_READ_MAX) {
-      refresh();
-      return;
-    }
-    const known = selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).tasks;
-    for (const taskId of taskIds) {
-      // Deleted here while the read was out (its change may come after): it stays deleted.
-      const wasKnown = taskId in known;
-      get({ taskId }).then(
-        (task) => {
-          if (!isCurrent()) return;
-          const store = useLocalTasksStore.getState();
-          if (wasKnown && !(taskId in selectLocalTasksEnvironment(store, environmentId).tasks))
-            return;
-          store.applyTask(environmentId, task);
-        },
-        // Deleted, or unreadable now: the list says what is left.
-        () => {
-          if (isCurrent()) refresh();
-        },
-      );
-    }
-  };
-  const unsubscribe = subscribe((change) => {
-    if (!isCurrent()) return;
-    // The stream's first word, once it listens (again, after a reconnect), or in place of
-    // changes it fell too far behind on: read everything a read already out or landed misses.
-    if (change.taskId === undefined) {
-      readAll(change.position);
-      return;
-    }
-    if (change.deleted) {
-      pending.delete(change.taskId);
-      useLocalTasksStore.getState().removeTask(environmentId, change.taskId);
-      return;
-    }
-    pending.add(change.taskId);
-    if (timer === null) timer = setTimeout(flush, LOCAL_TASKS_CHANGE_READ_DELAY_MS);
-  });
-  return () => {
-    unsubscribe();
-    if (timer !== null) clearTimeout(timer);
-    timer = null;
-  };
+function clearReconnectWait(entry: RetainedTasks): void {
+  if (entry.reconnectWait !== null) clearTimeout(entry.reconnectWait);
+  entry.reconnectWait = null;
 }
 
 /**
  * Keeps one environment's tasks in `useLocalTasksStore` while retained. Every
  * surface showing them (the Tasks page, the sidebar badge) shares one reader,
  * which reads every page when it starts; retaining with a new connection's
- * `api` swaps the reader for all of them and reads again. The last release
- * stops at the end of the task, so an effect re-running hands the sync over
+ * `api` swaps the reader for all of them and reads again, or, when a landed
+ * read holds a change position, waits for the new change stream's first word
+ * and reads only if something changed since. The last release stops at the
+ * end of the task, so an effect re-running hands the sync over
  * instead of dropping the tasks. Changes the node reports on its change stream
  * are read as they come (`watchChanges`); the stream's word to read every task
  * reads the list only when no read already covers its position (one that
  * landed, or the one out, decided once it lands). The first retainer's
- * `triggers` and `threadActivity` are installed once and re-read once per
- * signal. A node without `listLocalTasks` leaves the environment in `error`
- * with `LOCAL_TASKS_UNSUPPORTED_ERROR`. Returns the (idempotent) release.
+ * `triggers` and `threadActivity` are installed once: a trigger re-reads the
+ * list (unless the change stream is live and the read optional, see
+ * `LocalTasksRefreshOptions`), a chat moving reads the tasks it belongs to.
+ * A node without `listLocalTasks` leaves the environment in `error` with
+ * `LOCAL_TASKS_UNSUPPORTED_ERROR`. Returns the (idempotent) release.
  */
 export function retainLocalTasks(
   api: LocalTasksApi,
@@ -418,8 +504,9 @@ export function retainLocalTasks(
       teardownScheduled: false,
       stopTriggers: null,
       threadWatch: null,
-      stopChanges: null,
+      changes: null,
       covered: null,
+      reconnectWait: null,
       reading: false,
       deferredReadAll: null,
     };
@@ -428,8 +515,8 @@ export function retainLocalTasks(
   } else if (fresh) {
     const swapped = entry;
     swapped.reader.stop();
-    // What the old connection's reads covered says nothing about the new one's.
-    swapped.covered = null;
+    // `covered` stays: its feed tells whether the new connection's words reach the same node
+    // process. Only the read that was out is gone.
     swapped.reading = false;
     swapped.deferredReadAll = null;
     swapped.reader = startReader(
@@ -445,6 +532,8 @@ export function retainLocalTasks(
   const refresh = (refreshOptions?: LocalTasksRefreshOptions) =>
     void refreshEntry(environmentId, held, refreshOptions);
   const readAll = (position: LocalTaskChangePosition | undefined) => {
+    // The word a new connection waited for has come: it decides.
+    clearReconnectWait(held);
     if (position !== undefined) {
       // A read stamped at or past the word already holds what it stands for.
       if (positionCovers(held.covered, position)) return;
@@ -456,21 +545,48 @@ export function retainLocalTasks(
     }
     refresh();
   };
+  const currentConnection = () => {
+    const listing = held.api.listLocalTasks;
+    return () => retained.get(environmentId) === held && held.api.listLocalTasks === listing;
+  };
+  // A new connection to a node whose positions a landed read holds: the stream's first word
+  // says whether anything changed meanwhile, so the list is read only then (or when the word
+  // does not come).
+  let awaitWord = false;
   if (fresh) {
-    held.stopChanges?.();
-    const listing = api.listLocalTasks;
-    held.stopChanges = watchChanges(
+    held.changes?.stop();
+    held.changes = null;
+    clearReconnectWait(held);
+    awaitWord =
+      api.subscribeLocalTaskChanges !== undefined &&
+      held.covered !== null &&
+      selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).status === "ready";
+    const isCurrent = currentConnection();
+    if (awaitWord)
+      held.reconnectWait = setTimeout(() => {
+        held.reconnectWait = null;
+        if (isCurrent()) refresh();
+      }, LOCAL_TASKS_RECONNECT_WORD_WAIT_MS);
+    held.changes = watchChanges(
       environmentId,
       api,
-      () => retained.get(environmentId) === held && held.api.listLocalTasks === listing,
+      isCurrent,
       () => refresh(),
       readAll,
+      () => {
+        // Waiting for a word that will not come: read now.
+        if (held.reconnectWait === null) return;
+        clearReconnectWait(held);
+        refresh();
+      },
     );
   }
   if (options.triggers && held.stopTriggers === null) held.stopTriggers = options.triggers(refresh);
   if (options.threadActivity && held.threadWatch === null)
-    held.threadWatch = watchThreads(environmentId, options.threadActivity, () => refresh());
-  if (fresh) refresh();
+    held.threadWatch = watchThreads(environmentId, options.threadActivity, (taskIds) =>
+      readChangedTasks(environmentId, held.api, taskIds, currentConnection(), () => refresh()),
+    );
+  if (fresh && !awaitWord) refresh();
 
   let released = false;
   return () => {
@@ -486,7 +602,8 @@ export function retainLocalTasks(
       held.reader.stop();
       held.stopTriggers?.();
       held.threadWatch?.stop();
-      held.stopChanges?.();
+      held.changes?.stop();
+      clearReconnectWait(held);
       useLocalTasksStore.getState().clear(environmentId);
     });
   };
