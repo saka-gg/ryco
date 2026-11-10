@@ -1,8 +1,8 @@
 import * as Linking from "expo-linking";
 import { useEffect } from "react";
-import { AppState } from "react-native";
 
 import { useHomeEnvironments } from "../features/home/useHomeEnvironments";
+import { isAppInFront, subscribeAppInFront } from "../platform/appInFront";
 import { mobileCliProxyHubReads } from "../state/cliProxyHubReads";
 import {
   getEnvironmentServerConfigsSnapshot,
@@ -30,15 +30,8 @@ export function startMobileWidgets(): WidgetsRuntime | null {
       subscribe: (listener) => mobileCliProxyHubReads.subscribe(listener),
       read: (environmentId) => mobileCliProxyHubReads.read(environmentId),
     },
-    appState: {
-      isActive: () => AppState.currentState === "active",
-      subscribe: (listener) => {
-        const subscription = AppState.addEventListener("change", (state) =>
-          listener(state === "active"),
-        );
-        return () => subscription.remove();
-      },
-    },
+    // A Notification Center pull is no leaving the app (`isAppInFront`).
+    appState: { isActive: isAppInFront, subscribe: subscribeAppInFront },
     url: Linking.createURL("usage", { queryParams: { tab: "limits" } }),
   });
 }

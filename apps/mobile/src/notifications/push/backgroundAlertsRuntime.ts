@@ -11,12 +11,12 @@ import {
 } from "@ryco/client-runtime/notifications/push";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
 import * as Notifications from "expo-notifications";
-import { AppState } from "react-native";
 
 import {
   getMobileNativeE2eeEnrollmentState,
   subscribeMobileNativeE2eeEnrollment,
 } from "../../hostedHub/e2eeEnrollment";
+import { isAppInFront, subscribeAppInFront } from "../../platform/appInFront";
 import { readMobileNativePlatform, readMobilePushBuild } from "../../platform/config";
 import {
   readLiveActivityPushToken,
@@ -146,12 +146,10 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
     notifications: { readPermission: readThreadAlertPermission, readDeviceToken },
     app: {
       // The same test thread alerts use: whenever they would defer to push,
-      // the node must already hear that the app is not in front.
-      isActive: () => AppState.currentState === "active",
-      subscribe: (listener) => {
-        const subscription = AppState.addEventListener("change", listener);
-        return () => subscription.remove();
-      },
+      // the node must already hear that the app is not in front. A
+      // Notification Center pull is no leaving (`isAppInFront`).
+      isActive: isAppInFront,
+      subscribe: (listener) => subscribeAppInFront(() => listener()),
     },
     timers: {
       setInterval: (callback, ms) => setInterval(callback, ms),
