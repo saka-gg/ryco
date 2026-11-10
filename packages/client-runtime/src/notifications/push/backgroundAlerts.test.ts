@@ -110,8 +110,10 @@ function harness(
       "approval" | "input" | "plan-ready" | "completed" | "failed" | "stopped"
     >;
     liveActivity?: boolean;
+    liveActivityStart?: boolean;
   } = { enabled: options.enabled ?? true, sound: false };
   let liveActivityToken: string | null = null;
+  let liveActivityStartToken: string | null = null;
   const liveActivityListeners = new Set<() => void>();
   let account: BackgroundAlertsAccount = options.account ?? {
     status: "signed-in",
@@ -194,6 +196,7 @@ function harness(
     pushKey,
     liveActivity: {
       readToken: () => liveActivityToken,
+      readStartToken: () => liveActivityStartToken,
       subscribe: (listener) => {
         liveActivityListeners.add(listener);
         return () => liveActivityListeners.delete(listener);
@@ -241,6 +244,10 @@ function harness(
     },
     setLiveActivityToken: (next: string | null) => {
       liveActivityToken = next;
+      for (const listener of liveActivityListeners) listener();
+    },
+    setLiveActivityStartToken: (next: string | null) => {
+      liveActivityStartToken = next;
       for (const listener of liveActivityListeners) listener();
     },
     setAccount: (next: BackgroundAlertsAccount) => {
@@ -437,6 +444,56 @@ describe("background alerts on a Hub that sends push", () => {
     expect(test.hub.registerNativePush).toHaveBeenCalledTimes(3);
     expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
       expect.not.objectContaining({ liveActivityToken: expect.anything() }),
+    );
+  });
+
+  it("hand the push-to-start token only when the person turned it on and the Hub starts cards", async () => {
+    const START_TOKEN = "ef".repeat(40);
+    const test = harness({
+      capability: { ...CAPABILITY, liveActivities: true, liveActivityStart: true },
+    });
+    const node = fakeConnection("env-a");
+    test.setConnections([node]);
+    test.setPreferences({ liveActivity: true });
+    test.setLiveActivityStartToken(START_TOKEN);
+    test.alerts.start();
+    await settle();
+    // Off by default: no start token, and nodes count nothing for a device without a card.
+    expect(test.alerts.getSnapshot().liveActivityStart).toBe(true);
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivityStartToken: expect.anything() }),
+    );
+    expect(node.push.registerDevice).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivity: true }),
+    );
+
+    test.setPreferences({ liveActivityStart: true });
+    await settle();
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.objectContaining({ liveActivityStartToken: START_TOKEN }),
+    );
+    // The nodes now count for this device, so a turn beginning can ask for a start.
+    expect(node.push.registerDevice).toHaveBeenLastCalledWith(
+      expect.objectContaining({ liveActivity: true }),
+    );
+
+    test.setPreferences({ liveActivityStart: false });
+    await settle();
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivityStartToken: expect.anything() }),
+    );
+  });
+
+  it("never send a push-to-start token to a Hub that does not start cards", async () => {
+    const test = harness({ capability: { ...CAPABILITY, liveActivities: true } });
+    test.setConnections([fakeConnection("env-a")]);
+    test.setPreferences({ liveActivity: true, liveActivityStart: true });
+    test.setLiveActivityStartToken("ef".repeat(40));
+    test.alerts.start();
+    await settle();
+    expect(test.alerts.getSnapshot().liveActivityStart).toBe(false);
+    expect(test.hub.registerNativePush).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ liveActivityStartToken: expect.anything() }),
     );
   });
 

@@ -97,6 +97,8 @@ export interface BackgroundAlertsPorts {
       readonly mutedKinds?: ReadonlyArray<PushAlertKind>;
       /** The agent Live Activity is on, so it may take push updates. */
       readonly liveActivity?: boolean;
+      /** A card may start by push when a task begins (off unless the person turned it on). */
+      readonly liveActivityStart?: boolean;
     };
     readonly subscribe: (listener: () => void) => () => void;
   };
@@ -119,6 +121,8 @@ export interface BackgroundAlertsPorts {
    */
   readonly liveActivity?: {
     readonly readToken: () => string | null;
+    /** The app's push-to-start token (hex, iOS 17.2+), or null without one. */
+    readonly readStartToken?: () => string | null;
     readonly subscribe: (listener: () => void) => () => void;
   };
   /**
@@ -172,6 +176,8 @@ interface CapabilityCheck {
   readonly support: NativePushHubSupport | "unreachable";
   /** The Hub sends Live Activity push updates. */
   readonly liveActivities: boolean;
+  /** It also starts cards by push (`liveActivityStart`). */
+  readonly liveActivityStart: boolean;
   readonly checkedAt: number;
 }
 
@@ -262,7 +268,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       next.hub === snapshot.hub &&
       next.device === snapshot.device &&
       next.environments === snapshot.environments &&
-      next.liveActivityUpdates === snapshot.liveActivityUpdates
+      next.liveActivityUpdates === snapshot.liveActivityUpdates &&
+      next.liveActivityStart === snapshot.liveActivityStart
     ) {
       return;
     }
@@ -279,7 +286,11 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
 
   // Push updates hold only while the Hub holds this device's registration.
   const setHub = (hub: BackgroundAlertsHubStatus) =>
-    publish(hub === "registered" ? { hub } : { hub, liveActivityUpdates: false });
+    publish(
+      hub === "registered"
+        ? { hub }
+        : { hub, liveActivityUpdates: false, liveActivityStart: false },
+    );
 
   const isLive = (attempt: NodeAttempt) => attempt.connection.readReady() === attempt.ready;
 
@@ -350,15 +361,23 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       setHub("checking");
       let support: CapabilityCheck["support"];
       let liveActivities = false;
+      let liveActivityStart = false;
       try {
         const read = await ports.hub().getNativePushCapability();
         support = nativePushHubSupport(read, ports.build);
         liveActivities = read?.liveActivities === true;
+        liveActivityStart = liveActivities && read?.liveActivityStart === true;
       } catch (error) {
         report("Reading the Hub's push capability failed", error);
         support = "unreachable";
       }
-      capability = { accountId, support, liveActivities, checkedAt: ports.now() };
+      capability = {
+        accountId,
+        support,
+        liveActivities,
+        liveActivityStart,
+        checkedAt: ports.now(),
+      };
       setHub(support);
     })().finally(() => {
       capabilityInFlight = null;
@@ -721,7 +740,13 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     const liveActivityToken = liveActivityUpdates
       ? (ports.liveActivity?.readToken() ?? null)
       : null;
-    const registration = `${account.accountId}\n${account.enrollmentId}\n${token}\n${liveActivityToken ?? ""}`;
+    // Push-to-start (`docs/live-activity-push.md`): only while the person turned it on.
+    const liveActivityStart = liveActivityUpdates && capability?.liveActivityStart === true;
+    const liveActivityStartToken =
+      liveActivityStart && preferences.liveActivityStart === true
+        ? (ports.liveActivity?.readStartToken?.() ?? null)
+        : null;
+    const registration = `${account.accountId}\n${account.enrollmentId}\n${token}\n${liveActivityToken ?? ""}\n${liveActivityStartToken ?? ""}`;
     if (hubRegistration !== registration) {
       if (ports.now() < hubRetryAt) return;
       setHub("registering");
@@ -732,6 +757,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           environment: ports.build.apnsEnvironment,
           topic: ports.build.topic,
           ...(liveActivityToken === null ? {} : { liveActivityToken }),
+          ...(liveActivityStartToken === null ? {} : { liveActivityStartToken }),
         });
         hubRegistration = registration;
       } catch (error) {
@@ -743,6 +769,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
             accountId: account.accountId,
             support: status,
             liveActivities: false,
+            liveActivityStart: false,
             checkedAt: ports.now(),
           };
         }
@@ -753,8 +780,14 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     // The new registration overtakes a removal still owed from turning off.
     await setHubRemovalOwed(null);
     setHub("registered");
-    publish({ liveActivityUpdates });
-    await registerNodes(preferences.sound, wantedKinds, liveActivityToken !== null, key);
+    publish({ liveActivityUpdates, liveActivityStart });
+    // Nodes count for a device whose card takes pushes, or that may have one started by push.
+    await registerNodes(
+      preferences.sound,
+      wantedKinds,
+      liveActivityToken !== null || liveActivityStartToken !== null,
+      key,
+    );
   };
 
   const reconcile = async (): Promise<void> => {
