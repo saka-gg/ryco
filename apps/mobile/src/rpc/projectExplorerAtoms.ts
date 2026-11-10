@@ -50,7 +50,7 @@ const DETAIL_RETAINED_KEY_LIMIT = 8;
 const LOG_RETAINED_KEY_LIMIT = 2;
 const META_RETAINED_KEY_LIMIT = 2;
 
-const explorerCache = createMobileQueryCache("project-explorer");
+const explorerCache = createMobileQueryCache("project-explorer", { storage: "own" });
 
 function client(environmentId: EnvironmentId) {
   const live = readRpcClient(environmentId);

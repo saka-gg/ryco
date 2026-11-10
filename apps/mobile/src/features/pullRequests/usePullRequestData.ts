@@ -26,7 +26,11 @@ import {
   pullRequestDiffQuery,
   pullRequestListQuery,
 } from "../../rpc/pullRequestAtoms";
-import { useMobileQuery, type MobileQueryResult } from "../../rpc/useMobileQuery";
+import {
+  sourceControlProviderMirror,
+  type SourceControlProviderAnswer,
+} from "../../rpc/sourceControlAtoms";
+import { useMobileQuery, useSavedMirror, type MobileQueryResult } from "../../rpc/useMobileQuery";
 import { selectProjectByRef, useStore } from "../../state/threadsRuntime";
 import {
   derivePullRequestDetailItems,
@@ -76,29 +80,47 @@ function sameProvider(
 
 /**
  * The checkout's hosting provider, from the node's git status summary (no
- * fetch): it decides which reads the host can serve. Held while mounted, like
- * every other mounted source-control surface (`vcs-status` scope).
+ * fetch): it decides which reads the host can serve. The last answer is kept
+ * on this device, so the pull request screens can show their saved reads
+ * before the node answers. Held while mounted, like every other mounted
+ * source-control surface (`vcs-status` scope).
  */
 export function useSourceControlProvider(
   environmentId: EnvironmentId | null,
   cwd: string | null,
 ): SourceControlProviderInfo | null {
   const api = useEnvironmentApi(environmentId);
-  const [provider, setProvider] = useState<SourceControlProviderInfo | null>(null);
+  // Tagged with its checkout, so an answer for the previous one is never shown or saved for this one.
+  const checkoutKey = `${environmentId}\u0000${cwd}`;
+  const [live, setLive] = useState<{
+    readonly key: string;
+    readonly answer: SourceControlProviderAnswer;
+  } | null>(null);
   useEffect(() => {
     if (environmentId === null || cwd === null) return;
     const release = mobileHostedConnectionScopes.retain(environmentId, { type: "vcs-status", cwd });
     if (api === undefined) return release;
     const unsubscribe = api.vcs.onStatus({ cwd, view: "summary" }, (status) => {
       const next = status.sourceControlProvider ?? null;
-      setProvider((current) => (sameProvider(current, next) ? current : next));
+      setLive((current) =>
+        current !== null &&
+        current.key === checkoutKey &&
+        sameProvider(current.answer.provider, next)
+          ? current
+          : { key: checkoutKey, answer: { provider: next } },
+      );
     });
     return () => {
       unsubscribe();
       release();
     };
-  }, [api, cwd, environmentId]);
-  return provider;
+  }, [api, checkoutKey, cwd, environmentId]);
+  const answer = useSavedMirror(
+    sourceControlProviderMirror,
+    { environmentId, cwd },
+    live !== null && live.key === checkoutKey ? live.answer : null,
+  );
+  return answer.data?.provider ?? null;
 }
 
 export interface PullRequestListData {

@@ -138,7 +138,50 @@ export interface MobileQueryCache {
   readonly resetForTests: () => void;
 }
 
-export function createMobileQueryCache(labelPrefix: string): MobileQueryCache {
+export interface MobileQueryCacheOptions {
+  /**
+   * "screens" (the default): counted and cleared in Storage settings with every
+   * other screen cache (`screenCachesBytes`). "own": the cache's module does
+   * its own accounting.
+   */
+  readonly storage?: "screens" | "own";
+}
+
+/** Every mobile query cache, for the one teardown and the Storage totals. */
+const allCaches = new Map<MobileQueryCache, "screens" | "own">();
+
+/**
+ * Environment teardown (forgetting the node): every mobile query cache drops
+ * what it holds for it. Idempotent with each cache's own teardown helper.
+ */
+export function clearMobileQueryCachesForEnvironment(environmentId: EnvironmentId): void {
+  for (const cache of allCaches.keys()) cache.clearEnvironment(environmentId);
+}
+
+/** Estimated bytes of one node's screen-cache reads that are not on screen (Storage settings). */
+export function screenCachesBytes(
+  environmentId: EnvironmentId,
+  measure: (data: unknown) => number,
+): number {
+  let bytes = 0;
+  for (const [cache, storage] of allCaches) {
+    if (storage !== "screens") continue;
+    for (const [, data] of cache.unobservedEntries(environmentId)) bytes += measure(data);
+  }
+  return bytes;
+}
+
+/** Cache-only eviction of one node's screen-cache reads that are not on screen. */
+export function clearScreenCaches(environmentId: EnvironmentId): void {
+  for (const [cache, storage] of allCaches) {
+    if (storage === "screens") cache.clearUnobserved(environmentId);
+  }
+}
+
+export function createMobileQueryCache(
+  labelPrefix: string,
+  options: MobileQueryCacheOptions = {},
+): MobileQueryCache {
   const registry = createKeyedQueryRegistry<MobileQueryState<unknown>>({
     labelPrefix,
     initialState: INITIAL_QUERY_STATE,
@@ -373,7 +416,7 @@ export function createMobileQueryCache(labelPrefix: string): MobileQueryCache {
     });
   }
 
-  return {
+  const cache: MobileQueryCache = {
     defineQuery,
     defineSavedMirror,
     refreshMatching: (matches) => {
@@ -423,4 +466,6 @@ export function createMobileQueryCache(labelPrefix: string): MobileQueryCache {
       for (const tracker of retainedKeyTrackers) tracker.clear();
     },
   };
+  allCaches.set(cache, options.storage ?? "screens");
+  return cache;
 }

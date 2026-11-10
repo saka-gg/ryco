@@ -39,6 +39,7 @@ vi.mock("../../connection/hostedConnectionScopes", () => ({
 }));
 vi.mock("../../rpc/pullRequestAtoms", () => ({}));
 vi.mock("../../rpc/useMobileQuery", () => ({}));
+vi.mock("../../rpc/sourceControlAtoms", () => ({}));
 vi.mock("../../state/threadsRuntime", () => ({}));
 
 import { usePullRequestDetailItems } from "./usePullRequestData";

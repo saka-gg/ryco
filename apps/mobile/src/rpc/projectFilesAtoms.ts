@@ -58,7 +58,7 @@ export type ProjectFilesQueryState<T> = MobileQueryState<T>;
 
 export type ProjectFilesQuery<TInput, TData> = MobileQuery<TInput, TData>;
 
-const projectFilesCache = createMobileQueryCache("project-files");
+const projectFilesCache = createMobileQueryCache("project-files", { storage: "own" });
 const defineQuery = projectFilesCache.defineQuery;
 
 function projectsClient(environmentId: EnvironmentId) {

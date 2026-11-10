@@ -1,5 +1,4 @@
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import type { VcsRef } from "@ryco/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { ScrollView, View } from "react-native";
 
@@ -7,9 +6,15 @@ import { SymbolView } from "../../components/AppSymbol";
 import { errorMessageOr } from "../../lib/errorMessage";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
+import { LoadingStrip } from "../../components/LoadingStrip";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
-import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
+import {
+  refreshCheckoutReads,
+  vcsRefSearchQuery,
+  vcsRefsQuery,
+} from "../../rpc/sourceControlAtoms";
+import { useMobileQuery } from "../../rpc/useMobileQuery";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   branchNameProblem,
@@ -21,9 +26,6 @@ import { GroupCard, LoadingRow, SectionTitle, ToolRow, ToolTextField } from "./g
 import { useSourceControlTarget, type SourceControlRouteParams } from "./useSourceControlTarget";
 
 type BranchesRouteProps = StaticScreenProps<SourceControlRouteParams>;
-
-/** Refs the picker asks for at once; the search narrows the rest on the node. */
-const BRANCH_PAGE_SIZE = 100;
 
 /** A ref name the search asks the node for: whole words only, so typing never errors. */
 function refQuery(query: string): string | undefined {
@@ -41,40 +43,33 @@ export function SourceControlBranchesRouteScreen(props: BranchesRouteProps) {
   const target = useSourceControlTarget(props.route.params);
   const { environmentId, cwd, mutable } = target;
   const [query, setQuery] = useState("");
-  const [refs, setRefs] = useState<ReadonlyArray<VcsRef> | null>(null);
+  const [search, setSearch] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const checkColor = useThemeColor("--color-icon");
-  const api = useEnvironmentApi(environmentId);
 
+  // The typed search reaches the node after a short pause; the first page is
+  // saved on this device and shows at once.
   useEffect(() => {
-    if (!api || !cwd) return;
-    let cancelled = false;
-    const search = refQuery(query);
-    const timer = setTimeout(
-      () => {
-        void api.vcs
-          .listRefs({
-            cwd,
-            limit: BRANCH_PAGE_SIZE,
-            ...(search ? { query: search } : {}),
-          })
-          .then(
-            (result) => {
-              if (!cancelled) setRefs(result.refs);
-            },
-            (cause: unknown) => {
-              if (!cancelled) setError(errorMessageOr(cause, "Branches could not be listed."));
-            },
-          );
-      },
-      search ? 200 : 0,
-    );
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [api, cwd, query]);
+    const next = refQuery(query);
+    const timer = setTimeout(() => setSearch(next), next ? 200 : 0);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const firstPage = useMobileQuery(vcsRefsQuery, { environmentId, cwd }, environmentId);
+  const searched = useMobileQuery(
+    vcsRefSearchQuery,
+    { environmentId, cwd, query: search ?? "" },
+    environmentId,
+  );
+  const read = search ? searched : firstPage;
+  // While a search is on its way, the first page narrowed here stands in for it.
+  const refs = useMemo(() => {
+    if (!search) return firstPage.data?.refs ?? null;
+    if (searched.data) return searched.data.refs;
+    const needle = search.toLowerCase();
+    return firstPage.data?.refs.filter((ref) => ref.name.toLowerCase().includes(needle)) ?? null;
+  }, [firstPage.data, search, searched.data]);
+  const readError = read.error ? errorMessageOr(read.error, "Branches could not be listed.") : null;
 
   const sections = useMemo(
     () => (refs && cwd ? buildBranchSections(refs, cwd) : null),
@@ -88,6 +83,7 @@ export function SourceControlBranchesRouteScreen(props: BranchesRouteProps) {
     setError(null);
     try {
       await work();
+      if (environmentId && cwd) refreshCheckoutReads(environmentId, cwd);
       navigation.goBack();
     } catch (cause) {
       setError(errorMessageOr(cause, `${label} failed.`));
@@ -142,57 +138,62 @@ export function SourceControlBranchesRouteScreen(props: BranchesRouteProps) {
       />
     ));
 
+  const shownError = error ?? readError;
+
   return (
-    <ScrollView
-      className="flex-1 bg-sheet"
-      keyboardShouldPersistTaps="handled"
-      contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 48 }}
-    >
-      <ToolTextField
-        mono
-        value={query}
-        onChangeText={setQuery}
-        placeholder="Search or name a new branch"
-        returnKeyType="done"
-        accessibilityLabel="Branch name"
-        onSubmitEditing={() => {
-          if (createName) void create(createName);
-        }}
-      />
-      {error ? <ErrorBanner message={error} /> : null}
-      {busy ? <Text className="px-1 text-[13px] text-foreground-muted">{busy}…</Text> : null}
+    <View className="flex-1 bg-sheet">
+      <ScrollView
+        className="flex-1 bg-sheet"
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 48 }}
+      >
+        <ToolTextField
+          mono
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search or name a new branch"
+          returnKeyType="done"
+          accessibilityLabel="Branch name"
+          onSubmitEditing={() => {
+            if (createName) void create(createName);
+          }}
+        />
+        {shownError ? <ErrorBanner message={shownError} /> : null}
+        {busy ? <Text className="px-1 text-[13px] text-foreground-muted">{busy}…</Text> : null}
 
-      {createName ? (
-        <GroupCard>
-          <ToolRow
-            first
-            symbol="plus"
-            title={`Create branch “${createName}”`}
-            detail="From what is checked out now, then switch to it"
-            disabled={!mutable || busy !== null}
-            onPress={() => void create(createName)}
-          />
-        </GroupCard>
-      ) : typedProblem && sections && sections.local.length + sections.remote.length === 0 ? (
-        <Text className="px-1 text-[13px] text-foreground-muted">{typedProblem}</Text>
-      ) : null}
+        {createName ? (
+          <GroupCard>
+            <ToolRow
+              first
+              symbol="plus"
+              title={`Create branch “${createName}”`}
+              detail="From what is checked out now, then switch to it"
+              disabled={!mutable || busy !== null}
+              onPress={() => void create(createName)}
+            />
+          </GroupCard>
+        ) : typedProblem && sections && sections.local.length + sections.remote.length === 0 ? (
+          <Text className="px-1 text-[13px] text-foreground-muted">{typedProblem}</Text>
+        ) : null}
 
-      {!sections ? <LoadingRow label="Reading branches…" /> : null}
-      {sections && sections.local.length > 0 ? (
-        <View>
-          <SectionTitle>Local</SectionTitle>
-          <GroupCard>{renderRows(sections.local)}</GroupCard>
-        </View>
-      ) : null}
-      {sections && sections.remote.length > 0 ? (
-        <View>
-          <SectionTitle>Remote</SectionTitle>
-          <GroupCard>{renderRows(sections.remote)}</GroupCard>
-        </View>
-      ) : null}
-      {sections && sections.local.length + sections.remote.length === 0 && !createName ? (
-        <EmptyState variant="plain" title="No branches" detail="Nothing matches that name." />
-      ) : null}
-    </ScrollView>
+        {!sections ? <LoadingRow label="Reading branches…" /> : null}
+        {sections && sections.local.length > 0 ? (
+          <View>
+            <SectionTitle>Local</SectionTitle>
+            <GroupCard>{renderRows(sections.local)}</GroupCard>
+          </View>
+        ) : null}
+        {sections && sections.remote.length > 0 ? (
+          <View>
+            <SectionTitle>Remote</SectionTitle>
+            <GroupCard>{renderRows(sections.remote)}</GroupCard>
+          </View>
+        ) : null}
+        {sections && sections.local.length + sections.remote.length === 0 && !createName ? (
+          <EmptyState variant="plain" title="No branches" detail="Nothing matches that name." />
+        ) : null}
+      </ScrollView>
+      {read.isFetching && refs !== null ? <LoadingStrip /> : null}
+    </View>
   );
 }

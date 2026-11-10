@@ -9,6 +9,7 @@ import { forgetEnvironmentServerConfig } from "@ryco/client-runtime/rpc";
 import { useStore } from "../state/threadsRuntime";
 import { clearProjectExplorerStateForEnvironment } from "../rpc/projectExplorerAtoms";
 import { clearProjectFilesStateForEnvironment } from "../rpc/projectFilesAtoms";
+import { clearMobileQueryCachesForEnvironment } from "../rpc/mobileQueryCache";
 import { clearPullRequestStateForEnvironment } from "../rpc/pullRequestAtoms";
 import { purgeEnvironmentSnapshot } from "../persistence/environmentSnapshotPersistence";
 import type { MobileE2eeTrustStore } from "../platform/e2eeTrustStore";
@@ -174,6 +175,8 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     clearProjectFilesStateForEnvironment(environmentId);
     clearPullRequestStateForEnvironment(environmentId);
     clearProjectExplorerStateForEnvironment(environmentId);
+    // Every other screen cache (source control, automations, usage, …).
+    clearMobileQueryCachesForEnvironment(environmentId);
     clearProjectIconCache(environmentId);
     await registry.catalog.removeBearerToken(environmentId);
     // The owner forgetting a node also forgets its §13 trust state — the pin, the

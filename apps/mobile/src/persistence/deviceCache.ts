@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { clearProjectIconCache, projectIconCacheBytes } from "@ryco/client-runtime/connection";
+import { cachedPayloadBytes } from "./cacheSize";
 import { clearProjectFileCache, projectFilesCacheStats } from "../rpc/projectFilesAtoms";
 import {
   checkpointDiffCacheBytes,
@@ -7,6 +8,7 @@ import {
 } from "../rpc/checkpointDiffAtoms";
 import { clearProjectExplorerCache, projectExplorerCacheBytes } from "../rpc/projectExplorerAtoms";
 import { clearPullRequestCache, pullRequestCacheBytes } from "../rpc/pullRequestAtoms";
+import { clearScreenCaches, screenCachesBytes } from "../rpc/mobileQueryCache";
 import { readTaskCacheBytes } from "../features/tasks/taskCacheKeys";
 import {
   clearEnvironmentSnapshotCache,
@@ -56,6 +58,7 @@ export async function readDeviceCacheUsage(
         previews.files +
         checkpointDiffCacheBytes(environmentId) +
         pullRequestCacheBytes(environmentId) +
+        screenCachesBytes(environmentId, cachedPayloadBytes) +
         projectExplorerCacheBytes(environmentId);
       // Saved screen answers and the machine's task list copy live beside the
       // snapshot and are cleared with it.
@@ -82,6 +85,7 @@ export async function clearDeviceCache(environmentId: EnvironmentId): Promise<vo
   clearProjectFileCache(environmentId);
   clearCheckpointDiffCacheForEnvironment(environmentId);
   clearPullRequestCache(environmentId);
+  clearScreenCaches(environmentId);
   clearProjectExplorerCache(environmentId);
   clearProjectIconCache(environmentId);
 }

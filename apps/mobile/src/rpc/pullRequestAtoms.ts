@@ -55,7 +55,7 @@ export const PULL_REQUEST_REPOSITORY_RETAINED_KEY_LIMIT = 4;
 // A repository's people and labels change rarely; a reconnect reads them again.
 const REPOSITORY_STALE_TIME_MS = 10 * 60_000;
 
-const pullRequestCache = createMobileQueryCache("pull-requests");
+const pullRequestCache = createMobileQueryCache("pull-requests", { storage: "own" });
 
 /** The node is not connected: the screens say so instead of spinning. */
 export class PullRequestNodeOfflineError extends Error {
