@@ -30,6 +30,7 @@ function activityRow(id: string): ActivityRow {
     command: null,
     output: null,
     outputPreviewActivityId: null,
+    outputPreviewBytes: null,
     exitCode: null,
     changedFiles: [],
     tone: "tool",

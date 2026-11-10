@@ -43,6 +43,7 @@ import {
   setServerThreadHistoryLoadState,
   setSidebarWorktreeTitle,
   setThreadBranch,
+  setWholeMessageText,
   syncServerThreadHistoryPage,
   selectThreadsAcrossEnvironments,
   syncServerShellSnapshot,
@@ -3948,5 +3949,66 @@ describe("pull request watch summaries", () => {
       localEnvironmentId,
     );
     expect(summaryOf(again)).toBe(summaryOf(first));
+  });
+});
+
+describe("whole text of a previewed message", () => {
+  it("replaces the preview, and leaves a message that is whole or gone alone", () => {
+    const threadId = ThreadId.make("thread-long-message");
+    const messageId = MessageId.make("message-long");
+    const state = syncServerThreadDetail(
+      makeEmptyState(),
+      {
+        id: threadId,
+        projectId: ProjectId.make("project-1"),
+        title: "Long message",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        worktreeId: null,
+        manualStatusBucket: null,
+        manualPosition: 0,
+        latestTurn: null,
+        createdAt: "2026-11-10T00:00:00.000Z",
+        updatedAt: "2026-11-10T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        deletedAt: null,
+        messages: [
+          {
+            id: messageId,
+            role: "assistant",
+            text: "the head",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-11-10T00:00:00.000Z",
+            updatedAt: "2026-11-10T00:00:00.000Z",
+            textPreview: { fullLength: 40_000 },
+          },
+        ],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+        session: null,
+      },
+      localEnvironmentId,
+    );
+    const ref = { environmentId: localEnvironmentId, threadId };
+    expect(localEnvironmentStateOf(state).messageByThreadId[threadId]?.[messageId]).toMatchObject({
+      text: "the head",
+      textPreview: { fullLength: 40_000 },
+    });
+
+    const whole = setWholeMessageText(state, ref, messageId, "the whole text");
+    const message = localEnvironmentStateOf(whole).messageByThreadId[threadId]?.[messageId];
+    expect(message?.text).toBe("the whole text");
+    expect(message?.textPreview).toBeUndefined();
+
+    // Whole already, or not held: nothing changes.
+    expect(setWholeMessageText(whole, ref, messageId, "other")).toBe(whole);
+    expect(setWholeMessageText(whole, ref, MessageId.make("gone"), "other")).toBe(whole);
   });
 });

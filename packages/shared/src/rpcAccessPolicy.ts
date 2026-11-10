@@ -118,6 +118,7 @@ export const RPC_ACCESS_POLICY = {
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "viewer",
   // The full payload of an activity the window already sent as a preview.
   [ORCHESTRATION_WS_METHODS.getActivityPayload]: "viewer",
+  [ORCHESTRATION_WS_METHODS.getMessageText]: "viewer",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "viewer",
   // The same shells a viewer's shell subscription carries, for archived stubs.
   [ORCHESTRATION_WS_METHODS.getThreadShells]: "viewer",
@@ -450,6 +451,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [ORCHESTRATION_WS_METHODS.getTaskOutput]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "read",
   [ORCHESTRATION_WS_METHODS.getActivityPayload]: "read",
+  [ORCHESTRATION_WS_METHODS.getMessageText]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadShells]: "read",
   // Idempotent: it sets a mode and the server spaces recovery reads per thread.

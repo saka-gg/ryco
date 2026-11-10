@@ -36,6 +36,7 @@ import { Image, Pressable, ScrollView, Share, View } from "react-native";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { CopyTextButton } from "../../components/CopyTextButton";
+import { MessageTextPreviewControl, readWholeMessageText } from "./MessageTextPreview";
 import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
@@ -442,6 +443,14 @@ export function ThreadMessage(props: {
             onLinkPress={openWebLink}
           />
         )}
+        {props.message.textPreview ? (
+          <MessageTextPreviewControl
+            environmentId={props.environmentId}
+            threadId={props.threadId}
+            message={props.message}
+            fullLength={props.message.textPreview.fullLength}
+          />
+        ) : null}
         {sentContexts && sentContextCount > 0 ? (
           <SentMessageContexts
             browserElements={sentContexts.browserElements}
@@ -573,6 +582,17 @@ export function ThreadMessage(props: {
             <CopyTextButton
               accessibilityLabel="Copy message"
               text={props.message.text}
+              // A preview copies its whole text, read first.
+              readText={
+                props.message.textPreview
+                  ? () =>
+                      readWholeMessageText({
+                        environmentId: props.environmentId,
+                        threadId: props.threadId,
+                        message: props.message,
+                      })
+                  : undefined
+              }
               tintColor={metadataColor}
               iconSize={12}
               buttonSize={28}

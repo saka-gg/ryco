@@ -497,6 +497,16 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /**
+   * Read the whole text of one message of an active thread, for a client
+   * showing a message a window or page sent as a preview. Optional so existing
+   * test doubles stay valid; the RPC reports it unavailable.
+   */
+  readonly getMessageText?: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<Option.Option<{ readonly text: string }>, ProjectionRepositoryError>;
+
+  /**
    * Read one stored activity payload of an active thread, with its encoded
    * size, for a client expanding a row the window sent as a preview.
    * Optional so existing test doubles stay valid; the RPC reports it

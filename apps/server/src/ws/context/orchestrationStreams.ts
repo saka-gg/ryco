@@ -1,5 +1,6 @@
-import { Array as Arr, Effect, Fiber, Option, Queue, Ref, Stream } from "effect";
+import { Array as Arr, Effect, Fiber, Option, Queue, Ref, type Scope, Stream } from "effect";
 import {
+  type OrchestrationActivityPayloadMode,
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
   type OrchestrationShellSnapshotDelivery,
@@ -39,13 +40,18 @@ import {
   ORCHESTRATION_THREAD_RESUME_MAX_SCAN_EVENTS,
 } from "./constants.ts";
 import { isThreadDetailEvent } from "./orchestrationEvents.ts";
+import {
+  type ThreadEventRegistration,
+  registerThreadEventSubscriber,
+} from "./threadEventRouter.ts";
+import { previewActivityAppendedEvent } from "../../orchestration/activityPayloadPreview.ts";
 import { randomShortId } from "./branchNaming.ts";
 import {
   makeOrchestrationEventCoalescer,
   orchestrationProgressFrameKey,
   orchestrationShellFrameKey,
 } from "./orchestrationEventCoalescing.ts";
-import { rechunkByBudget, tapArray } from "../streamBatching.ts";
+import { makeCachedJsonBytes, rechunkByBudget, tapArray } from "../streamBatching.ts";
 import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
@@ -153,6 +159,35 @@ export const releaseQueuedEventsBytes = (
   for (const event of events) released += orchestrationEventBytes(event);
   return Ref.update(queuedBytesRef, (bytes) => Math.max(0, bytes - released));
 };
+
+/**
+ * The slim wire form of a thread event (`OrchestrationSlimThreadEvent`):
+ * only what the client applies. Memoized per event object, so every
+ * subscriber that asked for slim events shares one copy and one measurement.
+ */
+const slimThreadEvents = new WeakMap<OrchestrationEvent, SlimThreadEvent>();
+export type SlimThreadEvent = OrchestrationEvent extends infer E
+  ? E extends OrchestrationEvent
+    ? Pick<E, "sequence" | "occurredAt" | "type" | "payload">
+    : never
+  : never;
+export const toSlimThreadEvent = (event: OrchestrationEvent): SlimThreadEvent => {
+  let slim = slimThreadEvents.get(event);
+  if (slim === undefined) {
+    slim = {
+      sequence: event.sequence,
+      occurredAt: event.occurredAt,
+      type: event.type,
+      payload: event.payload,
+    } as SlimThreadEvent;
+    slimThreadEvents.set(event, slim);
+  }
+  return slim;
+};
+const slimThreadEventBytes = makeCachedJsonBytes<SlimThreadEvent>();
+type ThreadEventItem =
+  | { readonly kind: "event"; readonly event: OrchestrationEvent }
+  | { readonly kind: "slim-event"; readonly event: SlimThreadEvent };
 
 const lastSequenceOf = (events: Arr.NonEmptyReadonlyArray<{ readonly sequence: number }>) => {
   let sequence = events[0].sequence;
@@ -593,7 +628,17 @@ export const makeOrchestrationStreamHelpers = (deps: {
    */
   const runLiveFeed = (input: {
     readonly stream: WsReplayStreamKind;
-    readonly liveEvents: Stream.Stream<OrchestrationEvent>;
+    /**
+     * Where live events come from: a stream the feed runs on its own fiber, or
+     * a router the feed registers with (`registerThreadEventSubscriber`), whose
+     * fiber calls `handle` for each event and `end` when its stream ended.
+     */
+    readonly liveEvents:
+      | Stream.Stream<OrchestrationEvent>
+      | ((
+          handle: (event: OrchestrationEvent) => Effect.Effect<void, OrchestrationGetSnapshotError>,
+          end: Effect.Effect<void>,
+        ) => Effect.Effect<void, never, Scope.Scope>);
     readonly liveQueue: Queue.Queue<OrchestrationEvent, OrchestrationGetSnapshotError>;
     readonly overflowedRef: Ref.Ref<boolean>;
     readonly replayMetrics: WsReplayMetrics;
@@ -651,20 +696,25 @@ export const makeOrchestrationStreamHelpers = (deps: {
           .push(event)
           .pipe(Effect.andThen(input.coalesceKey(event) === null ? Effect.void : armFlush));
 
-      yield* input.liveEvents.pipe(
-        Stream.runForEach((event) => input.onEvent(event, push)),
-        Effect.ensuring(
-          Effect.gen(function* () {
-            if (flushFiber !== undefined) {
-              yield* Fiber.interrupt(flushFiber).pipe(Effect.ignore);
-            }
-            yield* coalescer.flush.pipe(Effect.ignoreCause({ log: true }));
-            yield* Queue.shutdown(input.liveQueue);
-          }),
-        ),
-        Effect.ignoreCause({ log: true }),
-        Effect.forkScoped,
-      );
+      const endFeed = Effect.gen(function* () {
+        if (flushFiber !== undefined) {
+          yield* Fiber.interrupt(flushFiber).pipe(Effect.ignore);
+        }
+        yield* coalescer.flush.pipe(Effect.ignoreCause({ log: true }));
+        yield* Queue.shutdown(input.liveQueue);
+      });
+      const handle = (event: OrchestrationEvent) => input.onEvent(event, push);
+      if (typeof input.liveEvents === "function") {
+        yield* Effect.addFinalizer(() => endFeed);
+        yield* input.liveEvents(handle, endFeed);
+      } else {
+        yield* input.liveEvents.pipe(
+          Stream.runForEach(handle),
+          Effect.ensuring(endFeed),
+          Effect.ignoreCause({ log: true }),
+          Effect.forkScoped,
+        );
+      }
       return queuedBytesRef;
     });
 
@@ -904,7 +954,13 @@ export const makeOrchestrationStreamHelpers = (deps: {
   >(
     snapshot: Effect.Effect<Snapshot, SnapshotError>,
     threadId: ThreadId,
-    options: { readonly resumeFromSequence?: number | undefined } = {},
+    options: {
+      readonly resumeFromSequence?: number | undefined;
+      /** `"preview"`: live and replayed activity payloads are bounded like a window's. */
+      readonly liveActivityPayloads?: OrchestrationActivityPayloadMode | undefined;
+      /** `"slim"`: events go out as `slim-event` items (`OrchestrationSlimThreadEvent`). */
+      readonly liveEventForm?: "full" | "slim" | undefined;
+    } = {},
   ) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -915,12 +971,22 @@ export const makeOrchestrationStreamHelpers = (deps: {
         const loadedSnapshot = resumed ? undefined : yield* snapshot;
         const snapshotSequence =
           loadedSnapshot?.snapshotSequence ?? (resumed ? resumeFromSequence : 0);
-        const liveEvents = yield* orchestrationEngine.subscribeDomainEvents;
         const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(
           ORCHESTRATION_LIVE_QUEUE_MAX_EVENTS,
         );
         const overflowedRef = yield* Ref.make(false);
-        const replayBoundary = yield* makeReplayBoundaryTracker(snapshotSequence);
+        // Bounds the replay by what the shared router has routed (see threadEventRouter.ts).
+        // Captured once the router routed past the snapshot, then fixed (as in
+        // `makeReplayBoundaryTracker`).
+        let registration: ThreadEventRegistration | undefined;
+        let replayUpperBound: number | undefined;
+        const captureReplayUpperBound = Effect.sync((): Option.Option<number> => {
+          if (replayUpperBound !== undefined) return Option.some(replayUpperBound);
+          const routed = registration?.routedThrough() ?? 0;
+          if (routed <= snapshotSequence) return Option.none();
+          replayUpperBound = routed;
+          return Option.some(routed);
+        });
         const replayMetrics = yield* makeWsReplayMetrics({
           stream: "thread",
           subscriptionId: randomShortId(),
@@ -932,37 +998,43 @@ export const makeOrchestrationStreamHelpers = (deps: {
           event.aggregateId === threadId &&
           isThreadDetailEvent(event);
 
+        const previewActivities = options.liveActivityPayloads === "preview";
+        const slimEvents = options.liveEventForm === "slim";
         const threadEvents = <E, R>(stream: Stream.Stream<OrchestrationEvent, E, R>) =>
           stream.pipe(
             Stream.filter(isMatchingThreadEvent),
-            Stream.map((event) => ({
-              kind: "event" as const,
-              event,
-            })),
+            Stream.map((event): ThreadEventItem => {
+              const sent = previewActivities ? previewActivityAppendedEvent(event) : event;
+              return slimEvents
+                ? { kind: "slim-event", event: toSlimThreadEvent(sent) }
+                : { kind: "event", event: sent };
+            }),
           );
 
         const queuedBytesRef = yield* runLiveFeed({
           stream: "thread",
-          liveEvents,
+          liveEvents: (handle, end) =>
+            registerThreadEventSubscriber(orchestrationEngine, threadId, {
+              onEvent: handle,
+              onEnd: end,
+            }).pipe(
+              Effect.map((registered) => {
+                registration = registered;
+              }),
+            ),
           liveQueue,
           overflowedRef,
           replayMetrics,
           coalesceKey: orchestrationProgressFrameKey,
           coalesceWindowMs: ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS,
-          onEvent: (event, push) =>
-            Effect.gen(function* () {
-              yield* replayBoundary.recordLiveSequence(event.sequence);
-              if (!isMatchingThreadEvent(event)) {
-                return;
-              }
-              yield* push(event);
-            }),
+          // The router hands over only this thread's detail events.
+          onEvent: (event, push) => push(event),
         });
 
         const readStreamEventsPage = deps.readStreamEventsPage;
         const replayStream = makeBoundedReplayStream({
           snapshotSequence,
-          captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
+          captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration thread events",
           ...(resumed && deps.readReplayFloor !== undefined
             ? {
@@ -991,7 +1063,10 @@ export const makeOrchestrationStreamHelpers = (deps: {
           rechunkByBudget({
             maxItems: ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
             maxBytes: ORCHESTRATION_STREAM_CHUNK_MAX_BYTES,
-            sizeOf: (item) => orchestrationEventBytes(item.event),
+            sizeOf: (item) =>
+              item.kind === "event"
+                ? orchestrationEventBytes(item.event)
+                : slimThreadEventBytes(item.event),
           }),
         );
 

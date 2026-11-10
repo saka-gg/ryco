@@ -243,7 +243,8 @@ describe("orchestration stream chunking", () => {
       assert.isAbove(eventChunks.length, 1);
       for (const chunk of eventChunks) {
         const bytes = chunk.reduce(
-          (total, item) => total + ("event" in item ? orchestrationEventBytes(item.event) : 0),
+          (total, item) =>
+            total + (item.kind === "event" ? orchestrationEventBytes(item.event) : 0),
           0,
         );
         assert.isAtMost(bytes, ORCHESTRATION_STREAM_CHUNK_MAX_BYTES);

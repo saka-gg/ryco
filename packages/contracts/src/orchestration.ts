@@ -65,6 +65,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getThreadShells: "orchestration.getThreadShells",
   getThreadHistoryPage: "orchestration.getThreadHistoryPage",
   getActivityPayload: "orchestration.getActivityPayload",
+  getMessageText: "orchestration.getMessageText",
   setThreadHistoryRecovery: "orchestration.setThreadHistoryRecovery",
   replayEvents: "orchestration.replayEvents",
   replayEventsPage: "orchestration.replayEventsPage",
@@ -906,6 +907,17 @@ export const OrchestrationMessage = Schema.Struct({
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /**
+   * Present when `text` is the head of a very long finished message: a window
+   * or history page served with `messageText: "preview"`.
+   * `orchestration.getMessageText` returns the whole text.
+   */
+  textPreview: Schema.optional(
+    Schema.Struct({
+      /** Length of the whole text, in UTF-16 code units. */
+      fullLength: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestrationMessage = typeof OrchestrationMessage.Type;
 
@@ -1757,10 +1769,20 @@ export type OrchestrationThreadHistoryState = typeof OrchestrationThreadHistoryS
 export const OrchestrationActivityPayloadMode = Schema.Literals(["full", "preview"]);
 export type OrchestrationActivityPayloadMode = typeof OrchestrationActivityPayloadMode.Type;
 
+/**
+ * How a window or history page sends very long finished messages.
+ * `"preview"` sends the head of each with `OrchestrationMessage.textPreview`
+ * set; absent means whole texts, all an older client understands. Older
+ * servers ignore the field and send whole texts.
+ */
+export const OrchestrationMessageTextMode = Schema.Literals(["full", "preview"]);
+export type OrchestrationMessageTextMode = typeof OrchestrationMessageTextMode.Type;
+
 export const OrchestrationGetThreadWindowInput = Schema.Struct({
   threadId: ThreadId,
   limits: OrchestrationThreadHistoryLimits,
   activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  messageText: Schema.optional(OrchestrationMessageTextMode),
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
 
@@ -1810,6 +1832,18 @@ export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
   resumeFromSequence: ThreadResumeFromSequence,
   historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
   activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  /**
+   * How the live and replayed `thread.activity-appended` events of this
+   * subscription carry their payloads. `"preview"` bounds each large payload
+   * as a window does (`OrchestrationThreadActivity.payloadPreview`), and the
+   * client reads the stored one through `orchestration.getActivityPayload`.
+   * Absent means full payloads, what an older client gets; an older server
+   * ignores the field and sends full payloads.
+   */
+  liveActivityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  messageText: Schema.optional(OrchestrationMessageTextMode),
+  /** See `OrchestrationLiveEventForm`. */
+  liveEventForm: Schema.optional(Schema.Literals(["full", "slim"])),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;
@@ -1854,6 +1888,8 @@ export const OrchestrationGetThreadHistoryPageInput = Schema.Union([
     activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
     /** Only read for the `messages` collection. */
     messageFilter: Schema.optional(OrchestrationThreadHistoryMessageFilter),
+    /** Only read for the `messages` collection. */
+    messageText: Schema.optional(OrchestrationMessageTextMode),
   }),
   Schema.Struct({
     threadId: ThreadId,
@@ -1918,6 +1954,32 @@ export const OrchestrationGetActivityPayloadResult = Schema.Struct({
 });
 export type OrchestrationGetActivityPayloadResult =
   typeof OrchestrationGetActivityPayloadResult.Type;
+
+export const OrchestrationGetMessageTextInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type OrchestrationGetMessageTextInput = typeof OrchestrationGetMessageTextInput.Type;
+
+export const OrchestrationGetMessageTextResult = Schema.Struct({
+  messageId: MessageId,
+  /** The whole text, or its head when it exceeds what one response carries. */
+  text: Schema.String,
+  /** Length of the whole text, in UTF-16 code units. */
+  fullLength: NonNegativeInt,
+  /** Whether `text` is still cut short. */
+  truncated: Schema.Boolean,
+});
+export type OrchestrationGetMessageTextResult = typeof OrchestrationGetMessageTextResult.Type;
+
+export class OrchestrationGetMessageTextError extends Schema.TaggedError<OrchestrationGetMessageTextError>()(
+  "OrchestrationGetMessageTextError",
+  {
+    reason: Schema.Literals(["not-found", "unavailable"]),
+    threadId: ThreadId,
+    messageId: MessageId,
+  },
+) {}
 
 export class OrchestrationGetActivityPayloadError extends Schema.TaggedError<OrchestrationGetActivityPayloadError>()(
   "OrchestrationGetActivityPayloadError",
@@ -4336,6 +4398,39 @@ export type OrchestrationWireEvent = typeof OrchestrationWireEvent.Type;
 export type UnknownOrchestrationEvent = Extract<OrchestrationWireEvent, UnknownUnionMember>;
 
 /**
+ * A live or replayed event of one thread's subscription without the fields the
+ * client does not use: event, command, causation and correlation ids, metadata,
+ * and the aggregate (the subscription's thread). Every frame is compressed on
+ * its own, so those ids made up about half of a streamed delta's bytes. Sent
+ * only to a client that asked for it (`liveEventForm: "slim"`); the client
+ * restores the omitted fields (`expandSlimThreadEvent` in client-runtime).
+ * Forward-compatible like `OrchestrationWireEvent`.
+ */
+export const OrchestrationSlimThreadEvent = ForwardCompatibleUnion(
+  OrchestrationEvent.members.map((member) =>
+    Schema.Struct({
+      sequence: NonNegativeInt,
+      occurredAt: IsoDateTime,
+      type: member.fields.type,
+      payload: member.fields.payload,
+    }),
+  ),
+  "type",
+  { sequence: NonNegativeInt },
+);
+export type OrchestrationSlimThreadEvent = typeof OrchestrationSlimThreadEvent.Type;
+
+/**
+ * How a thread window subscription sends its live and replayed events.
+ * `"slim"` sends `slim-event` items (`OrchestrationSlimThreadEvent`); absent
+ * means full `event` items, all an older client understands. An older server
+ * ignores the field and sends full events, which a client asking for slim
+ * ones handles unchanged.
+ */
+export const OrchestrationLiveEventForm = Schema.Literals(["full", "slim"]);
+export type OrchestrationLiveEventForm = typeof OrchestrationLiveEventForm.Type;
+
+/**
  * Wire-only, so a client decodes it forward-compatibly: an item kind this
  * build does not know decodes to an `UnknownUnionMember` (new kinds are sent
  * only to clients that ask for them, so this is a backstop), and so does an
@@ -4368,6 +4463,11 @@ export type OrchestrationThreadStreamItem = typeof OrchestrationThreadStreamItem
 /** Wire-only and forward-compatible, like `OrchestrationThreadStreamItem`. */
 export const OrchestrationThreadWindowStreamItem = ForwardCompatibleUnion(
   [
+    /** Only sent to a client that asked for `liveEventForm: "slim"`. */
+    Schema.Struct({
+      kind: Schema.Literal("slim-event"),
+      event: OrchestrationSlimThreadEvent,
+    }),
     Schema.Struct({
       kind: Schema.Literal("snapshot"),
       snapshot: OrchestrationThreadWindowSnapshot,
@@ -4765,6 +4865,10 @@ export const OrchestrationRpcSchemas = {
   getActivityPayload: {
     input: OrchestrationGetActivityPayloadInput,
     output: OrchestrationGetActivityPayloadResult,
+  },
+  getMessageText: {
+    input: OrchestrationGetMessageTextInput,
+    output: OrchestrationGetMessageTextResult,
   },
   setThreadHistoryRecovery: {
     input: OrchestrationSetThreadHistoryRecoveryInput,

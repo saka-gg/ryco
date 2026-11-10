@@ -18,6 +18,7 @@ const hoisted = vi.hoisted(() => ({
   share: vi.fn(async (_input: unknown) => undefined),
   openURL: vi.fn(async (_url: string) => true),
   nativeMarkdown: false,
+  readWholeMessageText: vi.fn(async (_input: unknown) => "the whole text"),
   player: {
     replace: vi.fn(),
     play: vi.fn(),
@@ -89,6 +90,10 @@ vi.mock("../settings/appearance/useScaledTextRole", () => ({
 vi.mock("../../native/SelectableMarkdownText", () => ({
   hasNativeSelectableMarkdownText: () => hoisted.nativeMarkdown,
   SelectableMarkdownText: "SelectableMarkdownText",
+}));
+vi.mock("./MessageTextPreview", () => ({
+  MessageTextPreviewControl: "MessageTextPreviewControl",
+  readWholeMessageText: hoisted.readWholeMessageText,
 }));
 vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
@@ -193,6 +198,7 @@ function renderMessage(
 beforeEach(() => {
   hoisted.memo = null;
   hoisted.nativeMarkdown = false;
+  hoisted.readWholeMessageText.mockClear();
   hoisted.openURL.mockClear();
   vi.mocked(htmlRenderOfAttachment).mockClear();
 });
@@ -988,5 +994,47 @@ describe("ThreadMessage Undo file changes", () => {
         }),
       ),
     ).toHaveLength(0);
+  });
+});
+
+describe("ThreadMessage previews of very long messages", () => {
+  const previewMessage = (role: "user" | "assistant") =>
+    ({
+      id: "m-long",
+      role,
+      text: "the head",
+      textPreview: { fullLength: 48_000 },
+      createdAt: "2026-11-10T10:00:00.000Z",
+      streaming: false,
+    }) as unknown as ChatMessage;
+
+  it("shows the head with the whole-message control, and copies the whole text", async () => {
+    const message = previewMessage("user");
+    const tree = ThreadMessage({ environmentId, threadId, message });
+    const controls = collectElements(
+      tree,
+      (element) => element.type === "MessageTextPreviewControl",
+    );
+    expect(controls).toHaveLength(1);
+    expect(controls[0]!.props).toMatchObject({
+      environmentId,
+      threadId,
+      message,
+      fullLength: 48_000,
+    });
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy).toHaveLength(1);
+    const readText = (copy[0]!.props as { readText?: () => Promise<string> }).readText;
+    await expect(readText?.()).resolves.toBe("the whole text");
+    expect(hoisted.readWholeMessageText).toHaveBeenCalledWith({ environmentId, threadId, message });
+  });
+
+  it("shows no control under a whole message and copies its text as is", () => {
+    const tree = renderMessage([], { text: "short" });
+    expect(
+      collectElements(tree, (element) => element.type === "MessageTextPreviewControl"),
+    ).toHaveLength(0);
+    const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
+    expect(copy[0]?.props).toMatchObject({ text: "short", readText: undefined });
   });
 });

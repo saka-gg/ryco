@@ -36,7 +36,7 @@ import {
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
 import { stampTurnOrigin } from "../orchestration/turnOrigin.ts";
 import { shellSettlementPolicy } from "../orchestration/threadSettlementInput.ts";
-import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
+import { loadActivityPayload, loadMessageText } from "../orchestration/activityPayloadPreview.ts";
 import { encodeThreadHistoryCursor } from "../orchestration/threadHistoryCursor.ts";
 import {
   makeThreadHistoryRecoveryRegistry,
@@ -65,6 +65,7 @@ import {
   ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES,
 } from "./context/constants.ts";
 import { observeArrays } from "./streamBatching.ts";
+import { loadSharedThreadWindow } from "./context/sharedThreadWindowLoads.ts";
 
 /**
  * Encoded size a thread window may reach. The relay carries 4 MiB per message;
@@ -380,26 +381,35 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         }),
       );
     }
-    return query({
+    const limits = {
+      messages: clamp(input.limits.messages, { minimum: 1, maximum: 200 }),
+      proposedPlans: clamp(input.limits.proposedPlans, {
+        minimum: 1,
+        maximum: 50,
+      }),
+      activities: clamp(input.limits.activities, {
+        minimum: 1,
+        maximum: 200,
+      }),
+      checkpoints: clamp(input.limits.checkpoints, {
+        minimum: 1,
+        maximum: 50,
+      }),
+    };
+    const load = query({
       threadId: input.threadId,
       ...(input.activityPayloads !== undefined ? { activityPayloads: input.activityPayloads } : {}),
-      limits: {
-        messages: clamp(input.limits.messages, { minimum: 1, maximum: 200 }),
-        proposedPlans: clamp(input.limits.proposedPlans, {
-          minimum: 1,
-          maximum: 50,
-        }),
-        activities: clamp(input.limits.activities, {
-          minimum: 1,
-          maximum: 200,
-        }),
-        checkpoints: clamp(input.limits.checkpoints, {
-          minimum: 1,
-          maximum: 50,
-        }),
-      },
-    }).pipe(
-      Effect.map((window) => fitThreadWindowToByteBudget(window)),
+      ...(input.messageText !== undefined ? { messageText: input.messageText } : {}),
+      limits,
+    }).pipe(Effect.map((window) => fitThreadWindowToByteBudget(window)));
+    // Subscribers opening the same window at once share one read (sharedThreadWindowLoads.ts).
+    const key = JSON.stringify([
+      input.threadId,
+      limits,
+      input.activityPayloads ?? "full",
+      input.messageText ?? "full",
+    ]);
+    return loadSharedThreadWindow(query, key, load).pipe(
       Effect.mapError((cause) =>
         Schema.is(OrchestrationThreadHistoryError)(cause)
           ? cause
@@ -784,6 +794,12 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
       observeRpcEffect(ORCHESTRATION_WS_METHODS.getThreadShells, loadThreadShells(input), {
         "rpc.aggregate": "orchestration",
       }),
+    [ORCHESTRATION_WS_METHODS.getMessageText]: (input) =>
+      observeRpcEffect(
+        ORCHESTRATION_WS_METHODS.getMessageText,
+        loadMessageText(projectionSnapshotQuery.getMessageText, input),
+        { "rpc.aggregate": "orchestration" },
+      ),
     [ORCHESTRATION_WS_METHODS.getActivityPayload]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.getActivityPayload,
@@ -949,6 +965,13 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             input.threadId,
             { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
+            // Slim events are only sent to window subscribers that ask; never here.
+            Stream.filter(
+              <Item extends { readonly kind: string }>(
+                item: Item,
+              ): item is Exclude<Item, { readonly kind: "slim-event" }> =>
+                item.kind !== "slim-event",
+            ),
             (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),
             observeArrays(isServerPerfProfileEnabled(), (items) =>
               recordServerPerfPayload("server.ws.orchestration.subscribeThread", items),
@@ -983,7 +1006,11 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               }),
             ),
             input.threadId,
-            { resumeFromSequence: input.resumeFromSequence },
+            {
+              resumeFromSequence: input.resumeFromSequence,
+              liveActivityPayloads: input.liveActivityPayloads,
+              liveEventForm: input.liveEventForm,
+            },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),
             observeArrays(isServerPerfProfileEnabled(), (items) =>

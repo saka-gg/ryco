@@ -44,6 +44,7 @@ import {
   orderSavedEnvironmentConnectionQueue,
   runSavedEnvironmentConnectionQueue,
 } from "./savedEnvironmentConnectionScheduler.ts";
+import { expandSlimThreadEvent } from "./slimThreadEvent.ts";
 import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
 
 const NOOP = () => undefined;
@@ -68,6 +69,14 @@ const THREAD_WINDOW_LIMITS: OrchestrationThreadHistoryLimits = {
   checkpoints: 30,
 };
 const MIN_THREAD_WINDOW_ITEMS = 10;
+/**
+ * After a first window smaller than {@link THREAD_WINDOW_LIMITS}
+ * (`threadWindowInitialLimits`), the rest of the usual window is read as
+ * history pages this long after the window arrived, while a view still shows
+ * the thread.
+ */
+const THREAD_WINDOW_BACKFILL_DELAY_MS = 750;
+const THREAD_WINDOW_BACKFILL_COLLECTIONS = ["messages", "activities"] as const;
 /** Backoff for re-requesting a window the server failed to load (not a size or support failure). */
 const THREAD_WINDOW_RETRY_BASE_MS = 1_000;
 const THREAD_WINDOW_RETRY_MAX_MS = 30_000;
@@ -184,6 +193,19 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
    * may set it; servers without previews ignore it.
    */
   readonly threadWindowActivityPayloads?: "preview";
+  /**
+   * Ask windows and history pages to send very long finished messages as
+   * previews (`OrchestrationMessage.textPreview`). Only a client that reads the
+   * whole text on demand (`orchestration.getMessageText`) may set it; servers
+   * without previews ignore it.
+   */
+  readonly threadWindowMessageText?: "preview";
+  /**
+   * The first window a thread subscription asks for, sized to the screen (a
+   * phone shows far fewer rows than {@link THREAD_WINDOW_LIMITS}). While a view
+   * shows the thread, the rest of the usual window follows as history pages.
+   */
+  readonly threadWindowInitialLimits?: OrchestrationThreadHistoryLimits;
   readonly syncThreadWindowSnapshot?: (
     environmentId: EnvironmentId,
     snapshot: OrchestrationThreadWindowSnapshot,
@@ -646,7 +668,19 @@ export function createEnvironmentConnectionSupervisor<
   });
 
   const activityPayloads = input.threadWindowActivityPayloads;
-  const activityPayloadsRequest = activityPayloads !== undefined ? { activityPayloads } : {};
+  const messageText = input.threadWindowMessageText;
+  const activityPayloadsRequest = {
+    ...(activityPayloads !== undefined ? { activityPayloads } : {}),
+    ...(messageText !== undefined ? { messageText } : {}),
+  };
+  // A client that reads previews on demand takes live tool output as previews too.
+  // Live events in the slim form (no ids or metadata the client never reads);
+  // an older server ignores the field and sends full events.
+  const windowSubscriptionPayloads = {
+    ...activityPayloadsRequest,
+    ...(activityPayloads === "preview" ? { liveActivityPayloads: activityPayloads } : {}),
+    liveEventForm: "slim" as const,
+  };
   const historyPagination = createThreadHistoryPaginationController({
     request: (environmentId, request) => {
       const query = require(environmentId).client.orchestration.getThreadHistoryPage;
@@ -654,7 +688,11 @@ export function createEnvironmentConnectionSupervisor<
         ? query(
             request.collection === "activities" && activityPayloads !== undefined
               ? { ...request, activityPayloads }
-              : request,
+              : request.collection === "messages" &&
+                  messageText !== undefined &&
+                  request.mode.kind !== "around"
+                ? { ...request, messageText }
+                : request,
           )
         : Promise.reject(new Error("Thread history pagination is unavailable"));
     },
@@ -688,6 +726,33 @@ export function createEnvironmentConnectionSupervisor<
       }
     },
   });
+
+  /**
+   * A window smaller than the usual one (a screen-sized first window, or one
+   * shrunk to fit the connection) is completed with history pages in the
+   * background while a view shows the thread, so scrolling up finds the usual
+   * window's rows already there.
+   */
+  const scheduleWindowBackfill = (
+    entry: ThreadDetailSubscriptionEntry,
+    snapshot: OrchestrationThreadWindowSnapshot,
+  ) => {
+    const pages = THREAD_WINDOW_BACKFILL_COLLECTIONS.flatMap((collection) => {
+      const missing = THREAD_WINDOW_LIMITS[collection] - entry.windowLimits[collection];
+      const page = snapshot.history[collection];
+      return missing > 0 && page.hasMoreBefore ? [{ collection, page, limit: missing }] : [];
+    });
+    if (pages.length === 0) return;
+    input.setTimeout(() => {
+      const current = threadDetailSubscriptions.get(keyFor(entry.environmentId, entry.threadId));
+      if (current !== entry || entry.viewCount === 0) return;
+      const scope = { environmentId: entry.environmentId, threadId: entry.threadId };
+      for (const { collection, page, limit } of pages) {
+        // A newer snapshot or a failed read only skips the backfill; scrolling still pages.
+        historyPagination.loadBefore({ scope, collection, page, limit }).catch(NOOP);
+      }
+    }, THREAD_WINDOW_BACKFILL_DELAY_MS);
+  };
 
   const historyRecoveryMode = (entry: ThreadDetailSubscriptionEntry) =>
     entry.viewCount > 0 ? ("active" as const) : ("passive" as const);
@@ -830,7 +895,7 @@ export function createEnvironmentConnectionSupervisor<
       subscribing = true;
       pendingFailure = null;
       unsubscribeCurrent = subscribeWindow(
-        { threadId: entry.threadId, limits: entry.windowLimits, ...activityPayloadsRequest },
+        { threadId: entry.threadId, limits: entry.windowLimits, ...windowSubscriptionPayloads },
         (item) => {
           // Any item, a resume included, means the server served this window.
           failedWindowAttempts = 0;
@@ -845,9 +910,14 @@ export function createEnvironmentConnectionSupervisor<
             } else {
               input.syncThreadDetailSnapshot(entry.environmentId, item.snapshot);
             }
+            scheduleWindowBackfill(entry, item.snapshot);
             return;
           }
-          applyEvent(item.event);
+          applyEvent(
+            item.kind === "slim-event"
+              ? expandSlimThreadEvent(item.event, entry.threadId)
+              : item.event,
+          );
         },
         {
           ...subscriptionOptions,
@@ -1177,6 +1247,10 @@ export function createEnvironmentConnectionSupervisor<
       retainedRows: createRetainedThreadBytes(),
     };
     if (!existing) threadDetailSubscriptions.set(key, entry);
+    // A new subscription's first window is sized to the screen (`threadWindowInitialLimits`).
+    if (!existing && input.threadWindowInitialLimits) {
+      entry.windowLimits = input.threadWindowInitialLimits;
+    }
     clearEviction(entry);
     entry.refCount += 1;
     const view = options?.view === true;

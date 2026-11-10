@@ -43,6 +43,7 @@ function ToolRow(props: {
     environmentId: props.environmentId,
     threadId: props.threadId,
     activityId: open ? row.outputPreviewActivityId : null,
+    payloadBytes: row.outputPreviewBytes,
   });
   const output =
     fullOutput.status === "loaded" ? fullOutput.output?.trim() || row.output : row.output;

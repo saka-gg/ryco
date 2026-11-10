@@ -14,7 +14,10 @@ import {
 } from "../../rpc/keyedQuery.ts";
 import { deriveActivityPayloadOutput, mergeLoadedChangedFiles } from "./session-logic.ts";
 
-/** Stored activity payloads never change, so a fetched one stays fresh until collected. */
+/**
+ * A stored payload changes only while its tool runs, and then it grows: a
+ * fetched one stays fresh until collected or outgrown (`isActivityPayloadOutdated`).
+ */
 export const ACTIVITY_PAYLOAD_STALE_TIME_MS = Number.POSITIVE_INFINITY;
 /** Long enough to collapse and reopen a row without a refetch, short enough to drop MBs of output. */
 export const ACTIVITY_PAYLOAD_GC_TIME_MS = 2 * 60_000;
@@ -30,6 +33,14 @@ export interface ActivityPayloadInput {
   readonly environmentId: EnvironmentId | null;
   readonly threadId: ThreadId | null;
   readonly activityId: string | null;
+  /**
+   * The stored payload size the newest preview announced
+   * (`payloadPreview.fullBytes`). A running tool rewrites its activity under the
+   * same id, so a fetched payload smaller than this is read again
+   * (`isActivityPayloadOutdated`); it is not part of the key, so the panel keeps
+   * showing the fetched output meanwhile.
+   */
+  readonly payloadBytes?: number | null | undefined;
 }
 
 export type ActivityPayloadQuery = KeyedQueryByKey<
@@ -161,4 +172,21 @@ export function resolveActivityChangedFiles(
 ): ReadonlyArray<string> {
   if (view.status !== "loaded") return entryChangedFiles;
   return mergeLoadedChangedFiles(entryChangedFiles, view.changedFiles);
+}
+
+/**
+ * Whether a fetched payload is older than the newest preview of the same
+ * activity: a running tool rewrote it under the same id and it grew. The hook
+ * then refreshes the entry in place.
+ */
+export function isActivityPayloadOutdated(
+  state: ActivityPayloadQueryState,
+  payloadBytes: number | null | undefined,
+): boolean {
+  return (
+    state.data !== null &&
+    !state.isLoading &&
+    payloadBytes != null &&
+    state.data.fullBytes < payloadBytes
+  );
 }

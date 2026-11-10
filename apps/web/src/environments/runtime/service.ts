@@ -233,6 +233,17 @@ function getEnvironmentSupervisor() {
         .syncServerThreadDetail((snapshot as { readonly thread: never }).thread, environmentId),
     // The timeline fetches a previewed activity's full payload when its row expands.
     threadWindowActivityPayloads: "preview",
+    // A very long message arrives as its head; its row reads the whole text on
+    // demand (`orchestration.getMessageText`).
+    threadWindowMessageText: "preview",
+    // The first window of a thread fills a desktop screen; the rest of the usual
+    // window follows as history pages while the thread is shown.
+    threadWindowInitialLimits: {
+      messages: 60,
+      proposedPlans: 30,
+      activities: 100,
+      checkpoints: 30,
+    },
     syncThreadWindowSnapshot: (environmentId, snapshot) =>
       useStore.getState().syncServerThreadWindow(snapshot, environmentId),
     syncThreadHistoryPage: (environmentId, threadId, page) =>

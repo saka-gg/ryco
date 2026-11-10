@@ -26,6 +26,7 @@ import { makeDeviceWsRpcLayer, makeWsRpcLayer } from "./ws/index.ts";
 import { directConnectionOf, directRpcPrincipal, type RpcPrincipal } from "./ws/RpcPrincipal.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { ContextHandoffRepositoryLive } from "./persistence/Layers/ContextHandoffs.ts";
+import { DIRECT_SOCKET_SILENCE_TIMEOUT_MS, makeSilentSocketWatch } from "./ws/silentSocketWatch.ts";
 
 /**
  * Per-connection RPC layer. `SourceControlDiscovery`, `ProviderMaintenanceRunner`
@@ -64,26 +65,41 @@ export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
   );
 
 /**
- * Serves a direct socket until it closes or its session ends: the pairing was
- * revoked, or a Hub-linked session reached its end. A revoked client or link
- * then loses its live connection at once, not at its next connect.
+ * Serves a direct socket until it closes, its session ends (the pairing was
+ * revoked, or a Hub-linked session reached its end) or its client went silent
+ * (`silentSocketWatch.ts`). A revoked client or link then loses its live
+ * connection at once, not at its next connect, and a client that vanished
+ * from the network no longer holds subscriptions and queues on the server.
  */
 const serveUntilSessionEnds = <E, R>(
   sessions: SessionCredentialServiceShape,
   session: AuthenticatedSession,
+  request: HttpServerRequest.HttpServerRequest,
   serve: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
 ) =>
-  Effect.acquireUseRelease(
-    sessions.markConnected(session.sessionId),
-    () =>
-      Effect.raceFirst(
-        serve,
-        sessions
-          .awaitEnd({ sessionId: session.sessionId, chainId: session.chainId })
-          .pipe(Effect.as(HttpServerResponse.empty())),
-      ),
-    () => sessions.markDisconnected(session.sessionId),
-  );
+  Effect.gen(function* () {
+    const watch = yield* makeSilentSocketWatch(request);
+    return yield* Effect.acquireUseRelease(
+      sessions.markConnected(session.sessionId),
+      () =>
+        Effect.raceAllFirst([
+          serve.pipe(Effect.provideService(HttpServerRequest.HttpServerRequest, watch.request)),
+          sessions
+            .awaitEnd({ sessionId: session.sessionId, chainId: session.chainId })
+            .pipe(Effect.as(HttpServerResponse.empty())),
+          watch.silent.pipe(
+            Effect.andThen(
+              Effect.logInfo("closing a direct connection whose client went silent", {
+                sessionId: session.sessionId,
+                silentForMs: DIRECT_SOCKET_SILENCE_TIMEOUT_MS,
+              }),
+            ),
+            Effect.as(HttpServerResponse.empty()),
+          ),
+        ]),
+      () => sessions.markDisconnected(session.sessionId),
+    );
+  });
 
 /**
  * The main socket serves the application group and the simulator control group
@@ -113,7 +129,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
             Layer.merge(makeServerWsRpcLayer(principal), makeDeviceWsRpcLayer(principal)),
           ),
         );
-        return yield* serveUntilSessionEnds(sessions, session, rpcWebSocketHttpEffect);
+        return yield* serveUntilSessionEnds(sessions, session, request, rpcWebSocketHttpEffect);
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     ),
   ),
@@ -142,7 +158,7 @@ export const deviceWebsocketRpcRouteLayer = Layer.unwrap(
             "rpc.channel": "device",
           },
         }).pipe(Effect.provide(makeDeviceWsRpcLayer(directRpcPrincipal(session))));
-        return yield* serveUntilSessionEnds(sessions, session, rpcWebSocketHttpEffect);
+        return yield* serveUntilSessionEnds(sessions, session, request, rpcWebSocketHttpEffect);
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     ),
   ),
