@@ -60,6 +60,21 @@ describe("authoritative app access", () => {
     });
   });
 
+  it("keeps the launch surface until the saved workspace was read, then opens with it", () => {
+    const granted = { ...complete, directCredentialReadable: true, hostedSessionRevalidated: true };
+    expect(deriveAppAccess({ ...granted, savedWorkspaceRead: false })).toEqual({
+      status: "hydrating",
+    });
+    expect(deriveAppAccess({ ...granted, savedWorkspaceRead: true })).toEqual({
+      status: "unlocked",
+      via: "both",
+    });
+    // A device with no grant is not held back by it.
+    expect(deriveAppAccess({ ...complete, savedWorkspaceRead: false })).toEqual({
+      status: "locked",
+    });
+  });
+
   it("upgrades an early single-plane unlock when the other plane joins", () => {
     const early = deriveAppAccess({
       ...complete,

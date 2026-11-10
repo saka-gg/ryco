@@ -21,6 +21,14 @@ export interface AppAccessFacts {
   readonly hostedSessionRetained?: boolean;
   readonly directHydrated: boolean;
   readonly directCredentialReadable: boolean;
+  /**
+   * The saved workspace (machine list and each machine's projects and
+   * threads) has been read from storage, or could not be. Until then an
+   * unlocked workspace would open empty ("No projects yet") and fill a moment
+   * later, so the launch surface stays instead. The read always settles: a
+   * failed one counts as an empty workspace. Optional: absent means read.
+   */
+  readonly savedWorkspaceRead?: boolean;
 }
 
 /**
@@ -43,6 +51,7 @@ export interface AppAccessFacts {
 export function deriveAppAccess(facts: AppAccessFacts): AppAccess {
   const hosted = facts.hostedSessionRevalidated || facts.hostedSessionRetained === true;
   const direct = facts.directHydrated && facts.directCredentialReadable;
+  if ((hosted || direct) && facts.savedWorkspaceRead === false) return { status: "hydrating" };
   if (hosted && direct) return { status: "unlocked", via: "both" };
   if (hosted) return { status: "unlocked", via: "hosted-session" };
   if (direct) return { status: "unlocked", via: "direct-node" };

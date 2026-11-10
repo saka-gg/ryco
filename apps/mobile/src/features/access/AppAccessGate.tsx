@@ -26,7 +26,11 @@ import { RootStack } from "../../Stack";
 import { ServerStateBootstrap } from "../../state/serverStateSync";
 import { deriveAppAccess, isWorkspaceDeepLink } from "./appAccessModel";
 import { watchDirectCredentialAccess } from "./directCredentialAccess";
-import { HOSTED_LAUNCH_DECISION_DEADLINE_MS, markAppAccessDecided } from "./launchDecision";
+import {
+  HOSTED_LAUNCH_DECISION_DEADLINE_MS,
+  markAppAccessDecided,
+  SAVED_WORKSPACE_READ_WAIT_MS,
+} from "./launchDecision";
 import {
   LiveActivityBridge,
   LockedLiveActivityBridge,
@@ -103,8 +107,8 @@ export function AppAccessGate(props: {
       clearTimeout(deadline);
       if (active) setHostedHydrated(true);
     });
-    // What a retained sign-in opens is the saved workspace, so it waits for
-    // that to be read; and it needs to know when the Hub last confirmed it.
+    // The workspace opens on what is saved on this device, so it waits for
+    // that to be read; a retained sign-in also needs the Hub's last confirmation.
     void readHubSessionConfirmedAt(mobileKV).then((confirmedAt) => {
       if (active) setHubSessionConfirmedAt(confirmedAt);
     });
@@ -114,9 +118,15 @@ export function AppAccessGate(props: {
       },
       () => undefined,
     );
+    // A read that takes this long is no longer worth the launch surface: the
+    // workspace opens and fills in as the rest of it lands.
+    const savedWorkspaceDeadline = setTimeout(() => {
+      if (active) setSavedWorkspaceRead(true);
+    }, SAVED_WORKSPACE_READ_WAIT_MS);
     return () => {
       active = false;
       clearTimeout(deadline);
+      clearTimeout(savedWorkspaceDeadline);
     };
   }, []);
 
@@ -132,15 +142,14 @@ export function AppAccessGate(props: {
   const access = deriveAppAccess({
     hostedHydrated,
     hostedSessionRevalidated: hostedAuthenticated,
-    hostedSessionRetained:
-      savedWorkspaceRead &&
-      deriveRetainedHubSession({
-        storedSession: storedHubSession,
-        confirmedAt: hubSessionConfirmedAt,
-        now: launchedAt,
-        accessCheckSettled: hostedCheckSettled,
-        accountStatus,
-      }),
+    savedWorkspaceRead,
+    hostedSessionRetained: deriveRetainedHubSession({
+      storedSession: storedHubSession,
+      confirmedAt: hubSessionConfirmedAt,
+      now: launchedAt,
+      accessCheckSettled: hostedCheckSettled,
+      accountStatus,
+    }),
     directHydrated,
     directCredentialReadable,
   });
