@@ -11,6 +11,7 @@ import { markPromotedDraftThreadByRef, useComposerDraftStore } from "../state/co
 import { terminalHistoryMirrors } from "../features/terminal/terminalHistoryMirrors";
 import { useTerminalStateStore } from "../state/terminalStateStore";
 import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
+import { isEnvironmentShellLive } from "@ryco/client-runtime/state/threads/threadBodyResidency";
 import {
   selectBootstrapCompleteForEnvironment,
   selectEnvironmentState,
@@ -165,6 +166,8 @@ export function createMobileEnvironmentStateSink(
       projectionChanged(environmentId);
     },
     // No mobile UI store; terminal state follows the listed threads.
+    isEnvironmentShellLive: (environmentId) =>
+      isEnvironmentShellLive(useStore.getState(), environmentId),
     reconcileSnapshotDerivedState: () => reconcileMobileTerminalState(),
     syncProjects: () => undefined,
     syncThreads: () => undefined,

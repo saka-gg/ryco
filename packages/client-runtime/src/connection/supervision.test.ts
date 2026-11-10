@@ -43,6 +43,7 @@ import {
   SavedEnvironmentCredentialError,
   SavedEnvironmentSwitchedOffError,
   savedEnvironmentRetryDelayMs,
+  THREAD_RESUME_SESSION_WAIT_MS,
   type ShellAcceptance,
   VIEW_RESUME_HEARTBEAT_GRACE_MS,
   VIEW_RESUME_SILENT_MS,
@@ -73,6 +74,8 @@ function makeSupervisor(
     readonly listThreadBodies?: () => ReadonlyArray<ThreadBodyUsage>;
     readonly evictThreadBodies?: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void;
     readonly isThreadBodyProtected?: (threadRef: ScopedThreadRef) => boolean;
+    readonly holdsThreadBody?: (threadRef: ScopedThreadRef) => boolean;
+    readonly readRestoredThreadSequence?: (threadRef: ScopedThreadRef) => number | null;
     readonly syncThreadWindowSnapshot?: (
       environmentId: EnvironmentId,
       snapshot: OrchestrationThreadWindowSnapshot,
@@ -97,6 +100,8 @@ function makeSupervisor(
     listThreadBodies: overrides.listThreadBodies,
     evictThreadBodies: overrides.evictThreadBodies,
     isThreadBodyProtected: overrides.isThreadBodyProtected,
+    holdsThreadBody: overrides.holdsThreadBody,
+    readRestoredThreadSequence: overrides.readRestoredThreadSequence,
     now: () => Date.now(),
     setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
     clearTimeout: (timeoutId: ReturnType<typeof setTimeout>) => clearTimeout(timeoutId),
@@ -913,24 +918,344 @@ describe("thread subscription resume", () => {
     resetNewerNodeStateForTests();
   });
 
-  it("always takes a fresh snapshot over the Hub relay", () => {
+  it("resumes only within one subscription where the store cannot tell what it holds", () => {
     const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
-    const thread = threadConnection("hub-hosted");
-    supervisor.register(thread.connection);
-    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
-    thread.emit(windowSnapshot(5));
-    expect(thread.resumeFrom()).toBeNull();
-  });
-
-  it("always takes a fresh snapshot in hosted mode", () => {
-    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
-      isHostedMode: true,
-    });
     const thread = threadConnection("manual");
     supervisor.register(thread.connection);
     supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
     thread.emit(windowSnapshot(5));
+    supervisor.disposeThreadDetailSubscription(remote, "thread-1" as ThreadId);
+    supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
     expect(thread.resumeFrom()).toBeNull();
+  });
+});
+
+describe("thread resume across subscriptions and Hub sessions", () => {
+  const threadId = "thread-1" as ThreadId;
+  const threadRef = scopeThreadRef(remote, threadId);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  type ResumePoint = number | null | PromiseLike<number | null>;
+  interface WindowSubscription {
+    readonly emit: (item: unknown) => void;
+    /** What the transport does when it (re)opens the stream: read the resume point. */
+    readonly open: (signal?: AbortSignal) => ResumePoint;
+    unsubscribed: boolean;
+  }
+
+  /** A connection whose session readiness a test opens and closes. */
+  function hubConnection(source: string) {
+    let ready = true;
+    const readinessListeners = new Set<() => void>();
+    const subscriptions: WindowSubscription[] = [];
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source },
+      dispose: () => Promise.resolve(),
+      sessionReadiness: {
+        read: () => ready,
+        subscribe: (listener: () => void) => {
+          readinessListeners.add(listener);
+          return () => readinessListeners.delete(listener);
+        },
+      },
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (
+            _input: unknown,
+            next: (item: unknown) => void,
+            options?: {
+              readonly resumeFromSequence?: (signal: AbortSignal) => ResumePoint;
+            },
+          ) => {
+            const subscription: WindowSubscription = {
+              emit: next,
+              open: (signal = new AbortController().signal) =>
+                options?.resumeFromSequence?.(signal) ?? null,
+              unsubscribed: false,
+            };
+            subscriptions.push(subscription);
+            return () => {
+              subscription.unsubscribed = true;
+            };
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return {
+      connection,
+      subscriptions,
+      latest: () => subscriptions.at(-1)!,
+      readinessListenerCount: () => readinessListeners.size,
+      setReady: (next: boolean) => {
+        ready = next;
+        for (const listener of Array.from(readinessListeners)) listener();
+      },
+    };
+  }
+
+  const windowSnapshot = (snapshotSequence: number) => ({
+    kind: "snapshot",
+    snapshot: { snapshotSequence, thread: {}, history: {} },
+  });
+  const event = (sequence: number) => ({ kind: "event", event: { sequence } });
+
+  /** The resume point once the transport may send the request. */
+  const settle = async (point: ResumePoint) => {
+    let settled: number | null | "pending" = "pending";
+    void Promise.resolve(point).then((value) => {
+      settled = value;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    return settled;
+  };
+
+  function setup(
+    options: {
+      readonly isHostedMode?: boolean;
+      readonly holdsBody?: () => boolean;
+      readonly readRestoredThreadSequence?: () => number | null;
+    } = {},
+  ) {
+    const windows: number[] = [];
+    let holds = true;
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      ...(options.isHostedMode === undefined ? {} : { isHostedMode: options.isHostedMode }),
+      isThreadDetailSubscriptionNonIdle: () => false,
+      // The store keeps bodies past their subscriptions (residency configured).
+      listThreadBodies: () => [],
+      evictThreadBodies: () => undefined,
+      holdsThreadBody: (ref) =>
+        scopedThreadKey(ref) === scopedThreadKey(threadRef) && (options.holdsBody?.() ?? holds),
+      ...(options.readRestoredThreadSequence === undefined
+        ? {}
+        : { readRestoredThreadSequence: options.readRestoredThreadSequence }),
+      syncThreadWindowSnapshot: (_environmentId, snapshot) => {
+        windows.push(snapshot.snapshotSequence);
+      },
+    });
+    return {
+      supervisor,
+      windows,
+      dropBody: () => {
+        holds = false;
+      },
+    };
+  }
+
+  describe("a thread reopened while its body is held", () => {
+    it("resumes after the last event the body holds instead of loading the window again", async () => {
+      const { supervisor, windows } = setup();
+      const hub = hubConnection("manual");
+      supervisor.register(hub.connection);
+      const release = supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      expect(hub.latest().open()).toBeNull();
+      hub.latest().emit(windowSnapshot(5));
+      hub.latest().emit(event(7));
+      release();
+      supervisor.disposeThreadDetailSubscription(remote, threadId);
+      expect(hub.latest().unsubscribed).toBe(true);
+      expect(supervisor.readThreadDetailSequence(remote, threadId)).toBe(7);
+
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      expect(hub.subscriptions).toHaveLength(2);
+      expect(hub.latest().open()).toBe(7);
+      hub.latest().emit({ kind: "resumed", fromSequence: 7 });
+      hub.latest().emit(event(8));
+      expect(windows).toEqual([5]);
+      expect(supervisor.readThreadDetailSequence(remote, threadId)).toBe(8);
+    });
+
+    it("loads a fresh window once the store no longer holds the body", async () => {
+      const { supervisor, dropBody } = setup();
+      const hub = hubConnection("manual");
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId)();
+      hub.latest().emit(windowSnapshot(5));
+      supervisor.disposeThreadDetailSubscription(remote, threadId);
+      // Evicted, removed with its thread, or filled in from a display cache.
+      dropBody();
+      expect(supervisor.readThreadDetailSequence(remote, threadId)).toBeNull();
+      supervisor.retainThreadDetailSubscription(remote, threadId);
+      expect(hub.latest().open()).toBeNull();
+    });
+
+    it("stops resuming a held subscription whose body went meanwhile", async () => {
+      const { supervisor, dropBody } = setup();
+      const hub = hubConnection("manual");
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      hub.latest().emit(windowSnapshot(5));
+      dropBody();
+      expect(hub.latest().open()).toBeNull();
+    });
+
+    it("resumes the open threads of a connection that registers again", async () => {
+      const { supervisor, windows } = setup();
+      const first = hubConnection("manual");
+      supervisor.register(first.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      first.latest().emit(windowSnapshot(5));
+      first.latest().emit(event(6));
+      await supervisor.remove(remote);
+
+      const second = hubConnection("manual");
+      supervisor.register(second.connection);
+      expect(second.latest().open()).toBe(6);
+      expect(windows).toEqual([5]);
+    });
+
+    it("resumes from a window the platform restored from its own saved copy", async () => {
+      const { supervisor } = setup({ readRestoredThreadSequence: () => 42 });
+      const hub = hubConnection("manual");
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      expect(hub.latest().open()).toBe(42);
+    });
+
+    it("starts a thread the shell stopped listing over from its own snapshot", async () => {
+      const { supervisor } = setup();
+      const hub = hubConnection("manual");
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      hub.latest().emit(windowSnapshot(5));
+      supervisor.reconcileThreadDetailSubscriptionsForEnvironment(remote, []);
+      expect(supervisor.readThreadDetailSequence(remote, threadId)).toBeNull();
+    });
+  });
+
+  describe.each([
+    { mode: "a Hub-hosted machine", source: "hub-hosted", isHostedMode: false },
+    { mode: "hosted mode", source: "manual", isHostedMode: true },
+  ])("on $mode", ({ source, isHostedMode }) => {
+    it("resumes a reconnected thread once the session accepted a fresh thread list", async () => {
+      const { supervisor, windows } = setup({ isHostedMode });
+      const hub = hubConnection(source);
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      // A first open has nothing to resume, so it does not wait.
+      expect(hub.latest().open()).toBeNull();
+      hub.latest().emit(windowSnapshot(5));
+      hub.latest().emit(event(7));
+
+      // The relay drops; the transport reopens the stream before the new
+      // channel's thread list has been accepted.
+      hub.setReady(false);
+      const point = hub.latest().open();
+      expect(await settle(point)).toBe("pending");
+      hub.setReady(true);
+      expect(await settle(point)).toBe(7);
+      expect(hub.readinessListenerCount()).toBe(0);
+      hub.latest().emit({ kind: "resumed", fromSequence: 7 });
+      expect(windows).toEqual([5]);
+    });
+
+    it("resumes on the connection of a new generation only once its own session is current", async () => {
+      const { supervisor } = setup({ isHostedMode });
+      const old = hubConnection(source);
+      supervisor.register(old.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      old.latest().emit(windowSnapshot(5));
+      old.latest().emit(event(9));
+      // Foreground resume: the lifecycle owner replaces the generation.
+      await supervisor.remove(remote);
+      const next = hubConnection(source);
+      next.setReady(false);
+      supervisor.register(next.connection);
+      const point = next.latest().open();
+      // The old generation's session being current again counts for nothing.
+      old.setReady(true);
+      expect(await settle(point)).toBe("pending");
+      next.setReady(true);
+      expect(await settle(point)).toBe(9);
+    });
+
+    it("drops a resume that waited on a generation replaced meanwhile", async () => {
+      const { supervisor } = setup({ isHostedMode });
+      const old = hubConnection(source);
+      supervisor.register(old.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      old.latest().emit(windowSnapshot(5));
+      old.setReady(false);
+      const stale = old.latest().open();
+      await supervisor.remove(remote);
+      const next = hubConnection(source);
+      next.setReady(false);
+      supervisor.register(next.connection);
+      const current = next.latest().open();
+      // The replaced connection's session completing still sends nothing resumed.
+      old.setReady(true);
+      expect(await settle(stale)).toBeNull();
+      next.setReady(true);
+      expect(await settle(current)).toBe(5);
+    });
+
+    it("loads a fresh window when the session does not become current in time", async () => {
+      const { supervisor } = setup({ isHostedMode });
+      const hub = hubConnection(source);
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      hub.latest().emit(windowSnapshot(5));
+      hub.setReady(false);
+      const point = hub.latest().open();
+      await vi.advanceTimersByTimeAsync(THREAD_RESUME_SESSION_WAIT_MS - 1);
+      expect(await settle(point)).toBe("pending");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await settle(point)).toBeNull();
+      expect(hub.readinessListenerCount()).toBe(0);
+    });
+
+    it("stops waiting when the stream attempt is given up", async () => {
+      const { supervisor } = setup({ isHostedMode });
+      const hub = hubConnection(source);
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      hub.latest().emit(windowSnapshot(5));
+      hub.setReady(false);
+      const controller = new AbortController();
+      const point = hub.latest().open(controller.signal);
+      controller.abort();
+      expect(await settle(point)).toBeNull();
+      expect(hub.readinessListenerCount()).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("takes the snapshot of a node that restarted with a sequence gap", async () => {
+      const { supervisor, windows } = setup({ isHostedMode });
+      const hub = hubConnection(source);
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      hub.latest().emit(windowSnapshot(50));
+      hub.latest().emit(event(51));
+      expect(await settle(hub.latest().open())).toBe(51);
+      // The node no longer holds sequence 51 (a restored database): it answers
+      // with a snapshot at a lower sequence, which replaces the resume point.
+      hub.latest().emit(windowSnapshot(12));
+      hub.latest().emit(event(13));
+      expect(windows).toEqual([50, 12]);
+      expect(supervisor.readThreadDetailSequence(remote, threadId)).toBe(13);
+    });
+
+    it("takes the snapshot of an older node that ignores the resume point", async () => {
+      const { supervisor, windows } = setup({ isHostedMode });
+      const hub = hubConnection(source);
+      supervisor.register(hub.connection);
+      supervisor.retainThreadDetailSubscription(remote, threadId, { view: true });
+      hub.latest().emit(windowSnapshot(5));
+      expect(await settle(hub.latest().open())).toBe(5);
+      hub.latest().emit(windowSnapshot(8));
+      expect(windows).toEqual([5, 8]);
+      expect(supervisor.readThreadDetailSequence(remote, threadId)).toBe(8);
+    });
   });
 });
 
@@ -2824,6 +3149,30 @@ describe("shell frame batching", () => {
     supervisor.applyShellEvent(upsert(4), remote);
     supervisor.resetShellProjection(remote);
     expect(calls[0]).toBe("commit:4");
+    expect(supervisor.readShellProjectionSequence(remote)).toBeNull();
+  });
+});
+
+describe("shell resume point", () => {
+  it("offers no resume point for a shell the store no longer holds as live", () => {
+    let live = true;
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: {
+        applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) =>
+          events.map(() => undefined),
+        afterShellEventApplied: () => undefined,
+        syncServerShellSnapshot: () => undefined,
+        reconcileSnapshotDerivedState: () => undefined,
+        isEnvironmentShellLive: () => live,
+      },
+    });
+    supervisor.syncShellSnapshot(
+      { snapshotSequence: 40, updatedAt: null, projects: [], threads: [] } as never,
+      remote,
+    );
+    expect(supervisor.readShellProjectionSequence(remote)).toBe(40);
+    // Demoted to last-known state (sessions cleared) or filled from a cache.
+    live = false;
     expect(supervisor.readShellProjectionSequence(remote)).toBeNull();
   });
 });

@@ -90,8 +90,18 @@ export interface ShellSubscriptionOptions extends ResumableSubscriptionOptions {
   readonly archivedThreads?: "stub";
 }
 
-/** Options for a thread subscription; see `OrchestrationThreadHistoryRecoveryMode`. */
-export interface ThreadSubscriptionOptions extends ResumableSubscriptionOptions {
+/**
+ * Options for a thread subscription; see `OrchestrationThreadHistoryRecoveryMode`.
+ * Its resume point may be a promise: the request then waits for it, read again
+ * at every (re)subscription. A connection whose resume must wait for its session
+ * to accept a fresh thread list (a Hub relay) answers that way; `signal` aborts
+ * when the attempt is given up, and the promise must not reject.
+ */
+export interface ThreadSubscriptionOptions extends Omit<
+  ResumableSubscriptionOptions,
+  "resumeFromSequence"
+> {
+  readonly resumeFromSequence?: (signal: AbortSignal) => number | null | PromiseLike<number | null>;
   /** Read at every (re)subscription: whether an open view needs the thread now. */
   readonly historyRecovery?: () => OrchestrationThreadHistoryRecoveryMode;
 }
@@ -105,17 +115,47 @@ export interface VcsStatusStreamMeta {
   readonly remoteKnown: boolean;
 }
 
-const resumeInput = (options: ResumableSubscriptionOptions | undefined) => {
-  const resumeFromSequence = options?.resumeFromSequence?.() ?? null;
-  return resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
-};
+const resumePointInput = (resumeFromSequence: number | null) =>
+  resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
 
-const threadSubscriptionInput = (options: ThreadSubscriptionOptions | undefined) => {
-  const historyRecovery = options?.historyRecovery?.();
-  return {
-    ...resumeInput(options),
-    ...(historyRecovery === undefined ? {} : { historyRecovery }),
+const resumeInput = (options: ResumableSubscriptionOptions | undefined) =>
+  resumePointInput(options?.resumeFromSequence?.() ?? null);
+
+const isPromiseLike = <A>(value: A | PromiseLike<A>): value is PromiseLike<A> =>
+  typeof value === "object" && value !== null && "then" in value;
+
+/**
+ * Opens a thread stream once its resume point is known: at once for a plain
+ * value, after the promise settles otherwise. The history mode is read when
+ * the request goes out.
+ */
+const threadSubscriptionStream = <A>(
+  options: ThreadSubscriptionOptions | undefined,
+  open: (input: {
+    readonly resumeFromSequence?: number;
+    readonly historyRecovery?: OrchestrationThreadHistoryRecoveryMode;
+  }) => Stream.Stream<A, Error, never>,
+): Stream.Stream<A, Error, never> => {
+  const openFrom = (resumeFromSequence: number | null) => {
+    const historyRecovery = options?.historyRecovery?.();
+    return open({
+      ...resumePointInput(resumeFromSequence),
+      ...(historyRecovery === undefined ? {} : { historyRecovery }),
+    });
   };
+  const resumeFromSequence = options?.resumeFromSequence;
+  if (resumeFromSequence === undefined) return openFrom(null);
+  // A stream attempt that is given up interrupts the wait; the signal tells
+  // the caller to stop waiting too.
+  const controller = new AbortController();
+  const point = resumeFromSequence(controller.signal);
+  if (!isPromiseLike(point)) return openFrom(point);
+  return Stream.unwrap(
+    Effect.promise((signal) => {
+      signal.addEventListener("abort", () => controller.abort(), { once: true });
+      return point;
+    }).pipe(Effect.map(openFrom)),
+  );
 };
 
 const transportSubscribeOptions = (
@@ -1555,20 +1595,18 @@ export function createWsRpcClient(
       subscribeThread: (input, listener, options) =>
         transport.subscribe(
           (client) =>
-            client[ORCHESTRATION_WS_METHODS.subscribeThread]({
-              ...input,
-              ...threadSubscriptionInput(options),
-            }),
+            threadSubscriptionStream(options, (resume) =>
+              client[ORCHESTRATION_WS_METHODS.subscribeThread]({ ...input, ...resume }),
+            ),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThread),
         ),
       subscribeThreadWindow: (input, listener, options) =>
         transport.subscribe(
           (client) =>
-            client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow]({
-              ...input,
-              ...threadSubscriptionInput(options),
-            }),
+            threadSubscriptionStream(options, (resume) =>
+              client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow]({ ...input, ...resume }),
+            ),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThreadWindow),
         ),

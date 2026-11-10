@@ -80,6 +80,12 @@ const THREAD_WINDOW_BACKFILL_COLLECTIONS = ["messages", "activities"] as const;
 /** Backoff for re-requesting a window the server failed to load (not a size or support failure). */
 const THREAD_WINDOW_RETRY_BASE_MS = 1_000;
 const THREAD_WINDOW_RETRY_MAX_MS = 30_000;
+/**
+ * How long a thread on a Hub relay waits for its session to accept a fresh
+ * thread list before it resumes. Past it the thread loads a fresh window, as
+ * it did before relays resumed.
+ */
+export const THREAD_RESUME_SESSION_WAIT_MS = 20_000;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
 /**
  * A page or window that comes back into view does not reconnect a socket only because its last
@@ -186,6 +192,26 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly listThreadBodies?: () => ReadonlyArray<ThreadBodyUsage>;
   readonly evictThreadBodies?: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void;
   readonly isThreadBodyProtected?: (threadRef: ScopedThreadRef) => boolean;
+  /**
+   * Whether the store holds a body of the thread that a resume may extend: one
+   * this supervisor's subscriptions delivered (`holdsLiveThreadBody`), or one
+   * the platform restored from its own saved copy of a thread window (see
+   * `readRestoredThreadSequence`), never one a display cache filled in. With
+   * it, a thread's resume point outlives its subscription: reopening the
+   * thread, or a connection registering again, resumes after the last event
+   * the body holds instead of loading the window again. Without it a resume
+   * point lives only as long as one attached subscription.
+   */
+  readonly holdsThreadBody?: (threadRef: ScopedThreadRef) => boolean;
+  /**
+   * The sequence a body the platform restored from its own saved copy is
+   * current to, for a thread this supervisor holds no resume point for. Only
+   * a complete thread window may answer (messages, activities, plans and
+   * checkpoints as the window delivered them, saved with
+   * `readThreadDetailSequence`); a display-only copy answers null and is
+   * reloaded.
+   */
+  readonly readRestoredThreadSequence?: (threadRef: ScopedThreadRef) => number | null;
   readonly syncThreadDetailSnapshot: (environmentId: EnvironmentId, snapshot: unknown) => void;
   /**
    * Ask windows and history pages for bounded activity previews. Only a client
@@ -327,6 +353,13 @@ type ThreadDetailSubscriptionEntry = {
    */
   idleSince: number | null;
   protocol: "bounded" | "legacy";
+  /**
+   * The last sequence the store's body of this thread holds: the snapshot's,
+   * then each event applied on top. A replacement subscription (a reconnect, a
+   * connection registering again) resumes after it; `null` asks for a fresh
+   * window.
+   */
+  appliedSequence: number | null;
   /** The window this subscription asks for; shrunk after a response too large to carry. */
   windowLimits: OrchestrationThreadHistoryLimits;
   /**
@@ -343,6 +376,13 @@ type ThreadBodyAccess = Pick<
   ThreadDetailSubscriptionEntry,
   "lastAccessedAt" | "speculativeOnly" | "estimatedRetainedBytes"
 >;
+
+/**
+ * A body the store keeps after its subscription went: how it was used, and
+ * where a subscription that opens it again resumes.
+ */
+type DepartedThreadBody = ThreadBodyAccess &
+  Pick<ThreadDetailSubscriptionEntry, "appliedSequence" | "retainedRows">;
 
 export interface ThreadDetailSubscriptionReleaseOptions {
   /**
@@ -423,8 +463,21 @@ export interface EnvironmentConnectionSupervisor {
   /** Commits buffered shell items now (tests, teardown). */
   readonly flushShellEvents: () => void;
   readonly resetShellProjection: (environmentId: EnvironmentId) => void;
-  /** The last shell sequence applied for an environment, for resuming its subscription. */
+  /**
+   * The last shell sequence applied for an environment, for resuming its
+   * subscription; `null` once the store no longer holds that shell as live
+   * (`EnvironmentStateSink.isEnvironmentShellLive`).
+   */
   readonly readShellProjectionSequence: (environmentId: EnvironmentId) => number | null;
+  /**
+   * The sequence the store's body of a thread is current to, while this
+   * supervisor holds a resume point for it; for a platform that saves thread
+   * windows and resumes from them (`readRestoredThreadSequence`).
+   */
+  readonly readThreadDetailSequence: (
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+  ) => number | null;
   readonly syncShellSnapshot: (
     snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
@@ -512,7 +565,7 @@ export function createEnvironmentConnectionSupervisor<
   // When, and how large, the thread bodies of disposed subscriptions were last
   // used. The store keeps those bodies after the subscription goes; this is
   // what ranks them for the residency pass until they are dropped.
-  const departedThreadBodies = new Map<string, ThreadBodyAccess>();
+  const departedThreadBodies = new Map<string, DepartedThreadBody>();
   const residencyConfigured =
     input.listThreadBodies !== undefined && input.evictThreadBodies !== undefined;
   const projectionTracker = createProjectionTracker();
@@ -768,6 +821,39 @@ export function createEnvironmentConnectionSupervisor<
     // An older server ignores the mode altogether; nothing to retry.
     void setMode({ threadId: entry.threadId, mode: historyRecoveryMode(entry) }).catch(NOOP);
   };
+  /** Whether the store still holds the body the entry's resume point belongs to. */
+  const holdsResumableBody = (entry: ThreadDetailSubscriptionEntry) =>
+    input.holdsThreadBody === undefined ||
+    input.holdsThreadBody(scopeThreadRef(entry.environmentId, entry.threadId));
+  /**
+   * Resolves true once the connection's session is current, false when it is
+   * not within {@link THREAD_RESUME_SESSION_WAIT_MS} or the wait is given up.
+   */
+  const waitForSessionReadiness = (connection: EnvironmentConnection, signal: AbortSignal) =>
+    new Promise<boolean>((resolve) => {
+      let settled = false;
+      let unsubscribe: () => void = NOOP;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      const settle = (ready: boolean) => {
+        if (settled) return;
+        settled = true;
+        unsubscribe();
+        if (timeoutId !== null) input.clearTimeout(timeoutId);
+        signal.removeEventListener("abort", onAbort);
+        resolve(ready);
+      };
+      const onAbort = () => settle(false);
+      if (signal.aborted) {
+        settle(false);
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      unsubscribe = connection.sessionReadiness.subscribe(() => {
+        if (connection.sessionReadiness.read()) settle(true);
+      });
+      timeoutId = input.setTimeout(() => settle(false), THREAD_RESUME_SESSION_WAIT_MS);
+      if (connection.sessionReadiness.read()) settle(true);
+    });
   const isMissingFromShell = (environmentId: EnvironmentId, threadId: ThreadId) => {
     const threadIds = shellThreadIdsByEnvironment.get(environmentId);
     return threadIds !== undefined && !threadIds.has(threadId);
@@ -795,34 +881,54 @@ export function createEnvironmentConnectionSupervisor<
       environmentId: entry.environmentId,
       threadId: entry.threadId,
     };
-    // The last sequence this subscription applied. A replacement subscription
-    // after a reconnect resumes after it instead of reloading the thread. Hosted
-    // and Hub-relayed connections always take a fresh snapshot.
-    let appliedSequence: number | null = null;
-    const resumable = !input.isHostedMode() && connection.knownEnvironment.source !== "hub-hosted";
+    // A platform that cannot tell whether the store still holds the body this
+    // resume point belongs to resumes only within one attached subscription.
+    if (input.holdsThreadBody === undefined) entry.appliedSequence = null;
+    // A replacement subscription resumes after the body's last sequence. On a
+    // Hub relay (hosted mode, or a Hub-hosted machine) it first waits until
+    // this connection's session has accepted a fresh thread list of its own
+    // current attempt and generation (`sessionReadiness`), so a resume never
+    // rests on a list a lost channel or a replaced generation delivered.
+    const resumeWaitsForSession =
+      input.isHostedMode() || connection.knownEnvironment.source === "hub-hosted";
+    const resumeFromSequence = (signal: AbortSignal): number | null | Promise<number | null> => {
+      const sequence = entry.appliedSequence;
+      if (sequence === null) return null;
+      if (!holdsResumableBody(entry)) {
+        entry.appliedSequence = null;
+        return null;
+      }
+      if (!resumeWaitsForSession || connection.sessionReadiness.read()) return sequence;
+      return waitForSessionReadiness(connection, signal).then((ready) =>
+        ready && active && read(entry.environmentId) === connection && holdsResumableBody(entry)
+          ? entry.appliedSequence
+          : null,
+      );
+    };
     const subscriptionOptions = {
-      ...(resumable ? { resumeFromSequence: () => appliedSequence } : {}),
+      resumeFromSequence,
       historyRecovery: () => historyRecoveryMode(entry),
     };
     const applyEvent = (event: OrchestrationWireEvent) => {
-      appliedSequence = Math.max(appliedSequence ?? 0, event.sequence);
+      entry.appliedSequence = Math.max(entry.appliedSequence ?? 0, event.sequence);
       // An event type a newer node added: skipped, but a resume starts after it.
       if (skipNewerNodeContent(entry.environmentId, event)) return;
       recordRetainedEvent(entry, event);
       scheduleEvictToCapacity();
       input.applyThreadDetailEvent(entry.environmentId, event);
     };
-    const subscribeLegacy = () => {
+    const subscribeLegacy = (fallback: boolean) => {
       if (!active) return;
       entry.protocol = "legacy";
       unsubscribeCurrent();
-      appliedSequence = null;
+      // A server without bounded windows: start over from its own snapshot.
+      if (fallback) entry.appliedSequence = null;
       unsubscribeCurrent = connection.client.orchestration.subscribeThread(
         { threadId: entry.threadId },
         (item) => {
           if (skipNewerNodeContent(entry.environmentId, item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
-            appliedSequence = item.snapshot.snapshotSequence;
+            entry.appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
             recordRetainedSnapshot(entry, item.snapshot);
             evictToCapacity();
@@ -848,7 +954,7 @@ export function createEnvironmentConnectionSupervisor<
     };
     const subscribeWindow = connection.client.orchestration.subscribeThreadWindow;
     if (entry.protocol === "legacy" || subscribeWindow === undefined) {
-      subscribeLegacy();
+      subscribeLegacy(entry.protocol !== "legacy");
       return true;
     }
     // A failure can arrive synchronously, before the subscription below has
@@ -858,7 +964,7 @@ export function createEnvironmentConnectionSupervisor<
     const handleWindowFailure = (kind: SubscriptionFailureKind | undefined) => {
       if (!active) return;
       if (kind === "unsupported") {
-        subscribeLegacy();
+        subscribeLegacy(true);
         return;
       }
       unsubscribeCurrent();
@@ -901,7 +1007,7 @@ export function createEnvironmentConnectionSupervisor<
           failedWindowAttempts = 0;
           if (skipNewerNodeContent(entry.environmentId, item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
-            appliedSequence = item.snapshot.snapshotSequence;
+            entry.appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
             recordRetainedSnapshot(entry, item.snapshot);
             evictToCapacity();
@@ -985,6 +1091,8 @@ export function createEnvironmentConnectionSupervisor<
         lastAccessedAt: entry.lastAccessedAt,
         speculativeOnly: entry.speculativeOnly,
         estimatedRetainedBytes: entry.estimatedRetainedBytes,
+        appliedSequence: entry.appliedSequence,
+        retainedRows: entry.retainedRows,
       });
     }
     scheduleResidencyPass();
@@ -1176,9 +1284,11 @@ export function createEnvironmentConnectionSupervisor<
       }
       // Still retained (a draft before its first send): detach and wait for the
       // shell to list the thread, so its creation still starts the stream.
+      // Whatever lists it then starts from that thread's own snapshot.
       historyPagination.invalidate({ environmentId, threadId: entry.threadId });
       entry.unsubscribe();
       entry.unsubscribe = NOOP;
+      entry.appliedSequence = null;
     }
   };
 
@@ -1203,9 +1313,9 @@ export function createEnvironmentConnectionSupervisor<
     shellThreadIdsByEnvironment.delete(environmentId);
     historyPagination.clearEnvironment(environmentId);
     emit();
-    // A hosted connection never resumes, so a cached idle stream would only
-    // reload from scratch when the node comes back: drop it now. The rows it
-    // delivered stay in the store.
+    // A hosted connection's idle cached streams go now: the rows they delivered
+    // stay in the store, and a retain resumes from them (`departedThreadBodies`)
+    // once the connection that comes back has accepted its fresh thread list.
     const disposeIdle = input.isHostedMode() || connection.knownEnvironment.source === "hub-hosted";
     for (const [key, entry] of threadDetailSubscriptions) {
       if (entry.environmentId !== environmentId) continue;
@@ -1220,6 +1330,24 @@ export function createEnvironmentConnectionSupervisor<
     await connection.dispose();
     return true;
   };
+  /**
+   * Where a new subscription of a thread whose body the store holds resumes:
+   * after the last sequence of the subscription that delivered it, or of the
+   * platform's own saved window. Null loads a fresh window.
+   */
+  const resumePointFor = (
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    departed: DepartedThreadBody | undefined,
+  ): { readonly sequence: number; readonly departed: DepartedThreadBody | null } | null => {
+    const ref = scopeThreadRef(environmentId, threadId);
+    if (input.holdsThreadBody === undefined || !input.holdsThreadBody(ref)) return null;
+    if (departed !== undefined && departed.appliedSequence !== null) {
+      return { sequence: departed.appliedSequence, departed };
+    }
+    const restored = input.readRestoredThreadSequence?.(ref) ?? null;
+    return restored === null ? null : { sequence: restored, departed: null };
+  };
   const retain = (
     environmentId: EnvironmentId,
     threadId: ThreadId,
@@ -1227,6 +1355,10 @@ export function createEnvironmentConnectionSupervisor<
   ) => {
     const key = keyFor(environmentId, threadId);
     const existing = threadDetailSubscriptions.get(key);
+    // A body the store kept after its subscription went resumes where it stopped.
+    const departed = existing === undefined ? departedThreadBodies.get(key) : undefined;
+    const resumed =
+      existing === undefined ? resumePointFor(environmentId, threadId, departed) : null;
     const entry = existing ?? {
       environmentId,
       threadId,
@@ -1242,9 +1374,10 @@ export function createEnvironmentConnectionSupervisor<
         options?.speculative === true && departedThreadBodies.get(key)?.speculativeOnly !== false,
       idleSince: null,
       protocol: "bounded" as const,
+      appliedSequence: resumed?.sequence ?? null,
       windowLimits: THREAD_WINDOW_LIMITS,
-      estimatedRetainedBytes: 0,
-      retainedRows: createRetainedThreadBytes(),
+      estimatedRetainedBytes: resumed?.departed?.estimatedRetainedBytes ?? 0,
+      retainedRows: resumed?.departed?.retainedRows ?? createRetainedThreadBytes(),
     };
     if (!existing) threadDetailSubscriptions.set(key, entry);
     // A new subscription's first window is sized to the screen (`threadWindowInitialLimits`).
@@ -1831,7 +1964,21 @@ export function createEnvironmentConnectionSupervisor<
     },
     readShellProjectionSequence: (environmentId) => {
       flushShellEvents();
+      // A shell demoted to last-known state (its sessions cleared) or replaced
+      // by a cache cannot take a replay on top: it needs a fresh snapshot.
+      if (input.stateSink.isEnvironmentShellLive?.(environmentId) === false) return null;
       return projectionTracker.read(environmentId)?.sequence ?? null;
+    },
+    readThreadDetailSequence: (environmentId, threadId) => {
+      const key = keyFor(environmentId, threadId);
+      const sequence =
+        threadDetailSubscriptions.get(key)?.appliedSequence ??
+        departedThreadBodies.get(key)?.appliedSequence ??
+        null;
+      return sequence !== null &&
+        input.holdsThreadBody?.(scopeThreadRef(environmentId, threadId)) === true
+        ? sequence
+        : null;
     },
     syncShellSnapshot,
     subscribeShellAcceptance: (listener) => {

@@ -97,6 +97,7 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import {
   hasUnsentThreadWork,
+  holdsLiveThreadBody,
   isThreadNonIdle,
   selectThreadBodyUsage,
 } from "@ryco/client-runtime/state/threads/threadBodyResidency";
@@ -222,6 +223,8 @@ function getEnvironmentSupervisor() {
       isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
     listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),
     evictThreadBodies: (threadRefs) => useStore.getState().evictThreadBodies(threadRefs),
+    // A thread reopened while its body is still held resumes after its last event.
+    holdsThreadBody: (threadRef) => holdsLiveThreadBody(useStore.getState(), threadRef),
     isThreadBodyProtected: (threadRef) =>
       hasUnsentThreadWork(threadRef, {
         queuesByThreadKey: useMessageQueueStore.getState().queuesByThreadKey,
@@ -758,8 +761,9 @@ function createEnvironmentConnectionHandlers(
   options: {
     /**
      * Resume the shell after a reconnect instead of taking a fresh snapshot.
-     * Direct connections only: a hosted session must accept a current snapshot
-     * before it regains mutation authority.
+     * A fenced (hosted) connection resumes only the list its own generation
+     * accepted, and a resume the node verified counts as its current list: the
+     * session regains mutation authority as it would from a snapshot.
      */
     readonly resumeShell?: boolean;
   } = {},
@@ -780,15 +784,20 @@ function createEnvironmentConnectionHandlers(
       .ready(environmentId, refreshGeneration, isAuthoritativelyReady)
       .catch(() => undefined);
   };
-  const resumeShell = options.resumeShell === true && fence === null;
   return {
-    ...(resumeShell
+    ...(options.resumeShell === true
       ? {
           readShellResumeSequence: (environmentId: EnvironmentId) =>
-            getEnvironmentSupervisor().readShellProjectionSequence(environmentId),
-          skipShellEvent: (sequence: number, environmentId: EnvironmentId) =>
-            getEnvironmentSupervisor().skipShellEvent(sequence, environmentId),
+            acceptsEvent()
+              ? getEnvironmentSupervisor().readShellProjectionSequence(environmentId)
+              : null,
+          skipShellEvent: (sequence: number, environmentId: EnvironmentId) => {
+            if (!acceptsEvent()) return;
+            getEnvironmentSupervisor().skipShellEvent(sequence, environmentId);
+          },
           onShellResumed: (environmentId: EnvironmentId) => {
+            if (!acceptsEvent()) return;
+            fence?.markReady(environmentId);
             completeQueryRefresh(environmentId);
           },
         }
@@ -1246,7 +1255,8 @@ export async function connectHostedEnvironment(
       node,
       generation,
       sessions,
-      handlersFor: (fence) => createEnvironmentConnectionHandlers(fence, environmentId),
+      handlersFor: (fence) =>
+        createEnvironmentConnectionHandlers(fence, environmentId, { resumeShell: true }),
       isDemanded: () => isHostedEnvironmentDemanded(environmentId),
     }),
   );
@@ -1371,7 +1381,8 @@ export async function connectDesktopWorkspaceEnvironment(input: {
           descriptor: payload.environment,
         });
       },
-      ...createEnvironmentConnectionHandlers(),
+      // A relay reconnect resumes the list this connection accepted.
+      ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
     }),
   );
   void loadDesktopHubLinkedRoutes()

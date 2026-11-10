@@ -8,10 +8,16 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import { scopeThreadRef } from "../../scoped.ts";
-import type { AppState, EnvironmentState } from "./store.ts";
+import {
+  demoteEnvironmentStateToCachedSnapshot,
+  type AppState,
+  type EnvironmentState,
+} from "./store.ts";
 import {
   hasComposerDraftContent,
   hasUnsentThreadWork,
+  holdsLiveThreadBody,
+  isEnvironmentShellLive,
   isThreadNonIdle,
   planThreadBodyResidency,
   selectThreadBodyUsage,
@@ -79,6 +85,41 @@ function summary(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as never;
 }
+
+describe("resume preconditions", () => {
+  const message = { id: MessageId.make("message-1") } as never;
+  const withBody = { messageByThreadId: { [threadId]: { "message-1": message } } } as never;
+
+  it("holds a live body only for a thread whose messages a subscription delivered", () => {
+    expect(holdsLiveThreadBody(appState(), ref)).toBe(false);
+    expect(holdsLiveThreadBody(appState(withBody), ref)).toBe(true);
+    expect(
+      holdsLiveThreadBody(appState({ messageByThreadId: { [threadId]: {} } } as never), ref),
+    ).toBe(true);
+    // Messages a display cache filled in are not a body a resume may extend.
+    expect(
+      holdsLiveThreadBody(
+        appState({ ...(withBody as object), cachedMessageThreadIds: { [threadId]: true } }),
+        ref,
+      ),
+    ).toBe(false);
+    expect(
+      holdsLiveThreadBody(appState(withBody), scopeThreadRef(otherEnvironmentId, threadId)),
+    ).toBe(false);
+  });
+
+  it("counts a shell as live only between a snapshot and its demotion", () => {
+    expect(isEnvironmentShellLive(appState(), environmentId)).toBe(true);
+    expect(isEnvironmentShellLive(appState({ bootstrapComplete: false }), environmentId)).toBe(
+      false,
+    );
+    expect(isEnvironmentShellLive(appState(), otherEnvironmentId)).toBe(false);
+    const demoted = demoteEnvironmentStateToCachedSnapshot(appState(withBody), environmentId, 1);
+    expect(isEnvironmentShellLive(demoted, environmentId)).toBe(false);
+    // The body survives the demotion: its thread can still resume.
+    expect(holdsLiveThreadBody(demoted, ref)).toBe(true);
+  });
+});
 
 describe("isThreadNonIdle", () => {
   it("is false for a thread or environment the store does not know", () => {
