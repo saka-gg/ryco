@@ -20,6 +20,62 @@ const SafeCounter = Schema.Number.check(
 export const PUSH_ALERT_TITLE_MAX_LENGTH = 120;
 /** Longest approval request id a sealed payload carries; a longer one is left out. */
 export const PUSH_ALERT_REQUEST_ID_MAX_LENGTH = 160;
+/**
+ * Most UTF-8 bytes the excerpt (`x`) of a sealed payload takes, as JSON: about a kilobyte of the
+ * question or the approval's command. The node trims it further when the seal would not fit the
+ * Hub's {@link PushAttentionSignalResult.fields.sealedMaxLength}.
+ */
+export const PUSH_ALERT_EXCERPT_MAX_BYTES = 1_024;
+
+const ApprovalRequestKindLiteral = Schema.Literals(["command", "file-read", "file-change"]);
+
+/**
+ * An approval's excerpt: what the agent asks to do, as its card shows it. Text cut short ends
+ * with "…".
+ */
+export const PushAlertApprovalExcerpt = Schema.Struct({
+  /** The request kind: run a command, read a file, change a file. */
+  k: ApprovalRequestKindLiteral,
+  /** The command or the path (the card's detail). */
+  d: Schema.optionalKey(Schema.String),
+  /** The provider's own reason for asking. */
+  r: Schema.optionalKey(Schema.String),
+});
+export type PushAlertApprovalExcerpt = typeof PushAlertApprovalExcerpt.Type;
+
+export const PushAlertQuestionExcerpt = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  /** The question's short header. */
+  h: Schema.optionalKey(Schema.String),
+  q: Schema.String,
+  /** Its option labels, in order (descriptions are left out). */
+  o: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** More than one option may be picked. */
+  m: Schema.optionalKey(Schema.Literal(true)),
+});
+export type PushAlertQuestionExcerpt = typeof PushAlertQuestionExcerpt.Type;
+
+/** A question's excerpt: the agent's questions, so the app can show their card at once. */
+export const PushAlertInputExcerpt = Schema.Struct({
+  /** The question's request id. */
+  rq: TrimmedNonEmptyString,
+  /** Its request event id, which keys the app's answer drafts; absent when the node has none. */
+  ev: Schema.optionalKey(TrimmedNonEmptyString),
+  qs: Schema.Array(PushAlertQuestionExcerpt).check(Schema.isMinLength(1)),
+  /** Set when questions or options were left out to fit: the card shows, but answers wait. */
+  c: Schema.optionalKey(Schema.Literal(true)),
+});
+export type PushAlertInputExcerpt = typeof PushAlertInputExcerpt.Type;
+
+/**
+ * The excerpt (`x`) of an approval or question alert (`docs/push-alerts.md`): sealed with the
+ * rest, at most {@link PUSH_ALERT_EXCERPT_MAX_BYTES}. Older phones ignore it.
+ */
+export const PushAlertExcerpt = Schema.Union([
+  Schema.Struct({ a: PushAlertApprovalExcerpt }),
+  Schema.Struct({ u: PushAlertInputExcerpt }),
+]);
+export type PushAlertExcerpt = typeof PushAlertExcerpt.Type;
 
 /**
  * The opened payload. Short keys keep the sealed blob small: APNs caps the
@@ -42,6 +98,11 @@ export const PushAlertPlaintext = Schema.Struct({
   rq: Schema.optionalKey(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PUSH_ALERT_REQUEST_ID_MAX_LENGTH)),
   ),
+  /**
+   * What the person is asked: the approval's command, or the questions. Only on approval and
+   * question alerts, and only from nodes that send it; older phones ignore it.
+   */
+  x: Schema.optionalKey(PushAlertExcerpt),
   /** The signal's sequence; also bound into the seal's associated data. */
   q: SafeCounter,
   /** When the node sealed it, epoch milliseconds. */
@@ -55,8 +116,18 @@ export const PUSH_ATTENTION_SIGNAL_PATH = "/api/node/attention/signal";
 export const PUSH_ATTENTION_MAX_DELIVERIES = 32;
 /** base64url of 1 version byte, a 32-byte key, a 16-byte tag and some plaintext. */
 export const PUSH_SEALED_MIN_LENGTH = 66;
-/** base64url of a 1,024-byte blob. */
-export const PUSH_SEALED_MAX_LENGTH = 1_366;
+/** The bytes a seal adds to its plaintext: the version byte, the ephemeral key and the tag. */
+export const PUSH_SEALED_OVERHEAD_BYTES = 49;
+/**
+ * base64url of a 1,024-byte blob: what every Hub takes. A node seals to this until the Hub's
+ * answer names a larger {@link PushAttentionSignalResult.fields.sealedMaxLength}.
+ */
+export const PUSH_SEALED_LEGACY_MAX_LENGTH = 1_366;
+/**
+ * base64url of a 2,048-byte blob: room for an excerpt. With the Hub's own fields the APNs
+ * payload stays near 3 KB, well under its 4 KB limit.
+ */
+export const PUSH_SEALED_MAX_LENGTH = 2_731;
 
 /** One device's sealed alert. The Hub routes it by enrollment and never opens it. */
 export const PushAttentionDelivery = Schema.Struct({
@@ -98,6 +169,11 @@ export type PushAttentionDeliveryStatus = typeof PushAttentionDeliveryStatus.Typ
 export const PushAttentionSignalResult = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   sequence: SafeCounter,
+  /**
+   * The longest `sealed` this Hub takes, between {@link PUSH_SEALED_LEGACY_MAX_LENGTH} and
+   * {@link PUSH_SEALED_MAX_LENGTH}. Absent from older Hubs, which take the legacy length only.
+   */
+  sealedMaxLength: Schema.optionalKey(SafeCounter),
   results: Schema.Array(
     Schema.Struct({
       enrollmentId: NativeE2eeEnrollmentId,
@@ -136,6 +212,11 @@ export const NativePushCapability = Schema.Struct({
    * (`docs/live-activity-push.md`). Absent from Hubs without them.
    */
   liveActivities: Schema.optional(Schema.Boolean),
+  /**
+   * The Hub also takes push-to-start tokens (iOS 17.2+) and starts a card when a node asks
+   * (`docs/live-activity-push.md`). Absent from Hubs without it.
+   */
+  liveActivityStart: Schema.optional(Schema.Boolean),
 });
 export type NativePushCapability = typeof NativePushCapability.Type;
 
@@ -154,6 +235,14 @@ export const NativePushRegistrationInput = Schema.Struct({
    * Hub whose capability says `liveActivities`; a registration without it drops the earlier one.
    */
   liveActivityToken: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64,512}$/u))),
+  /**
+   * The app's push-to-start token, hex: only while the person turned on starting a card when a
+   * task begins, and only to a Hub whose capability says `liveActivityStart`. A registration
+   * without it drops the earlier one.
+   */
+  liveActivityStartToken: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[0-9a-f]{64,512}$/u)),
+  ),
 });
 export type NativePushRegistrationInput = typeof NativePushRegistrationInput.Type;
 
@@ -194,6 +283,12 @@ export type PushActivityCounts = typeof PushActivityCounts.Type;
 export const PushActivityEntry = Schema.Struct({
   enrollmentId: NativeE2eeEnrollmentId,
   counts: PushActivityCounts,
+  /**
+   * A turn began on this node while, as far as it knows, the device shows no card: the Hub may
+   * start one with these counts when the device registered a push-to-start token. Older Hubs
+   * ignore it.
+   */
+  start: Schema.optionalKey(Schema.Literal(true)),
 });
 export type PushActivityEntry = typeof PushActivityEntry.Type;
 
@@ -211,11 +306,14 @@ export type PushActivitySignalInput = typeof PushActivitySignalInput.Type;
 
 /**
  * What the Hub did with one entry: `accepted` (it holds these counts for the device and sends
- * the sum when it changes), `no-token` (the device shows no card that takes pushes; nothing is
- * kept), `not-authorized` (the node forgets the device), `rate-limited` (try again later).
+ * the sum when it changes), `started` (it asked iOS to start a card with them, and holds them),
+ * `no-token` (the device shows no card that takes pushes; nothing is kept), `not-authorized`
+ * (the node forgets the device), `rate-limited` (try again later). Only an entry with `start`
+ * can be answered `started`.
  */
 export const PushActivityEntryStatus = Schema.Literals([
   "accepted",
+  "started",
   "no-token",
   "not-authorized",
   "rate-limited",
