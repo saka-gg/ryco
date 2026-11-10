@@ -24,7 +24,10 @@ export function shellPromptShown(output: string): boolean {
   return output.includes(LINE_EDITOR_READY);
 }
 
-type TerminalApi = Pick<EnvironmentApi["terminal"], "open" | "write" | "close" | "onEvent">;
+type TerminalApi = Pick<
+  EnvironmentApi["terminal"],
+  "open" | "write" | "close" | "onEvent" | "attachOutput"
+>;
 
 /**
  * Resolves once the shell's line editor is reading (bracketed paste switched
@@ -96,6 +99,9 @@ export async function runScriptInTerminal(input: {
   readonly quietMs?: number;
 }): Promise<void> {
   const { api, threadId, terminalId, request } = input;
+  // The readiness check reads the new shell's output, which a node that scopes output sends
+  // only while someone holds it; held from before the open until the command is typed.
+  const releaseOutput = api.attachOutput?.({ threadId, terminalId }) ?? (() => undefined);
   const shell = shellReady(api, threadId, terminalId, {
     timeoutMs: input.timeoutMs ?? SHELL_READY_TIMEOUT_MS,
     quietMs: input.quietMs ?? SHELL_QUIET_MS,
@@ -113,6 +119,7 @@ export async function runScriptInTerminal(input: {
       });
     } catch (cause) {
       shell.cancel();
+      releaseOutput();
       throw cause;
     }
   })();
@@ -126,5 +133,8 @@ export async function runScriptInTerminal(input: {
     shell.cancel();
     await api.close({ threadId, terminalId }).catch(() => undefined);
     throw cause;
+  } finally {
+    // The terminal screen shown next holds it itself.
+    releaseOutput();
   }
 }

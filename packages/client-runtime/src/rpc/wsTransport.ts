@@ -9,6 +9,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as RpcClient from "effect/rpc/RpcClient";
 
+import type { EnvironmentId } from "@ryco/contracts";
 import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
 import {
@@ -529,6 +530,11 @@ class RpcTransport<Client> {
     } finally {
       this.reconnectOperation = null;
     }
+  }
+
+  /** The environment this transport connects, when its owner told it. */
+  environmentId(): EnvironmentId | null {
+    return this.lifecycleHandlers?.getEnvironmentId?.() ?? null;
   }
 
   isHeartbeatFresh(maxAgeMs = 15_000): boolean {

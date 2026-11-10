@@ -206,6 +206,14 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   terminalWriteRequireIdle: Schema.optionalKey(Schema.Boolean),
   /**
+   * `subscribeTerminalEvents` honours `output` (output only for terminals attached on the
+   * connection, acknowledged in-band with `outputScope`), `terminal.open` honours `attachOutput`,
+   * and the node answers `terminal.detachOutput` and `server.setConnectionVisibility`. Clients
+   * rely on the in-band acknowledgement, which also holds on hosted connections; absent on older
+   * servers, which send every terminal's output to every connection.
+   */
+  terminalOutputScope: Schema.optionalKey(Schema.Boolean),
+  /**
    * The node honours `lowerAgentProcessPriority` (agents run at a lower CPU priority); absent on
    * older servers, which drop the key.
    */

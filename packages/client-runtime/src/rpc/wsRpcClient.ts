@@ -14,6 +14,8 @@ import type {
   ThreadLocalServerList,
   ProviderSignInWireEvent,
   ServerSettingsPatch,
+  TerminalRef,
+  TerminalWireEvent,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
@@ -27,6 +29,7 @@ import {
 } from "@ryco/contracts/orchestration";
 import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import { WS_METHODS } from "@ryco/contracts/rpc";
+import { DEFAULT_TERMINAL_ID } from "@ryco/contracts/terminal";
 import {
   assertUsageContractVersion,
   isUsageContractRejection,
@@ -38,6 +41,8 @@ import * as Stream from "effect/Stream";
 
 import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
+import { readClientVisibility, subscribeClientVisibility } from "./clientVisibility.ts";
+import { createTerminalOutputScope } from "./terminalOutputScope.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
 import type { ProjectCopyRpcMethods } from "./projectCopyRpcClient.ts";
@@ -178,7 +183,21 @@ export interface WsRpcClient {
     readonly clear: RpcUnaryMethod<typeof WS_METHODS.terminalClear>;
     readonly restart: RpcUnaryMethod<typeof WS_METHODS.terminalRestart>;
     readonly close: RpcUnaryMethod<typeof WS_METHODS.terminalClose>;
-    readonly onEvent: RpcStreamMethod<typeof WS_METHODS.subscribeTerminalEvents>;
+    readonly onEvent: (
+      listener: (event: TerminalWireEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    /**
+     * Shows `ref` on this connection until the returned release: `open` then attaches its output
+     * before the snapshot, and a node that scopes output keeps sending it. Without a hold a
+     * scoping node sends only the terminal's metadata.
+     */
+    readonly attachOutput: (ref: TerminalRef) => () => void;
+    /**
+     * Whether output of terminals nobody held may have stayed away: the node acknowledged scoped
+     * output on this or an earlier connection to the environment.
+     */
+    readonly isOutputScoped: () => boolean;
   };
   readonly projects: {
     readonly listEntries: RpcUnaryMethod<typeof WS_METHODS.projectsListEntries>;
@@ -814,8 +833,20 @@ export function createWsRpcClient(
   },
 ): WsRpcClient {
   const projectCopy = lazyProjectCopyRpc(transport);
+  const terminalOutput = createTerminalOutputScope({
+    environmentId: () => transport.environmentId(),
+    detach: (ref) => transport.request((client) => client[WS_METHODS.terminalDetachOutput](ref)),
+    setVisibility: (visibility) =>
+      transport.request((client) =>
+        client[WS_METHODS.serverSetConnectionVisibility]({ visibility }),
+      ),
+    readVisibility: readClientVisibility,
+  });
+  const stopVisibility = subscribeClientVisibility(terminalOutput.visibilityChanged);
   return {
     dispose: async () => {
+      stopVisibility();
+      terminalOutput.dispose();
       await Promise.all([transport.dispose(), device?.dispose()]);
     },
     reconnect: async () => {
@@ -826,7 +857,18 @@ export function createWsRpcClient(
     hasReopenedSince: (sinceMs) => transport.hasReopenedSince(sinceMs),
     ...(device ? { device } : {}),
     terminal: {
-      open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),
+      open: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.terminalOpen](
+            !input.attachOutput &&
+              terminalOutput.isAttached({
+                threadId: input.threadId,
+                terminalId: input.terminalId ?? DEFAULT_TERMINAL_ID,
+              })
+              ? { ...input, attachOutput: true }
+              : input,
+          ),
+        ),
       write: (input) =>
         transport.request((client) => {
           const write = client[WS_METHODS.terminalWrite](input);
@@ -841,10 +883,19 @@ export function createWsRpcClient(
       onEvent: (listener, options) =>
         transport.subscribe(
           // History stays on `terminal.open`; catch-up events only carry session metadata.
-          (client) => client[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }),
-          listener,
+          // Output arrives only for terminals a surface holds (`attachOutput`).
+          (client) => client[WS_METHODS.subscribeTerminalEvents](terminalOutput.subscribeInput()),
+          (item) => {
+            if (!isUnknownUnionMember(item) && item.type === "outputScope") {
+              terminalOutput.acknowledge();
+              return;
+            }
+            listener(item);
+          },
           { ...options, tag: WS_METHODS.subscribeTerminalEvents },
         ),
+      attachOutput: (ref) => terminalOutput.attach(ref),
+      isOutputScoped: () => terminalOutput.mayHaveFilteredOutput(),
     },
     projects: {
       listEntries: (input) =>

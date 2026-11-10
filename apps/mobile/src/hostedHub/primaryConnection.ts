@@ -49,6 +49,7 @@ import {
 } from "./linkedDirectAccessRuntime";
 import { capLinkedRole } from "./linkedDirectAccess";
 import { setMobileDirectRoute } from "./linkedDirectAccessState";
+import { bindMobileClientVisibility } from "../connection/clientVisibility";
 
 /**
  * The supervisor's stream handlers a hosted node connection feeds. The
@@ -165,6 +166,7 @@ export function createHostedEnvironmentConnection(
   });
   // Device previews and input borrow the relay socket; its lifecycle owner manages it.
   // Video and live input ride the relay channel's frame tunnel (`hostedDeviceFrameSources`).
+  bindMobileClientVisibility();
   const client = dispatchReplay.wrap(
     createWsRpcClient(
       transport,

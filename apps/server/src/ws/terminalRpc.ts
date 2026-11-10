@@ -1,8 +1,10 @@
 import { Cause, Effect, Option, Queue, Stream } from "effect";
 import {
+  DEFAULT_TERMINAL_ID,
   ThreadId,
   TerminalInputRejectedError,
   type TerminalEvent,
+  type TerminalOutputScopeEvent,
   type TerminalSessionSnapshot,
   type TerminalSubscribeEventsInput,
   TerminalSubscriptionResyncError,
@@ -16,6 +18,11 @@ import {
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 import { makeCachedJsonBytes, observeArrays, rechunkByBudget, tapArray } from "./streamBatching.ts";
+import {
+  makeTerminalBackgroundHold,
+  makeTerminalOutputAttachments,
+  terminalSessionKey,
+} from "./terminalOutputScope.ts";
 
 const TERMINAL_SUBSCRIBER_CAPACITY = 256;
 /**
@@ -51,8 +58,11 @@ const terminalStreamChunkBudget = {
   sizeOf: terminalEventBytes,
 };
 
-const terminalSessionKey = (threadId: string, terminalId: string) =>
-  JSON.stringify([threadId, terminalId]);
+/** First item of a scoped stream: this node honours `output` and its companion methods. */
+const TERMINAL_OUTPUT_SCOPE_ACK: TerminalOutputScopeEvent = {
+  type: "outputScope",
+  scope: "attached",
+};
 
 /**
  * Catch-up event for a session that was already running when the subscription
@@ -80,6 +90,8 @@ export function terminalBootstrapEvent(
     ...(hasRunningSubprocess === undefined ? {} : { hasRunningSubprocess }),
   };
 }
+
+type TerminalStreamItemOut = TerminalEvent | TerminalOutputScopeEvent;
 
 export interface TerminalSubscriberLedger {
   bytes: number;
@@ -141,7 +153,9 @@ export function makeTerminalSubscriberOffer(
 }
 
 export const makeTerminalHandlers = (ctx: WsRpcContext) => {
-  const { ownerEffect, ownerStream, terminalManager } = ctx;
+  const { ownerEffect, ownerStream, terminalManager, connectionVisibility } = ctx;
+  // Per connection: the handlers are built for each socket and relay channel.
+  const outputAttachments = makeTerminalOutputAttachments();
   const assertCurrentWorkspace = (input: {
     threadId: string;
     cwd: string;
@@ -191,8 +205,22 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
         ownerEffect(
           WS_METHODS.terminalOpen,
           Effect.gen(function* () {
+            // Before the snapshot is taken, so no output falls between it and the stream.
+            if (input.attachOutput) {
+              outputAttachments.attach({
+                threadId: input.threadId,
+                terminalId: input.terminalId ?? DEFAULT_TERMINAL_ID,
+              });
+            }
             if (input.requireCurrentWorkspace) yield* assertCurrentWorkspace(input);
-            return yield* terminalManager.open(input);
+            const snapshot = yield* terminalManager.open(input);
+            // How much history the answer carries, and whether `sinceCursor` made it a delta.
+            yield* Effect.annotateCurrentSpan({
+              "terminal.history_chars": snapshot.history.length,
+              "terminal.history_delta": snapshot.historySince !== undefined,
+              "terminal.since_cursor": input.sinceCursor !== undefined,
+            });
+            return snapshot;
           }),
         ),
         {
@@ -253,6 +281,20 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "terminal",
         },
       ),
+    [WS_METHODS.terminalDetachOutput]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.terminalDetachOutput,
+        ownerEffect(
+          WS_METHODS.terminalDetachOutput,
+          Effect.sync(() => {
+            outputAttachments.detach(input);
+            return {};
+          }),
+        ),
+        {
+          "rpc.aggregate": "terminal",
+        },
+      ),
     [WS_METHODS.subscribeTerminalEvents]: (input) =>
       observeRpcStream(
         WS_METHODS.subscribeTerminalEvents,
@@ -266,10 +308,54 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
                 TerminalSubscriptionResyncError | Cause.Done<void>
               >(TERMINAL_SUBSCRIBER_CAPACITY);
               yield* Effect.addFinalizer(() => Queue.shutdown(queue));
+              const offer = makeTerminalSubscriberOffer(
+                queue,
+                TERMINAL_SUBSCRIBER_CAPACITY,
+                ledger,
+              );
+              const scope = input.output;
+              if (scope) for (const ref of scope.attached) outputAttachments.attach(ref);
+              const hold = scope
+                ? makeTerminalBackgroundHold({ sizeOf: terminalEventBytes })
+                : null;
+              let holding = hold !== null && connectionVisibility.isBackground();
+              const scopedOffer = (event: TerminalEvent) => {
+                if (event.type === "output" && !outputAttachments.includes(event)) {
+                  return Effect.void;
+                }
+                if (holding && hold) return Effect.sync(() => hold.hold(event));
+                return offer(event);
+              };
+              if (hold) {
+                yield* Effect.acquireRelease(
+                  Effect.sync(() =>
+                    connectionVisibility.subscribe((background) => {
+                      if (background) {
+                        holding = true;
+                        return;
+                      }
+                      if (!holding) return;
+                      holding = false;
+                      const held = hold.release();
+                      // Synchronous: nothing the manager publishes can land in between.
+                      Effect.runSync(
+                        held === null
+                          ? Queue.fail(
+                              queue,
+                              new TerminalSubscriptionResyncError({
+                                reason: "slowConsumer",
+                                capacity: TERMINAL_SUBSCRIBER_CAPACITY,
+                              }),
+                            ).pipe(Effect.asVoid)
+                          : Effect.forEach(held, offer, { discard: true }),
+                      );
+                    }),
+                  ),
+                  (unsubscribe) => Effect.sync(unsubscribe),
+                );
+              }
               yield* Effect.acquireRelease(
-                terminalManager.subscribe(
-                  makeTerminalSubscriberOffer(queue, TERMINAL_SUBSCRIBER_CAPACITY, ledger),
-                ),
+                terminalManager.subscribe(scope ? scopedOffer : offer),
                 (unsubscribe) => Effect.sync(unsubscribe),
               );
               // Subscribe first to avoid a gap, but do not expose queued live events
@@ -308,7 +394,7 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
               // once, and the budgets are returned per emitted array, when the
               // transport pulls it, so the ledger still covers everything the
               // client has not been sent.
-              return Stream.concat(
+              const events = Stream.concat(
                 Stream.fromIterable(initial).pipe(
                   rechunkByBudget(terminalStreamChunkBudget),
                   observeArrays(isServerPerfProfileEnabled(), (events) => {
@@ -333,6 +419,14 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
                   }),
                 ),
               );
+              const items: Stream.Stream<TerminalStreamItemOut, TerminalSubscriptionResyncError> =
+                scope
+                  ? Stream.concat(
+                      Stream.succeed<TerminalStreamItemOut>(TERMINAL_OUTPUT_SCOPE_ACK),
+                      events,
+                    )
+                  : events;
+              return items;
             }),
           ),
         ),

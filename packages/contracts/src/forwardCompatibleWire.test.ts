@@ -37,7 +37,7 @@ import { WsNodeRpcGroup, WsProjectsSubscribeImportRpc } from "./projectCopyRpc.t
 import { NodeBrowserEvent, NodeBrowserWireEvent } from "./nodeBrowser.ts";
 import { ProviderSignInEvent, ProviderSignInWireEvent } from "./providerSignIn.ts";
 import { ServerConfigStreamEvent, ServerConfigStreamWireEvent } from "./server.ts";
-import { TerminalEvent, TerminalWireEvent } from "./terminal.ts";
+import { TerminalEvent, TerminalStreamItem } from "./terminal.ts";
 
 const at = "2026-10-22T00:00:00.000Z";
 const eventBase = (sequence: number) => ({
@@ -187,10 +187,14 @@ const cases: ReadonlyArray<WireUnionCase> = [
   },
   {
     name: "terminal events",
-    schema: TerminalWireEvent,
+    schema: TerminalStreamItem,
     strict: { schema: TerminalEvent, rejects: { ...terminal, type: "bell" } },
     rpc: WsSubscribeTerminalEventsRpc,
-    known: [{ ...terminal, type: "output", data: "ls\n" }],
+    known: [
+      { ...terminal, type: "output", data: "ls\n" },
+      // A scoped stream's acknowledgement; only clients that asked for scoped output get it.
+      { type: "outputScope", scope: "attached" },
+    ],
     broken: [{ ...terminal, type: "output", data: 42 }],
     unknown: [{ wire: { ...terminal, type: "bell" }, decoded: placeholder("type", "bell") }],
   },

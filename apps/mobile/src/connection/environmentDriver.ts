@@ -48,6 +48,7 @@ import {
   type ThreadDetailEventScheduling,
 } from "./threadDetailEvents";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
+import { bindMobileClientVisibility } from "./clientVisibility";
 
 // Bound wrappers for every injected timer/lifecycle seam (the slice-3b lesson:
 // unbound globals throw "Illegal invocation").
@@ -343,6 +344,7 @@ export function createMobileEnvironmentDriver(
     });
     // Device control shares the application socket; video and live input get
     // the node's frame socket, each attempt with a fresh socket token.
+    bindMobileClientVisibility();
     return createWsRpcClient(
       transport,
       createDeviceRpcClient(transport, {

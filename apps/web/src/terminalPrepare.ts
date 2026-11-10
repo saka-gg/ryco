@@ -99,6 +99,8 @@ interface PreparedTerminalOpen {
   readonly dimensions: TerminalDimensions;
   readonly promise: Promise<TerminalSessionSnapshot>;
   readonly createdAt: number;
+  /** Holds the terminal's output from before the open's snapshot until a surface takes over. */
+  readonly releaseOutput: () => void;
 }
 
 /**
@@ -146,6 +148,14 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
   const api = readEnvironmentApi(input.environmentId);
   if (!api) return;
   const dimensions = readLastTerminalDimensions(input.layout);
+  if (existing) {
+    preparedTerminalOpens.delete(key);
+    existing.releaseOutput();
+  }
+  // Held before the open, so the open attaches the output ahead of its snapshot.
+  const releaseOutput =
+    api.terminal.attachOutput?.({ threadId: input.threadId, terminalId: input.terminalId }) ??
+    (() => undefined);
   const promise = api.terminal.open({
     threadId: input.threadId,
     terminalId: input.terminalId,
@@ -155,12 +165,23 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
     rows: dimensions.rows,
     env: input.launch.runtimeEnv,
   });
-  const entry: PreparedTerminalOpen = { launchKey, dimensions, promise, createdAt: Date.now() };
+  const entry: PreparedTerminalOpen = {
+    launchKey,
+    dimensions,
+    promise,
+    createdAt: Date.now(),
+    releaseOutput,
+  };
   preparedTerminalOpens.set(key, entry);
-  promise.catch(() => {
-    // A failed prepare must not be handed out; the terminal opens on its own.
-    if (preparedTerminalOpens.get(key) === entry) preparedTerminalOpens.delete(key);
-  });
+  const discard = () => {
+    if (preparedTerminalOpens.get(key) !== entry) return;
+    preparedTerminalOpens.delete(key);
+    entry.releaseOutput();
+  };
+  // A failed prepare must not be handed out; the terminal opens on its own.
+  promise.catch(discard);
+  // Nobody took it in time: a later surface opens on its own and holds the output itself.
+  setTimeout(discard, PREPARED_TERMINAL_OPEN_TTL_MS);
 }
 
 /** Hands a matching, fresh prepared open to the terminal that mounts. */
@@ -177,6 +198,8 @@ export function takePreparedTerminalOpen(input: {
   const entry = preparedTerminalOpens.get(key);
   if (!entry) return null;
   preparedTerminalOpens.delete(key);
+  // The taking surface holds the output itself from before it takes this.
+  entry.releaseOutput();
   if (
     entry.launchKey !== input.launchKey ||
     Date.now() - entry.createdAt >= PREPARED_TERMINAL_OPEN_TTL_MS
@@ -187,6 +210,7 @@ export function takePreparedTerminalOpen(input: {
 }
 
 export function resetPreparedTerminalOpensForTests(): void {
+  for (const entry of preparedTerminalOpens.values()) entry.releaseOutput();
   preparedTerminalOpens.clear();
   storedDimensions = null;
 }

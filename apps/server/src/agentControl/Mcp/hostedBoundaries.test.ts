@@ -83,6 +83,7 @@ describe("pre-auth server environment descriptor", () => {
       "settingsSharingVersion",
       "stagedOnlyCommit",
       "storageManagement",
+      "terminalOutputScope",
       "terminalWriteRequireIdle",
       "threadBranchAdoption",
       "threadFork",

@@ -141,6 +141,15 @@ const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_MAX_PENDING_PROCESS_EVENTS = 2_048;
 const DEFAULT_MAX_PENDING_PROCESS_OUTPUT_BYTES = 2 * 1024 * 1024;
+/**
+ * PTY output of one process is coalesced for up to this long before it becomes one output
+ * event, so progress bars and full-screen redraws do not cost one WebSocket message (and one
+ * relay encryption) per PTY read. The leading chunk after a quiet window and the echo of typed
+ * input leave at once; only the chunks that follow inside the window wait.
+ */
+export const DEFAULT_TERMINAL_OUTPUT_COALESCE_MS = 16;
+/** Held output leaves at once at this size, and a drained backlog merges up to it. */
+const OUTPUT_COALESCE_MAX_BYTES = 64 * 1024;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 
@@ -209,6 +218,18 @@ interface TerminalSessionState {
   pendingProcessEventIndex: number;
   pendingProcessOutputBytes: number;
   processEventDrainRunning: boolean;
+  /**
+   * PTY output of the running process held for the current coalescing window, in arrival
+   * order; it is not in `pendingProcessEvents` yet and has no cursor.
+   */
+  heldOutput: Array<string>;
+  heldOutputBytes: number;
+  /** Clock time output last left the coalescer; a chunk a full window later leaves at once. */
+  lastOutputReleaseAtMs: number;
+  /** Set by committed input: the next chunk, its echo, leaves at once with anything held. */
+  releaseNextOutput: boolean;
+  /** Ends the current window. Cleared whenever held output leaves or is dropped. */
+  outputReleaseTimer: OutputReleaseTimer | null;
   exitCode: number | null;
   exitSignal: number | null;
   updatedAt: string;
@@ -275,6 +296,10 @@ function mergePersistHistoryRequests(
 
 interface ScheduledHistoryPersist {
   readonly session: TerminalSessionState;
+}
+
+interface OutputReleaseTimer {
+  fiber: Fiber.Fiber<void> | null;
 }
 
 type PendingProcessEvent =
@@ -369,11 +394,21 @@ function diagnosticsSnapshot(session: TerminalSessionState): DiagnosticsTerminal
   };
 }
 
-function cleanupProcessHandles(session: TerminalSessionState): void {
+/**
+ * Detaches the PTY callbacks. Output still held for the coalescing window moves into the
+ * pending queue first, without starting a drain: close drains that queue itself so the accepted
+ * tail survives, and stop and restart clear it right after.
+ */
+function cleanupProcessHandles(
+  session: TerminalSessionState,
+  limits: PendingProcessEventLimits,
+): void {
   session.unsubscribeData?.();
   session.unsubscribeData = null;
   session.unsubscribeExit?.();
   session.unsubscribeExit = null;
+  if (session.pid !== null) releaseHeldOutput(session, session.pid, null, limits);
+  cancelOutputReleaseTimer(session);
 }
 
 /** Whether the PTY reported its exit and the drain has yet to apply it. */
@@ -388,30 +423,82 @@ function hasPendingExit(session: TerminalSessionState): boolean {
   return false;
 }
 
-function clearPendingProcessEvents(session: TerminalSessionState): void {
+interface PendingProcessEventLimits {
+  readonly maxPendingProcessEvents: number;
+  readonly maxPendingProcessOutputBytes: number;
+}
+
+/** Empties the pending queue; held output stays (see {@link clearPendingProcessEvents}). */
+function resetPendingProcessEventQueue(session: TerminalSessionState): void {
   session.pendingProcessEvents = [];
   session.pendingProcessEventIndex = 0;
   session.pendingProcessOutputBytes = 0;
   session.processEventDrainRunning = false;
 }
 
+/** Drops every process event not published yet: the pending queue and held output. */
+function clearPendingProcessEvents(session: TerminalSessionState): void {
+  resetPendingProcessEventQueue(session);
+  dropHeldOutput(session);
+}
+
+function cancelOutputReleaseTimer(session: TerminalSessionState): void {
+  const timer = session.outputReleaseTimer;
+  if (timer === null) return;
+  session.outputReleaseTimer = null;
+  timer.fiber?.interruptUnsafe();
+}
+
+function dropHeldOutput(session: TerminalSessionState): void {
+  cancelOutputReleaseTimer(session);
+  session.heldOutput = [];
+  session.heldOutputBytes = 0;
+  session.lastOutputReleaseAtMs = Number.NEGATIVE_INFINITY;
+  session.releaseNextOutput = false;
+}
+
+/**
+ * Moves held output into the pending queue as one output event and ends its window. Returns
+ * whether the caller must start a drain, as {@link enqueueProcessEvent} does.
+ */
+function releaseHeldOutput(
+  session: TerminalSessionState,
+  expectedPid: number,
+  nowMs: number | null,
+  limits: PendingProcessEventLimits,
+): boolean {
+  cancelOutputReleaseTimer(session);
+  if (session.heldOutput.length === 0) return false;
+  const data =
+    session.heldOutput.length === 1 ? session.heldOutput[0]! : session.heldOutput.join("");
+  const byteLength = session.heldOutputBytes;
+  session.heldOutput = [];
+  session.heldOutputBytes = 0;
+  if (nowMs !== null) session.lastOutputReleaseAtMs = nowMs;
+  return enqueueProcessEvent(session, expectedPid, { type: "output", data, byteLength }, limits);
+}
+
+/** Whether output of `expectedPid` may still be accepted: it runs and has not exited. */
+function acceptsProcessOutput(session: TerminalSessionState, expectedPid: number): boolean {
+  return (
+    session.process !== null &&
+    session.status === "running" &&
+    session.pid === expectedPid &&
+    !session.pendingProcessEvents.some((pendingEvent) => pendingEvent.type === "exit")
+  );
+}
+
 function enqueueProcessEvent(
   session: TerminalSessionState,
   expectedPid: number,
   event: PendingProcessEvent,
-  limits: {
-    readonly maxPendingProcessEvents: number;
-    readonly maxPendingProcessOutputBytes: number;
-  },
+  limits: PendingProcessEventLimits,
 ): boolean {
   if (!session.process || session.status !== "running" || session.pid !== expectedPid) {
     return false;
   }
 
-  if (
-    event.type === "output" &&
-    session.pendingProcessEvents.some((pendingEvent) => pendingEvent.type === "exit")
-  ) {
+  if (event.type === "output" && !acceptsProcessOutput(session, expectedPid)) {
     return false;
   }
 
@@ -524,10 +611,7 @@ function trimPendingOutputBytesToLimit(
 
 function enforcePendingProcessEventLimits(
   session: TerminalSessionState,
-  limits: {
-    readonly maxPendingProcessEvents: number;
-    readonly maxPendingProcessOutputBytes: number;
-  },
+  limits: PendingProcessEventLimits,
 ): void {
   while (
     session.pendingProcessEvents.length > limits.maxPendingProcessEvents &&
@@ -1063,6 +1147,11 @@ interface TerminalManagerOptions {
   maxRetainedInactiveSessions?: number;
   maxPendingProcessEvents?: number;
   maxPendingProcessOutputBytes?: number;
+  /**
+   * Coalescing window for PTY output, in ms; defaults to
+   * {@link DEFAULT_TERMINAL_OUTPUT_COALESCE_MS}. `0` publishes one event per PTY read.
+   */
+  outputCoalesceMs?: number;
   workspaceAccessPolicy?: WorkspaceAccessPolicyShape;
 }
 
@@ -1148,10 +1237,16 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       1,
       options.maxPendingProcessOutputBytes ?? DEFAULT_MAX_PENDING_PROCESS_OUTPUT_BYTES,
     );
-    const pendingProcessEventLimits = {
+    const pendingProcessEventLimits: PendingProcessEventLimits = {
       maxPendingProcessEvents,
       maxPendingProcessOutputBytes,
-    } as const;
+    };
+    const outputCoalesceMs = Math.max(
+      0,
+      options.outputCoalesceMs ?? DEFAULT_TERMINAL_OUTPUT_COALESCE_MS,
+    );
+    // PTY callbacks are plain JS; they read the manager's clock directly (a TestClock in tests).
+    const clock = yield* Clock.Clock;
 
     yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
 
@@ -1813,11 +1908,31 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
         const nextEvent = session.pendingProcessEvents[session.pendingProcessEventIndex];
         if (!nextEvent) {
-          clearPendingProcessEvents(session);
+          // Output held for the coalescing window stays; its timer queues it.
+          resetPendingProcessEventQueue(session);
           return { type: "idle" } as const;
         }
 
         session.pendingProcessEventIndex += 1;
+        let outputData = nextEvent.type === "output" ? nextEvent.data : "";
+        let outputBytes = nextEvent.type === "output" ? nextEvent.byteLength : 0;
+        if (nextEvent.type === "output" && outputCoalesceMs > 0) {
+          // A backlog leaves as one event rather than one per queued chunk.
+          let following = session.pendingProcessEvents[session.pendingProcessEventIndex];
+          if (following?.type === "output") {
+            const parts = [outputData];
+            while (
+              following?.type === "output" &&
+              outputBytes + following.byteLength <= OUTPUT_COALESCE_MAX_BYTES
+            ) {
+              parts.push(following.data);
+              outputBytes += following.byteLength;
+              session.pendingProcessEventIndex += 1;
+              following = session.pendingProcessEvents[session.pendingProcessEventIndex];
+            }
+            outputData = parts.join("");
+          }
+        }
         if (session.pendingProcessEventIndex >= session.pendingProcessEvents.length) {
           session.pendingProcessEvents = [];
           session.pendingProcessEventIndex = 0;
@@ -1826,11 +1941,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         if (nextEvent.type === "output") {
           session.pendingProcessOutputBytes = Math.max(
             0,
-            session.pendingProcessOutputBytes - nextEvent.byteLength,
+            session.pendingProcessOutputBytes - outputBytes,
           );
           const sanitized = sanitizeTerminalHistoryChunk(
             session.pendingHistoryControlSequence,
-            nextEvent.data,
+            outputData,
           );
           session.pendingHistoryControlSequence = sanitized.pendingControlSequence;
           if (sanitized.visibleText.length > 0) {
@@ -1861,12 +1976,12 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             terminalId: session.terminalId,
             cursor,
             persistHistory: sanitized.visibleText.length > 0,
-            data: nextEvent.data,
+            data: outputData,
           } as const;
         }
 
         const process = session.process;
-        cleanupProcessHandles(session);
+        cleanupProcessHandles(session, pendingProcessEventLimits);
         session.process = null;
         session.pid = null;
         session.hasRunningSubprocess = false;
@@ -1940,6 +2055,71 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
     });
 
+    /** Ends the window of output held for `expectedPid`; see {@link acceptCoalescedOutput}. */
+    const scheduleOutputRelease = (
+      session: TerminalSessionState,
+      expectedPid: number,
+      delayMs: number,
+    ) => {
+      const timer: OutputReleaseTimer = { fiber: null };
+      session.outputReleaseTimer = timer;
+      // Interruptible until it fires; firing is one synchronous step that only forks the drain,
+      // so interrupting it can never strand `processEventDrainRunning`.
+      timer.fiber = runFork(
+        Effect.sleep(delayMs).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              if (session.outputReleaseTimer !== timer) return;
+              session.outputReleaseTimer = null;
+              if (session.pid !== expectedPid) return;
+              if (
+                releaseHeldOutput(
+                  session,
+                  expectedPid,
+                  clock.currentTimeMillisUnsafe(),
+                  pendingProcessEventLimits,
+                )
+              ) {
+                runFork(drainProcessEvents(session, expectedPid));
+              }
+            }),
+          ),
+        ),
+      );
+    };
+
+    /**
+     * Coalesces PTY output: a chunk leaves at once when no output left within the last window,
+     * when it answers input (its echo), or when the held bytes reach
+     * {@link OUTPUT_COALESCE_MAX_BYTES}; otherwise it is held until the window ends. Held output
+     * leaves as one pending output event; cursors are still assigned when the drain publishes.
+     */
+    const acceptCoalescedOutput = (
+      session: TerminalSessionState,
+      expectedPid: number,
+      data: string,
+    ) => {
+      if (!acceptsProcessOutput(session, expectedPid)) return;
+      session.heldOutput.push(data);
+      session.heldOutputBytes += approximateTextBytes(data);
+      const nowMs = clock.currentTimeMillisUnsafe();
+      const windowEndsAtMs = session.lastOutputReleaseAtMs + outputCoalesceMs;
+      if (
+        session.releaseNextOutput ||
+        nowMs >= windowEndsAtMs ||
+        session.heldOutputBytes >= OUTPUT_COALESCE_MAX_BYTES
+      ) {
+        session.releaseNextOutput = false;
+        if (releaseHeldOutput(session, expectedPid, nowMs, pendingProcessEventLimits)) {
+          runFork(drainProcessEvents(session, expectedPid));
+        }
+        return;
+      }
+      if (session.outputReleaseTimer === null) {
+        scheduleOutputRelease(session, expectedPid, windowEndsAtMs - nowMs);
+      }
+    };
+
     /**
      * `nextStatus: "starting"` is for a session whose relaunch storage admission already
      * published it as starting: it must never look ended (and its path free) in between.
@@ -1952,7 +2132,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       if (!process) return;
 
       yield* modifyManagerState((state) => {
-        cleanupProcessHandles(session);
+        cleanupProcessHandles(session, pendingProcessEventLimits);
         session.process = null;
         session.pid = null;
         session.hasRunningSubprocess = false;
@@ -2077,6 +2257,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
               const processPid = ptyProcess.pid;
               const unsubscribeData = ptyProcess.onData((data) => {
+                if (outputCoalesceMs > 0) {
+                  acceptCoalescedOutput(session, processPid, data);
+                  return;
+                }
                 if (
                   !enqueueProcessEvent(
                     session,
@@ -2094,14 +2278,22 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 runFork(drainProcessEvents(session, processPid));
               });
               const unsubscribeExit = ptyProcess.onExit((event) => {
-                if (
-                  !enqueueProcessEvent(
+                // Held output was produced before the exit: it is queued, and published, first.
+                const drainForOutput =
+                  session.pid === processPid &&
+                  releaseHeldOutput(
                     session,
                     processPid,
-                    { type: "exit", event },
+                    clock.currentTimeMillisUnsafe(),
                     pendingProcessEventLimits,
-                  )
-                ) {
+                  );
+                const drainForExit = enqueueProcessEvent(
+                  session,
+                  processPid,
+                  { type: "exit", event },
+                  pendingProcessEventLimits,
+                );
+                if (!drainForOutput && !drainForExit) {
                   return;
                 }
                 runFork(drainProcessEvents(session, processPid));
@@ -2188,7 +2380,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
       if (Option.isSome(session)) {
         const pid = session.value.pid;
-        cleanupProcessHandles(session.value);
+        cleanupProcessHandles(session.value, pendingProcessEventLimits);
         // The detached producer cannot extend this bounded queue while closing.
         if (pid !== null) {
           while (yield* drainNextProcessEvent(session.value, pid)) {
@@ -2433,7 +2625,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         const cleanupSession = Effect.fn("terminal.cleanupSession")(function* (
           session: TerminalSessionState,
         ) {
-          cleanupProcessHandles(session);
+          cleanupProcessHandles(session, pendingProcessEventLimits);
           if (!session.process) return;
           yield* clearKillFiber(session.process);
           yield* runKillEscalation(session.process, session.threadId, session.terminalId);
@@ -2479,6 +2671,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               pendingProcessEventIndex: 0,
               pendingProcessOutputBytes: 0,
               processEventDrainRunning: false,
+              heldOutput: [],
+              heldOutputBytes: 0,
+              lastOutputReleaseAtMs: Number.NEGATIVE_INFINITY,
+              releaseNextOutput: false,
+              outputReleaseTimer: null,
               exitCode: null,
               exitSignal: null,
               updatedAt: new Date().toISOString(),
@@ -2662,7 +2859,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               !session.hasReceivedInput &&
               session.cursor.generation === input.guard.outputCursor.generation &&
               session.cursor.sequence === input.guard.outputCursor.sequence &&
-              session.pendingProcessEvents.length === session.pendingProcessEventIndex);
+              session.pendingProcessEvents.length === session.pendingProcessEventIndex &&
+              session.heldOutput.length === 0);
           if (input.guard) {
             const validPaste = yield* Effect.try({
               try: () => input.data === bracketedTerminalSnippet(input.data.slice(6, -6)),
@@ -2705,7 +2903,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               session.hasReceivedInput = true;
               // Focusing a terminal or answering its queries starts nothing. A script run moves
               // focus right before its write, so counting those reports would refuse that write.
-              if (!isTerminalReportData(input.data)) session.lastInputAtMs = inputAtMs;
+              if (!isTerminalReportData(input.data)) {
+                session.lastInputAtMs = inputAtMs;
+                // Its echo should not wait for the output coalescing window.
+                session.releaseNextOutput = true;
+              }
               process.write(input.data);
               noteTerminalIo();
               return Effect.void;
@@ -2784,6 +2986,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                   pendingProcessEventIndex: 0,
                   pendingProcessOutputBytes: 0,
                   processEventDrainRunning: false,
+                  heldOutput: [],
+                  heldOutputBytes: 0,
+                  lastOutputReleaseAtMs: Number.NEGATIVE_INFINITY,
+                  releaseNextOutput: false,
+                  outputReleaseTimer: null,
                   exitCode: null,
                   exitSignal: null,
                   updatedAt: new Date().toISOString(),

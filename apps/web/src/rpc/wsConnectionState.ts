@@ -1,6 +1,7 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
+  bindClientVisibility,
   seedWsConnectionOnlineStatus,
   wsConnectionStatusAtom,
   wsConnectionStatusForEnvironmentAtom,
@@ -14,6 +15,8 @@ export * from "@ryco/client-runtime/rpc";
 
 export function initializeWsConnectionState(): void {
   seedWsConnectionOnlineStatus(webAppLifecycle);
+  // Nodes that support it hold back live terminal output while the tab or window is hidden.
+  bindClientVisibility(webAppLifecycle);
 }
 
 export function useWsConnectionStatus(): WsConnectionStatus {

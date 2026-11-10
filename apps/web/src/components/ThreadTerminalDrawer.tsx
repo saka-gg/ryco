@@ -2,6 +2,7 @@ import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
+  createTerminalInputCoalescer,
   createTerminalReplayGate,
   isTerminalReplayEvent,
   isTerminalSnapshotDeltaFor,
@@ -391,6 +392,9 @@ export function TerminalViewport({
     const localApi = readLocalApi();
     if (!api || !localApi) return;
     const snippetRequest = terminalSnippetBroker.read({ threadRef, terminalId });
+    // Held while this pane shows the terminal: a node that scopes output sends it only then, and
+    // every open below attaches it before taking its snapshot.
+    const releaseOutput = api.terminal.attachOutput?.({ threadId, terminalId }) ?? null;
     const viewKey = terminalViewCacheKey(environmentId, threadId, terminalId);
     const launchKey = terminalLaunchKey({ cwd, worktreePath, runtimeEnv });
     // A snippet insertion tracks parse progress from a fresh hydration.
@@ -644,18 +648,20 @@ export function TerminalViewport({
       },
     });
 
+    // Keys typed while a write is unanswered leave together with the next write.
+    const input = createTerminalInputCoalescer({
+      send: (data) => api.terminal.write({ threadId, terminalId, data }),
+      onError: (err) =>
+        writeBufferedSystemMessage(
+          terminal,
+          err instanceof Error ? err.message : "Terminal write failed",
+        ),
+    });
     const inputDisposable = terminal.onData((data) => {
       if (inputBlocked()) return;
       // Replayed output already had its queries answered (or timed out) when it was live.
       if (replayGate.dropsData(data)) return;
-      void api.terminal
-        .write({ threadId, terminalId, data })
-        .catch((err) =>
-          writeBufferedSystemMessage(
-            terminal,
-            err instanceof Error ? err.message : "Terminal write failed",
-          ),
-        );
+      input.push(data);
     });
 
     const selectionDisposable = terminal.onSelectionChange(() => {
@@ -989,10 +995,14 @@ export function TerminalViewport({
     // is current before the open round trip returns. This runs after openTerminal
     // exists: a buffered replay event re-hydrates through it.
     if (cachedView) {
-      const catchUp = resolveTerminalViewCatchUp(
-        readTerminalEventEntries(),
-        cachedView.lastAppliedTerminalEventId,
-      );
+      // A node that scopes output sent none for this terminal while its view was detached, so
+      // the buffer cannot bring the view current; the delta open below does.
+      const catchUp = api.terminal.isOutputScoped?.()
+        ? null
+        : resolveTerminalViewCatchUp(
+            readTerminalEventEntries(),
+            cachedView.lastAppliedTerminalEventId,
+          );
       if (catchUp !== null) {
         // Output that arrived while the view was detached is not live either.
         replayGate.replay(() => {
@@ -1119,6 +1129,7 @@ export function TerminalViewport({
       lastAppliedTerminalEventIdRef.current = 0;
       lastSentDimensionsRef.current = null;
       unsubscribeTerminalEvents();
+      releaseOutput?.();
       window.clearTimeout(fitTimer);
       inputDisposable.dispose();
       selectionDisposable.dispose();

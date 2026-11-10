@@ -801,7 +801,12 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    expect(bytes).toBeLessThan(7_231_000);
+    // 7.241 MB on 2026-11-10 with terminal output only where it is shown (+10.7 KB from
+    // 7.229767 MB, measured 7.240451 MB): PTY output coalescing in the terminal manager, the
+    // scoped terminal stream with its attachments and background hold, the per-connection
+    // visibility hint, and their RPC schemas. Every connection runs them, so none waits behind
+    // import().
+    expect(bytes).toBeLessThan(7_241_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

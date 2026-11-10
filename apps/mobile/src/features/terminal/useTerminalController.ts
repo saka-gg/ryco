@@ -10,6 +10,7 @@ import { useTerminalStateStore } from "../../state/terminalStateStore";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { terminalEnvironmentAccess } from "./terminalAccess";
 import { TerminalController, type TerminalControllerPorts } from "./terminalController";
+import { terminalHistoryMirrors } from "./terminalHistoryMirrors";
 import { createMobileTerminalId } from "./terminalSessionModel";
 
 const PORTS: TerminalControllerPorts = {
@@ -27,6 +28,7 @@ const PORTS: TerminalControllerPorts = {
       }),
   },
   createTerminalId: () => createMobileTerminalId(uuidv4()),
+  historyMirrors: terminalHistoryMirrors,
   scheduleFrame: (callback) => mobileFrameScheduler.scheduleFrame(callback),
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),

@@ -29,7 +29,7 @@ import {
 } from "effect";
 import { Base64Url } from "effect/encoding";
 import { TestClock } from "effect/testing";
-import { expect } from "vite-plus/test";
+import { describe, expect } from "vite-plus/test";
 
 import { makeWorkspaceAccessPolicy } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
 import type { TerminalManagerShape } from "../Services/Manager.ts";
@@ -132,6 +132,7 @@ interface CreateManagerOptions {
   maxPendingProcessEvents?: number;
   maxPendingProcessOutputBytes?: number;
   maxHistoryBytes?: number;
+  outputCoalesceMs?: number;
   ptyAdapter?: FakePtyAdapter;
   restrictToBaseDir?: boolean;
 }
@@ -193,6 +194,9 @@ const createManager = (
           : {}),
         ...(options.maxHistoryBytes !== undefined
           ? { maxHistoryBytes: options.maxHistoryBytes }
+          : {}),
+        ...(options.outputCoalesceMs !== undefined
+          ? { outputCoalesceMs: options.outputCoalesceMs }
           : {}),
       });
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
@@ -2650,4 +2654,281 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       expect(process.killSignals).toContain("SIGKILL");
     }).pipe(Effect.provide(TestClock.layer())),
   );
+  describe("output coalescing", () => {
+    /** Lets the drains the fake PTY's callbacks forked publish what they took. */
+    const settle = Effect.gen(function* () {
+      for (let index = 0; index < 20; index++) yield* Effect.yieldNow;
+    });
+    const outputs = (events: ReadonlyArray<TerminalEvent>) =>
+      events.flatMap((event) => (event.type === "output" ? [event.data] : []));
+    const sequences = (events: ReadonlyArray<TerminalEvent>) =>
+      events.flatMap((event) => ("cursor" in event && event.cursor ? [event.cursor.sequence] : []));
+    const expectIncreasing = (values: ReadonlyArray<number>) => {
+      for (let index = 1; index < values.length; index++) {
+        expect(values[index]!).toBeGreaterThan(values[index - 1]!);
+      }
+    };
+
+    it.effect("publishes the leading chunk at once and the rest of the window as one event", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("prompt$ ");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["prompt$ "]);
+
+        pty.emitData("1%");
+        pty.emitData("\r2%");
+        pty.emitData("\r3%");
+        yield* settle;
+        yield* TestClock.adjust("15 millis");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["prompt$ "]);
+        yield* TestClock.adjust("1 millis");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["prompt$ ", "1%\r2%\r3%"]);
+
+        // After a quiet window the next chunk is a leading edge again.
+        yield* TestClock.adjust("100 millis");
+        pty.emitData("done\n");
+        yield* settle;
+        const events = yield* getEvents;
+        expect(outputs(events)).toEqual(["prompt$ ", "1%\r2%\r3%", "done\n"]);
+        expectIncreasing(sequences(events));
+        expect((yield* manager.listSessions)[0]!.history).toBe("prompt$ 1%\r2%\r3%done\n");
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("publishes one event per PTY read when coalescing is off", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 0,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("a");
+        pty.emitData("b");
+        pty.emitData("c");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["a", "b", "c"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("publishes held output early once it reaches 64 KB", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("a");
+        pty.emitData("x".repeat(40 * 1024));
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["a"]);
+        pty.emitData("y".repeat(24 * 1024));
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual([
+          "a",
+          "x".repeat(40 * 1024) + "y".repeat(24 * 1024),
+        ]);
+        // The window restarts at the early release; the next chunk is held again.
+        pty.emitData("z");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toHaveLength(2);
+        yield* TestClock.adjust("16 millis");
+        yield* settle;
+        expect(outputs(yield* getEvents).at(-1)).toBe("z");
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("publishes the echo of typed input at once, with the output held before it", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("$ ");
+        pty.emitData("[held]");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["$ "]);
+        yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "l" });
+        pty.emitData("l");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["$ ", "[held]l"]);
+        // Only the echo skips the window; the output after it is coalesced again.
+        pty.emitData("s");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toHaveLength(2);
+        yield* TestClock.adjust("16 millis");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["$ ", "[held]l", "s"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("publishes held output before the exit, with increasing cursors", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("first ");
+        pty.emitData("tail");
+        pty.emitExit({ exitCode: 0, signal: 0 });
+        yield* settle;
+        const events = (yield* getEvents).filter(
+          (event) => event.type === "output" || event.type === "exited",
+        );
+        expect(events.map((event) => event.type)).toEqual(["output", "output", "exited"]);
+        expect(outputs(events)).toEqual(["first ", "tail"]);
+        expectIncreasing(sequences(events));
+        // Nothing is left for the window to publish after the exit.
+        const count = (yield* getEvents).length;
+        yield* TestClock.adjust("100 millis");
+        yield* settle;
+        expect(yield* getEvents).toHaveLength(count);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("drops held output on restart, like other unpublished output", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("old ");
+        pty.emitData("held");
+        yield* settle;
+        const restarted = yield* manager.restart(restartInput());
+        yield* TestClock.adjust("100 millis");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["old "]);
+        expect(restarted.history).toBe("");
+        expect((yield* manager.listSessions)[0]!.history).toBe("");
+        // The new shell starts with a fresh window: its first chunk leaves at once.
+        ptyAdapter.processes[1]!.emitData("new");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["old ", "new"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("keeps the held tail in history on close, and no window fires afterwards", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents, logsDir } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("line one\n");
+        pty.emitData("held tail\n");
+        yield* settle;
+        expect(outputs(yield* getEvents)).toEqual(["line one\n"]);
+        yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID });
+        expect(outputs(yield* getEvents)).toEqual(["line one\n", "held tail\n"]);
+        const fs = yield* FileSystem.FileSystem;
+        expect(yield* fs.readFileString(historyLogPath(logsDir))).toBe("line one\nheld tail\n");
+        const count = (yield* getEvents).length;
+        pty.emitData("after close");
+        yield* TestClock.adjust("100 millis");
+        yield* settle;
+        expect(yield* getEvents).toHaveLength(count);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("cancels the window when the manager's scope closes", () =>
+      Effect.gen(function* () {
+        const seen: TerminalEvent[] = [];
+        const scope = yield* Scope.make("sequential");
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        }).pipe(Effect.provideService(Scope.Scope, scope));
+        // Stays subscribed after the scope closes, to see anything published late.
+        yield* manager.subscribe((event) => Effect.sync(() => void seen.push(event)));
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("a");
+        pty.emitData("held");
+        yield* settle;
+        yield* Scope.close(scope, Exit.void);
+        yield* TestClock.adjust("100 millis");
+        yield* settle;
+        expect(outputs(seen)).toEqual(["a"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("publishes a backlog of queued output as one event", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+          outputCoalesceMs: 16,
+        });
+        yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const removeBlocker = yield* manager.subscribe((event) =>
+          event.type === "output" && event.data === "first"
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(removeBlocker));
+        pty.emitData("first");
+        yield* Deferred.await(entered);
+        // Three windows end while the drain is busy: three queued events, one publish.
+        for (const chunk of ["a", "b", "c"]) {
+          pty.emitData(chunk);
+          yield* TestClock.adjust("16 millis");
+          yield* settle;
+        }
+        yield* Deferred.succeed(release, undefined);
+        yield* settle;
+        const events = yield* getEvents;
+        expect(outputs(events)).toEqual(["first", "abc"]);
+        expectIncreasing(sequences(events));
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("refuses guarded insertion while output is held", () =>
+      Effect.gen(function* () {
+        const { manager, ptyAdapter } = yield* createManager(5, { outputCoalesceMs: 16 });
+        const initial = yield* manager.open(openInput());
+        const pty = ptyAdapter.processes[0]!;
+        pty.emitData("$ ");
+        pty.emitData("late output");
+        yield* settle;
+        const seen = (yield* manager.listSessions)[0]!;
+        const data = "\x1b[200~echo hi\x1b[201~";
+        const guardedWrite = (outputCursor: NonNullable<typeof seen.cursor>) =>
+          manager.write(
+            {
+              threadId: initial.threadId,
+              terminalId: initial.terminalId,
+              data,
+              guard: {
+                inputEpoch: seen.inputEpoch!,
+                outputCursor,
+                cwd: seen.cwd,
+                worktreePath: seen.worktreePath,
+              },
+            },
+            () => true,
+          );
+        // The client's cursor is the latest published one, but output it has not seen is held.
+        const refused = yield* guardedWrite(seen.cursor!).pipe(Effect.flip);
+        assert.equal(refused._tag, "TerminalInputRejectedError");
+        expect(pty.writes).toEqual([]);
+
+        yield* TestClock.adjust("16 millis");
+        yield* settle;
+        const current = (yield* manager.listSessions)[0]!;
+        expect(current.history).toBe("$ late output");
+        yield* guardedWrite(current.cursor!);
+        expect(pty.writes).toEqual([data]);
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+  });
 });
