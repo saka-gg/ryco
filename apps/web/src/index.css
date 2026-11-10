@@ -945,6 +945,17 @@ code {
     --app-toast-tone-border-strength: 32%;
   }
 
+  /* The capsule's countdown: a ring around its close button that empties over
+     the toast's lifetime, and holds while the stack is hovered or focused, or
+     the window is not in front (the timers hold then too). */
+  .toast-countdown-ring {
+    animation: toast-countdown linear forwards;
+  }
+
+  [data-countdown-held] .toast-countdown-ring {
+    animation-play-state: paused;
+  }
+
   /* `:where(.dark)` keeps this at (0,1,0) so the later forced-colors and
      no-backdrop-filter fallbacks can out-cascade it by source order — a bare
      `.dark` prefix would pin dark mode to the translucent plate even under
@@ -3818,8 +3829,8 @@ label:has(> select#reasoning-effort) select {
 }
 
 /* ─── Floating overlays on a translucent window ─────────────────────────────
-   Menus, selects, comboboxes, pickers, popovers and toasts portaled next to the
-   app root: the page is cut out from under them, so the blur is dropped (it
+   Menus, selects, comboboxes, pickers and popovers portaled next to the app
+   root: the page is cut out from under them, so the blur is dropped (it
    would only lay a second copy of the coat under the fill). Sidebar-only glass
    has no body coat, so the overlay carries it itself. Keep the selector in step
    with GLASS_OVERLAY_SELECTOR (lib/glassOverlayCutout.ts). */
@@ -3842,32 +3853,16 @@ label:has(> select#reasoning-effort) select {
   backdrop-filter: none;
 }
 
-/* Toasts keep their status tone over the glass pane. */
-:root[data-window-translucency="window"] .app-toast-surface {
-  background-color: color-mix(
+/* Toasts take the solid popover plate, with their status tone, and are never
+   cut out. A notification lands over arbitrary content (the page, a dialog,
+   another toast), so a thin pane read differently in each place: clear and
+   near-black over the page, solid over a dialog or under a newer toast. */
+:root[data-window-translucency] .app-toast-surface {
+  background: color-mix(
     in srgb,
     var(--app-toast-tone, var(--popover)) var(--app-toast-tone-strength, 0%),
-    var(--app-glass-raised-surface)
+    var(--popover)
   );
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
-
-:root[data-window-translucency="sidebar"] .app-toast-surface {
-  background:
-    linear-gradient(
-      color-mix(
-        in srgb,
-        var(--app-toast-tone, var(--popover)) var(--app-toast-tone-strength, 0%),
-        var(--app-overlay-surface)
-      ),
-      color-mix(
-        in srgb,
-        var(--app-toast-tone, var(--popover)) var(--app-toast-tone-strength, 0%),
-        var(--app-overlay-surface)
-      )
-    ),
-    var(--app-window-glass);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -3875,13 +3870,15 @@ label:has(> select#reasoning-effort) select {
 /* Nothing is cut out from under these, so a thin fill would leave what they
    cover readable: an overlay on another portaled layer (`data-glass-backed`, a
    select inside a dialog), hover cards (never cut out: opening one per row
-   crossing must not re-clip the app), and glass surfaces inside the page. */
+   crossing must not re-clip the app), and glass surfaces inside the page.
+   `body` lifts the rule over the portaled-overlay panes above. */
 :root[data-window-translucency]
+  body
   :is(
     [data-glass-backed],
     [data-slot="tooltip-popup"],
     [data-slot="preview-card-popup"],
-    #root :is(.selection-glass-surface, .app-toast-surface)
+    #root .selection-glass-surface
   ) {
   background: color-mix(in srgb, var(--popover) 96%, transparent);
   -webkit-backdrop-filter: none;
@@ -3902,7 +3899,7 @@ label:has(> select#reasoning-effort) select {
 :root[data-window-translucency]
   body
   > :not(#root)
-  :is(.selection-glass-surface, .app-toast-surface, [data-slot="popover-popup"])
+  :is(.selection-glass-surface, [data-slot="popover-popup"])
   :is(.selection-glass-surface, .app-toast-surface) {
   background: transparent;
 }
@@ -3915,23 +3912,69 @@ label:has(> select#reasoning-effort) select {
   background: none;
 }
 
+/* The fades are scroll-driven: each edge dissolves only while transcript is
+   scrolled past it. At rest at the top the first message, and at the end the
+   last one, sit clear of their bar and stay whole; a fixed fade dimmed them. */
+@property --chat-transcript-fade-top-size {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --chat-transcript-fade-bottom-size {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes toast-countdown {
+  to {
+    stroke-dashoffset: 59.7;
+  }
+}
+
+@keyframes chat-transcript-fade-top {
+  from {
+    --chat-transcript-fade-top-size: 0px;
+  }
+  to {
+    --chat-transcript-fade-top-size: 1.5rem;
+  }
+}
+
+@keyframes chat-transcript-fade-bottom {
+  from {
+    --chat-transcript-fade-bottom-size: 2.5rem;
+  }
+  to {
+    --chat-transcript-fade-bottom-size: 0px;
+  }
+}
+
 :root[data-window-translucency="window"] .chat-transcript-viewport {
   --chat-transcript-fade-top: var(--chat-header-clearance, 0px);
   --chat-transcript-fade-bottom: calc(100% - var(--chat-composer-clearance, 0px) + 8px);
   -webkit-mask-image: linear-gradient(
     to bottom,
     transparent var(--chat-transcript-fade-top),
-    black calc(var(--chat-transcript-fade-top) + 1.5rem),
-    black calc(var(--chat-transcript-fade-bottom) - 2.5rem),
+    black calc(var(--chat-transcript-fade-top) + var(--chat-transcript-fade-top-size)),
+    black calc(var(--chat-transcript-fade-bottom) - var(--chat-transcript-fade-bottom-size)),
     transparent var(--chat-transcript-fade-bottom)
   );
   mask-image: linear-gradient(
     to bottom,
     transparent var(--chat-transcript-fade-top),
-    black calc(var(--chat-transcript-fade-top) + 1.5rem),
-    black calc(var(--chat-transcript-fade-bottom) - 2.5rem),
+    black calc(var(--chat-transcript-fade-top) + var(--chat-transcript-fade-top-size)),
+    black calc(var(--chat-transcript-fade-bottom) - var(--chat-transcript-fade-bottom-size)),
     transparent var(--chat-transcript-fade-bottom)
   );
+  animation:
+    chat-transcript-fade-top linear both,
+    chat-transcript-fade-bottom linear both;
+  animation-timeline: scroll(self y), scroll(self y);
+  animation-range:
+    0 1.5rem,
+    calc(100% - 2.5rem) 100%;
 }
 
 /* Terminals follow the glass: their xterm theme resolves a clear background

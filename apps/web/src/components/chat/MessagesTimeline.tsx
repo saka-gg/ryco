@@ -472,6 +472,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         offerFork,
         showForkOrigin: !isPhoneTier,
         showUserInputExchanges: !isPhoneTier,
+        foldEarlierChapters: !isPhoneTier,
       }),
     [
       observedRunningTurnIds,
@@ -2307,11 +2308,14 @@ const WorkGroupSection = memo(function WorkGroupSection({
   // plain work rows there instead of dead-end navigation affordances.
   const isPhoneTier = usePresentationTier() === "phone";
   const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
+  // A spawn card names itself ("Kicked off 3 subagents"): a "Work log (1)"
+  // heading over each one only lengthens a thread that delegates often.
+  const onlySpawnCards = !isPhoneTier && groupedEntries.every((entry) => entry.agentSpawn);
   const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
 
   return (
     <div className="space-y-1">
-      {!onlyToolEntries && (
+      {!onlyToolEntries && !onlySpawnCards && (
         <div className="flex items-center gap-2 px-2">
           <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
             {groupLabel} ({groupedEntries.length})
@@ -2393,6 +2397,24 @@ function WorkGroupToggleTimelineRow({
 }) {
   const { routeThreadKey } = use(TimelineStableCtx);
   const setExpanded = useUiStateStore((store) => store.setThreadWorkGroupExpanded);
+  if (row.earlierSteps) {
+    // Sits on the chapter column, styled like a live chapter's own
+    // "N earlier steps" toggle, which it continues one level up.
+    return (
+      <button
+        type="button"
+        aria-expanded={row.expanded}
+        onClick={() => setExpanded(routeThreadKey, row.groupId, !row.expanded)}
+        data-earlier-steps-toggle="true"
+        className="ml-[26px] flex h-6 cursor-pointer items-center gap-1.5 rounded-sm text-[12px] text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+      >
+        {row.expanded
+          ? "Hide earlier steps"
+          : `${row.hiddenCount} earlier ${row.hiddenCount === 1 ? "step" : "steps"}`}
+        <DisclosureChevron open={row.expanded} className="size-3" />
+      </button>
+    );
+  }
   const labelNoun = row.onlyToolEntries
     ? row.hiddenCount === 1
       ? "tool call"

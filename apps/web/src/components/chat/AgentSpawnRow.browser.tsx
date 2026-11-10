@@ -29,6 +29,10 @@ function Harness(props: {
   );
 }
 
+/** The marker's one line, without its monograms. */
+const markerText = () =>
+  document.querySelector("[data-agent-spawn-row] button .truncate")?.textContent;
+
 describe("AgentSpawnRow", () => {
   let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
@@ -36,6 +40,27 @@ describe("AgentSpawnRow", () => {
     await mounted?.unmount().catch(() => {});
     mounted = null;
     document.body.innerHTML = "";
+  });
+
+  it("reads as finished with its cost once settled, and calls out failures", async () => {
+    const model = deriveAgentPanelModel({
+      agents: [
+        makeRuntimeAgent("a", {
+          title: "fix:window-capture",
+          status: "completed",
+          usage: { totalTokens: 1_300_000 },
+        }),
+        makeRuntimeAgent("b", { title: "fix:paste-recall", status: "failed" }),
+      ],
+    });
+
+    mounted = await render(<Harness model={model} onOpenAgents={vi.fn()} onOpenAgent={vi.fn()} />);
+
+    const row = page.getByRole("button", { name: /2 subagents finished/ });
+    await expect.element(row).toBeVisible();
+    expect(markerText()).toBe(
+      "2 subagents finished · fix:window-capture, fix:paste-recall · 1 failed · 1.3M tok",
+    );
   });
 
   it("shows the latest action, expands in place and opens one agent", async () => {
@@ -63,9 +88,12 @@ describe("AgentSpawnRow", () => {
 
     const row = page.getByRole("button", { name: /Kicked off 2 subagents/ });
     await expect.element(row).toBeVisible();
-    const summary = row.element().textContent ?? "";
-    expect(summary).toContain("Trace Ryco worktree flow · Reading ComposerPrimaryActions.tsx");
-    expect(summary).toContain("2 working");
+    // One line: what started and how many still work; who acted last is the tooltip.
+    expect(markerText()).toBe("Kicked off 2 subagents · 2 working");
+    expect(row.element().getAttribute("title")).toBe(
+      "Trace Ryco worktree flow · Reading ComposerPrimaryActions.tsx",
+    );
+    expect(row.element().getBoundingClientRect().height).toBeLessThanOrEqual(32);
     expect(document.querySelectorAll("[data-agent-row]")).toHaveLength(0);
 
     await row.click();

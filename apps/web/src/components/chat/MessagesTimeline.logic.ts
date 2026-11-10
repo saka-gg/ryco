@@ -441,6 +441,12 @@ export type MessagesTimelineRow =
       onlyToolEntries: boolean;
       /** Compact recap of the folded run ("Ran 9 commands, Read 1 file"). */
       summary: ToolCallGroupSummary | null;
+      /**
+       * Folds a running turn's finished chapters ("21 earlier steps") instead
+       * of a run of work entries; `hiddenCount` then counts their paragraphs
+       * and steps.
+       */
+      earlierSteps?: true | undefined;
     }
   | {
       kind: "proposed-plan";
@@ -544,6 +550,14 @@ export function timelineRowItemType(row: MessagesTimelineRow): string {
 export function chapterExpansionKey(chapterId: string): string {
   return chapterId;
 }
+
+/** Expansion key of a turn's "N earlier steps" fold; by turn, so it survives the turn settling. */
+export function earlierStepsExpansionKey(turnId: TurnId): string {
+  return `earlier-steps:${turnId}`;
+}
+
+/** A turn folds the chapters before its latest one once it has this many of them. */
+const MIN_FOLDED_EARLIER_CHAPTERS = 2;
 
 export function chapterStepsExpansionKey(chapterId: string): string {
   return `${chapterId}:steps`;
@@ -673,6 +687,11 @@ interface TurnFold {
   label: string | null;
   hiddenEntryIds: ReadonlySet<string>;
   expanded: boolean;
+  /**
+   * The outline shows only where the turn got to: it is running, or it stays open because the
+   * user watched it finish. A turn the user opened themselves lists every chapter.
+   */
+  showsLatestOnly: boolean;
   completedAt: string | null;
 }
 
@@ -862,6 +881,7 @@ function deriveTurnFolds(input: {
         (isRunning ||
           (input.liveSettledTurnIds.has(turnId) &&
             (input.turnFoldExpandedById[`turn-fold:running:${turnId}`] ?? true))),
+      showsLatestOnly: isRunning || input.turnFoldExpandedById[foldId] === undefined,
       completedAt: effectiveEnd,
     });
   }
@@ -919,6 +939,8 @@ class ChapterAccumulator {
       workGroupExpandedById: Readonly<Record<string, boolean>>;
       revealedMessageIds: ReadonlySet<string>;
       rows: MessagesTimelineRow[];
+      /** Fold a running turn's finished chapters into one "earlier steps" line. */
+      foldEarlierChapters: boolean;
     },
   ) {}
 
@@ -1006,7 +1028,54 @@ class ChapterAccumulator {
         }
         row.endedAt = next ? next.startedAt : (fold?.completedAt ?? chapterLastActivity(row));
       });
+      if (fold?.showsLatestOnly && this.options.foldEarlierChapters) {
+        this.foldEarlier(fold, turnRows);
+      }
     }
+  }
+
+  /**
+   * While a turn works, only its current chapter stays open: the ones before
+   * it fold into one toggle that leads them. A turn watched to its end keeps
+   * that shape, so settling does not unfold them all at once. A search hit or
+   * deep link inside a folded chapter opens the fold.
+   */
+  private foldEarlier(fold: TurnFold, turnRows: ReadonlyArray<ChapterRow>) {
+    const earlier = turnRows.slice(0, -1);
+    if (earlier.length < MIN_FOLDED_EARLIER_CHAPTERS) return;
+    const first = earlier[0]!;
+    const groupId = earlierStepsExpansionKey(fold.turnId);
+    const expanded =
+      earlier.some(
+        (row) => row.message !== null && this.options.revealedMessageIds.has(row.message.id),
+      ) ||
+      (this.options.workGroupExpandedById[groupId] ?? false);
+    const hidden = expanded ? null : new Set<MessagesTimelineRow>(earlier);
+    const rows = this.options.rows;
+    const next: MessagesTimelineRow[] = [];
+    for (const row of rows) {
+      if (row === first) {
+        next.push({
+          kind: "work-toggle",
+          id: `work-toggle:${groupId}`,
+          createdAt: first.createdAt,
+          groupId,
+          hiddenCount: earlier.reduce(
+            (count, chapter) => count + chapter.entries.length + (chapter.message ? 1 : 0),
+            0,
+          ),
+          expanded,
+          onlyToolEntries: false,
+          summary: null,
+          earlierSteps: true,
+        });
+      }
+      if (!hidden?.has(row)) next.push(row);
+    }
+    rows.length = 0;
+    for (const row of next) rows.push(row);
+    // The rail starts at the first chapter still on screen.
+    if (hidden) turnRows.at(-1)!.isFirstInTurn = true;
   }
 }
 
@@ -1106,6 +1175,11 @@ export function deriveMessagesTimelineRows(input: {
    * bare "User input" rows.
    */
   showUserInputExchanges?: boolean | undefined;
+  /**
+   * While a turn works, folds its finished chapters into one "N earlier steps" line so only the
+   * current step is open; the frozen phone tier keeps every chapter listed.
+   */
+  foldEarlierChapters?: boolean | undefined;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
   const sourceEntries = input.showUserInputExchanges
@@ -1165,6 +1239,7 @@ export function deriveMessagesTimelineRows(input: {
     workGroupExpandedById: input.workGroupExpandedById ?? {},
     revealedMessageIds: input.revealedMessageIds ?? EMPTY_STRING_SET,
     rows: nextRows,
+    foldEarlierChapters: input.foldEarlierChapters ?? false,
   });
 
   for (let index = 0; index < timelineEntries.length; index += 1) {
@@ -1558,6 +1633,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.hiddenCount === bw.hiddenCount &&
         a.expanded === bw.expanded &&
         a.onlyToolEntries === bw.onlyToolEntries &&
+        a.earlierSteps === bw.earlierSteps &&
         // The label is derived from the folded run's composition, so it changes
         // exactly when the recap would render differently.
         a.summary?.label === bw.summary?.label

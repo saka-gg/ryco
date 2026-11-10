@@ -591,6 +591,35 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("C:/Users/mike/dev-stuff/ryco/apps/web/src/session-logic.ts");
   });
 
+  it("leaves the work log heading off a group that is only spawn cards", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const workEntry = (extra: object) => ({
+      id: "entry-1",
+      kind: "work" as const,
+      createdAt: "2026-03-17T19:12:28.000Z",
+      entry: {
+        id: "work-1",
+        createdAt: "2026-03-17T19:12:28.000Z",
+        label: "Delegating",
+        tone: "info" as const,
+        ...extra,
+      },
+    });
+    const spawnOnly = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[workEntry({ agentSpawn: { workflowId: null, agentTaskIds: ["a-1"] } })]}
+      />,
+    );
+    const plain = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[workEntry({})]} />,
+    );
+
+    expect(spawnOnly).toContain("data-agent-spawn-row");
+    expect(spawnOnly).not.toContain("Work log");
+    expect(plain).toContain("Work log");
+  });
+
   it("labels the changed-files diff button as close for the open turn", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const assistantMessageId = MessageId.make("assistant-1");

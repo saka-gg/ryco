@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  GLASS_BACKED_ATTRIBUTE,
   GLASS_IN_PAGE_ATTRIBUTE,
   installGlassOverlayCutout,
   registerInPageGlassOverlay,
@@ -119,5 +120,64 @@ describe("in-page glass overlay cutout", () => {
       window.requestAnimationFrame = originalRequest;
       unregister();
     }
+  });
+});
+
+describe("portaled glass overlay cutout", () => {
+  let root: HTMLElement;
+  let portal: HTMLElement;
+  let dispose: (() => void) | null = null;
+
+  beforeEach(() => {
+    root = document.createElement("div");
+    root.id = "root";
+    root.innerHTML = `<div style="width:600px;height:400px">Page text</div>`;
+    portal = document.createElement("div");
+    document.body.append(root, portal);
+    document.documentElement.setAttribute(WINDOW_TRANSLUCENCY_ATTRIBUTE, "window");
+    dispose = installGlassOverlayCutout(root);
+  });
+
+  afterEach(() => {
+    dispose?.();
+    dispose = null;
+    root.remove();
+    portal.remove();
+    document.documentElement.removeAttribute(WINDOW_TRANSLUCENCY_ATTRIBUTE);
+  });
+
+  const overlay = (className: string, style: string) => {
+    const element = document.createElement("div");
+    element.className = className;
+    element.style.cssText = `position:fixed;${style}`;
+    portal.append(element);
+    return element;
+  };
+
+  it("cuts the page out under a popup that sits on a painted scrim", async () => {
+    // The command palette: an empty backdrop dims the page, the popup floats on it.
+    overlay("", "inset:0;background:rgb(0 0 0 / 0.6)");
+    const popup = overlay("selection-glass-surface", "top:40px;left:40px;width:300px;height:200px");
+
+    await vi.waitFor(() => expect(root.style.clipPath).toContain("path(evenodd"));
+    expect(popup.hasAttribute(GLASS_BACKED_ATTRIBUTE)).toBe(false);
+  });
+
+  it("marks a popup on another portaled layer as backed instead of cutting the page", async () => {
+    const dialog = overlay("", "inset:0;background:rgb(20 20 20)");
+    dialog.textContent = "Dialog text";
+    const select = overlay(
+      "selection-glass-surface",
+      "top:40px;left:40px;width:300px;height:200px",
+    );
+
+    await vi.waitFor(() => expect(select.hasAttribute(GLASS_BACKED_ATTRIBUTE)).toBe(true));
+    expect(root.style.clipPath).toBe("");
+  });
+
+  it("never cuts the page out under a toast", async () => {
+    overlay("app-toast-surface", "top:12px;left:40px;width:300px;height:80px");
+    await nextFrames(3);
+    expect(root.style.clipPath).toBe("");
   });
 });

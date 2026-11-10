@@ -151,8 +151,6 @@ const WORK_LABEL_GAP_REM = 0.25;
 /** A multi-file edit row: `py-1.5`, label, `mt-0.5`, a row of 9px chips. */
 const MULTI_FILE_EDIT_EXTRA_REM = 0.75 + 0.125 + 0.75 + 0.25;
 const MULTI_FILE_EDIT_EXTRA_PX = 2;
-/** An agent spawn row. */
-const AGENT_SPAWN_ROW_REM = 3.5;
 /** Turn fold `pt-1 pb-1`; working row `pt-1 pb-2` around two 30px lines. */
 const TURN_FOLD_PADDING_REM = 0.5;
 const WORKING_PADDING_REM = 0.75;
@@ -752,7 +750,8 @@ type WorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"
 function estimateWorkEntryHeight(entry: WorkEntry, layout: TimelineRowLayout): number {
   const { remPx } = layout;
   const rowPx = Math.max(COMPACT_ROW_PX, COMPACT_ROW_TEXT_REM * remPx);
-  if (entry.agentSpawn && layout.tier !== "phone") return AGENT_SPAWN_ROW_REM * remPx;
+  // A spawn marker is one compact line.
+  if (entry.agentSpawn && layout.tier !== "phone") return rowPx;
   if ((entry.changedFiles?.length ?? 0) > 1) {
     return Math.max(
       rowPx,
@@ -769,7 +768,9 @@ function estimateWorkRow(
   const { remPx } = layout;
   const entries = row.groupedEntries;
   let height = ROW_PAD_WORK_REM * remPx;
-  if (entries.some((entry) => entry.tone !== "tool")) {
+  // Spawn markers name themselves, so a group of only those has no heading.
+  const onlySpawnMarkers = layout.tier !== "phone" && entries.every((entry) => entry.agentSpawn);
+  if (!onlySpawnMarkers && entries.some((entry) => entry.tone !== "tool")) {
     height += WORK_LABEL_PX + WORK_LABEL_GAP_REM * remPx;
   }
   for (const entry of entries) height += estimateWorkEntryHeight(entry, layout);

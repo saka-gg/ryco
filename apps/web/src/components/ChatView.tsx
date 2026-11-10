@@ -268,7 +268,7 @@ import {
   TriangleAlertIcon,
   WifiOffIcon,
 } from "lucide-react";
-import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
+import { ThreadLiveWorkContext, type ThreadLiveWork } from "./delegation/threadLiveWork";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
@@ -7149,6 +7149,41 @@ export default function ChatView(props: ChatViewProps) {
       isPhoneTier || activeThreadId === null ? null : { environmentId, threadId: activeThreadId },
     [activeThreadId, environmentId, isPhoneTier],
   );
+  // What runs beside the turn (subagents, background tasks) shows in that dock.
+  // It reaches it by context, so the composer does not re-render with the roster.
+  const liveWorkConnected =
+    !activeEnvironmentUnavailable && sideChatConnection.phase === "connected";
+  const liveWorkMutationReady = dispatchCapability.allowed && liveWorkConnected;
+  const threadLiveWork = useMemo<ThreadLiveWork | null>(
+    () =>
+      isPhoneTier
+        ? null
+        : {
+            agentPanelModel,
+            work: backgroundWork,
+            liveness: activeBackgroundLiveness,
+            connected: liveWorkConnected,
+            mutationReady: liveWorkMutationReady,
+            stoppingAll: isStoppingBackgroundWork,
+            onStopAll: handleStopBackgroundWork,
+            onStopTask: handleStopBackgroundTask,
+            onOpenAgents: onOpenAgentsPanel,
+            onOpenAgent: onOpenRuntimeAgentPanel,
+          },
+    [
+      activeBackgroundLiveness,
+      agentPanelModel,
+      backgroundWork,
+      handleStopBackgroundTask,
+      handleStopBackgroundWork,
+      isPhoneTier,
+      isStoppingBackgroundWork,
+      liveWorkConnected,
+      liveWorkMutationReady,
+      onOpenAgentsPanel,
+      onOpenRuntimeAgentPanel,
+    ],
+  );
   // The thread dock renders inside the composer, beneath the approval and
   // pending-input panels (see `ChatComposer`), so an open panel cannot carry it
   // out of the bottom third. The phone-tier gate stays here; the dock stays
@@ -7698,34 +7733,6 @@ export default function ChatView(props: ChatViewProps) {
               />
             ) : null}
             <div className={cn("relative isolate", composerOverlayActive && "pointer-events-auto")}>
-              {/* Background-liveness stays off the frozen phone tier along
-                  with the rest of the Agents surface (AGENTS.md). */}
-              {(activeBackgroundLiveness !== null ||
-                backgroundWork.tasks.length > 0 ||
-                backgroundWork.detailsOmitted) &&
-              presentationTier !== "phone" ? (
-                <div className="mx-auto mb-2 flex w-full min-w-0 max-w-(--chat-composer-max-width) items-center px-4">
-                  <BackgroundLivenessChip
-                    key={activeThreadKey}
-                    work={backgroundWork}
-                    connected={
-                      !activeEnvironmentUnavailable && sideChatConnection.phase === "connected"
-                    }
-                    mutationReady={
-                      dispatchCapability.allowed &&
-                      !activeEnvironmentUnavailable &&
-                      sideChatConnection.phase === "connected"
-                    }
-                    onStopTask={handleStopBackgroundTask}
-                    liveness={activeBackgroundLiveness ?? "monitoring"}
-                    liveCount={agentPanelModel.liveCount}
-                    waitingCount={agentPanelModel.waitingCount}
-                    onOpenAgents={onOpenAgentsPanel}
-                    stopping={isStoppingBackgroundWork}
-                    onStop={handleStopBackgroundWork}
-                  />
-                </div>
-              ) : null}
               {presentationTier !== "phone" && activeThread
                 ? optionalUserInputs.map((input) => (
                     <OptionalQuestionCard
@@ -7861,121 +7868,125 @@ export default function ChatView(props: ChatViewProps) {
                 onCancelEdit={cancelServerQueueEdit}
               />
               <div ref={composerBoxRef} className="relative z-10">
-                <ChatComposer
-                  ref={composerRef}
-                  onComposerIntent={onComposerIntent}
-                  composerDraftTarget={composerDraftTarget}
-                  environmentId={environmentId}
-                  routeKind={routeKind}
-                  routeThreadRef={routeThreadRef}
-                  draftId={draftId}
-                  activeThreadId={activeThreadId}
-                  activeThreadEnvironmentId={activeThread?.environmentId}
-                  activeThreadSessionProviderInstanceId={activeThreadSessionProviderInstanceId}
-                  activeThreadStarted={activeThreadStarted}
-                  isServerThread={isServerThread}
-                  isLocalDraftThread={isLocalDraftThread}
-                  activeThreadGoal={serverThread?.goal ?? null}
-                  phase={phase}
-                  isConnecting={isConnecting}
-                  isSendBusy={
-                    isSendBusy ||
-                    // A connection being established takes sends into the queue;
-                    // any other refusal keeps the send button busy.
-                    (!dispatchCapability.allowed && !dispatchEstablishing) ||
-                    workspaceExecutionTargetUnavailable ||
-                    hostedDraftTarget.pending !== null
-                  }
-                  sendsQueueUntilReady={sendsQueueUntilReady}
-                  mutationUnavailableReason={mutationUnavailableReason}
-                  isPreparingWorktree={isPreparingWorktree}
-                  isWorktreeSetupRunning={composerWorktreeSetupRunning}
-                  environmentUnavailable={activeEnvironmentUnavailableState}
-                  activePendingApproval={activePendingApproval}
-                  pendingApprovals={pendingApprovals}
-                  pendingUserInputs={pendingUserInputs}
-                  activePendingProgress={activePendingProgress}
-                  activePendingResolvedAnswers={activePendingResolvedAnswers}
-                  activePendingIsResponding={activePendingIsResponding}
-                  activePendingDraftAnswers={activePendingDraftAnswers}
-                  activePendingQuestionIndex={activePendingQuestionIndex}
-                  respondingRequestIds={respondingRequestIds}
-                  activeRuntimeSessionId={activeThread?.session?.runtimeSessionId ?? null}
-                  activeTurnId={activeThread?.session?.activeTurnId ?? null}
-                  approvalRedirectedTurnId={
-                    activeThreadKey ? (approvalRedirectedTurns.get(activeThreadKey) ?? null) : null
-                  }
-                  showPlanFollowUpPrompt={showPlanFollowUpPrompt}
-                  activeProposedPlan={activeProposedPlan}
-                  activePlan={activePlan as { turnId?: TurnId } | null}
-                  sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
-                  planSidebarLabel={planSidebarLabel}
-                  planSidebarOpen={overviewControlOpen}
-                  runtimeMode={runtimeMode}
-                  interactionMode={interactionMode}
-                  tokenMode={tokenMode}
-                  lockedProvider={lockedProvider}
-                  providerStatuses={composerProviderStatuses}
-                  activeThreadModelSelection={activeThread?.modelSelection}
-                  cliProxyHubsEnabled={cliProxyHubsEnabled}
-                  activeThreadActivities={threadActivities}
-                  compactNow={compactNow}
-                  phoneThreadDock={phoneThreadDock}
-                  delegationDock={delegationDock}
-                  resolvedTheme={resolvedTheme}
-                  settings={settings}
-                  keybindings={keybindings}
-                  terminalOpen={Boolean(terminalState.terminalOpen)}
-                  gitCwd={gitCwd}
-                  readPromptHistoryMessages={readPromptHistoryMessages}
-                  executionTargets={executionTargets}
-                  executionTargetLocked={executionTargetLocked}
-                  executionTargetHoisted={executionTargetHoisted}
-                  onExecutionTargetChange={onExecutionTargetChange}
-                  promptRef={promptRef}
-                  composerImagesRef={composerImagesRef}
-                  composerTerminalContextsRef={composerTerminalContextsRef}
-                  composerFileReferencesRef={composerFileReferencesRef}
-                  shouldAutoScrollRef={isAtEndRef}
-                  scheduleStickToBottom={scrollToEnd}
-                  followUpSurfaceAllowsSteer={presentationTier !== "phone"}
-                  getFollowUpSteerUnavailableReason={getFollowUpSteerUnavailableReason}
-                  followUpSteerRestarts={followUpSteerRestarts}
-                  onSend={onSend}
-                  onInterrupt={worktreeSetupRunning ? cancelWorktreeSetup : onInterrupt}
-                  onImplementPlanInNewThread={onImplementPlanInNewThread}
-                  onRespondToApproval={onRespondToApproval}
-                  onSelectActivePendingUserInputOption={onSelectActivePendingUserInputOption}
-                  onAdvanceActivePendingUserInput={onAdvanceActivePendingUserInput}
-                  onPreviousActivePendingUserInputQuestion={
-                    onPreviousActivePendingUserInputQuestion
-                  }
-                  onChangeActivePendingUserInputCustomAnswer={
-                    onChangeActivePendingUserInputCustomAnswer
-                  }
-                  onProviderModelSelect={onProviderModelSelect}
-                  toggleInteractionMode={toggleInteractionMode}
-                  handleRuntimeModeChange={handleRuntimeModeChange}
-                  handleInteractionModeChange={handleInteractionModeChange}
-                  handleTokenModeChange={handleTokenModeChange}
-                  togglePlanSidebar={toggleOverviewSidebar}
-                  focusComposer={focusComposer}
-                  scheduleComposerFocus={scheduleComposerFocus}
-                  setThreadError={setThreadError}
-                  onExpandImage={onExpandTimelineImage}
-                  onGoalBudgetChange={(tokenBudget) => dispatchThreadGoalUpdate({ tokenBudget })}
-                  onRetryGoal={() => {
-                    if (serverThread?.goal?.synchronization?.action === "clear")
-                      void handleClearGoal();
-                    else
-                      void dispatchThreadGoalUpdate({
-                        startTurn: serverThread?.goal?.status === "active" && phase !== "running",
-                      });
-                  }}
-                  onEditGoal={handleEditGoal}
-                  onGoalStatusChange={handleGoalStatusChange}
-                  onClearGoal={handleClearGoal}
-                />
+                <ThreadLiveWorkContext value={threadLiveWork}>
+                  <ChatComposer
+                    ref={composerRef}
+                    onComposerIntent={onComposerIntent}
+                    composerDraftTarget={composerDraftTarget}
+                    environmentId={environmentId}
+                    routeKind={routeKind}
+                    routeThreadRef={routeThreadRef}
+                    draftId={draftId}
+                    activeThreadId={activeThreadId}
+                    activeThreadEnvironmentId={activeThread?.environmentId}
+                    activeThreadSessionProviderInstanceId={activeThreadSessionProviderInstanceId}
+                    activeThreadStarted={activeThreadStarted}
+                    isServerThread={isServerThread}
+                    isLocalDraftThread={isLocalDraftThread}
+                    activeThreadGoal={serverThread?.goal ?? null}
+                    phase={phase}
+                    isConnecting={isConnecting}
+                    isSendBusy={
+                      isSendBusy ||
+                      // A connection being established takes sends into the queue;
+                      // any other refusal keeps the send button busy.
+                      (!dispatchCapability.allowed && !dispatchEstablishing) ||
+                      workspaceExecutionTargetUnavailable ||
+                      hostedDraftTarget.pending !== null
+                    }
+                    sendsQueueUntilReady={sendsQueueUntilReady}
+                    mutationUnavailableReason={mutationUnavailableReason}
+                    isPreparingWorktree={isPreparingWorktree}
+                    isWorktreeSetupRunning={composerWorktreeSetupRunning}
+                    environmentUnavailable={activeEnvironmentUnavailableState}
+                    activePendingApproval={activePendingApproval}
+                    pendingApprovals={pendingApprovals}
+                    pendingUserInputs={pendingUserInputs}
+                    activePendingProgress={activePendingProgress}
+                    activePendingResolvedAnswers={activePendingResolvedAnswers}
+                    activePendingIsResponding={activePendingIsResponding}
+                    activePendingDraftAnswers={activePendingDraftAnswers}
+                    activePendingQuestionIndex={activePendingQuestionIndex}
+                    respondingRequestIds={respondingRequestIds}
+                    activeRuntimeSessionId={activeThread?.session?.runtimeSessionId ?? null}
+                    activeTurnId={activeThread?.session?.activeTurnId ?? null}
+                    approvalRedirectedTurnId={
+                      activeThreadKey
+                        ? (approvalRedirectedTurns.get(activeThreadKey) ?? null)
+                        : null
+                    }
+                    showPlanFollowUpPrompt={showPlanFollowUpPrompt}
+                    activeProposedPlan={activeProposedPlan}
+                    activePlan={activePlan as { turnId?: TurnId } | null}
+                    sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
+                    planSidebarLabel={planSidebarLabel}
+                    planSidebarOpen={overviewControlOpen}
+                    runtimeMode={runtimeMode}
+                    interactionMode={interactionMode}
+                    tokenMode={tokenMode}
+                    lockedProvider={lockedProvider}
+                    providerStatuses={composerProviderStatuses}
+                    activeThreadModelSelection={activeThread?.modelSelection}
+                    cliProxyHubsEnabled={cliProxyHubsEnabled}
+                    activeThreadActivities={threadActivities}
+                    compactNow={compactNow}
+                    phoneThreadDock={phoneThreadDock}
+                    delegationDock={delegationDock}
+                    resolvedTheme={resolvedTheme}
+                    settings={settings}
+                    keybindings={keybindings}
+                    terminalOpen={Boolean(terminalState.terminalOpen)}
+                    gitCwd={gitCwd}
+                    readPromptHistoryMessages={readPromptHistoryMessages}
+                    executionTargets={executionTargets}
+                    executionTargetLocked={executionTargetLocked}
+                    executionTargetHoisted={executionTargetHoisted}
+                    onExecutionTargetChange={onExecutionTargetChange}
+                    promptRef={promptRef}
+                    composerImagesRef={composerImagesRef}
+                    composerTerminalContextsRef={composerTerminalContextsRef}
+                    composerFileReferencesRef={composerFileReferencesRef}
+                    shouldAutoScrollRef={isAtEndRef}
+                    scheduleStickToBottom={scrollToEnd}
+                    followUpSurfaceAllowsSteer={presentationTier !== "phone"}
+                    getFollowUpSteerUnavailableReason={getFollowUpSteerUnavailableReason}
+                    followUpSteerRestarts={followUpSteerRestarts}
+                    onSend={onSend}
+                    onInterrupt={worktreeSetupRunning ? cancelWorktreeSetup : onInterrupt}
+                    onImplementPlanInNewThread={onImplementPlanInNewThread}
+                    onRespondToApproval={onRespondToApproval}
+                    onSelectActivePendingUserInputOption={onSelectActivePendingUserInputOption}
+                    onAdvanceActivePendingUserInput={onAdvanceActivePendingUserInput}
+                    onPreviousActivePendingUserInputQuestion={
+                      onPreviousActivePendingUserInputQuestion
+                    }
+                    onChangeActivePendingUserInputCustomAnswer={
+                      onChangeActivePendingUserInputCustomAnswer
+                    }
+                    onProviderModelSelect={onProviderModelSelect}
+                    toggleInteractionMode={toggleInteractionMode}
+                    handleRuntimeModeChange={handleRuntimeModeChange}
+                    handleInteractionModeChange={handleInteractionModeChange}
+                    handleTokenModeChange={handleTokenModeChange}
+                    togglePlanSidebar={toggleOverviewSidebar}
+                    focusComposer={focusComposer}
+                    scheduleComposerFocus={scheduleComposerFocus}
+                    setThreadError={setThreadError}
+                    onExpandImage={onExpandTimelineImage}
+                    onGoalBudgetChange={(tokenBudget) => dispatchThreadGoalUpdate({ tokenBudget })}
+                    onRetryGoal={() => {
+                      if (serverThread?.goal?.synchronization?.action === "clear")
+                        void handleClearGoal();
+                      else
+                        void dispatchThreadGoalUpdate({
+                          startTurn: serverThread?.goal?.status === "active" && phase !== "running",
+                        });
+                    }}
+                    onEditGoal={handleEditGoal}
+                    onGoalStatusChange={handleGoalStatusChange}
+                    onClearGoal={handleClearGoal}
+                  />
+                </ThreadLiveWorkContext>
               </div>
             </div>
             {isGitRepo && (

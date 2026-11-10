@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { act } from "react";
 import { render } from "vitest-browser-react";
 
-import { BackgroundLivenessChip } from "../chat/BackgroundLivenessChip";
+import { LiveWorkDock, makeThreadLiveWork } from "../delegation/threadLiveWorkTestFixtures";
 import { useInboxClock } from "../inboxSidebar/useInboxListMotion";
 import { AgentElapsed } from "./agentRoster";
 import { makeRuntimeAgent } from "./agentRosterTestFixtures";
@@ -76,20 +76,12 @@ it("ticks agent, background work and inbox labels on one timer that stops while 
         <AgentElapsed agent={makeRuntimeAgent("second")} />
       </div>
       <InboxSeconds />
-      <BackgroundLivenessChip
-        liveness="monitoring"
-        liveCount={1}
-        work={{ tasks: [task], detailsOmitted: false }}
-        onStopTask={async () => {}}
-        connected
-        mutationReady
-        stopping={false}
-        onStop={() => {}}
-        onOpenAgents={() => {}}
+      <LiveWorkDock
+        liveWork={makeThreadLiveWork({ work: { tasks: [task], detailsOmitted: false } })}
       />
     </div>,
   );
-  await page.getByRole("button", { name: "1 background task" }).click();
+  await page.getByRole("button", { name: /1 background task/ }).click();
   expect(labels()).toEqual(["5s", "5s", "5s", "5"]);
   expect(secondTimers()).toHaveLength(1);
 

@@ -84,7 +84,7 @@
   "src/components/chat/AgentChip.browser.tsx": 1.16,
   "src/components/chat/AgentSpawnRow.browser.tsx": 0.78,
   "src/components/chat/ApprovalCard.browser.tsx": 1.74,
-  "src/components/chat/BackgroundWorkDisclosure.browser.tsx": 1.23,
+  "src/components/delegation/DockLiveWork.browser.tsx": 1.23,
   "src/components/chat/ChatHeader.browser.tsx": 1.04,
   "src/components/chat/ChatHeaderBar.browser.tsx": 0.88,
   "src/components/chat/ChatOverviewPanel.ReadAdmission.browser.tsx": 1,

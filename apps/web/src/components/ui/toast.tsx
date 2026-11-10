@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type ComponentPropsWithoutRef,
   type KeyboardEvent,
@@ -432,9 +433,12 @@ export function useActiveThreadRefFromRoute(): ScopedThreadRef | null {
 function ThreadToastVisibleAutoDismiss({
   toastId,
   dismissAfterVisibleMs,
+  paused,
 }: {
   toastId: ToastId;
   dismissAfterVisibleMs: number | undefined;
+  /** The stack is hovered or focused: the countdown holds, like Base UI's own timers. */
+  paused: boolean;
 }) {
   useEffect(() => {
     if (!dismissAfterVisibleMs || dismissAfterVisibleMs <= 0) return;
@@ -482,7 +486,7 @@ function ThreadToastVisibleAutoDismiss({
     };
 
     const syncTimer = () => {
-      const shouldRun = document.visibilityState === "visible" && document.hasFocus();
+      const shouldRun = !paused && document.visibilityState === "visible" && document.hasFocus();
       if (shouldRun) {
         start();
         return;
@@ -502,9 +506,234 @@ function ThreadToastVisibleAutoDismiss({
       pause();
       clearTimer();
     };
-  }, [dismissAfterVisibleMs, toastId]);
+  }, [dismissAfterVisibleMs, paused, toastId]);
 
   return null;
+}
+
+function subscribeWindowFocus(onChange: () => void): () => void {
+  window.addEventListener("focus", onChange);
+  window.addEventListener("blur", onChange);
+  return () => {
+    window.removeEventListener("focus", onChange);
+    window.removeEventListener("blur", onChange);
+  };
+}
+
+/** Base UI's default `Toast.Provider` timeout: what a toast without its own gets. */
+const DEFAULT_TOAST_TIMEOUT_MS = 5000;
+
+/**
+ * How long the toast stays before it goes on its own, or null when it waits to
+ * be dismissed (an error with `timeout: 0`, a running task).
+ */
+function toastLifetimeMs(toast: {
+  readonly type?: string | undefined;
+  readonly timeout?: number | undefined;
+  readonly data?: ThreadToastData | undefined;
+}): number | null {
+  if (toast.type === "loading") return null;
+  const visibleMs = toast.data?.dismissAfterVisibleMs;
+  if (visibleMs !== undefined && visibleMs > 0) return visibleMs;
+  const timeout = toast.timeout ?? DEFAULT_TOAST_TIMEOUT_MS;
+  return timeout > 0 ? timeout : null;
+}
+
+const CAPSULE_ICON_TONE_CLASS: Record<string, string> = {
+  error: "bg-destructive/15 text-destructive",
+  info: "bg-info/15 text-info",
+  success: "bg-success/15 text-success",
+  warning: "bg-warning/15 text-warning",
+};
+
+/** Circumference of the countdown ring (r = 9.5 in a 22px box). */
+const CAPSULE_RING_LENGTH = 59.7;
+
+type StackToast = ReturnType<typeof Toast.useToastManager<ThreadToastData>>["toasts"][number];
+
+/**
+ * The capsule: one slim pill showing the tone icon, the title and the main
+ * action. Pointing at it, focusing into it, or clicking it opens the details
+ * (description, expandable body, the other actions). The status tone lives in the
+ * icon only; the plate is the solid popover.
+ */
+function CapsuleToastBody({
+  toast,
+  hiddenBehindCount,
+}: {
+  toast: StackToast;
+  /** Toasts folded under this one while the stack is collapsed; 0 for none. */
+  hiddenBehindCount: number;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const { Icon, actionVariant, secondaryActionVariant, copyErrorText } =
+    deriveToastBodyDescriptor(toast);
+  const toastData = toast.data;
+  const leadingIcon = toastData?.leadingIcon;
+  const secondaryActionProps = toastData?.secondaryActionProps;
+  const { className: secondaryActionClassName, ...secondaryActionRest } =
+    secondaryActionProps ?? {};
+  const actionProps = toast.actionProps;
+  const hasTitle = toast.title !== undefined && toast.title !== null && toast.title !== "";
+  // A toast with only a description shows it as the pill's one line.
+  const hasDescription =
+    hasTitle &&
+    toast.description !== undefined &&
+    toast.description !== null &&
+    toast.description !== "";
+  // The main action stays in the row, open or not: pointing at the pill opens
+  // the details, so an action that moved into them would slip from under the
+  // pointer on its way to the click.
+  const hasDetailActions = copyErrorText !== null || secondaryActionProps !== undefined;
+  const hasDetail =
+    hasDescription || toastData?.expandableContent !== undefined || hasDetailActions;
+  const open = hasDetail && (hovered || focusWithin || pinned);
+  const lifetimeMs = toastLifetimeMs(toast);
+  const rowTextClassName = "min-w-0 flex-1 truncate font-semibold";
+
+  return (
+    <div
+      data-capsule-open={open ? "" : undefined}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocusWithin(false);
+      }}
+      onFocus={() => setFocusWithin(true)}
+      onPointerEnter={(event) => {
+        if (event.pointerType === "mouse") setHovered(true);
+      }}
+      onPointerLeave={() => setHovered(false)}
+    >
+      {/* The row is the pill at rest. Clicking it (not a control in it) keeps
+          the details open, which is also how touch opens them. */}
+      <div
+        className={cn("flex min-w-0 items-center gap-[9px]", hasDetail && "cursor-pointer")}
+        data-slot="toast-row"
+        onClick={(event) => {
+          if (!hasDetail || (event.target as HTMLElement).closest("button")) return;
+          setPinned((value) => !value);
+        }}
+      >
+        <span
+          className={cn(
+            "flex size-[22px] shrink-0 items-center justify-center rounded-full [&_svg]:pointer-events-none [&_svg]:size-[13px] [&_svg]:shrink-0",
+            leadingIcon
+              ? "bg-foreground/8 text-foreground"
+              : (CAPSULE_ICON_TONE_CLASS[toast.type ?? ""] ??
+                  "bg-foreground/8 text-muted-foreground"),
+          )}
+          data-slot="toast-icon"
+        >
+          {leadingIcon ??
+            (Icon ? (
+              <Icon className={cn(toast.type === "loading" && "animate-spin")} strokeWidth={2.2} />
+            ) : (
+              <InfoIcon strokeWidth={2.2} />
+            ))}
+        </span>
+        {hasTitle ? (
+          <Toast.Title className={rowTextClassName} data-slot="toast-title" />
+        ) : (
+          <Toast.Description className={rowTextClassName} data-slot="toast-description" />
+        )}
+        {hiddenBehindCount > 0 ? (
+          <span
+            aria-hidden
+            className="shrink-0 rounded-full border border-border px-1.5 text-[11px] leading-[18px] text-muted-foreground group-data-expanded/toast:hidden"
+            data-slot="toast-more"
+          >
+            +{hiddenBehindCount}
+          </span>
+        ) : null}
+        {actionProps ? (
+          <Toast.Action
+            className={cn(
+              "shrink-0 cursor-pointer rounded-md px-1 py-0.5 text-xs font-semibold outline-none hover:bg-foreground/9 focus-visible:ring-2 focus-visible:ring-ring",
+              actionVariant.startsWith("destructive") ? "text-destructive" : "text-foreground",
+            )}
+            data-slot="toast-action"
+          >
+            {actionProps.children}
+          </Toast.Action>
+        ) : null}
+        <button
+          aria-label="Dismiss notification"
+          className="relative flex size-[22px] shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-foreground/9 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          data-slot="toast-close"
+          onClick={() => handleToastDismissClick(toastManager, toast.id, toastData?.onClose)}
+          type="button"
+        >
+          <XIcon className="size-[11px]" strokeWidth={2.4} />
+          {lifetimeMs !== null ? (
+            // The time left, drawn around the close button. Keyed by type so a
+            // running task that settles starts a fresh ring with its new timer.
+            <svg
+              aria-hidden
+              className="pointer-events-none absolute inset-0 size-[22px] -rotate-90"
+              data-slot="toast-countdown"
+              key={toast.type ?? "plain"}
+              viewBox="0 0 22 22"
+            >
+              <circle
+                className="toast-countdown-ring fill-none stroke-foreground/45"
+                cx="11"
+                cy="11"
+                r="9.5"
+                strokeDasharray={CAPSULE_RING_LENGTH}
+                strokeWidth="1.5"
+                style={{ animationDuration: `${lifetimeMs}ms` }}
+              />
+            </svg>
+          ) : null}
+        </button>
+      </div>
+      {hasDetail ? (
+        <div
+          aria-hidden={!open}
+          className={cn(
+            "grid transition-[grid-template-rows] duration-[260ms] ease-out motion-reduce:transition-none",
+            open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+          )}
+          data-slot="toast-detail"
+          inert={!open}
+        >
+          <div className="min-h-0 overflow-hidden">
+            <div className="pt-1.5 pr-1 pb-[5px] pl-[31px] text-xs">
+              {hasDescription || toastData?.expandableContent !== undefined ? (
+                <ToastDescriptionAndExpandable
+                  toastData={toastData}
+                  toastDescription={toast.description}
+                  toastType={toast.type}
+                />
+              ) : null}
+              {hasDetailActions ? (
+                <div
+                  className={cn(
+                    "flex flex-wrap items-center gap-1.5",
+                    (hasDescription || toastData?.expandableContent !== undefined) && "mt-[9px]",
+                  )}
+                >
+                  {secondaryActionProps ? (
+                    <button
+                      {...secondaryActionRest}
+                      className={cn(
+                        buttonVariants({ size: "xs", variant: secondaryActionVariant }),
+                        "rounded-full px-[11px]",
+                        secondaryActionClassName,
+                      )}
+                      type="button"
+                    />
+                  ) : null}
+                  {copyErrorText !== null ? <CopyErrorButton text={copyErrorText} /> : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function ToastProvider({ children, position = "top-center", ...props }: ToastProviderProps) {
@@ -527,6 +756,19 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
       shouldRenderThreadScopedToast(toast.data, activeThreadRef),
   );
   const visibleToastLayout = buildVisibleToastLayout(visibleToasts);
+  const liveToastCount = visibleToasts.filter(
+    (toast) => toast.transitionStatus !== "ending",
+  ).length;
+  // Hovering or focusing the stack holds every countdown, as Base UI does for
+  // its own timers; so does a window that is not in front.
+  const [stackHovered, setStackHovered] = useState(false);
+  const [stackFocused, setStackFocused] = useState(false);
+  const stackEngaged = stackHovered || stackFocused;
+  const windowFocused = useSyncExternalStore(
+    subscribeWindowFocus,
+    () => document.hasFocus(),
+    () => true,
+  );
 
   useEffect(() => {
     const activeToastIds = new Set(toasts.map((toast) => toast.id));
@@ -549,7 +791,7 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
           // the session tab strip, both carrying navigation state a covered
           // toast would hide) and the same 22.5rem cap. Only desktop takes the
           // new top offset and the wider card.
-          "fixed z-100 mx-auto flex w-[calc(100%-var(--toast-inset)*2)] max-w-90 not-phone:max-w-105 phone:[--toast-top:calc(var(--toast-inset)+76px)] not-phone:[--toast-top:--spacing(3)] [--toast-inset:--spacing(4)] sm:[--toast-inset:--spacing(8)]",
+          "fixed z-100 mx-auto flex w-[calc(100%-var(--toast-inset)*2)] max-w-90 not-phone:max-w-95 phone:[--toast-top:calc(var(--toast-inset)+76px)] not-phone:[--toast-top:--spacing(3)] [--toast-inset:--spacing(4)] sm:[--toast-inset:--spacing(8)]",
           // Vertical positioning. `--toast-inset` deliberately plays no part in
           // the top offset; it stays for horizontal insets and swipe travel.
           "data-[position*=top]:top-(--toast-top)",
@@ -559,8 +801,15 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
           "data-[position*=right]:right-(--toast-inset)",
           "data-[position*=center]:-translate-x-1/2 data-[position*=center]:left-1/2",
         )}
+        data-countdown-held={stackEngaged || !windowFocused ? "" : undefined}
         data-position={position}
         data-slot="toast-viewport"
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setStackFocused(false);
+        }}
+        onFocus={() => setStackFocused(true)}
+        onMouseEnter={() => setStackHovered(true)}
+        onMouseLeave={() => setStackHovered(false)}
         style={
           {
             "--toast-frontmost-height": `${visibleToastLayout.frontmostHeight}px`,
@@ -572,17 +821,16 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
             visibleIndex,
             visibleToastLayout.items.length,
           );
-          const bodyDescriptor = deriveToastBodyDescriptor(toast);
-          const { stackedActionLayout, inlineContentEndPad } = bodyDescriptor;
 
           return (
             <Toast.Root
               className={cn(
                 toastInteractionRegionClass,
+                // The capsule plate: solid popover, one hairline, one shadow.
                 // The snappy spring drives the transform so a new toast drops in
                 // and settles with a slight overshoot; opacity fades on the pop
                 // duration so entrance and exit read as material, not a slide.
-                "app-toast-surface absolute z-[calc(9999-var(--toast-index))] w-full overflow-visible select-none rounded-xl border not-dark:bg-clip-padding text-popover-foreground shadow-xl/5 [transition:transform_var(--app-motion-duration-stack)_var(--app-motion-spring-snappy),opacity_var(--app-motion-duration-pop)_var(--app-motion-spring-gentle),height_var(--app-motion-duration-chip)] before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-xl)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+                "group/toast absolute z-[calc(9999-var(--toast-index))] w-full overflow-visible select-none rounded-[19px] border border-border bg-popover text-popover-foreground shadow-[0_10px_30px_-10px_rgb(0_0_0/0.45),0_2px_6px_rgb(0_0_0/0.18)] not-dark:bg-clip-padding not-dark:shadow-[0_10px_30px_-10px_rgb(0_0_0/0.18),0_2px_6px_rgb(0_0_0/0.06)] forced-colors:bg-[Canvas] [transition:transform_var(--app-motion-duration-stack)_var(--app-motion-spring-snappy),opacity_var(--app-motion-duration-pop)_var(--app-motion-spring-gentle),height_var(--app-motion-duration-chip)]",
                 // Base positioning using data-position
                 "data-[position*=right]:right-0 data-[position*=right]:left-auto",
                 "data-[position*=left]:right-auto data-[position*=left]:left-0",
@@ -598,7 +846,7 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
                 visibleIndex > 0
                   ? "not-data-expanded:[--toast-calc-height:var(--toast-frontmost-height)] data-expanded:[--toast-calc-height:max(var(--toast-frontmost-height,var(--toast-height)),var(--toast-height))]"
                   : "[--toast-calc-height:max(var(--toast-frontmost-height,var(--toast-height)),var(--toast-height))]",
-                "[--toast-gap:--spacing(3)] [--toast-peek:--spacing(3)] [--toast-scale:calc(max(0,1-(var(--toast-index)*.1)))] [--toast-shrink:calc(1-var(--toast-scale))]",
+                "[--toast-gap:--spacing(2)] [--toast-peek:7px] [--toast-scale:calc(max(0,1-(var(--toast-index)*.05)))] [--toast-shrink:calc(1-var(--toast-scale))]",
                 // Root height: never `min-h-(--toast-height)` — Base UI measures height by briefly forcing
                 // `height: auto` on this node; an old `min-height` from `--toast-height` blocks shrinking,
                 // so `recalculateHeight` keeps the inflated value after an expandable closes.
@@ -620,7 +868,7 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
                 // short drop with a scale settle rather than a slide from
                 // off-screen; bottom keeps the slide from the viewport edge.
                 "data-starting-style:opacity-0",
-                "data-[position*=top]:data-starting-style:transform-[translateY(-1rem)_scale(0.95)]",
+                "data-[position*=top]:data-starting-style:transform-[translateY(-1rem)_scale(0.86)]",
                 "data-[position*=bottom]:data-starting-style:transform-[translateY(calc(100%+var(--toast-inset)))]",
                 "data-ending-style:opacity-0",
                 // Ending animations (direction-aware). Top toasts recede up and
@@ -628,8 +876,8 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
                 // collapsed stack must exit from the peek transform, not from
                 // `--toast-calc-offset-y` (that is the EXPANDED offset — using
                 // it made a behind toast lurch down from under the front card).
-                "data-[position*=top]:not-data-expanded:data-ending-style:not-data-limited:not-data-swipe-direction:transform-[translateY(calc(var(--toast-index)*var(--toast-peek)+var(--toast-shrink)*var(--toast-calc-height)-0.5rem))_scale(calc(var(--toast-scale)-0.03))]",
-                "data-[position*=top]:data-expanded:data-ending-style:not-data-limited:not-data-swipe-direction:transform-[translateY(calc(var(--toast-calc-offset-y)-0.5rem))_scale(0.97)]",
+                "data-[position*=top]:not-data-expanded:data-ending-style:not-data-limited:not-data-swipe-direction:transform-[translateY(calc(var(--toast-index)*var(--toast-peek)+var(--toast-shrink)*var(--toast-calc-height)-10px))_scale(calc(var(--toast-scale)-0.08))]",
+                "data-[position*=top]:data-expanded:data-ending-style:not-data-limited:not-data-swipe-direction:transform-[translateY(calc(var(--toast-calc-offset-y)-10px))_scale(0.92)]",
                 "data-[position*=bottom]:data-ending-style:not-data-limited:not-data-swipe-direction:transform-[translateY(calc(100%+var(--toast-inset)))]",
                 "data-ending-style:data-[swipe-direction=left]:transform-[translateX(calc(var(--toast-swipe-movement-x)-100%-var(--toast-inset)))_translateY(var(--toast-calc-offset-y))]",
                 "data-ending-style:data-[swipe-direction=right]:transform-[translateX(calc(var(--toast-swipe-movement-x)+100%+var(--toast-inset)))_translateY(var(--toast-calc-offset-y))]",
@@ -661,39 +909,21 @@ function Toasts({ position = "top-center" }: { position: ToastPosition }) {
             >
               <ThreadToastVisibleAutoDismiss
                 dismissAfterVisibleMs={toast.data?.dismissAfterVisibleMs}
+                paused={stackEngaged}
                 toastId={toast.id}
               />
-              <div className={toastCornerDismissClass}>
-                <button
-                  aria-label="Dismiss notification"
-                  className={toastCornerOrbClass}
-                  data-slot="toast-close"
-                  onClick={() =>
-                    handleToastDismissClick(toastManager, toast.id, toast.data?.onClose)
-                  }
-                  type="button"
-                >
-                  <XIcon className="size-3" strokeWidth={2.25} />
-                </button>
-              </div>
               <Toast.Content
                 className={cn(
                   // `overflow-x: clip` avoids the CSS quirk where pairing `hidden` + `y: visible`
                   // forces `y` to `auto`. Expandable detail panels can extend below without being cut off.
-                  "pointer-events-auto min-h-0 overflow-y-visible pl-3.5 text-sm transition-opacity duration-(--app-motion-duration-pop) [overflow-x:clip] data-expanded:opacity-100",
-                  stackedActionLayout
-                    ? "flex flex-col gap-2 py-2.5 pr-3.5"
-                    : cn("py-3", "flex items-center justify-between gap-1.5", inlineContentEndPad),
+                  "pointer-events-auto min-h-0 overflow-y-visible px-2 py-[7px] text-[13px] leading-[1.45] transition-opacity duration-(--app-motion-duration-pop) [overflow-x:clip] data-expanded:opacity-100",
                   hideCollapsedContent &&
                     "not-data-expanded:pointer-events-none not-data-expanded:opacity-0",
                 )}
               >
-                <ToastBodyContent
-                  {...bodyDescriptor}
-                  actionProps={toast.actionProps}
-                  toastData={toast.data}
-                  toastDescription={toast.description}
-                  toastType={toast.type}
+                <CapsuleToastBody
+                  hiddenBehindCount={visibleIndex === 0 ? liveToastCount - 1 : 0}
+                  toast={toast}
                 />
               </Toast.Content>
             </Toast.Root>
