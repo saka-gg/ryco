@@ -733,6 +733,14 @@
     "./projectPaths": {
       "types": "./src/projectPaths.ts",
       "import": "./src/projectPaths.ts"
+    },
+    "./releaseNotes": {
+      "types": "./src/releaseNotes.ts",
+      "import": "./src/releaseNotes.ts"
+    },
+    "./releaseVersion": {
+      "types": "./src/releaseVersion.ts",
+      "import": "./src/releaseVersion.ts"
     }
   },
   "scripts": {

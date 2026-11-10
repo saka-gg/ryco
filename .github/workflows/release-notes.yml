@@ -1,0 +1,111 @@
+name: Release notes
+
+# Asks the release-notes automation (a webhook-triggered Ryco automation on an
+# always-on machine) to write the next release's notes and open a pull request
+# with them. Run it before Release; docs/release-notes.md has the setup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The coming release version (for example 0.1.45)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+concurrency:
+  group: release-notes-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  request:
+    name: Request release notes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # The change list reads every commit since the previous release tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup project
+        uses: ./.github/actions/setup-ryco
+        with:
+          install-args: --filter=@ryco/scripts
+          install-resource-monitor-toolchain: "false"
+          bun-cache: none
+          restore-turbo-cache: "false"
+
+      - id: version
+        name: Resolve version
+        shell: bash
+        env:
+          RAW_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          version="${RAW_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release notes are for stable versions like 0.1.45, not '$RAW_VERSION'."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if node scripts/release-notes.ts check --version "$version" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$version already has release notes on this branch; nothing to request."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: previous_tag
+        name: Resolve previous release tag
+        if: steps.version.outputs.exists == 'false'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node scripts/resolve-previous-release-tag.ts \
+            --channel stable \
+            --current-tag "v$RELEASE_VERSION" \
+            --github-output
+
+      - name: Send the request
+        if: steps.version.outputs.exists == 'false'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS_TAG: ${{ steps.previous_tag.outputs.previous_tag }}
+          HOOK_URL: ${{ secrets.RYCO_RELEASE_NOTES_HOOK_URL }}
+          HOOK_SECRET: ${{ secrets.RYCO_RELEASE_NOTES_HOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$HOOK_URL" || -z "$HOOK_SECRET" ]]; then
+            echo "::error::Set the repository secrets RYCO_RELEASE_NOTES_HOOK_URL and RYCO_RELEASE_NOTES_HOOK_SECRET to the release-notes automation's webhook URL and secret (docs/release-notes.md)."
+            exit 1
+          fi
+
+          node scripts/release-notes.ts request \
+            --version "$RELEASE_VERSION" \
+            --previous-tag "$PREVIOUS_TAG" \
+            --repository "$GITHUB_REPOSITORY" > request.json
+          echo "Requesting notes for $RELEASE_VERSION since ${PREVIOUS_TAG:-the first commit}: $(node -e 'console.log(JSON.parse(require("fs").readFileSync("request.json","utf8")).changes.length)') changes."
+
+          # GitHub's webhook signature format: the Hub keeps the request for the
+          # machine and never sees the secret; the machine checks the signature.
+          signature="sha256=$(openssl dgst -sha256 -hmac "$HOOK_SECRET" -r < request.json | cut -d' ' -f1)"
+          status=$(curl -sS -o response.json -w '%{http_code}' \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            -X POST "$HOOK_URL" \
+            -H 'content-type: application/json' \
+            -H "x-ryco-signature-256: $signature" \
+            -H "x-github-delivery: release-notes-$RELEASE_VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --data-binary @request.json)
+          echo "The webhook answered $status: $(cat response.json)"
+          if [[ "$status" != 202 ]]; then
+            echo "::error::The release-notes webhook refused the request ($status)."
+            exit 1
+          fi
+          echo "::notice::Requested. The automation opens a pull request with the notes for $RELEASE_VERSION; merge it, then run Release."

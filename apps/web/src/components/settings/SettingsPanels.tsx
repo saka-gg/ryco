@@ -83,6 +83,7 @@ import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
 import { describeDesktopUpdateTrack } from "./desktopUpdateTrack";
 import { NightlyAppSettings } from "./NightlyAppSettings";
+import { openWhatsNewDialog, preloadWhatsNewDialog } from "../whatsNew/whatsNewDialogStore";
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
@@ -783,6 +784,58 @@ export function ThreadConfirmationSettings() {
   );
 }
 
+/** The release notes, and whether they open on their own after an update. */
+function WhatsNewSettings({ scopeLabel }: { readonly scopeLabel: string }) {
+  const showAfterUpdate = useSettings((settings) => settings.whatsNewAfterUpdate);
+  const { updateSettings } = useUpdateSettings();
+  return (
+    <>
+      <SettingsRow
+        title="What's new"
+        description={`The release notes for ${APP_BASE_NAME} ${APP_VERSION} and earlier releases.`}
+        owner="client"
+        scope={scopeLabel}
+        control={
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => openWhatsNewDialog()}
+            onPointerEnter={preloadWhatsNewDialog}
+            onFocus={preloadWhatsNewDialog}
+          >
+            Release notes
+          </Button>
+        }
+      />
+      <SettingsRow
+        title="What's new after updates"
+        description="Show the release notes the first time Ryco opens after an update."
+        owner="client"
+        scope={scopeLabel}
+        resetAction={
+          showAfterUpdate !== DEFAULT_UNIFIED_SETTINGS.whatsNewAfterUpdate ? (
+            <SettingResetButton
+              label="what's new after updates"
+              onClick={() =>
+                updateSettings({
+                  whatsNewAfterUpdate: DEFAULT_UNIFIED_SETTINGS.whatsNewAfterUpdate,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={showAfterUpdate}
+            onCheckedChange={(checked) => updateSettings({ whatsNewAfterUpdate: Boolean(checked) })}
+            aria-label="Show what's new after updates"
+          />
+        }
+      />
+    </>
+  );
+}
+
 /** Ryco's name, version and source. About & help on the settings page. */
 export function AboutSettings({
   includeUpdateTrack,
@@ -808,6 +861,7 @@ export function AboutSettings({
           scope={labels.local}
         />
       )}
+      {editingScope !== "node" && <WhatsNewSettings scopeLabel={labels.local} />}
       {includeUpdateTrack && isElectron && !isPhoneTier && editingScope !== "node" && (
         <NightlyAppSettings scope={labels.device} />
       )}
