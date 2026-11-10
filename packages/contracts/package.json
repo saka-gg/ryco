@@ -21,6 +21,11 @@
       "import": "./src/push.ts",
       "require": "./src/push.ts"
     },
+    "./push-alert": {
+      "types": "./src/pushAlert.ts",
+      "import": "./src/pushAlert.ts",
+      "require": "./src/pushAlert.ts"
+    },
     "./push-hub": {
       "types": "./src/pushHub.ts",
       "import": "./src/pushHub.ts",

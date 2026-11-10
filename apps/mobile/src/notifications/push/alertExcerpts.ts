@@ -14,7 +14,7 @@
 import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { ApprovalRequestId, EventId, TurnId } from "@ryco/contracts/base-schemas";
-import { PushAlertExcerpt } from "@ryco/contracts/push-hub";
+import { PushAlertExcerpt } from "@ryco/contracts/push-alert";
 import * as Schema from "effect/Schema";
 
 /** As the extension: an alert sealed longer ago than this is stale, and so is its excerpt. */

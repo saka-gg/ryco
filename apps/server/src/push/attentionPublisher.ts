@@ -47,11 +47,13 @@ import type { PushAlertKind, PushHubDelivery } from "@ryco/contracts/push";
 import {
   PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
-  PUSH_SEALED_LEGACY_MAX_LENGTH,
   type PushAlertExcerpt,
+  type PushAlertPlaintext,
+} from "@ryco/contracts/push-alert";
+import {
+  PUSH_SEALED_LEGACY_MAX_LENGTH,
   type PushActivitySignalInput,
   type PushActivitySignalResult,
-  type PushAlertPlaintext,
   type PushAttentionDelivery,
   type PushAttentionSignalInput,
   type PushAttentionSignalResult,

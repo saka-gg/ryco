@@ -14,7 +14,7 @@ import {
   derivePendingUserInputs,
 } from "@ryco/client-runtime/state/session";
 import type { OrchestrationThreadActivity, ThreadId } from "@ryco/contracts";
-import type { PushAlertExcerpt } from "@ryco/contracts/push-hub";
+import type { PushAlertExcerpt } from "@ryco/contracts/push-alert";
 import { Effect } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -81,9 +81,9 @@ export function excerptFromActivities(input: {
     return approval === undefined ? null : approvalExcerpt(approval);
   }
   // The question the thread waits on: the newest blocking one.
-  const question = derivePendingUserInputs(input.activities)
-    .filter((candidate) => candidate.nonBlocking !== true)
-    .at(-1);
+  const question = derivePendingUserInputs(input.activities).findLast(
+    (candidate) => candidate.nonBlocking !== true,
+  );
   return question === undefined ? null : inputExcerpt(question);
 }
 

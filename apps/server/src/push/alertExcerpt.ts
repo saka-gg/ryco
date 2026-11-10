@@ -13,13 +13,15 @@
 import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
 import {
   PUSH_ALERT_EXCERPT_MAX_BYTES,
-  PUSH_SEALED_LEGACY_MAX_LENGTH,
-  PUSH_SEALED_MAX_LENGTH,
-  PUSH_SEALED_OVERHEAD_BYTES,
   type PushAlertExcerpt,
   type PushAlertInputExcerpt,
   type PushAlertPlaintext,
   type PushAlertQuestionExcerpt,
+} from "@ryco/contracts/push-alert";
+import {
+  PUSH_SEALED_LEGACY_MAX_LENGTH,
+  PUSH_SEALED_MAX_LENGTH,
+  PUSH_SEALED_OVERHEAD_BYTES,
 } from "@ryco/contracts/push-hub";
 
 const encoder = new TextEncoder();

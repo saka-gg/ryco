@@ -1,9 +1,9 @@
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import { ApprovalRequestId, EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
+import type { PushAlertExcerpt } from "@ryco/contracts/push-alert";
 import {
   PUSH_SEALED_LEGACY_MAX_LENGTH,
   PUSH_SEALED_MAX_LENGTH,
-  type PushAlertExcerpt,
   type PushAttentionSignalInput,
 } from "@ryco/contracts/push-hub";
 import { openPushPayload, pushSealAssociatedData } from "@ryco/shared/pushSeal";

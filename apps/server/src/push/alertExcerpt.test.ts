@@ -4,11 +4,10 @@ import {
   PUSH_ALERT_EXCERPT_MAX_BYTES,
   PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
-  PUSH_SEALED_LEGACY_MAX_LENGTH,
-  PUSH_SEALED_MAX_LENGTH,
   PushAlertPlaintext,
   type PushAlertExcerpt,
-} from "@ryco/contracts/push-hub";
+} from "@ryco/contracts/push-alert";
+import { PUSH_SEALED_LEGACY_MAX_LENGTH, PUSH_SEALED_MAX_LENGTH } from "@ryco/contracts/push-hub";
 import { openPushPayload, pushSealAssociatedData } from "@ryco/shared/pushSeal";
 import { e2eeX25519KeyPair } from "@ryco/shared/relayE2eeKeys";
 import { Schema } from "effect";
