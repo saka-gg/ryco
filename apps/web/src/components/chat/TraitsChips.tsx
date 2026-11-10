@@ -15,7 +15,7 @@ import { boundedDisabledReason } from "~/lib/boundedReason";
 
 import { AgentChip } from "./AgentChip";
 import { GenericSelectChip } from "./GenericSelectChip";
-import { isTuningDescriptor } from "./modelTuning.logic";
+import { isTuningDescriptor } from "@ryco/client-runtime/state/composer/modelTuning";
 import {
   useProviderOptionsUpdater,
   type ProviderOptions,

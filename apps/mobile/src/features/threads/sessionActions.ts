@@ -9,6 +9,7 @@ import {
   type ApprovalRequestId,
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
+  type AgentTokenMode,
   type RuntimeMode,
   type ThreadGoalUpdate,
   type ThreadId,
@@ -113,6 +114,21 @@ export async function setThreadInteractionMode(
     commandId: newCommandId(),
     threadId,
     interactionMode,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/** The token budget the desktop composer's Tokens control sets, from the phone's footer. */
+export async function setThreadTokenMode(
+  api: EnvironmentApi,
+  threadId: ThreadId,
+  tokenMode: AgentTokenMode,
+): Promise<void> {
+  await api.orchestration.dispatchCommand({
+    type: "thread.token-mode.set",
+    commandId: newCommandId(),
+    threadId,
+    tokenMode,
     createdAt: new Date().toISOString(),
   });
 }

@@ -1,7 +1,10 @@
 import { memo } from "react";
 
 import { cn } from "~/lib/utils";
-import { reasoningTone, type ModelTuningSummary } from "./modelTuning.logic";
+import {
+  reasoningTone,
+  type ModelTuningSummary,
+} from "@ryco/client-runtime/state/composer/modelTuning";
 import { RollingText, useTravelDirection } from "./RollingText";
 import { SpeedTierIcon, speedToneClassName } from "./SpeedTierIcon";
 

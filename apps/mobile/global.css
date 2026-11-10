@@ -67,6 +67,24 @@
       --color-plan: #7651a6;
       --color-plan-bg: rgba(118, 81, 166, 0.1);
       --color-plan-border: rgba(118, 81, 166, 0.2);
+      /* Desktop composer card: foreground 4.5% over the screen (`--app-composer-surface`). */
+      --color-composer-surface: #e9e9ee;
+      /* The model picker's tuning dial and the model pill's effort, as on desktop (tailwind 500/600). */
+      --color-reasoning-low: #62748e;
+      --color-reasoning-medium: #155dfc;
+      --color-reasoning-high: #4f39f6;
+      --color-reasoning-xhigh: #7f22fe;
+      --color-reasoning-max: #c800de;
+      --color-reasoning-ultra: #e60076;
+      --color-reasoning-ultracode: #6d5ce8;
+      --color-reasoning-thinking: #0084d1;
+      --color-reasoning-off: #71717b;
+      --color-fast-mode: #e17100;
+      --color-ultrafast-mode: #f54900;
+      --color-dial-track: rgba(0, 0, 0, 0.06);
+      --color-dial-notch: rgba(0, 0, 0, 0.22);
+      --color-dial-thumb: #ffffff;
+      --color-stop: rgba(255, 32, 86, 0.9);
       --color-diff-add: #00764a;
       --color-diff-del: #c7113f;
 
@@ -189,6 +207,24 @@
       --color-plan: #b79ad8;
       --color-plan-bg: rgba(151, 111, 194, 0.14);
       --color-plan-border: rgba(183, 154, 216, 0.22);
+      /* Desktop composer card: foreground 6.5% over the screen (`--app-composer-surface`). */
+      --color-composer-surface: #191919;
+      /* The model picker's tuning dial and the model pill's effort, as on desktop (tailwind 400). */
+      --color-reasoning-low: #90a1b9;
+      --color-reasoning-medium: #51a2ff;
+      --color-reasoning-high: #7c86ff;
+      --color-reasoning-xhigh: #a684ff;
+      --color-reasoning-max: #ed6bff;
+      --color-reasoning-ultra: #fb64b6;
+      --color-reasoning-ultracode: #b3a8ff;
+      --color-reasoning-thinking: #00bcff;
+      --color-reasoning-off: #9f9fa9;
+      --color-fast-mode: #fdc700;
+      --color-ultrafast-mode: #ff8904;
+      --color-dial-track: rgba(255, 255, 255, 0.065);
+      --color-dial-notch: rgba(255, 255, 255, 0.3);
+      --color-dial-thumb: #f4f4f5;
+      --color-stop: rgba(255, 32, 86, 0.9);
       --color-diff-add: #2fa37a;
       --color-diff-del: #e0455f;
 

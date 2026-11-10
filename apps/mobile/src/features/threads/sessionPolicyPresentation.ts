@@ -1,4 +1,4 @@
-import type { ProviderInteractionMode, RuntimeMode } from "@ryco/contracts";
+import type { AgentTokenMode, ProviderInteractionMode, RuntimeMode } from "@ryco/contracts";
 // Type-only, so this module stays free of any React Native runtime import and
 // remains loadable in the node test env (program status §1.1).
 import type { SFSymbol } from "expo-symbols";
@@ -96,9 +96,39 @@ export const interactionModeConfig: Readonly<
   },
 };
 
+/**
+ * Mirror of apps/web/src/tokenModePresentation.ts: the token budget the composer's controls set
+ * (`thread.token-mode.set`). Same words as the desktop; SF Symbols for the lucide glyphs
+ * (circle-off, scale, minimize-2).
+ */
+export const tokenModeConfig: Readonly<Record<AgentTokenMode, SessionPolicyOptionPresentation>> = {
+  off: {
+    label: "Off",
+    triggerLabel: "Tokens off",
+    description: "Do not add Ryco token-efficiency instructions.",
+    icon: "circle.slash",
+    tone: "default",
+  },
+  balanced: {
+    label: "Balanced",
+    triggerLabel: "Balanced",
+    description: "Favor concise answers and targeted reads without hiding important detail.",
+    icon: "scalemass",
+    tone: "default",
+  },
+  aggressive: {
+    label: "Aggressive",
+    triggerLabel: "Aggressive",
+    description: "Minimize prose and avoid copying large outputs unless needed.",
+    icon: "arrow.down.right.and.arrow.up.left",
+    tone: "default",
+  },
+};
+
 // Declaration order is the display order, matching how web derives it with
 // Object.keys over the same records. Do not sort.
 export const runtimeModeOptions = Object.keys(runtimeModeConfig) as ReadonlyArray<RuntimeMode>;
 export const interactionModeOptions = Object.keys(
   interactionModeConfig,
 ) as ReadonlyArray<ProviderInteractionMode>;
+export const tokenModeOptions = Object.keys(tokenModeConfig) as ReadonlyArray<AgentTokenMode>;

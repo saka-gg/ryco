@@ -6,7 +6,7 @@ import {
   COMPOSER_PRIMARY_ACTIONS_COMPACT_BREAKPOINT_PX,
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
-} from "./composerFooterLayout";
+} from "./footerLayout.ts";
 
 describe("shouldUseCompactComposerFooter", () => {
   it("stays expanded without a measured width", () => {

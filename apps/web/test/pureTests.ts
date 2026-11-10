@@ -72,7 +72,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/chat/traitsMenuLogic.test.ts",
   "src/components/chat/useChatSessionTabsPrefetch.test.ts",
   "src/components/chat/userMessageTerminalContexts.test.ts",
-  "src/components/composerFooterLayout.test.ts",
   "src/components/delegation/delegationDock.logic.test.ts",
   "src/components/desktopUpdate.logic.test.ts",
   "src/components/device/deviceFrameGate.test.ts",

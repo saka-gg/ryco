@@ -1,12 +1,38 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { useKeyboardState } from "react-native-keyboard-controller";
-import type { ModelSelection, RuntimeMode, ProviderInteractionMode } from "@ryco/contracts";
+import type {
+  AgentTokenMode,
+  ModelSelection,
+  ProviderInteractionMode,
+  RuntimeMode,
+} from "@ryco/contracts";
 import type { FastModeNotice } from "@ryco/client-runtime/state/session";
 import type { ModelPickerModel } from "./modelPickerModel";
 import type { SessionPolicyModel } from "./sessionPolicyModel";
-import { ComposerCaption } from "./ComposerCaption";
+import { isTuningDescriptor } from "@ryco/client-runtime/state/composer/modelTuning";
+import { getModelSelectionOptionDescriptors } from "@ryco/shared/model";
 import { composerShrinkHeld } from "./composerShrinkModel";
-import { composerPrimaryAction } from "./composerCaptionModel";
+import {
+  composerPlaceholder,
+  composerPrimaryAction,
+  composerTriggerTraits,
+  isComposerFooterCompact,
+  resolveComposerTuning,
+  summarizeComposerTuning,
+} from "./composerFooterModel";
+import { ComposerModelMenu } from "./ComposerModelMenu";
+import { ComposerMoreControlsMenu, ComposerPolicySelects } from "./ComposerFooterControls";
+import {
+  ComposerContextMeter,
+  ComposerModelTrigger,
+  ComposerRoundButton,
+  ComposerSendGlyph,
+} from "./ComposerFooterParts";
+import {
+  applyModelOption,
+  listModelPickerEntries,
+  resolveModelPillFastMode,
+} from "./modelPickerModel";
 import { COMPOSER_SIDE_INSET } from "./ComposerShrunkBubble";
 import type { ComposerShrinkBinding } from "./useComposerShrink";
 import { Pressable, View } from "react-native";
@@ -17,7 +43,6 @@ import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 import type { AnchoredMenuHandle } from "../../components/AnchoredMenu";
-import { GlassSurface } from "../../components/GlassSurface";
 import { ComposerAttachMenu } from "../../components/ComposerAttachMenu";
 import type { ComposerAttachmentSource, DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
@@ -40,21 +65,24 @@ import { useComposerDictation } from "../dictation/useComposerDictation";
 import type { ComposerCommandAction } from "./composerCommandMenuModel";
 import { useComposerCommandMenu, type ComposerCommandMenuContext } from "./useComposerCommandMenu";
 
-// The chat composer: a quiet icon caption (model, effort, mode, access) over a one-line glass
-// capsule (+ · text · mic, send or stop). While the reader scrolls back through the chat it
-// shrinks away into the screen's "Message" bubble (`useComposerShrink`). It uses the shared
-// native ComposerEditor so mentions/skills, hardware-keyboard submit, and pasted images behave
-// like the desktop composer. Attachment state (images + streamed files) lives in the owning
-// screen, which knows the environment/thread context the upload engine needs.
+// The chat composer, laid out as the desktop one (apps/web ChatComposer + ComposerPromptShell +
+// ComposerFooter): one rounded card with the attachments and the prompt on top and the footer
+// inside it — paperclip, the model pill (its picker has the provider tabs on top), then mode,
+// access and tokens (folded into "More composer controls" below the shared 620pt breakpoint),
+// and on the right the mic, the context ring and the round send / stop. While the reader scrolls
+// back through the chat it shrinks away into the screen's "Message" bubble (`useComposerShrink`).
+// It uses the shared native ComposerEditor so mentions/skills, hardware-keyboard submit, and
+// pasted images behave like the desktop composer. Attachment state (images + streamed files)
+// lives in the owning screen, which knows the environment/thread context the upload engine needs.
 
-const CAPSULE_RADIUS = 24;
-const CAPSULE_PADDING = 5;
-const BUTTON = 32;
-const TEXT_SIZE = 15.5;
-const LINE_HEIGHT = 21;
-const TEXT_INSET = 6;
-/** Five lines, then the field scrolls. */
-const MAX_FIELD_HEIGHT = LINE_HEIGHT * 5 + TEXT_INSET * 2;
+/** The desktop card: `rounded-3xl` frame with a 1pt inset surface. */
+const CARD_RADIUS = 28;
+/** The desktop prompt: 14px text on a 22.75px line (`text-sm leading-relaxed`). */
+const TEXT_SIZE = 14;
+const LINE_HEIGHT = 22.75;
+/** The desktop editor's empty height, two and a bit lines; it grows to seven, then scrolls. */
+const MIN_FIELD_HEIGHT = 70;
+const MAX_FIELD_HEIGHT = LINE_HEIGHT * 7;
 export interface ThreadComposerHandle {
   /** The composer holds typed text (attachments live in the owning screen). */
   readonly hasText: () => boolean;
@@ -88,6 +116,14 @@ export function ThreadComposer(props: {
   readonly policyDisabled?: boolean;
   readonly onSelectRuntimeMode: (mode: RuntimeMode) => void;
   readonly onSelectInteractionMode: (mode: ProviderInteractionMode) => void;
+  /** The thread's token budget; absent hides the Tokens control. */
+  readonly tokenMode?: AgentTokenMode;
+  readonly onSelectTokenMode?: ((mode: AgentTokenMode) => void) | undefined;
+  /** How full the context window is (0–1), for the footer ring; null before any usage. */
+  readonly contextFraction?: number | null;
+  readonly onOpenContextDetails?: (() => void) | undefined;
+  /** The picker's "+" tab: the machine's provider settings. */
+  readonly onAddProviders?: (() => void) | undefined;
   readonly modelPicker?: ModelPickerModel | null;
   readonly modelSelection?: ModelSelection | null;
   /** Claude Code's Fast mode when it differs from the selection's (`deriveClaudeFastModeNotice`). */
@@ -116,6 +152,7 @@ export function ThreadComposer(props: {
 }) {
   const policyModel = props.policyModel;
   const modelPicker = props.modelPicker;
+  const modelSelection = props.modelSelection ?? null;
   const editorRef = useRef<ComposerEditorHandle>(null);
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const restoreFocus = () => {
@@ -136,14 +173,17 @@ export function ThreadComposer(props: {
     [text],
   );
   const primaryFg = useThemeColor("--color-primary-foreground");
-  const iconSubtle = useThemeColor("--color-icon-subtle");
-  const iconColor = useThemeColor("--color-icon");
+  const iconMuted = useThemeColor("--color-icon-muted");
+  const surface = useThemeColor("--color-composer-surface");
   const [focused, setFocused] = useState(false);
-  // The field grows with its text up to five lines, then scrolls.
+  // The card's width decides the footer layout with the desktop's own breakpoint.
+  const [cardWidth, setCardWidth] = useState<number | null>(null);
+  const compact = isComposerFooterCompact(cardWidth);
+  // The field grows with its text, then scrolls.
   const [fieldContentHeight, setFieldContentHeight] = useState<number | null>(null);
   const fieldHeight = Math.min(
     MAX_FIELD_HEIGHT,
-    Math.max(BUTTON + 2, Math.ceil(fieldContentHeight ?? 0)),
+    Math.max(MIN_FIELD_HEIGHT, Math.ceil(fieldContentHeight ?? 0)),
   );
 
   const visibleAttachmentError = props.attachmentError ?? props.sendBlock;
@@ -164,7 +204,8 @@ export function ThreadComposer(props: {
     onChangeSelection: (selection) => commandMenu.onSelectionChange(selection),
   });
   const dictating = dictation.active;
-  const policyEditable = !(props.policyDisabled ?? false);
+  const policyDisabled = props.policyDisabled ?? false;
+  const policyEditable = !policyDisabled;
   const commandMenu = useComposerCommandMenu({
     text,
     onChangeText: setText,
@@ -211,8 +252,8 @@ export function ThreadComposer(props: {
     await props.onPasteImages(uris);
   };
 
-  // `/` and `@` from the + menu: the trigger goes in at the caret, after a space when the caret
-  // follows a word, and the command popover takes it from there.
+  // `/` and `@` from the attach menu: the trigger goes in at the caret, after a space when the
+  // caret follows a word, and the command popover takes it from there.
   const insertTrigger = (trigger: "/" | "@") => {
     const caret = caretRef.current;
     const before = text.slice(0, caret.start);
@@ -262,13 +303,48 @@ export function ThreadComposer(props: {
   });
 
   const hasContent = text.trim().length > 0 || props.attachments.length > 0;
+  const running = props.running === true;
   const primaryAction = composerPrimaryAction({
-    dictating,
     hasContent,
-    running: props.running === true,
+    running,
     canStop: props.onStop !== undefined,
   });
   const collapsed = shrink?.collapsed === true;
+
+  // The model pill's readout and the options the tuning dial does not own (agent, variant).
+  const tuning =
+    modelPicker && modelSelection
+      ? resolveComposerTuning({ model: modelPicker, selection: modelSelection, prompt: text })
+      : null;
+  const triggerTraits = composerTriggerTraits(summarizeComposerTuning(tuning), compact);
+  const fast = modelPicker ? resolveModelPillFastMode(modelPicker, props.fastModeNotice) : null;
+  const selectedCapabilities =
+    modelPicker && modelSelection
+      ? listModelPickerEntries(modelPicker).find(
+          (entry) => entry.key === `${modelSelection.instanceId}:${modelSelection.model}`,
+        )?.capabilities
+      : undefined;
+  const traitIds = new Set(
+    getModelSelectionOptionDescriptors(modelSelection, selectedCapabilities)
+      .filter((descriptor) => !isTuningDescriptor(descriptor))
+      .map((descriptor) => descriptor.id),
+  );
+  const traits = (modelPicker?.options ?? []).filter((option) => traitIds.has(option.id));
+  const policyControls = policyModel
+    ? {
+        policy: policyModel,
+        tokenMode: props.tokenMode ?? "off",
+        onSelectTokenMode: props.tokenMode === undefined ? undefined : props.onSelectTokenMode,
+        onSelectRuntimeMode: props.onSelectRuntimeMode,
+        onSelectInteractionMode: props.onSelectInteractionMode,
+        traits,
+        onSelectTrait: (id: string, value: string | boolean) => {
+          if (!modelSelection || policyDisabled) return;
+          props.onSelectModel(applyModelOption(modelSelection, selectedCapabilities, id, value));
+        },
+        disabled: policyDisabled,
+      }
+    : null;
 
   return (
     <Animated.View
@@ -311,74 +387,25 @@ export function ThreadComposer(props: {
               />
             </View>
           ) : null}
-          {dictating ? (
-            <View className="px-1 pb-1">
-              <ComposerDictationBar dictation={dictation} />
-            </View>
-          ) : policyModel ? (
-            <ComposerCaption
-              ref={modelMenuRef}
-              policyModel={policyModel}
-              policyDisabled={props.policyDisabled ?? false}
-              modelPicker={modelPicker ?? null}
-              modelSelection={props.modelSelection ?? null}
-              fastModeNotice={props.fastModeNotice}
-              onSelectModel={props.onSelectModel}
-              onSelectRuntimeMode={props.onSelectRuntimeMode}
-              onSelectInteractionMode={props.onSelectInteractionMode}
-              onOpenCacheInfo={props.onOpenCacheInfo}
-              onMenuClose={restoreFocus}
-            />
-          ) : null}
-          <GlassSurface
-            radius={CAPSULE_RADIUS}
-            glassEffectStyle="regular"
-            style={{ padding: CAPSULE_PADDING }}
+          <View
+            onLayout={(event) => setCardWidth(event.nativeEvent.layout.width)}
+            style={{ borderRadius: CARD_RADIUS, backgroundColor: surface }}
           >
-            {props.attachments.length > 0 ? (
-              <View className="px-1 pb-1 pt-0.5">
-                <ComposerAttachmentStrip
-                  attachments={props.attachments}
-                  fileUploadRecords={props.fileUploadRecords}
-                  imageSize={58}
-                  imageBorderRadius={13}
-                  onRemove={props.onRemoveAttachment}
-                  onRetryFileUpload={props.onRetryFileUpload}
-                  onReattachFile={props.onReattachFile}
-                />
-              </View>
-            ) : null}
-            <View className="flex-row items-end" style={{ gap: 4 }}>
-              <ComposerAttachMenu
-                disabled={sending || (props.disabled ?? false)}
-                onPick={(source) => void props.onPickAttachments(source)}
-                {...(props.commandMenuContext
-                  ? {
-                      onInsertCommand: () => insertTrigger("/"),
-                      onInsertMention: () => insertTrigger("@"),
-                    }
-                  : {})}
-                onOpenSideChat={props.onOpenSideChat}
-                onClose={restoreFocus}
-              >
-                {(open) => (
-                  <Pressable
-                    onPress={open}
-                    accessibilityRole="button"
-                    accessibilityLabel="Attach, commands and side chat"
-                    className="items-center justify-center rounded-full bg-subtle-strong active:opacity-70"
-                    style={{ width: BUTTON, height: BUTTON, marginBottom: 1 }}
-                  >
-                    <SymbolView
-                      name="plus"
-                      size={17}
-                      weight="semibold"
-                      tintColor={iconColor as string}
-                      type="monochrome"
-                    />
-                  </Pressable>
-                )}
-              </ComposerAttachMenu>
+            {/* The prompt: 12pt sides, 14pt above and 8pt below, as the desktop below `sm`. */}
+            <View style={{ paddingHorizontal: 12, paddingTop: 14, paddingBottom: 8 }}>
+              {props.attachments.length > 0 ? (
+                <View style={{ marginBottom: 12 }}>
+                  <ComposerAttachmentStrip
+                    attachments={props.attachments}
+                    fileUploadRecords={props.fileUploadRecords}
+                    imageSize={64}
+                    imageBorderRadius={10}
+                    onRemove={props.onRemoveAttachment}
+                    onRetryFileUpload={props.onRetryFileUpload}
+                    onReattachFile={props.onReattachFile}
+                  />
+                </View>
+              ) : null}
               <ComposerEditor
                 ref={editorRef}
                 value={text}
@@ -395,57 +422,151 @@ export function ThreadComposer(props: {
                   props.onComposerIntent?.();
                 }}
                 onBlur={() => setFocused(false)}
-                placeholder={props.placeholder ?? "Message"}
+                placeholder={composerPlaceholder({ running, override: props.placeholder })}
                 multiline
                 editable={!props.disabled && !sending && !dictating}
-                contentInsetVertical={TEXT_INSET}
+                contentInsetVertical={0}
                 textStyle={{ fontSize: TEXT_SIZE, lineHeight: LINE_HEIGHT }}
                 onContentHeightChange={setFieldContentHeight}
-                style={{ height: fieldHeight, flex: 1 }}
+                style={{ height: fieldHeight }}
                 onPasteImages={(uris) => void pasteImages(uris)}
                 onSubmit={() => void send()}
               />
-              <View style={{ marginBottom: 1 }}>
-                {primaryAction === "mic" ? (
-                  <ComposerDictationButton
-                    dictation={dictation}
-                    disabled={props.disabled === true || sending}
-                    size={BUTTON}
-                  />
-                ) : primaryAction === "stop" ? (
-                  <Pressable
-                    onPress={props.onStop}
-                    accessibilityRole="button"
-                    accessibilityLabel="Stop"
-                    className="items-center justify-center rounded-full bg-primary active:opacity-70"
-                    style={{ width: BUTTON, height: BUTTON }}
-                  >
-                    <View
-                      style={{ width: 11, height: 11, borderRadius: 3 }}
-                      className="bg-primary-foreground"
-                    />
-                  </Pressable>
-                ) : (
-                  <Pressable
-                    disabled={!canSend || dictating}
-                    onPress={() => void send()}
-                    accessibilityRole="button"
-                    accessibilityLabel="Send"
-                    className="items-center justify-center rounded-full bg-primary active:opacity-70 disabled:opacity-40"
-                    style={{ width: BUTTON, height: BUTTON }}
-                  >
-                    <SymbolView
-                      name="arrow.up"
-                      size={15}
-                      weight="bold"
-                      tintColor={(canSend ? primaryFg : iconSubtle) as string}
-                      type="monochrome"
-                    />
-                  </Pressable>
-                )}
-              </View>
             </View>
-          </GlassSurface>
+            {dictating ? (
+              <View style={{ paddingHorizontal: 8, paddingBottom: 6 }}>
+                <ComposerDictationBar dictation={dictation} />
+              </View>
+            ) : (
+              // Every control rests on the same bottom edge, 8pt above the card's.
+              <View
+                className="flex-row items-end justify-between"
+                style={{ gap: 6, paddingLeft: 8, paddingRight: 8, paddingBottom: 8 }}
+              >
+                <View className="min-w-0 flex-1 flex-row items-center" style={{ gap: 2 }}>
+                  <ComposerAttachMenu
+                    disabled={sending || (props.disabled ?? false)}
+                    onPick={(source) => void props.onPickAttachments(source)}
+                    {...(props.commandMenuContext
+                      ? {
+                          onInsertCommand: () => insertTrigger("/"),
+                          onInsertMention: () => insertTrigger("@"),
+                        }
+                      : {})}
+                    onOpenSideChat={props.onOpenSideChat}
+                    onClose={restoreFocus}
+                  >
+                    {(open) => (
+                      <Pressable
+                        onPress={open}
+                        accessibilityRole="button"
+                        accessibilityLabel="Add context"
+                        hitSlop={{ top: 10, bottom: 10, left: 8, right: 4 }}
+                        className="size-6 items-center justify-center rounded-full active:bg-subtle-strong"
+                      >
+                        <SymbolView
+                          name="paperclip"
+                          size={15}
+                          tintColor={iconMuted as string}
+                          type="monochrome"
+                        />
+                      </Pressable>
+                    )}
+                  </ComposerAttachMenu>
+                  {modelPicker && modelSelection ? (
+                    <ComposerModelMenu
+                      ref={modelMenuRef}
+                      model={modelPicker}
+                      selection={modelSelection}
+                      disabled={policyDisabled}
+                      prompt={text}
+                      onSelect={props.onSelectModel}
+                      onOpenCacheInfo={props.onOpenCacheInfo}
+                      onAddProviders={props.onAddProviders}
+                      onClose={restoreFocus}
+                      anchorClassName="min-w-0 shrink"
+                    >
+                      {(open) => (
+                        <ComposerModelTrigger
+                          providerDriver={modelPicker.pillProviderDriver}
+                          label={modelPicker.pillLabel}
+                          traits={triggerTraits}
+                          fastNotice={
+                            props.fastModeNotice && fast?.icon && fast.icon !== "bolt.fill"
+                              ? { icon: fast.icon, muted: fast.muted }
+                              : null
+                          }
+                          accessibilityLabel={
+                            fast?.accessibilityLabel ?? modelPicker.pillAccessibilityLabel
+                          }
+                          disabled={policyDisabled}
+                          onPress={open}
+                        />
+                      )}
+                    </ComposerModelMenu>
+                  ) : null}
+                  {policyControls ? (
+                    compact ? (
+                      <ComposerMoreControlsMenu {...policyControls} onClose={restoreFocus} />
+                    ) : (
+                      <>
+                        {traits.length > 0 ? (
+                          <ComposerMoreControlsMenu
+                            {...policyControls}
+                            traitsOnly
+                            onClose={restoreFocus}
+                          />
+                        ) : null}
+                        <ComposerPolicySelects {...policyControls} onClose={restoreFocus} />
+                      </>
+                    )
+                  ) : null}
+                </View>
+                <View className="flex-row items-center" style={{ gap: 8 }}>
+                  <View className="flex-row items-center" style={{ gap: 2 }}>
+                    <ComposerDictationButton
+                      dictation={dictation}
+                      disabled={props.disabled === true || sending}
+                      size={28}
+                      muted
+                    />
+                    <ComposerContextMeter
+                      fraction={props.contextFraction ?? null}
+                      onPress={props.onOpenContextDetails}
+                    />
+                  </View>
+                  {primaryAction === "stop" ? (
+                    <ComposerRoundButton
+                      tone="stop"
+                      accessibilityLabel="Stop generation"
+                      disabled={false}
+                      onPress={() => props.onStop?.()}
+                    >
+                      <View
+                        style={{ width: 8, height: 8, borderRadius: 1.5 }}
+                        className="bg-white"
+                      />
+                    </ComposerRoundButton>
+                  ) : (
+                    <ComposerRoundButton
+                      tone="primary"
+                      accessibilityLabel={
+                        primaryAction === "queue"
+                          ? "Queue follow-up"
+                          : sending
+                            ? "Sending"
+                            : "Send message"
+                      }
+                      disabled={!canSend}
+                      onPress={() => void send()}
+                    >
+                      <ComposerSendGlyph size={14} color={primaryFg as string} />
+                    </ComposerRoundButton>
+                  )}
+                </View>
+              </View>
+            )}
+          </View>
         </View>
       </Animated.View>
     </Animated.View>

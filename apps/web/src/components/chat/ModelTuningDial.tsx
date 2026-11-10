@@ -35,7 +35,7 @@ import {
   type ModelTuning,
   type SpeedTier,
   type TuningStop,
-} from "./modelTuning.logic";
+} from "@ryco/client-runtime/state/composer/modelTuning";
 import { RollingText, useTravelDirection } from "./RollingText";
 import { SpeedTierIcon, speedToneClassName } from "./SpeedTierIcon";
 import { applyDescriptorSelection, replaceDescriptorCurrentValue } from "./traitsMenuLogic";

@@ -21,7 +21,10 @@ import { Suspense, type ReactNode } from "react";
 
 import { LazyComposerModelTuning, ProviderModelPicker } from "./ProviderModelPicker";
 import { ModelTuningDial } from "./ModelTuningDial";
-import { resolveModelTuning, type ModelTuningSummary } from "./modelTuning.logic";
+import {
+  resolveModelTuning,
+  type ModelTuningSummary,
+} from "@ryco/client-runtime/state/composer/modelTuning";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   deriveProviderInstanceEntries,

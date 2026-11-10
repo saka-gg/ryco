@@ -22,7 +22,7 @@ import {
   resolveModelTuning,
   summarizeModelTuning,
   type ModelTuningSummary,
-} from "./modelTuning.logic";
+} from "@ryco/client-runtime/state/composer/modelTuning";
 import { shouldRenderTraitsControls, TraitsMenuContent } from "./TraitsPicker";
 import { TraitsChips } from "./TraitsChips";
 
