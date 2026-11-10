@@ -22,6 +22,7 @@ import {
   type RelayRpcChannelSession,
 } from "./RelayChannelRegistry.ts";
 import { RelaySendQueue } from "./RelaySendQueue.ts";
+import { RelayTransferMeter } from "./relayTransferMeter.ts";
 
 type ChannelOpenInput = Parameters<RelayChannelSessionFactory["open"]>[0];
 
@@ -72,6 +73,7 @@ function harness(
       reason: RelayCloseReason | undefined,
       closesSoFar: number,
     ) => void;
+    readonly transferMeter?: () => RelayTransferMeter;
   } = {},
 ) {
   const sent: Uint8Array[] = [];
@@ -145,6 +147,7 @@ function harness(
     // Deliberately no `onOutboundReady`: every ordering guarantee asserted
     // below must hold without the owner wiring a flush at all.
     ...(options.connection === undefined ? {} : { connection: options.connection }),
+    ...(options.transferMeter === undefined ? {} : { transferMeter: options.transferMeter }),
   });
   return {
     registry,
@@ -1011,5 +1014,69 @@ describe("RelayChannelRegistry", () => {
         }),
       );
     });
+  });
+
+  it("paces a large message until the transfer meter covers it, and never closes the channel", async () => {
+    let now = 0;
+    const meter = new RelayTransferMeter({
+      burstBytes: 3_000,
+      bytesPerSecond: 1_000,
+      unpacedMessageBytes: 512,
+      now: () => now,
+    });
+    const { registry, sendQueue, sent, sessions, opens } = harness({ transferMeter: () => meter });
+    await registry.handle(openFrame(channelA));
+    sessions.get(channelA as string)!.chunkSupport = true;
+    const send = sessions.get(channelA as string)!.send;
+    const large = new Uint8Array(1_800);
+    expect(send(large).accepted).toBe(true);
+    sendQueue.flush();
+    // The meter cannot pay for a second one: backpressure, whatever the disposition.
+    expect(send(large)).toEqual({ accepted: false, refusal: "paced" });
+    expect(opens[0]!.admit(large.byteLength)).toBeUndefined();
+    // Small records (keepalives, acknowledgements, close records) always pass.
+    expect(send(new Uint8Array(100)).accepted).toBe(true);
+    // Bytes the client sends spend the same budget.
+    await registry.handle({
+      type: "data",
+      ...version,
+      channelId: channelA,
+      sequence: 0 as never,
+      payload: new Uint8Array(400),
+    });
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    sendQueue.flush();
+    expect(decodeAll(sent).some((frame) => frame.type === "channel.close")).toBe(false);
+    expect(registry.has(channelA)).toBe(true);
+    // Once refilled, the message goes.
+    now += 1_000;
+    expect(send(large).accepted).toBe(false);
+    now += 1_000;
+    sendQueue.flush();
+    const admission = opens[0]!.admit(large.byteLength);
+    expect(admission).toBeDefined();
+    expect(admission!.send(large).accepted).toBe(true);
+  });
+});
+
+describe("RelayTransferMeter", () => {
+  it("refills at its rate up to its burst, and bounds debt to one burst", () => {
+    let now = 0;
+    const meter = new RelayTransferMeter({
+      burstBytes: 10_000,
+      bytesPerSecond: 1_000,
+      now: () => now,
+    });
+    meter.spend([9_000]);
+    expect(meter.available).toBe(10_000 - 9_000 - 64);
+    now += 1_000;
+    expect(meter.available).toBe(2_000 - 64);
+    now += 60_000;
+    expect(meter.available).toBe(10_000);
+    meter.spend([50_000]);
+    expect(meter.available).toBe(-10_000);
+    // Small messages pass even in debt; large ones wait for the meter to cover them.
+    expect(meter.allows([4_000])).toBe(true);
+    expect(meter.allows([5_000])).toBe(false);
   });
 });

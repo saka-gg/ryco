@@ -209,13 +209,23 @@ describe("persistent Hub session", () => {
     session.subscribeInvalidation(subscriber);
     session.start();
     sockets[0]!.ready();
+    const pings = () => sockets[0]!.frames().filter((frame) => frame.type === "ping");
+    // The Hub pings every 20 s: each answer proves the path, so the session sends no ping.
     for (let n = 0; n < 5; n++) {
       await vi.advanceTimersByTimeAsync(20_000);
-      const ping = sockets[0]!.frames().at(-1);
-      if (ping?.type !== "ping") throw new Error("missing ping");
-      sockets[0]!.receive({ type: "pong", nonce: ping.nonce });
       sockets[0]!.receive({ type: "ping", nonce: new Uint8Array(8) });
+      expect(sockets[0]!.frames().at(-1)?.type).toBe("pong");
     }
+    expect(pings()).toHaveLength(0);
+    // The Hub goes quiet: after 25 s of silence the session pings it, and an answer keeps it up.
+    await vi.advanceTimersByTimeAsync(24_999);
+    expect(pings()).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    const ping = pings()[0];
+    if (ping?.type !== "ping") throw new Error("missing ping");
+    await vi.advanceTimersByTimeAsync(10_000);
+    sockets[0]!.receive({ type: "pong", nonce: ping.nonce });
+    await vi.advanceTimersByTimeAsync(20_000);
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.closed).toBe(0);
     sockets[0]!.receive({ type: "invalidate", directory: true, threadCache: true });
@@ -541,9 +551,9 @@ describe("persistent Hub session", () => {
     sockets[0]!.receive({ type: "pong", nonce: ping.nonce });
     await vi.advanceTimersByTimeAsync(5_000);
     expect(onFailure).not.toHaveBeenCalled();
-    // The heartbeat's own ping is pending: a probe waits on it instead of
-    // sending a second nonce its delayed pong would not match.
-    await vi.advanceTimersByTimeAsync(15_000);
+    // The heartbeat's own ping (after 25 s without a frame) is pending: a probe
+    // waits on it instead of sending a second nonce its delayed pong would not match.
+    await vi.advanceTimersByTimeAsync(20_000);
     expect(pings()).toHaveLength(2);
     session.probe();
     expect(pings()).toHaveLength(2);

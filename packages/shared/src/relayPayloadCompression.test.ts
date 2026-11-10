@@ -78,6 +78,26 @@ describe("compressed relay payload framing", () => {
     }
   });
 
+  it("pads coarsely with a 16 KiB floor and under 25% overhead, decodable as version 1", () => {
+    expect(relayCompressionPaddedLength(1, "coarse")).toBe(16_384);
+    expect(relayCompressionPaddedLength(16_385, "coarse")).toBe(32_768);
+    expect(relayCompressionPaddedLength(70_000, "coarse")).toBe(81_920);
+    expect(relayCompressionPaddedLength(1_000_000, "coarse")).toBe(1_048_576);
+    for (let size = 16_384; size < 8 * 1_024 * 1_024; size = Math.ceil(size * 1.013)) {
+      const padded = relayCompressionPaddedLength(size, "coarse");
+      expect(padded).toBeGreaterThanOrEqual(relayCompressionPaddedLength(size));
+      expect(padded - size).toBeLessThan(Math.max(16_384, size / 4));
+    }
+    // The receiver of frame version 1 reads any amount of zero padding: no negotiation.
+    const message = rpcMessage(40 * 1_024);
+    const deflated = deflateRawSync(message, { level: 1 });
+    const frame = encodeCompressedRelayPayload(deflated, message.byteLength, "coarse");
+    expect(frame.byteLength % 16_384).toBe(0);
+    const decoded = decodeCompressedRelayPayload(frame);
+    if (decoded.kind !== "ok") throw new Error(decoded.reason);
+    expect(new Uint8Array(inflateRawSync(decoded.body))).toEqual(message);
+  });
+
   it("refuses truncated frames and bodies that run past the frame", () => {
     const frame = frameFor(rpcMessage(20 * 1_024));
     expect(decodeCompressedRelayPayload(frame.subarray(0, 11))).toEqual({

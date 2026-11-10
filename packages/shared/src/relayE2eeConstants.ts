@@ -527,9 +527,21 @@ export {
 export const RELAY_CHUNK_CAPABILITY_PRELUDE_BYTES = RELAY_CHUNK_CAPABILITY_PRELUDE.byteLength;
 
 /**
- * 8,000 ms. Period of the pinned RPC client's keepalive fiber (§3.2.2 L1). The
- * pinned client hard-codes it (`Effect.delay("8 seconds")` in `makePinger`,
- * `patches/effect@4.0.0-beta.106.patch`) and exports no constant, so this is the
- * one restated row with no importable definition site.
+ * 8,000 ms. Period of the pinned RPC client's keepalive fiber (§3.2.2 L1): its
+ * default (`pingInterval` in `makePinger`, `patches/effect@4.0.5.patch`), which
+ * exports no constant, so this is the one restated row with no importable
+ * definition site. It is the SHORTEST period any client runs, which is what L1
+ * and L5 bound; a socket may run a longer one (`RELAY_RPC_KEEPALIVE_INTERVAL`).
  */
 export const RPC_KEEPALIVE_INTERVAL = 8_000;
+
+/**
+ * 10,000 ms. Period of the RPC keepalive on Hub relay channels (§3.2.2 L6). L1
+ * and L5 only bound the period from below, so a relay channel may ping less
+ * often than a direct socket: the Hub already watches the path (its relay and
+ * session heartbeats), and on a phone every ping wakes the radio. The ceiling is
+ * the client's view-resume check, which waits
+ * `VIEW_RESUME_HEARTBEAT_GRACE_MS` (12 s) for a pong before it reconnects a
+ * connection; one period plus a slow round trip must fit inside it.
+ */
+export const RELAY_RPC_KEEPALIVE_INTERVAL = 10_000;

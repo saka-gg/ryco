@@ -1595,6 +1595,7 @@ export function makeNodeE2eeChannelSession(
       if (sent.accepted) return "sent";
       switch (sent.refusal) {
         case "queue_full":
+        case "paced":
           return "backpressure";
         case "message_too_large":
         case "peer_unsupported":

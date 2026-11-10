@@ -4,6 +4,7 @@ import {
   T_HANDSHAKE,
   T_KEEPALIVE_FLUSH_MARGIN,
   T_TRUST_COMMIT,
+  RELAY_RPC_KEEPALIVE_INTERVAL,
   RPC_KEEPALIVE_INTERVAL,
 } from "@ryco/shared/relayE2eeConstants";
 import {
@@ -282,7 +283,10 @@ const CLAIMED: RelayE2eeInboundDisposition = Object.freeze({
  * defect (§3.2.2), and it is checked at module load because the only alternative
  * is discovering it as a dead transport in the middle of row K15.
  */
-if (T_ADV + T_TRUST_COMMIT + T_HANDSHAKE + T_KEEPALIVE_FLUSH_MARGIN > RPC_KEEPALIVE_INTERVAL) {
+if (
+  T_ADV + T_TRUST_COMMIT + T_HANDSHAKE + T_KEEPALIVE_FLUSH_MARGIN > RPC_KEEPALIVE_INTERVAL ||
+  RELAY_RPC_KEEPALIVE_INTERVAL < RPC_KEEPALIVE_INTERVAL
+) {
   throw new Error("Relay E2EE negotiating window exceeds the pinned keepalive budget.");
 }
 

@@ -121,6 +121,7 @@ import {
   RELAY_MAX_DATA_CHUNK_BYTES,
   RELAY_MAX_RPC_MESSAGE_BYTES,
   RELAY_MIN_DATA_CHUNK_BYTES,
+  RELAY_RPC_KEEPALIVE_INTERVAL,
   RPC_KEEPALIVE_INTERVAL,
   T_ADV,
   T_CLOSE,
@@ -507,7 +508,7 @@ describe("size-relationship invariants (§3.2.1 S1–S11)", () => {
   });
 });
 
-describe("liveness and concurrency invariants (§3.2.2 L1–L5)", () => {
+describe("liveness and concurrency invariants (§3.2.2 L1–L6)", () => {
   it("L1 — the negotiating window fits inside one keepalive period", () => {
     expect(T_ADV + T_TRUST_COMMIT + T_HANDSHAKE + T_KEEPALIVE_FLUSH_MARGIN).toBeLessThanOrEqual(
       RPC_KEEPALIVE_INTERVAL,
@@ -531,6 +532,13 @@ describe("liveness and concurrency invariants (§3.2.2 L1–L5)", () => {
     expect(2 * T_CLOSE + T_CLOSE_LINGER_MAX + T_KEEPALIVE_FLUSH_MARGIN).toBeLessThanOrEqual(
       RPC_KEEPALIVE_INTERVAL,
     );
+  });
+
+  it("L6 — a relay channel pings no more often than the shortest period L1 and L5 bound", () => {
+    // The upper bound is the client's view-resume grace (12 s, client-runtime
+    // supervision), checked against that constant in client-runtime.
+    expect(RELAY_RPC_KEEPALIVE_INTERVAL).toBeGreaterThanOrEqual(RPC_KEEPALIVE_INTERVAL);
+    expect(RELAY_RPC_KEEPALIVE_INTERVAL).toBeLessThanOrEqual(12_000 - 2_000);
   });
 });
 

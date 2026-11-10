@@ -80,6 +80,22 @@ export const RELAY_COMPRESSION_ADVERTISEMENT = relayCompressionAdvertisement(
 export const RELAY_COMPRESSION_MIN_PAD_BYTES = 1_024;
 /** Buckets per doubling of size: the granularity is 1/16 of the enclosing power of two. */
 export const RELAY_COMPRESSION_PAD_BUCKETS_PER_DOUBLING = 16;
+/**
+ * Smallest bucket of the COARSE padding (`relayCompressionPaddedLength(n, "coarse")`), for the
+ * classes whose content may still change while it is being observed (thread windows of a running
+ * turn): the frame is never observable below 16 KiB.
+ */
+export const RELAY_COMPRESSION_COARSE_MIN_PAD_BYTES = 16 * 1_024;
+/** Coarse buckets per doubling: 1/4 of the enclosing power of two, at most 25% overhead. */
+export const RELAY_COMPRESSION_COARSE_PAD_BUCKETS_PER_DOUBLING = 4;
+
+/**
+ * How a frame is padded. `"standard"`: 1/16 of the enclosing power of two, at least 1 KiB.
+ * `"coarse"`: 1/4 of it, at least 16 KiB. Both are only zero bytes after the DEFLATE body, which
+ * every receiver of frame version 1 already accepts at any length, so the choice is the node's
+ * alone and needs no negotiation.
+ */
+export type RelayCompressionPadding = "standard" | "coarse";
 
 export type CompressedRelayPayloadError =
   | "truncated"
@@ -110,18 +126,28 @@ export function isCompressedRelayPayload(bytes: Uint8Array): boolean {
  * power of two not above it, and never to less than 1 KiB. The overhead is
  * therefore below 6.25% at every size, and the Hub's length resolution on a
  * compressed message degrades in proportion to the message rather than staying
- * a fixed kilobyte that a large message makes negligible.
+ * a fixed kilobyte that a large message makes negligible. Coarse padding uses
+ * 1/4 of that power of two and never less than 16 KiB (overhead below 25%).
  */
-export function relayCompressionPaddedLength(frameBytes: number): number {
+export function relayCompressionPaddedLength(
+  frameBytes: number,
+  padding: RelayCompressionPadding = "standard",
+): number {
   if (!Number.isSafeInteger(frameBytes) || frameBytes < 0) {
     throw new TypeError("Relay compression frame length must be a non-negative safe integer.");
   }
   if (frameBytes === 0) return 0;
   const power = 2 ** Math.floor(Math.log2(frameBytes));
-  const bucket = Math.max(
-    RELAY_COMPRESSION_MIN_PAD_BYTES,
-    power / RELAY_COMPRESSION_PAD_BUCKETS_PER_DOUBLING,
-  );
+  const bucket =
+    padding === "coarse"
+      ? Math.max(
+          RELAY_COMPRESSION_COARSE_MIN_PAD_BYTES,
+          power / RELAY_COMPRESSION_COARSE_PAD_BUCKETS_PER_DOUBLING,
+        )
+      : Math.max(
+          RELAY_COMPRESSION_MIN_PAD_BYTES,
+          power / RELAY_COMPRESSION_PAD_BUCKETS_PER_DOUBLING,
+        );
   return Math.ceil(frameBytes / bucket) * bucket;
 }
 
@@ -148,6 +174,7 @@ function readUint32(source: Uint8Array, offset: number): number {
 export function encodeCompressedRelayPayload(
   deflated: Uint8Array,
   uncompressedBytes: number,
+  padding: RelayCompressionPadding = "standard",
 ): Uint8Array {
   if (
     !Number.isSafeInteger(uncompressedBytes) ||
@@ -160,7 +187,7 @@ export function encodeCompressedRelayPayload(
     throw new RangeError("A compressed relay payload needs a non-empty body.");
   }
   const frameBytes = RELAY_COMPRESSED_PAYLOAD_HEADER_BYTES + deflated.byteLength;
-  const frame = new Uint8Array(relayCompressionPaddedLength(frameBytes));
+  const frame = new Uint8Array(relayCompressionPaddedLength(frameBytes, padding));
   frame[0] = RELAY_COMPRESSED_PAYLOAD_MAGIC;
   frame[1] = RELAY_COMPRESSED_PAYLOAD_VERSION;
   writeUint32(frame, 4, uncompressedBytes);

@@ -10,9 +10,13 @@ import { DEFAULT_HUB_CONNECTOR_CONFIG, ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { makeRpcByteSession } from "../ws/RpcByteSession.ts";
 import { relayRpcPrincipal, type RelayChannelAuthority } from "../ws/RpcPrincipal.ts";
-import { RelayResponseCompressor } from "../ws/relayResponseCompression.ts";
+import {
+  type RelayCompressionTurnState,
+  RelayResponseCompressor,
+} from "../ws/relayResponseCompression.ts";
 import { NODE_LINKED_ACCESS_CHECK_FEATURE } from "@ryco/contracts/node-linked-access";
 import { NODE_AUTOMATION_HOOKS_FEATURE } from "@ryco/contracts/automation-hooks";
+import type { ThreadId } from "@ryco/contracts";
 import type { RelayCloseReason } from "@ryco/contracts/relay";
 import {
   makeLinkedAccessCodes,
@@ -419,6 +423,34 @@ export const instrumentRelayChannelOpens = <WarmError>(
 };
 
 /**
+ * The running turn of a thread, read from its shell row, for the relay compressor's
+ * finished-history-page rule (`RelayCompressionTurnState`). `undefined` — do not compress —
+ * without a shell query, for an unknown thread, or when the read fails.
+ */
+export const relayCompressionTurnState = (
+  query: Option.Option<Pick<ProjectionSnapshotQueryShape, "getThreadShellById">>,
+  run: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>,
+): RelayCompressionTurnState | undefined => {
+  const getThreadShellById = Option.getOrUndefined(query)?.getThreadShellById;
+  if (getThreadShellById === undefined) return undefined;
+  return {
+    runningTurnOf: (threadId) =>
+      run(
+        getThreadShellById(threadId as ThreadId).pipe(
+          Effect.map(Option.getOrUndefined),
+          Effect.orElseSucceed(() => undefined),
+        ),
+      ).then((shell) => {
+        if (shell === undefined) return undefined;
+        const turn = shell.latestTurn;
+        return turn === null || turn.state !== "running"
+          ? null
+          : { turnId: turn.turnId, requestedAt: turn.requestedAt };
+      }),
+  };
+};
+
+/**
  * What a relay channel open warms: the stubbed shell, the form a hosted client subscribes to
  * right after its handshake, so the node's shell memo holds it by then. Nothing without a shell
  * query that builds that form.
@@ -530,6 +562,10 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
+    const compressionTurnState = relayCompressionTurnState(
+      yield* Effect.serviceOption(ProjectionSnapshotQuery),
+      runPromise,
+    );
     // Beside the identity it guards, so every backend sharing that identity —
     // the desktop's child and a `ryco serve` on the same state directory —
     // contends for the same file.
@@ -831,7 +867,10 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                 // Bounded by this channel's ceiling, so a compressed message and
                 // its frame never claim more of the client's queue than one
                 // message may (§4.6.3).
-                compressor: new RelayResponseCompressor({ maxMessageBytes: plaintextCeiling ?? 0 }),
+                compressor: new RelayResponseCompressor({
+                  maxMessageBytes: plaintextCeiling ?? 0,
+                  turnState: compressionTurnState,
+                }),
               },
             ).pipe(Effect.provideService(Scope.Scope, scope)),
           );

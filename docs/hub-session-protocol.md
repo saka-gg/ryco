@@ -123,7 +123,11 @@ apply. Send capacity reserves room for control frames. Tickets and queued payloa
 are erased on disposal or loss. The manager never replays application writes across
 physical reconnections: fresh logical streams must establish fresh authority.
 
-The idle session uses a 20-second heartbeat and 45-second liveness bound. Successful
+The idle session uses a 20-second heartbeat and 45-second liveness bound. The Hub pings
+every interval and judges the session by its own pongs. The client pings only after 25 seconds
+without any frame from the Hub (the interval plus 5 seconds, so a Hub ping on its way is not
+raced): any frame proves the path, so a session that receives data or the Hub's pings sends no
+ping of its own, and a ping still has 20 seconds for its pong before the liveness bound. Successful
 stable operation resets the bounded reconnect backoff. Authentication revocation is
 terminal; ordinary network loss uses bounded, jittered retries. Signing out disposes
 every logical stream and the physical socket. Account/session generations fence stale

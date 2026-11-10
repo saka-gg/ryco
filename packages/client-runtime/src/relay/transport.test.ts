@@ -10,6 +10,10 @@ import * as Socket from "effect/socket/Socket";
 import type { HubSessionFrame } from "@ryco/contracts/hub-session";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import { rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
+import {
+  RELAY_RPC_KEEPALIVE_INTERVAL,
+  RPC_KEEPALIVE_INTERVAL,
+} from "@ryco/shared/relayE2eeConstants";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -20,6 +24,7 @@ import type {
 } from "@ryco/client-runtime/platform";
 
 import { HostedHubApi, HostedHubApiError } from "../authorization/api.ts";
+import { VIEW_RESUME_HEARTBEAT_GRACE_MS } from "../connection/supervision.ts";
 import {
   configureHostedRuntime,
   hostedEnvironmentSessionsMode,
@@ -265,6 +270,17 @@ describe("HostedRelayAttemptFactory", () => {
       effectiveRole: "operator",
     });
     expect(factory.lifecycleHandlers().recordGlobalConnectionState).toBe(false);
+  });
+
+  it("pings relay channels every RELAY_RPC_KEEPALIVE_INTERVAL, inside the §3.2.2 L6 bounds", () => {
+    const factory = new HostedRelayAttemptFactory();
+    expect(factory.lifecycleHandlers().keepaliveIntervalMs).toBe(RELAY_RPC_KEEPALIVE_INTERVAL);
+    // L1 and L5 bound the period from below (the shortest period any client runs).
+    expect(RELAY_RPC_KEEPALIVE_INTERVAL).toBeGreaterThanOrEqual(RPC_KEEPALIVE_INTERVAL);
+    // The view-resume check waits this long for a pong: one period and a 2 s round trip fit.
+    expect(RELAY_RPC_KEEPALIVE_INTERVAL + 2_000).toBeLessThanOrEqual(
+      VIEW_RESUME_HEARTBEAT_GRACE_MS,
+    );
   });
 
   it("probes the account subscription once when a unary request goes unanswered", async () => {

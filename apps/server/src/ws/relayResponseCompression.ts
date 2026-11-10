@@ -12,14 +12,16 @@
  * analysis lives in docs/relay-e2ee-protocol.md §4.6.6.
  *
  * Everything not listed stays uncompressed: errors and defects, auth, pairing,
- * tokens, terminals, device and computer streams, settings, project data, and
- * every event and delta. A message is compressed only when ALL of these hold:
+ * tokens, terminals, device and computer streams, project data, diffs, file
+ * contents, and every event and delta. A message is compressed only when ALL of
+ * these hold:
  *
  * - the client advertised a frame version this node writes, on this channel;
  * - the response belongs to an allowlisted method, and every value it carries
  *   is an allowlisted kind (a stream batch mixing in anything else is left
  *   alone, except that a leading shell `snapshot-begin` is split off and sent
- *   uncompressed in a message of its own);
+ *   uncompressed in a message of its own); a history page only when nothing in
+ *   it belongs to the thread's running turn;
  * - the encoded message is at least 16 KiB, and it
  *   and its compressed frame TOGETHER fit the channel's message ceiling: the
  *   client holds both while it inflates, and charges both to its inbound queue;
@@ -35,9 +37,34 @@ import {
   encodeCompressedRelayPayload,
   RELAY_COMPRESSED_PAYLOAD_VERSION,
   readRelayCompressionAdvertisement,
+  type RelayCompressionPadding,
 } from "@ryco/shared/relayPayloadCompression";
 
 import { WEBSOCKET_PER_MESSAGE_DEFLATE } from "../webSocketCompression.ts";
+
+/**
+ * What the node knows about a thread's turns, for rules that depend on it. A
+ * thread's running turn: `null` when none runs, `undefined` when it cannot be
+ * told (the rule then does not compress).
+ */
+export interface RelayCompressionTurnState {
+  readonly runningTurnOf: (
+    threadId: string,
+  ) => Promise<RelayCompressionRunningTurn | null | undefined>;
+}
+
+export interface RelayCompressionRunningTurn {
+  readonly turnId: string;
+  /** When the turn was requested: everything of the thread updated before it belongs to earlier turns. */
+  readonly requestedAt: string;
+}
+
+/** The request a response answers, for rules that look at it. */
+export interface RelayCompressionRequest {
+  /** The request's payload as the client encoded it. */
+  readonly payload: unknown;
+  readonly turnState: RelayCompressionTurnState | undefined;
+}
 
 /** How one allowlisted method's responses may be compressed. */
 export interface RelayCompressionRule {
@@ -47,8 +74,18 @@ export interface RelayCompressionRule {
    * (0 for none) ahead of the compressed rest.
    */
   readonly streamBatch?: (values: ReadonlyArray<unknown>) => number | undefined;
-  /** The successful result of a unary call may be compressed. */
-  readonly success?: true;
+  /**
+   * The successful result of a unary call may be compressed: always (`true`),
+   * or when the predicate says so for this value and request.
+   */
+  readonly success?:
+    | true
+    | ((value: unknown, request: RelayCompressionRequest) => boolean | Promise<boolean>);
+  /**
+   * The frame's padding (`@ryco/shared/relayPayloadCompression`). `"coarse"`
+   * for content that may still change while the Hub watches its length.
+   */
+  readonly padding?: RelayCompressionPadding;
 }
 
 function hasField(field: string, values: ReadonlyArray<string>): (value: unknown) => boolean {
@@ -82,28 +119,64 @@ function shellThreadPages(values: ReadonlyArray<unknown>): number | undefined {
   return rest.some(isThreadPage) && rest.every(isThreadPageOrEnd) ? lead : undefined;
 }
 
-/**
- * Classes that are NOT compressed by default, kept defined so that turning one
- * on is a single line in `RELAY_COMPRESSION_ALLOWLIST`.
- *
- * - `threadWindows`: thread window snapshots and history pages. The most
- *   exposed class — conversation text mixes whatever the user pasted and tools
- *   printed with repository content and model output an attacker can shape —
- *   for the weakest measured gain (about 2.6–3.2x).
- */
-export const RELAY_COMPRESSION_OPT_IN_CLASSES = {
-  threadWindows: {
-    [ORCHESTRATION_WS_METHODS.subscribeThreadWindow]: {
-      streamBatch: everyValue(hasField("kind", ["snapshot"])),
-    },
-    [ORCHESTRATION_WS_METHODS.getThreadWindow]: { success: true },
-    [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: { success: true },
-  },
-} as const satisfies Record<string, Record<string, RelayCompressionRule>>;
+function threadIdOf(payload: unknown): string | undefined {
+  const threadId =
+    typeof payload === "object" && payload !== null
+      ? (payload as Record<string, unknown>).threadId
+      : undefined;
+  return typeof threadId === "string" ? threadId : undefined;
+}
+
+/** When a history item last changed: `updatedAt`, else `createdAt`, else `completedAt` (checkpoints). */
+function itemChangedAtMs(item: unknown): number | undefined {
+  if (typeof item !== "object" || item === null) return undefined;
+  const record = item as Record<string, unknown>;
+  const stamp = record.updatedAt ?? record.createdAt ?? record.completedAt;
+  if (typeof stamp !== "string") return undefined;
+  const ms = Date.parse(stamp);
+  return Number.isFinite(ms) ? ms : undefined;
+}
 
 /**
- * THE ALLOWLIST, by exposure class. Snapshot pages only; what each carries is
- * stated so a reviewer can weigh it (docs/relay-e2ee-protocol.md §4.6.3):
+ * A history page all of whose items belong to turns that ended: nothing in it
+ * streams, carries the running turn's id, or changed after that turn was
+ * requested. Such content no longer changes, so every delivery of the same page
+ * has the same length (§4.6.6). Unknown turn state, an unknown item shape or a
+ * missing timestamp leaves the page uncompressed.
+ */
+async function isFinishedHistoryPage(
+  value: unknown,
+  request: RelayCompressionRequest,
+): Promise<boolean> {
+  const items =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>).items
+      : undefined;
+  const threadId = threadIdOf(request.payload);
+  if (!Array.isArray(items) || threadId === undefined || request.turnState === undefined) {
+    return false;
+  }
+  for (const item of items) {
+    if (typeof item !== "object" || item === null) return false;
+    if ((item as Record<string, unknown>).streaming === true) return false;
+    if (itemChangedAtMs(item) === undefined) return false;
+  }
+  const running = await request.turnState.runningTurnOf(threadId);
+  if (running === undefined) return false;
+  if (running === null) return true;
+  const requestedAtMs = Date.parse(running.requestedAt);
+  if (!Number.isFinite(requestedAtMs)) return false;
+  return items.every(
+    (item) =>
+      (item as Record<string, unknown>).turnId !== running.turnId &&
+      itemChangedAtMs(item)! < requestedAtMs,
+  );
+}
+
+/**
+ * THE ALLOWLIST, by exposure class. What each carries is stated so a reviewer
+ * can weigh it; the side-channel reasoning per class is
+ * docs/relay-e2ee-protocol.md §4.6.6:
  *
  * - `shellSnapshotPages`: thread pages of a paged shell snapshot — titles,
  *   goals, branches, worktree paths, model selections, and each thread's
@@ -111,13 +184,20 @@ export const RELAY_COMPRESSION_OPT_IN_CLASSES = {
  * - `providerStatuses`: the full provider list, sent to clients that do not ask
  *   for deltas — model catalogs, status `message` (which may embed an OpenCode
  *   server URL or CLI stderr), `updateState.output` (raw update-command output,
- *   up to 10k characters), and `auth.email`. Deltas, the server config
- *   snapshot, `settingsUpdated`, and `server.getConfig` are NOT here: the
- *   latter three carry `ServerSettings`. Its client copy is redacted
- *   (§4.6.3), but adding them is a separate decision.
+ *   up to 10k characters), and `auth.email`. Deltas are never compressed.
+ * - `serverConfig`: the config stream's `snapshot` and `settingsUpdated`, and
+ *   `server.getConfig`. They carry the client copy of `ServerSettings`, which
+ *   is redacted (secrets presence-only, URL credentials replaced by a marker);
+ *   provider environment variables the user did not mark sensitive are sent as
+ *   entered.
+ * - `fileTree`: `projects.listEntries` results — workspace paths and kinds only,
+ *   never file contents.
+ * - `finishedHistoryPages`: `orchestration.getThreadHistoryPage` results whose
+ *   every item belongs to a turn that ended (`isFinishedHistoryPage`).
+ * - `threadWindows`: thread window snapshots (`subscribeThreadWindow` snapshot
+ *   items, `getThreadWindow`), which hold the running turn, with COARSE padding.
  *
- * To compress thread windows too, add
- * `threadWindows: RELAY_COMPRESSION_OPT_IN_CLASSES.threadWindows,`.
+ * Diffs and file contents are not here and stay uncompressed.
  */
 export const RELAY_COMPRESSION_ALLOWLIST: Readonly<
   Record<string, Readonly<Record<string, RelayCompressionRule>>>
@@ -129,6 +209,25 @@ export const RELAY_COMPRESSION_ALLOWLIST: Readonly<
     [WS_METHODS.subscribeServerConfig]: {
       streamBatch: everyValue(hasField("type", ["providerStatuses"])),
     },
+  },
+  serverConfig: {
+    [WS_METHODS.subscribeServerConfig]: {
+      streamBatch: everyValue(hasField("type", ["snapshot", "settingsUpdated"])),
+    },
+    [WS_METHODS.serverGetConfig]: { success: true },
+  },
+  fileTree: {
+    [WS_METHODS.projectsListEntries]: { success: true },
+  },
+  finishedHistoryPages: {
+    [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: { success: isFinishedHistoryPage },
+  },
+  threadWindows: {
+    [ORCHESTRATION_WS_METHODS.subscribeThreadWindow]: {
+      streamBatch: everyValue(hasField("kind", ["snapshot"])),
+      padding: "coarse",
+    },
+    [ORCHESTRATION_WS_METHODS.getThreadWindow]: { success: true, padding: "coarse" },
   },
 };
 
@@ -168,8 +267,9 @@ export function deflateRelayRpcMessage(message: Uint8Array): Promise<Uint8Array>
 export async function compressRelayRpcMessage(
   message: Uint8Array,
   deflate: (message: Uint8Array) => Promise<Uint8Array> = deflateRelayRpcMessage,
+  padding: RelayCompressionPadding = "standard",
 ): Promise<Uint8Array | undefined> {
-  const frame = encodeCompressedRelayPayload(await deflate(message), message.byteLength);
+  const frame = encodeCompressedRelayPayload(await deflate(message), message.byteLength, padding);
   return frame.byteLength <= message.byteLength * RELAY_COMPRESSION_MAX_RATIO ? frame : undefined;
 }
 
@@ -177,6 +277,7 @@ interface RpcMessageLike {
   readonly _tag?: unknown;
   readonly id?: unknown;
   readonly tag?: unknown;
+  readonly payload?: unknown;
   readonly requestId?: unknown;
   readonly values?: unknown;
   readonly exit?: unknown;
@@ -191,7 +292,9 @@ function requestKey(id: unknown): string | undefined {
 }
 
 interface TrackedRequest {
-  readonly rule: RelayCompressionRule;
+  /** Every class's rule for the request's method, in allowlist order. */
+  readonly rules: ReadonlyArray<RelayCompressionRule>;
+  readonly payload: unknown;
   /** Client acks still owed for messages this channel split a chunk into. */
   surplusAcks: number;
 }
@@ -204,7 +307,8 @@ interface TrackedRequest {
  */
 export class RelayResponseCompressor {
   readonly #deflate: (message: Uint8Array) => Promise<Uint8Array>;
-  readonly #rules: ReadonlyMap<string, RelayCompressionRule>;
+  readonly #rules: ReadonlyMap<string, ReadonlyArray<RelayCompressionRule>>;
+  readonly #turnState: RelayCompressionTurnState | undefined;
   readonly #maxMessageBytes: number;
   /** The frame version this node writes for this channel; 0 until advertised. */
   #frameVersion = 0;
@@ -221,18 +325,28 @@ export class RelayResponseCompressor {
        * message occupy. Defaults to the relay message limit.
        */
       readonly maxMessageBytes?: number;
+      /**
+       * Turn state for rules that depend on it (finished history pages). Absent,
+       * those rules never compress.
+       */
+      readonly turnState?: RelayCompressionTurnState | undefined;
     } = {},
   ) {
     this.#deflate = options.deflate ?? deflateRelayRpcMessage;
+    this.#turnState = options.turnState;
     this.#maxMessageBytes = Math.min(
       RELAY_MAX_RPC_MESSAGE_BYTES,
       Math.max(0, options.maxMessageBytes ?? RELAY_MAX_RPC_MESSAGE_BYTES),
     );
-    this.#rules = new Map(
-      Object.values(options.allowlist ?? RELAY_COMPRESSION_ALLOWLIST).flatMap((rules) =>
-        Object.entries(rules),
-      ),
-    );
+    const rules = new Map<string, Array<RelayCompressionRule>>();
+    for (const methods of Object.values(options.allowlist ?? RELAY_COMPRESSION_ALLOWLIST)) {
+      for (const [method, rule] of Object.entries(methods)) {
+        const existing = rules.get(method);
+        if (existing === undefined) rules.set(method, [rule]);
+        else existing.push(rule);
+      }
+    }
+    this.#rules = rules;
   }
 
   /** Whether this channel's client advertised a frame version this node writes. */
@@ -281,11 +395,11 @@ export class RelayResponseCompressor {
     if (record._tag !== "Request" || typeof record.tag !== "string") return true;
     // A reused id starts over: whatever the old request was, this one decides.
     this.#requests.delete(key);
-    const rule = this.#rules.get(record.tag);
-    if (rule === undefined || this.#requests.size >= RELAY_COMPRESSION_MAX_TRACKED_REQUESTS) {
+    const rules = this.#rules.get(record.tag);
+    if (rules === undefined || this.#requests.size >= RELAY_COMPRESSION_MAX_TRACKED_REQUESTS) {
       return true;
     }
-    this.#requests.set(key, { rule, surplusAcks: 0 });
+    this.#requests.set(key, { rules, payload: record.payload, surplusAcks: 0 });
     return true;
   }
 
@@ -308,18 +422,30 @@ export class RelayResponseCompressor {
     if (tracked === undefined || !this.advertised) return [bytes];
     try {
       if (record._tag === "Exit") {
-        return tracked.rule.success === true && asRecord(record.exit)?._tag === "Success"
-          ? [(await this.#compress(bytes)) ?? bytes]
-          : [bytes];
+        const exit = asRecord(record.exit) as { _tag?: unknown; value?: unknown } | undefined;
+        if (exit?._tag !== "Success") return [bytes];
+        const rule = await this.#acceptingResult(tracked, exit.value);
+        return rule === undefined
+          ? [bytes]
+          : [(await this.#compress(bytes, rule.padding)) ?? bytes];
       }
       if (record._tag !== "Chunk" || !Array.isArray(record.values)) return [bytes];
-      const lead = tracked.rule.streamBatch?.(record.values);
-      if (lead === undefined) return [bytes];
-      if (lead === 0) return [(await this.#compress(bytes)) ?? bytes];
-      const head = reencode({ ...record, values: record.values.slice(0, lead) });
-      const rest = reencode({ ...record, values: record.values.slice(lead) });
+      const values = record.values;
+      let lead: number | undefined;
+      let rule: RelayCompressionRule | undefined;
+      for (const candidate of tracked.rules) {
+        lead = candidate.streamBatch?.(values);
+        if (lead !== undefined) {
+          rule = candidate;
+          break;
+        }
+      }
+      if (lead === undefined || rule === undefined) return [bytes];
+      if (lead === 0) return [(await this.#compress(bytes, rule.padding)) ?? bytes];
+      const head = reencode({ ...record, values: values.slice(0, lead) });
+      const rest = reencode({ ...record, values: values.slice(lead) });
       if (head === undefined || rest === undefined) return [bytes];
-      const compressed = await this.#compress(rest);
+      const compressed = await this.#compress(rest, rule.padding);
       if (compressed === undefined) return [bytes];
       tracked.surplusAcks += 1;
       return [head, compressed];
@@ -328,14 +454,34 @@ export class RelayResponseCompressor {
     }
   }
 
-  async #compress(bytes: Uint8Array): Promise<Uint8Array | undefined> {
+  /** The first class whose rule accepts this successful unary result. */
+  async #acceptingResult(
+    tracked: TrackedRequest,
+    value: unknown,
+  ): Promise<RelayCompressionRule | undefined> {
+    for (const rule of tracked.rules) {
+      if (rule.success === true) return rule;
+      if (
+        rule.success !== undefined &&
+        (await rule.success(value, { payload: tracked.payload, turnState: this.#turnState }))
+      ) {
+        return rule;
+      }
+    }
+    return undefined;
+  }
+
+  async #compress(
+    bytes: Uint8Array,
+    padding: RelayCompressionPadding = "standard",
+  ): Promise<Uint8Array | undefined> {
     if (
       bytes.byteLength < RELAY_COMPRESSION_THRESHOLD_BYTES ||
       bytes.byteLength >= this.#maxMessageBytes
     ) {
       return undefined;
     }
-    const frame = await compressRelayRpcMessage(bytes, this.#deflate);
+    const frame = await compressRelayRpcMessage(bytes, this.#deflate, padding);
     return frame !== undefined && bytes.byteLength + frame.byteLength <= this.#maxMessageBytes
       ? frame
       : undefined;

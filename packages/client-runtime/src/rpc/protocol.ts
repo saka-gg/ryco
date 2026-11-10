@@ -44,6 +44,11 @@ export interface WsProtocolLifecycleHandlers {
   readonly onDispose?: () => void;
   readonly onAttempt?: (socketUrl: string) => void;
   readonly onOpen?: () => void;
+  /**
+   * Period of the RPC keepalive `Ping` on this socket; the dead-peer timeout is
+   * twice it. Absent, the RPC client's default (`RPC_KEEPALIVE_INTERVAL`, 8 s).
+   */
+  readonly keepaliveIntervalMs?: number;
   readonly onHeartbeatPing?: () => void;
   readonly onHeartbeatPong?: () => void;
   readonly onHeartbeatTimeout?: () => void;
@@ -480,6 +485,9 @@ export function createWsRpcProtocolLayer(
       RpcClient.makeProtocolSocket({
         retryPolicy,
         retryTransientErrors: handlers?.retryTransientErrors ?? true,
+        ...(handlers?.keepaliveIntervalMs === undefined
+          ? {}
+          : { pingInterval: Duration.millis(handlers.keepaliveIntervalMs) }),
       }),
       (protocol) => ({
         ...protocol,

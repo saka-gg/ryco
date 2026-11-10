@@ -19,11 +19,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { makeRpcByteSession } from "./RpcByteSession.ts";
 import { pageShellSnapshot } from "./context/shellSnapshotPages.ts";
-import {
-  RELAY_COMPRESSION_ALLOWLIST,
-  RELAY_COMPRESSION_OPT_IN_CLASSES,
-  RelayResponseCompressor,
-} from "./relayResponseCompression.ts";
+import { RelayResponseCompressor } from "./relayResponseCompression.ts";
 
 // The allowlist over REAL Effect RPC traffic: the production group, its
 // schemas encoding every response, and the byte session the relay runs on.
@@ -263,18 +259,13 @@ describe("relay compression over real RPC traffic", () => {
     await session.close();
   });
 
-  it("leaves an opted-in thread window's real failure and defect uncompressed", async () => {
-    const session = await openSession(
-      {
-        [ORCHESTRATION_WS_METHODS.getThreadWindow]: (input: { readonly threadId: string }) =>
-          input.threadId === "fail"
-            ? Effect.fail(new OrchestrationGetSnapshotError({ message: "z".repeat(40_000) }))
-            : Effect.die(new Error("w".repeat(40_000))),
-      },
-      new RelayResponseCompressor({
-        allowlist: { ...RELAY_COMPRESSION_ALLOWLIST, ...RELAY_COMPRESSION_OPT_IN_CLASSES },
-      }),
-    );
+  it("leaves a thread window's real failure and defect uncompressed", async () => {
+    const session = await openSession({
+      [ORCHESTRATION_WS_METHODS.getThreadWindow]: (input: { readonly threadId: string }) =>
+        input.threadId === "fail"
+          ? Effect.fail(new OrchestrationGetSnapshotError({ message: "z".repeat(40_000) }))
+          : Effect.die(new Error("w".repeat(40_000))),
+    });
     const limits = { messages: 10, proposedPlans: 10, activities: 10, checkpoints: 10 };
     await session.send(
       request("1", ORCHESTRATION_WS_METHODS.getThreadWindow, { threadId: "fail", limits }),
@@ -291,6 +282,59 @@ describe("relay compression over real RPC traffic", () => {
     expect(defect!.message._tag).toBe("Defect");
     expect(defect!.bytes.byteLength).toBeGreaterThan(40_000);
     expect(defect!.compressed).toBe(false);
+    await session.close();
+  });
+
+  it("compresses a real history page of ended turns and a real thread window", async () => {
+    const message = (index: number, turnId: string, at: string) => ({
+      id: `message-${index}`,
+      role: "assistant",
+      text: `Ran the relay suite, case ${index % 13}: everything passed after the retry.`,
+      turnId,
+      streaming: false,
+      createdAt: at,
+      updatedAt: at,
+    });
+    const page = (turnId: string, at: string) => ({
+      collection: "messages",
+      snapshotSequence: 4,
+      items: Array.from({ length: 400 }, (_, index) => message(index, turnId, at)),
+      page: { oldestCursor: null, newestCursor: null, hasMoreBefore: true },
+    });
+    const session = await openSession(
+      {
+        [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: (input: { readonly threadId: string }) =>
+          Effect.succeed(
+            input.threadId === "old"
+              ? page("turn-1", "2026-11-10T09:00:00.000Z")
+              : page("turn-2", "2026-11-10T09:20:00.000Z"),
+          ),
+      },
+      new RelayResponseCompressor({
+        turnState: {
+          runningTurnOf: async () => ({
+            turnId: "turn-2",
+            requestedAt: "2026-11-10T09:10:00.000Z",
+          }),
+        },
+      }),
+    );
+    const input = (threadId: string) => ({
+      threadId,
+      collection: "messages",
+      mode: { kind: "before", cursor: "cursor-1" },
+      limit: 400,
+    });
+    await session.send(request("1", ORCHESTRATION_WS_METHODS.getThreadHistoryPage, input("old")));
+    const [ended] = await session.drain("1");
+    expect(ended!.message.exit?._tag).toBe("Success");
+    expect(ended!.compressed).toBe(true);
+    await session.send(
+      request("2", ORCHESTRATION_WS_METHODS.getThreadHistoryPage, input("running")),
+    );
+    const [running] = await session.drain("2");
+    expect(running!.message.exit?._tag).toBe("Success");
+    expect(running!.compressed).toBe(false);
     await session.close();
   });
 });
