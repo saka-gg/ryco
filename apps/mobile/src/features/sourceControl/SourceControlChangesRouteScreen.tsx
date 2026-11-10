@@ -181,7 +181,8 @@ export function SourceControlChangesRouteScreen(props: ChangesRouteProps) {
   // The last review kept on this device shows while the controller reads; every
   // write still waits for (and is bound to) the controller's own live read.
   const saved = useSavedMirror(localChangesMirror, { environmentId, cwd }, liveData);
-  const data = liveData ?? (state?.error ? null : saved.data);
+  // Beside a read error too (offline): the banner says why, and nothing can be staged.
+  const data = liveData ?? saved.data;
   const files = useMemo(() => buildChangeFiles(data, scope), [data, scope]);
   const counts = useMemo(() => changeCounts(data), [data]);
   const busy = state

@@ -14,6 +14,7 @@ import {
   createSavedQueryStore,
   planSavedQueryEvictions,
   SAVED_QUERY_MAX_BYTES,
+  storedSavedQueryKey,
   storedSavedQueryVersion,
 } from "./savedQueryStore";
 import { createSnapshotDb, type SnapshotDbHandle } from "./snapshotDb";
@@ -72,6 +73,22 @@ describe("createSavedQueryStore", () => {
     await store.flush();
     now = 20;
     expect(await store.load(ENV, "a", 1)).toEqual({ payload: '{"v":2}', savedAt: 10 });
+    store.dispose();
+  });
+
+  it("drops rows of an older row format when it starts", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    await db.saveSavedQuery({
+      environmentId: ENV,
+      key: "old",
+      schemaVersion: 10_001,
+      payload: "{}",
+      payloadBytes: 2,
+      updatedAt: 1,
+    });
+    const store = createSavedQueryStore({ db, isEnabled: () => true, now: () => 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await db.loadSavedQuery(ENV, "old")).toBeNull();
     store.dispose();
   });
 
@@ -153,6 +170,16 @@ describe("createSavedQueryStore", () => {
       .toSorted();
     expect(left).toEqual(["env-1/c", "env-2/a", "env-2/b"]);
     store.dispose();
+  });
+});
+
+describe("storedSavedQueryKey", () => {
+  it("never stores a NUL, and keeps distinct keys distinct", () => {
+    const a = storedSavedQueryKey("pull-requests\u0000list\u0000env\u0000/a/b\u0000open");
+    const b = storedSavedQueryKey("pull-requests\u0000list\u0000env\u0000/a/b\u0000closed");
+    const c = storedSavedQueryKey("pull-requests\u0000list\u0000env\u0000/a%2Fb\u0000open");
+    expect(a).not.toContain("\u0000");
+    expect(new Set([a, b, c]).size).toBe(3);
   });
 });
 

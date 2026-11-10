@@ -21,7 +21,7 @@ import { payloadByteLength, type SavedQueryStat, type SnapshotDb } from "./snaps
  */
 
 /** Bump when the row format itself changes; every older row becomes a miss. */
-export const SAVED_QUERY_FORMAT_VERSION = 1;
+export const SAVED_QUERY_FORMAT_VERSION = 2;
 /** One answer larger than this is not kept (an unusually large read). */
 export const SAVED_QUERY_MAX_BYTES = 512 * 1024;
 export interface SavedQueryCaps {
@@ -38,6 +38,16 @@ export const SAVED_QUERY_CAPS: SavedQueryCaps = {
  * encode and one write per window instead of one per push.
  */
 export const SAVED_QUERY_WRITE_DELAY_MS = 1_000;
+
+/**
+ * The key as stored. Query keys join their parts with NUL, which SQLite text
+ * binding through expo-sqlite cuts off at the first NUL — every key of a cache
+ * would share one row. Each part is percent-encoded and the parts joined with
+ * "/", so no stored key holds a NUL and distinct keys stay distinct.
+ */
+export function storedSavedQueryKey(key: string): string {
+  return key.split("\u0000").map(encodeURIComponent).join("/");
+}
 
 /** The stored version of a query's codec version under the current row format. */
 export function storedSavedQueryVersion(codecVersion: number): number {
@@ -149,20 +159,22 @@ export function createSavedQueryStore(deps: {
       if (payloadBytes > SAVED_QUERY_MAX_BYTES) {
         // An older, smaller copy would now be out of date.
         await deps.db
-          .removeSavedQueries([{ environmentId: save.environmentId, key: save.key }])
+          .removeSavedQueries([
+            { environmentId: save.environmentId, key: storedSavedQueryKey(save.key) },
+          ])
           .catch(warn("could not remove an oversized answer"));
         continue;
       }
       try {
         await deps.db.saveSavedQuery({
           environmentId: save.environmentId,
-          key: save.key,
+          key: storedSavedQueryKey(save.key),
           schemaVersion: storedSavedQueryVersion(save.version),
           payload,
           payloadBytes,
           updatedAt: deps.now(),
         });
-        written.add(entryId(save.environmentId, save.key));
+        written.add(entryId(save.environmentId, storedSavedQueryKey(save.key)));
       } catch (error) {
         warn("could not save an answer")(error);
       }
@@ -193,6 +205,11 @@ export function createSavedQueryStore(deps: {
     return flushing;
   };
 
+  // Rows of an older row format can never be read again: dropped once, off the launch path.
+  void ready
+    .then(() => deps.db.removeSavedQueriesBelowVersion(storedSavedQueryVersion(0)))
+    .catch(warn("could not drop answers of an older format"));
+
   const unregisterPurge = registerEnvironmentDevicePurge(async (environmentId) => {
     epochs.set(environmentId, epochOf(environmentId) + 1);
     for (const [id, save] of pending) {
@@ -210,11 +227,12 @@ export function createSavedQueryStore(deps: {
       await ready;
       if (!deps.isEnabled()) return null;
       try {
-        const row = await deps.db.loadSavedQuery(environmentId, key);
+        const storedKey = storedSavedQueryKey(key);
+        const row = await deps.db.loadSavedQuery(environmentId, storedKey);
         if (row === null) return null;
         if (row.schemaVersion !== storedSavedQueryVersion(version)) {
           void deps.db
-            .removeSavedQueries([{ environmentId, key }])
+            .removeSavedQueries([{ environmentId, key: storedKey }])
             .catch(warn("could not remove an outdated answer"));
           return null;
         }

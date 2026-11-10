@@ -253,12 +253,17 @@ export function useStatisticsData(
           answeredRequests.current.get(environment.environmentId) !==
           nodeRequestKey(nodeScope(environment, tab, range), revision),
       ),
-      (environment, signal) => loadNodeStatistics(environment, tab, range, { signal, fresh }),
+      (environment, signal) =>
+        // Saved under the view and range this load was for, which an answer
+        // that lands after a switch no longer matches.
+        loadNodeStatistics(environment, tab, range, { signal, fresh }).then((node) => {
+          const kept = savedStatisticsOf(node);
+          if (kept !== null) {
+            saveNodeStatistics(environment.environmentId, savedStatisticsScope(tab, range), kept);
+          }
+          return node;
+        }),
       (environment, node) => {
-        const kept = savedStatisticsOf(node);
-        if (kept !== null) {
-          saveNodeStatistics(environment.environmentId, savedStatisticsScope(tab, range), kept);
-        }
         const answer = nodeAnswer(environment, tab, range, revision, node);
         answeredRequests.current.set(environment.environmentId, answer.requestKey);
         setAnswers((previous) => new Map(previous).set(environment.environmentId, answer));

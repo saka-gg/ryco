@@ -95,6 +95,13 @@ export async function loadSavedNodeStatistics(environment: InboxEnvironment, sco
   const read = await store?.load(environment.environmentId, savedKey(scope), SAVED.version);
   const saved = read ? SAVED.decode(read.payload) : null;
   if (!saved) return null;
+  // Only an answer of the view it is kept for.
+  const fits = scope.startsWith("usage:")
+    ? saved.usage !== undefined
+    : scope === "activity"
+      ? saved.activity !== undefined
+      : saved.providers !== undefined;
+  if (!fits) return null;
   return {
     environment,
     ...(saved.activity !== undefined ? { activity: saved.activity } : {}),

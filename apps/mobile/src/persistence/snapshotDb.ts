@@ -95,6 +95,8 @@ export interface SnapshotDb {
     entries: ReadonlyArray<{ readonly environmentId: string; readonly key: string }>,
   ) => Promise<void>;
   readonly savedQueryBytes: (environmentId: string) => Promise<number>;
+  /** Rows of an older store format (`schema_version` below `minimum`). */
+  readonly removeSavedQueriesBelowVersion: (minimum: number) => Promise<void>;
   /** Every environment's saved reads (the device setting was turned off). */
   readonly clearSavedQueries: () => Promise<void>;
 }
@@ -363,6 +365,10 @@ export function createSnapshotDb(
         [environmentId],
       );
       return row?.bytes ?? 0;
+    },
+    removeSavedQueriesBelowVersion: async (minimum) => {
+      const handle = await acquire();
+      await handle.runAsync("DELETE FROM saved_queries WHERE schema_version < ?", [minimum]);
     },
     clearSavedQueries: async () => {
       const handle = await acquire();

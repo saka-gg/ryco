@@ -141,6 +141,10 @@ function createFakeSnapshotDb() {
       for (const entry of entries) savedQueries.delete(`${entry.environmentId}\u0000${entry.key}`);
     },
     savedQueryBytes: async () => 0,
+    removeSavedQueriesBelowVersion: async (minimum) => {
+      for (const [key, row] of savedQueries)
+        if (row.schemaVersion < minimum) savedQueries.delete(key);
+    },
     clearSavedQueries: async () => {
       savedQueries.clear();
     },
