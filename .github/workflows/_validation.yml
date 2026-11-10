@@ -622,5 +622,48 @@ jobs:
           restore-turbo-cache: "false"
           install-resource-monitor-toolchain: "false"
 
+      # Metro keeps each module's transform (Babel with the React Compiler)
+      # in a file store under the temp directory, keyed by the module's
+      # content and the transform configuration, so a restored store only
+      # skips work for modules that did not change: about 100 of the job's
+      # 190 seconds. apps/mobile/metro.config.js ties Metro's cacheVersion to
+      # the lockfile and the patches, so the same inputs prefix the key and an
+      # entry no run can use is never restored. The key is per run, so main
+      # saves a fresh entry (about 55 MB) whenever it transformed something.
+      - name: Compute Metro cache key
+        id: metro-key
+        env:
+          CONFIG_HASH: ${{ hashFiles('bun.lock', 'patches/**', 'apps/mobile/metro.config.js', 'apps/mobile/babel.config.js', 'apps/mobile/app.config.ts') }}
+        run: |
+          prefix="${RUNNER_OS}-${RUNNER_ARCH}-metro-${CONFIG_HASH}-"
+          {
+            echo "key=${prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "prefix=${prefix}"
+          } >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/metro/metro-cache"
+
+      - name: Restore Metro transform cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/metro/metro-cache
+          key: ${{ steps.metro-key.outputs.key }}
+          restore-keys: ${{ steps.metro-key.outputs.prefix }}
+
       - name: Export iOS and Android bundles
-        run: bun run --cwd apps/mobile bundle:check
+        id: export
+        env:
+          # Metro's file store lives in os.tmpdir()/metro-cache.
+          TMPDIR: ${{ runner.temp }}/metro
+        run: |
+          touch "$RUNNER_TEMP/metro-restored"
+          bun run --cwd apps/mobile bundle:check
+          if [ -n "$(find "$TMPDIR/metro-cache" -type f -newer "$RUNNER_TEMP/metro-restored" -print -quit)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Metro transform cache
+        if: ${{ steps.export.outputs.changed == 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/metro/metro-cache
+          key: ${{ steps.metro-key.outputs.key }}
