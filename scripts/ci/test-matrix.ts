@@ -48,7 +48,19 @@ export function testJobs(packages: readonly string[]): TestJob[] {
       runner: "ubuntu-24.04",
     });
   }
-  const rest = selected.filter((name) => name !== "ryco-cli" && name !== "@ryco/web");
+  if (selected.includes("@ryco/mobile")) {
+    // The largest suite after the server's. In the shared leg it competed for
+    // four cores with every other package and ran 3.5 minutes, as long as a
+    // browser shard. A runner of its own takes that load off both legs.
+    jobs.push({
+      name: "mobile",
+      filters: "--filter=@ryco/mobile",
+      shard: "",
+      runner: "ubuntu-24.04",
+    });
+  }
+  const dedicated = new Set(["ryco-cli", "@ryco/web", "@ryco/mobile"]);
+  const rest = selected.filter((name) => !dedicated.has(name));
   if (rest.length > 0) {
     jobs.push({
       name: "rest",

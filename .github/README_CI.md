@@ -43,8 +43,8 @@ and browser shards use GitHub-hosted `ubuntu-24.04`. Release builds use
 GitHub-hosted macOS arm64, Ubuntu x64/arm64, and Windows x64/arm64 runners.
 
 `scripts/ci/test-matrix.ts` resolves Turbo's dry test plan once. Selected server
-tests run in three shards, selected web tests get a separate runner, and every
-other selected package goes into the remaining-package job. This works for both
+tests run in three shards, selected web and mobile tests each get a separate
+runner, and every other selected package goes into the remaining-package job. This works for both
 PRs and full runs, includes new test packages automatically, and avoids mixing
 Turbo's incompatible `--filter` and `--affected` flags. Workspaces without test
 scripts are omitted. TypeScript and Effect diagnostics share the normal
@@ -83,7 +83,7 @@ them out of `scripts/`: `--affected` attributes a file inside a workspace to
 that workspace alone, so a helper there would select only `@ryco/scripts`.
 Their unit tests are in `scripts/`, since a root file has no test task.
 
-Browser files stay serial within each of six shards. ChatView's six suites
+Browser files stay serial within each of eight shards. ChatView's six suites
 share one harness but separate composer, conversation, navigation, workspace,
 phone composer, and phone surface assertions so no single giant file dominates
 one shard. The browser config's sequencer
@@ -107,6 +107,13 @@ browser tests are not required. They run no build at all: Vitest browser mode
 serves the app through the Vite dev server, and every `@ryco/*` workspace export
 web uses resolves to `src` under the ESM `import` condition, so neither the
 `@ryco/web` bundle nor any dependency's `dist/` is read.
+
+Each shard caches the Chromium build and, separately, the system packages
+Playwright's `--with-deps` installs with apt (a few fonts). A warm shard installs
+those with `dpkg` and never contacts the Ubuntu mirror, whose stalls used to add
+up to minutes to one shard of many runs. The package cache is keyed by the
+Playwright version and the runner image; a set `dpkg` cannot install falls back
+to the apt path.
 
 ## Affected scoping and caching
 

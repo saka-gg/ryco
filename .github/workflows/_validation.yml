@@ -400,7 +400,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"]
+        shard: ["1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -436,7 +436,11 @@ jobs:
         working-directory: apps/web
         run: |
           version=$(node -p 'require("playwright/package.json").version')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${version}"
+            # The runner image (GitHub-hosted runners export both variables).
+            echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Restore Playwright browsers
         if: ${{ steps.scope.outputs.browser == 'true' }}
@@ -446,15 +450,60 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
 
+      # Playwright's `--with-deps` installs nine font packages (21 MB) with apt
+      # on every shard. That is about 10 seconds on a good day, but the Ubuntu
+      # mirror stalls often enough (1 shard in 13, up to 4.5 minutes) that some
+      # shard of most runs waited on it, and the slowest shard sets CI's wall
+      # time. Keep the downloaded packages next to the browser builds and
+      # install them with dpkg instead. The key carries the runner image too,
+      # since the image decides which packages are still missing; the prefix
+      # fallback is safe because a set dpkg cannot install falls back to apt.
+      - name: Restore Playwright system packages
+        if: ${{ steps.scope.outputs.browser == 'true' }}
+        id: playwright-debs
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/playwright-debs
+          key: ${{ runner.os }}-${{ runner.arch }}-playwright-debs-${{ steps.playwright.outputs.version }}-${{ steps.playwright.outputs.image }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-playwright-debs-${{ steps.playwright.outputs.version }}-
+
       # On a cold cache every shard downloads Chromium at once, and the
       # Playwright CDN occasionally fails a request (it once served the wrong
       # TLS certificate). Retry rather than fail the shard; a completed install
       # makes the retry a quick no-op.
       - name: Install browser test runtime
         if: ${{ steps.scope.outputs.browser == 'true' }}
+        id: playwright-install
+        env:
+          DEBS: ${{ runner.temp }}/playwright-debs
         run: |
+          shopt -s nullglob
+          cached=("$DEBS"/*.deb)
+          if [ "${#cached[@]}" -gt 0 ] && sudo dpkg --install "${cached[@]}"; then
+            echo "Installed ${#cached[@]} cached system packages."
+            with_deps=false
+            install=(bun run --cwd apps/web playwright install chromium)
+          else
+            # Start from an empty apt archive so the saved set is exactly what
+            # this install downloads, and make sure apt keeps it.
+            with_deps=true
+            install=(bun run --cwd apps/web test:browser:install)
+            echo 'APT::Keep-Downloaded-Packages "true";' | sudo tee /etc/apt/apt.conf.d/99-keep-downloads > /dev/null
+            sudo apt-get clean
+          fi
           for attempt in 1 2 3; do
-            bun run --cwd apps/web test:browser:install && exit 0
+            if "${install[@]}"; then
+              if [ "$with_deps" = true ]; then
+                rm -rf "$DEBS" && mkdir -p "$DEBS"
+                fresh=(/var/cache/apt/archives/*.deb)
+                if [ "${#fresh[@]}" -gt 0 ]; then
+                  cp "${fresh[@]}" "$DEBS"/
+                  echo "fresh=true" >> "$GITHUB_OUTPUT"
+                fi
+              fi
+              exit 0
+            fi
             echo "::warning::Browser runtime install failed (attempt ${attempt} of 3)."
             sleep $((attempt * 10))
           done
@@ -470,6 +519,15 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.playwright-cache.outputs['cache-primary-key'] }}
+
+      # Only a shard that went through apt has a complete set to save; an image
+      # that needs no extra packages leaves the directory empty and saves none.
+      - name: Save Playwright system packages
+        if: ${{ steps.scope.outputs.browser == 'true' && steps.playwright-install.outputs.fresh == 'true' && steps.playwright-debs.outputs['cache-hit'] != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/playwright-debs
+          key: ${{ steps.playwright-debs.outputs['cache-primary-key'] }}
 
       # The dev server compiles every module a shard imports with the React
       # Compiler on its main thread while the browser waits.

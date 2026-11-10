@@ -21,6 +21,12 @@ describe("CI test selection", () => {
     );
     expect(jobs.find((job) => job.name === "web")?.filters).toBe("--filter=@ryco/web");
     expect(testJobs(["@ryco/shared"]).map((job) => job.name)).toEqual(["rest"]);
+    // The mobile suite is large enough to slow every package it shares a runner with.
+    expect(testJobs(["@ryco/mobile", "@ryco/shared"])).toMatchObject([
+      { name: "mobile", filters: "--filter=@ryco/mobile", runner: "ubuntu-24.04" },
+      { name: "rest", filters: "--filter=@ryco/shared" },
+    ]);
+    expect(testJobs(["@ryco/mobile"]).map((job) => job.name)).toEqual(["mobile"]);
     expect(testJobs([])).toEqual([]);
   });
 

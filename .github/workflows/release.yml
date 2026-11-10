@@ -639,6 +639,9 @@ jobs:
           name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: release-publish/*
           if-no-files-found: error
+          # Installers, archives and blockmaps are already compressed: deflating
+          # them again costs upload and download time for almost no size.
+          compression-level: 0
 
       # Only release runs on main publish native caches; the restore side
       # accepts nothing else. A failed cache upload must not fail the release.

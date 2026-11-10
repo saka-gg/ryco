@@ -57,7 +57,14 @@ jobs:
 
   collect-targets:
     name: Collect PR targets
-    if: ${{ github.event_name != 'pull_request_target' || github.event.action != 'closed' }}
+    # Most comments are not recheck commands: skip those before a runner
+    # starts. The script below repeats the check for the comments that pass.
+    if: >-
+      ${{
+        (github.event_name != 'pull_request_target' || github.event.action != 'closed') &&
+        (github.event_name != 'issue_comment' ||
+          (github.event.issue.pull_request && contains(github.event.comment.body, '/recheck-vouch')))
+      }}
     permissions:
       contents: read
       pull-requests: read
