@@ -12,9 +12,10 @@ import {
   EarlyRelaySocket,
 } from "@ryco/client-runtime/relay/earlyRelaySocket";
 
+import { rycoAppRuntimeNative } from "../platform/appRuntimeNative";
 import { createMobileDpopSigner } from "../platform/dpopSigner";
 import { mobileSessionCredentials } from "../platform/sessionCredentials";
-import { fflateRelayPayloadInflater } from "./relayPayloadInflater";
+import { selectRelayPayloadInflater } from "./relayPayloadInflater";
 import { getMobileHostedConfig } from "./runtimeConfig";
 
 /**
@@ -324,7 +325,9 @@ export class MobileHostedRelaySocket {
         socket: relaySocket,
         callbacks: options.callbacks,
         ...(options.e2ee === undefined ? {} : { e2ee: options.e2ee }),
-        ...(options.relayCompression === false ? {} : { inflater: fflateRelayPayloadInflater }),
+        ...(options.relayCompression === false
+          ? {}
+          : { inflater: selectRelayPayloadInflater(rycoAppRuntimeNative()) }),
         timers: {
           // Bound wrappers: unbound platform methods throw "Illegal invocation".
           now,
