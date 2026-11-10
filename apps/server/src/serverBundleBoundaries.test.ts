@@ -804,7 +804,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // 7.233013 MB on 2026-11-10 with unchanged answers for file trees, file reads, local
     // changes, comparisons and preview chunks (+2,013 B, measured 7.231780 MB): their request
     // and result fields and the tree listing's revision hash.
-    expect(bytes).toBeLessThan(7_233_013);
+    // 7.234540 MB with turn diffs read file by file (+1,527 B, measured 7.233307 MB): the
+    // file view's request and answer schemas; splitting the patch loads through import().
+    expect(bytes).toBeLessThan(7_234_540);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
