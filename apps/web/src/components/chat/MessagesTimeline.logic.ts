@@ -268,8 +268,6 @@ export interface TimelineMessageActionsRequest {
   messageId: MessageId;
   role: "user" | "assistant";
   copyText: string | null;
-  /** Reads the whole text to copy, when `copyText` is the head of a very long message. */
-  readCopyText?: (() => Promise<string>) | undefined;
   canRevert: boolean;
 }
 

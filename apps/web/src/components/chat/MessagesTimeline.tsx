@@ -11,7 +11,9 @@ import {
 } from "@ryco/contracts";
 import {
   createContext,
+  lazy,
   memo,
+  Suspense,
   use,
   useCallback,
   useEffect,
@@ -19,6 +21,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -122,7 +125,7 @@ import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
 import { InterThreadMessageRow } from "./InterThreadMessageRow";
 import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
-import { EDIT_FROM_HERE_COPY, MESSAGE_TEXT_PREVIEW_COPY } from "@ryco/client-runtime/state/session";
+import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
 import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
@@ -152,7 +155,38 @@ import {
   type ActivityPayloadOutput,
   useActivityPayloadOutput,
 } from "../../rpc/useActivityPayloadOutput";
-import { type MessageText, useMessageText } from "../../rpc/useMessageText";
+
+// Only a very long message the window sent as its head loads these (see MessageTextPreview.tsx).
+const LazyMessageTextPreview = lazy(() => import("./MessageTextPreview"));
+/** A previewed message's control, or with `toCopyText` its whole-text copy button. */
+function MessageTextPreviewSlot(props: ComponentProps<typeof LazyMessageTextPreview>) {
+  return (
+    <Suspense fallback={null}>
+      <LazyMessageTextPreview {...props} />
+    </Suspense>
+  );
+}
+
+const userMessageCopyText = (text: string) =>
+  deriveDisplayedUserMessageContext(text).copyText ?? text;
+const identityText = (text: string) => text;
+
+/** The props `MessageTextPreview` needs for a previewed message row, or null for a whole one. */
+function messageTextPreviewProps(
+  row: TimelineMessageRow,
+  environmentId: EnvironmentId | null | undefined,
+  routeThreadKey: string | null | undefined,
+) {
+  const threadId = routeThreadKey ? parseScopedThreadKey(routeThreadKey)?.threadId : undefined;
+  const preview = row.message.textPreview;
+  if (preview === undefined || !environmentId || !threadId) return null;
+  return {
+    environmentId,
+    threadId,
+    messageId: row.message.id,
+    fullLength: preview.fullLength,
+  };
+}
 
 import {
   buildInlineTerminalContextText,
@@ -1424,20 +1458,6 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
   // object is local — it does not propagate through any context boundary.
   const ctx = { ...use(TimelineStableCtx), ...use(TimelineStreamingCtx) };
   const enteringMessageId = use(EnteringMessageIdCtx);
-  // A very long message arrives as its head (`textPreview`); the whole text is
-  // read when the reader asks for it, or copies the message.
-  const [wholeMessageTextWanted, setWholeMessageTextWanted] = useState(false);
-  const messageText = useMessageText({
-    environmentId: ctx.activeThreadEnvironmentId,
-    threadId: parseScopedThreadKey(ctx.routeThreadKey)?.threadId ?? null,
-    message: row.kind === "message" ? row.message : null,
-    wanted: wholeMessageTextWanted,
-  });
-  // Copying a preview copies the whole text, read first when not loaded yet.
-  const readMessageCopyText =
-    messageText.truncated && messageText.status !== "loaded"
-      ? messageText.readWholeText
-      : undefined;
   // Phone tier: long-press on a message bubble opens the message action
   // sheet with the same copy/revert actions as the desktop hover row.
   const isPhoneTier = usePresentationTier() === "phone";
@@ -1452,7 +1472,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
     () => {
       if (row.kind !== "message") return;
       if (row.message.role === "user") {
-        const displayedUserMessage = deriveDisplayedUserMessageContext(messageText.text);
+        const displayedUserMessage = deriveDisplayedUserMessageContext(row.message.text);
         const copyText = displayedUserMessage.copyText ?? null;
         const canRevert = typeof row.revertTurnCount === "number";
         // No actions apply (nothing to copy, no checkpoint): open no sheet.
@@ -1461,13 +1481,12 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           messageId: row.message.id,
           role: "user",
           copyText,
-          ...(readMessageCopyText ? { readCopyText: readMessageCopyText } : {}),
           canRevert,
         });
         return;
       }
       if (row.message.role !== "assistant") return;
-      const assistantCopyState = resolveAssistantRowCopyState(row, ctx, messageText.text);
+      const assistantCopyState = resolveAssistantRowCopyState(row, ctx);
       const copyText = assistantCopyState.visible ? (assistantCopyState.text ?? null) : null;
       // A streaming or copy-ineligible response has no actions: open no sheet.
       if (copyText === null) return;
@@ -1475,7 +1494,6 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         messageId: row.message.id,
         role: "assistant",
         copyText,
-        ...(readMessageCopyText ? { readCopyText: readMessageCopyText } : {}),
         canRevert: false,
       });
     },
@@ -1637,8 +1655,13 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         (!agentFold || agentFoldOpen) &&
         (() => {
           const userImages = row.message.attachments ?? [];
+          const textPreview = messageTextPreviewProps(
+            row,
+            ctx.activeThreadEnvironmentId,
+            ctx.routeThreadKey,
+          );
           const displayedUserMessage = deriveDisplayedUserMessageForTier(
-            messageText.text,
+            row.message.text,
             isPhoneTier ? "phone" : "desktop",
           );
           const terminalContexts = displayedUserMessage.contexts;
@@ -1710,23 +1733,26 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                       </UserMessageQuotes>
                     </QuoteCitationContext>
                   )}
-                  <MessageTextPreviewStatus
-                    messageText={messageText}
-                    onShowWhole={() => setWholeMessageTextWanted(true)}
-                  />
+                  {textPreview ? <MessageTextPreviewSlot {...textPreview} /> : null}
                 </div>
                 <div className="mt-1 flex items-center justify-end gap-2">
                   <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100 phone:opacity-100">
-                    {displayedUserMessage.copyText && (
-                      <MessageCopyButton
-                        text={displayedUserMessage.copyText}
-                        readText={readMessageCopyText}
-                        size="icon-xs"
-                        variant="ghost"
-                        className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
-                        ariaLabel="Copy message"
-                      />
-                    )}
+                    {displayedUserMessage.copyText &&
+                      (textPreview ? (
+                        <MessageTextPreviewSlot
+                          {...textPreview}
+                          className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
+                          toCopyText={userMessageCopyText}
+                        />
+                      ) : (
+                        <MessageCopyButton
+                          text={displayedUserMessage.copyText}
+                          size="icon-xs"
+                          variant="ghost"
+                          className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
+                          ariaLabel="Copy message"
+                        />
+                      ))}
                     {canRevertAgentWork && (
                       <Button
                         type="button"
@@ -1755,11 +1781,16 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
       {row.kind === "message" &&
         row.message.role === "assistant" &&
         (() => {
-          const assistantText =
-            messageText.text ||
+          const messageText =
+            row.message.text ||
             (row.message.streaming || row.message.attachments?.length ? "" : "(empty response)");
           const assistantResponseStillInProgress = resolveAssistantRowInProgress(row, ctx);
-          const assistantCopyState = resolveAssistantRowCopyState(row, ctx, messageText.text);
+          const textPreview = messageTextPreviewProps(
+            row,
+            ctx.activeThreadEnvironmentId,
+            ctx.routeThreadKey,
+          );
+          const assistantCopyState = resolveAssistantRowCopyState(row, ctx);
           // The phone tier is frozen: its rows never carry the fork action.
           const forkFrom =
             ctx.onForkFromMessage !== undefined && !isPhoneTier && !assistantResponseStillInProgress
@@ -1779,7 +1810,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     routeThreadKey={ctx.routeThreadKey}
                     streamingMessageId={row.message.streaming ? row.message.id : null}
                     allowTerminalInsertion
-                    text={assistantText}
+                    text={messageText}
                     cwd={ctx.markdownCwd}
                     environmentId={ctx.activeThreadEnvironmentId}
                     isStreaming={assistantResponseStillInProgress}
@@ -1788,10 +1819,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     searchHighlight={messageSearchHighlight}
                   />
                 </div>
-                <MessageTextPreviewStatus
-                  messageText={messageText}
-                  onShowWhole={() => setWholeMessageTextWanted(true)}
-                />
+                {textPreview ? <MessageTextPreviewSlot {...textPreview} /> : null}
                 <MessageAttachments
                   attachments={row.message.attachments ?? []}
                   onImageExpand={ctx.onImageExpand}
@@ -1840,14 +1868,22 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   {assistantCopyState.visible || canForkReply ? (
                     <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100 phone:opacity-100">
                       {assistantCopyState.visible ? (
-                        <MessageCopyButton
-                          text={assistantCopyState.text ?? ""}
-                          readText={readMessageCopyText}
-                          size="icon-xs"
-                          variant="ghost"
-                          className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
-                          ariaLabel="Copy response"
-                        />
+                        textPreview ? (
+                          <MessageTextPreviewSlot
+                            {...textPreview}
+                            className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
+                            ariaLabel="Copy response"
+                            toCopyText={identityText}
+                          />
+                        ) : (
+                          <MessageCopyButton
+                            text={assistantCopyState.text ?? ""}
+                            size="icon-xs"
+                            variant="ghost"
+                            className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
+                            ariaLabel="Copy response"
+                          />
+                        )
                       ) : null}
                       {forkFrom ? (
                         <ForkFromReplyButton
@@ -3060,11 +3096,9 @@ function resolveAssistantRowInProgress(
 function resolveAssistantRowCopyState(
   row: TimelineMessageRow,
   ctx: Pick<TimelineStreamingState, "activeTurnInProgress" | "activeTurnId">,
-  /** The text the row shows: the whole text of a preview once loaded. */
-  text: string,
 ): ReturnType<typeof resolveAssistantMessageCopyState> {
   return resolveAssistantMessageCopyState({
-    text,
+    text: row.message.text ?? null,
     showCopyButton: row.showAssistantCopyButton,
     streaming: resolveAssistantRowInProgress(row, ctx),
   });
@@ -3588,67 +3622,6 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
     </div>
   );
 });
-
-/**
- * Below a very long message the window sent as its head: the control that
- * shows the whole text, then how that read went.
- */
-function MessageTextPreviewStatus(props: { messageText: MessageText; onShowWhole: () => void }) {
-  const { messageText, onShowWhole } = props;
-  if (messageText.fullLength === null) return null;
-  const statusClassName = "mt-2 text-[11px] text-muted-foreground/60";
-  if (messageText.status === "idle") {
-    return (
-      <button
-        type="button"
-        data-message-text-status="preview"
-        className="mt-2 flex items-center gap-1 rounded text-[11px] text-muted-foreground/70 underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
-        onClick={(event) => {
-          event.stopPropagation();
-          onShowWhole();
-        }}
-      >
-        <ChevronDownIcon className="size-3" aria-hidden="true" />
-        {MESSAGE_TEXT_PREVIEW_COPY.show(messageText.fullLength)}
-      </button>
-    );
-  }
-  if (messageText.status === "loading") {
-    return (
-      <p data-message-text-status="loading" className={cn(statusClassName, "italic")}>
-        {MESSAGE_TEXT_PREVIEW_COPY.loading}
-      </p>
-    );
-  }
-  if (messageText.status === "error") {
-    return (
-      <p
-        data-message-text-status="error"
-        className={cn(statusClassName, "flex items-center gap-2")}
-      >
-        <span>{MESSAGE_TEXT_PREVIEW_COPY.failed}</span>
-        <button
-          type="button"
-          className="rounded px-1 text-foreground/80 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
-          onClick={(event) => {
-            event.stopPropagation();
-            messageText.retry();
-          }}
-        >
-          {MESSAGE_TEXT_PREVIEW_COPY.retry}
-        </button>
-      </p>
-    );
-  }
-  if (messageText.truncated) {
-    return (
-      <p data-message-text-status="truncated" className={cn(statusClassName, "italic")}>
-        {MESSAGE_TEXT_PREVIEW_COPY.tooLong}
-      </p>
-    );
-  }
-  return null;
-}
 
 /** How complete the panel's output is, when the window only sent a preview of it. */
 function WorkEntryOutputStatus(props: { fullOutput: ActivityPayloadOutput }) {

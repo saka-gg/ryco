@@ -130,7 +130,6 @@ vi.mock("@legendapp/list/react", async () => {
 
 import { MessagesTimeline } from "./MessagesTimeline";
 import { resetActivityPayloadAtomsForTests } from "../../rpc/activityPayloadAtoms";
-import { resetMessageTextAtomsForTests } from "../../rpc/messageTextAtoms";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import {
   __resetEnvironmentApiOverridesForTests,
@@ -1526,8 +1525,14 @@ describe("MessagesTimeline", () => {
     }
   });
 
-  it("shows the whole text of a previewed message on request and copies the whole text", async () => {
-    resetMessageTextAtomsForTests();
+  it("reads the whole text of a previewed message on request and copies the whole text", async () => {
+    // The row renders from the store; here it only records what would replace the preview.
+    const applied: Array<{ messageId: string; text: string }> = [];
+    const setWholeMessageText = vi
+      .spyOn(useStore.getState(), "setWholeMessageText")
+      .mockImplementation((_threadRef, messageId, text) => {
+        applied.push({ messageId, text });
+      });
     const wholeTexts: Record<string, string> = {
       "message-long-user": "the head of the question and its complete tail",
       "message-long-reply": "the head of the reply and the complete reply tail",
@@ -1589,26 +1594,20 @@ describe("MessagesTimeline", () => {
 
       fail = false;
       await page.getByRole("button", { name: "Retry" }).click();
-      await expect
-        .element(page.getByText("the complete reply tail", { exact: false }))
-        .toBeVisible();
-      expect(
-        document.querySelectorAll(
-          "[data-message-id='message-long-reply'] [data-message-text-status]",
-        ),
-      ).toHaveLength(0);
+      // The whole text replaces the preview in the store, which re-renders the row.
+      await vi.waitFor(() =>
+        expect(applied).toEqual([
+          { messageId: "message-long-reply", text: wholeTexts["message-long-reply"] },
+        ]),
+      );
 
-      // Copying the question, still shown as its head, reads and copies the whole text.
+      // Copying the question, shown as its head, reads and copies the whole text.
       await page.getByRole("button", { name: "Copy message" }).click();
       await vi.waitFor(() => expect(copied).toEqual([wholeTexts["message-long-user"]]));
       expect(requests.at(-1)).toEqual({ threadId: "thread-1", messageId: "message-long-user" });
-      // Copying does not expand the row.
-      await expect
-        .element(page.getByRole("button", { name: "Show whole message (48,000 characters)" }))
-        .toBeVisible();
     } finally {
+      setWholeMessageText.mockRestore();
       __resetEnvironmentApiOverridesForTests();
-      resetMessageTextAtomsForTests();
       await screen.unmount();
     }
   });

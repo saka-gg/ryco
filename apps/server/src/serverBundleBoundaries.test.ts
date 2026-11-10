@@ -801,11 +801,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    // 7.245 MB on 2026-11-10 for the thread stream program (+13.7 KB, measured 7.243476 MB):
+    // +13,709 bytes on 2026-11-10 for the thread stream program (measured 7.243476 MB):
     // one routed event feed for all thread subscriptions and shared in-flight window loads,
     // live activity previews and the slim event form, the window's message text budget and
     // message previews with their getMessageText RPC, and closing silent direct sockets.
-    expect(bytes).toBeLessThan(7_245_000);
+    expect(bytes).toBeLessThan(7_244_709);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

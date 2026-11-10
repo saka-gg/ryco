@@ -44,11 +44,8 @@ export const MessageCopyButton = memo(function MessageCopyButton({
   variant = "outline",
   className,
   ariaLabel = "Copy link",
-  readText,
 }: {
   text: string;
-  /** Reads the text to copy instead of `text` (the whole text of a message shown as its head). */
-  readText?: (() => Promise<string>) | undefined;
   size?: "xs" | "icon-xs";
   variant?: "outline" | "ghost";
   className?: string;
@@ -68,7 +65,7 @@ export const MessageCopyButton = memo(function MessageCopyButton({
           <Button
             aria-label={ariaLabel}
             disabled={isCopied}
-            onClick={() => copyToClipboard(readText ? readText() : text)}
+            onClick={() => copyToClipboard(text)}
             ref={ref}
             type="button"
             size={size}

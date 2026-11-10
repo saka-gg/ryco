@@ -4536,6 +4536,32 @@ export function demoteEnvironmentStateToCachedSnapshot(
   });
 }
 
+/**
+ * Puts the whole text of a message the store holds as a preview
+ * (`ChatMessage.textPreview`) in its place, read through
+ * `loadWholeMessageText`. A message that is gone, or no longer a preview (a
+ * later event replaced it), is left alone.
+ */
+export function setWholeMessageText(
+  state: AppState,
+  threadRef: ScopedThreadRef,
+  messageId: MessageId,
+  text: string,
+): AppState {
+  const environmentState = getStoredEnvironmentState(state, threadRef.environmentId);
+  const messages = environmentState.messageByThreadId[threadRef.threadId];
+  const message = messages?.[messageId];
+  if (message?.textPreview === undefined) return state;
+  const { textPreview: _preview, ...whole } = message;
+  return commitEnvironmentState(state, threadRef.environmentId, {
+    ...environmentState,
+    messageByThreadId: {
+      ...environmentState.messageByThreadId,
+      [threadRef.threadId]: { ...messages, [messageId]: { ...whole, text } },
+    },
+  });
+}
+
 export function setThreadBranch(
   state: AppState,
   threadRef: ScopedThreadRef,
@@ -4763,6 +4789,7 @@ interface AppStore extends AppState {
     branch: string | null,
     worktreePath: string | null,
   ) => void;
+  setWholeMessageText: (threadRef: ScopedThreadRef, messageId: MessageId, text: string) => void;
   setSidebarWorktreeTitle: (
     environmentId: EnvironmentId,
     worktreeId: WorktreeId,
@@ -4901,6 +4928,10 @@ export const useStore = create<AppStore>((set, get) => {
     setThreadBranch: (threadRef, branch, worktreePath) => {
       shellCoalescer.flush();
       set((state) => setThreadBranch(state, threadRef, branch, worktreePath));
+    },
+    setWholeMessageText: (threadRef, messageId, text) => {
+      shellCoalescer.flush();
+      set((state) => setWholeMessageText(state, threadRef, messageId, text));
     },
     setSidebarWorktreeTitle: (environmentId, worktreeId, title, updatedAt) => {
       shellCoalescer.flush();

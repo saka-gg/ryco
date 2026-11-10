@@ -15,8 +15,6 @@ import {
 export interface MessageActionsSheetTarget {
   readonly role: "user" | "assistant";
   readonly copyText: string | null;
-  /** Reads the whole text to copy, when `copyText` is the head of a very long message. */
-  readonly readCopyText?: (() => Promise<string>) | undefined;
   readonly canRevert: boolean;
 }
 
@@ -68,7 +66,7 @@ export function MessageActionsSheet({
               icon={<CopyIcon aria-hidden className="size-4 shrink-0" />}
               onClick={() => {
                 onOpenChange(false);
-                copyToClipboard(target.readCopyText?.() ?? target.copyText ?? "");
+                copyToClipboard(target.copyText ?? "");
               }}
             />
           ) : null}
