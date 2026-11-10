@@ -6,7 +6,7 @@ import { Effect, Option, Schema } from "effect";
 import {
   ThreadReadCacheBeginResponse,
   ThreadReadCacheSnapshotResponse,
-} from "@ryco/contracts/thread-read-cache";
+} from "@ryco/contracts/thread-read-cache-upload";
 import { RELAY_PROTOCOL_MAJOR, RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";

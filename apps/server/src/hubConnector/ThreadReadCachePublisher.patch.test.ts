@@ -2,11 +2,8 @@ import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
 import { MessageId, OrchestrationShellSnapshot, type OrchestrationMessage } from "@ryco/contracts";
-import {
-  ThreadReadCacheContent,
-  ThreadReadCacheShell,
-  ThreadReadCacheSnapshotItem,
-} from "@ryco/contracts/thread-read-cache";
+import { ThreadReadCacheContent, ThreadReadCacheShell } from "@ryco/contracts/thread-read-cache";
+import { ThreadReadCacheSnapshotItem } from "@ryco/contracts/thread-read-cache-upload";
 import {
   applyThreadReadCacheShellPatch,
   applyThreadReadCacheThreadPatch,

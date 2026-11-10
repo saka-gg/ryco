@@ -16,6 +16,11 @@
       "import": "./src/threadReadCache.ts",
       "require": "./src/threadReadCache.ts"
     },
+    "./thread-read-cache-upload": {
+      "types": "./src/threadReadCacheUpload.ts",
+      "import": "./src/threadReadCacheUpload.ts",
+      "require": "./src/threadReadCacheUpload.ts"
+    },
     "./push": {
       "types": "./src/push.ts",
       "import": "./src/push.ts",

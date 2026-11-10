@@ -11,9 +11,11 @@
 import type {
   ThreadReadCacheContent,
   ThreadReadCacheShell,
+} from "@ryco/contracts/thread-read-cache";
+import type {
   ThreadReadCacheShellPatch,
   ThreadReadCacheThreadPatch,
-} from "@ryco/contracts/thread-read-cache";
+} from "@ryco/contracts/thread-read-cache-upload";
 
 export type ThreadReadCachePatchResult<A> =
   | { readonly kind: "ok"; readonly value: A }

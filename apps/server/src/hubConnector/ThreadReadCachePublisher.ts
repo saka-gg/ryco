@@ -7,11 +7,11 @@ import type {
   OrchestrationThreadShell,
   ThreadId,
 } from "@ryco/contracts";
-import {
-  ThreadReadCacheContent,
-  type ThreadReadCacheShellPatch,
-  type ThreadReadCacheThreadPatch,
-} from "@ryco/contracts/thread-read-cache";
+import { ThreadReadCacheContent } from "@ryco/contracts/thread-read-cache";
+import type {
+  ThreadReadCacheShellPatch,
+  ThreadReadCacheThreadPatch,
+} from "@ryco/contracts/thread-read-cache-upload";
 
 const MAX_BATCH_BYTES = 2 * 1024 * 1024 - 4096;
 const MAX_THREAD_BYTES = 1024 * 1024;

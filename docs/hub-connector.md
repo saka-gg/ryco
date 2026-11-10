@@ -28,7 +28,8 @@ digest of the whole result the Hub checks) — and deflates the request body. A 
 apply is a revision conflict (the node starts a new generation) or, for a thread body the Hub
 evicted, is named in the answer and uploaded whole next. An older Hub announces nothing and keeps
 receiving whole items; an older node ignores the announcement. Both sides apply patches with
-`@ryco/shared/threadReadCachePatch`.
+`@ryco/shared/threadReadCachePatch`; the upload contracts are `@ryco/contracts/thread-read-cache-upload`, which
+no client loads.
 Initial synchronization starts with the most recently updated threads and retains at most
 512 thread bodies, each containing at most 150 messages and one MiB of UTF-8 JSON. Attachments,
 tool output, credentials, terminal data, pending actions, and relay frames are excluded. An
