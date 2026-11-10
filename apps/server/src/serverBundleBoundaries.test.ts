@@ -801,7 +801,12 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // schemas and handler (2.3 KB) and the agent-side webhook guard. The hook queries and
     // secrets, the direct endpoint's handler, the request pipeline, the hook view and the Hub
     // sync load through import().
-    expect(bytes).toBeLessThan(7_231_000);
+    // +6,452 bytes on 2026-11-10 for image previews and attachment caching (measured 7,236,219
+    // against main's 7,229,767): the attachment route's validators, 304 answers and
+    // `?preview=` branch, the chunk read's short membership cache, the project icon hash and
+    // its `unchanged` answer, and the RPC schemas' optional fields. Making previews (sharp,
+    // the preview files) loads through import().
+    expect(bytes).toBeLessThan(7_237_452);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

@@ -17,13 +17,18 @@ import { OtlpTracer } from "effect/observability";
 import {
   ATTACHMENTS_ROUTE_PREFIX,
   normalizeAttachmentRelativePath,
+  parseAttachmentPreviewSize,
   resolveAttachmentRelativePath,
 } from "./attachmentPaths.ts";
 import {
   probeAttachmentMediaDimensions,
   probeAttachmentMediaForServing,
 } from "./attachmentMedia.ts";
-import { attachmentIdExtensionSegment, resolveAttachmentPathById } from "./attachmentStore.ts";
+import {
+  attachmentIdExtensionSegment,
+  parseAttachmentIdFromRelativePath,
+  resolveAttachmentPathById,
+} from "./attachmentStore.ts";
 import {
   ChatAttachmentUploadError,
   ChatAttachmentUploads,
@@ -34,6 +39,7 @@ import { loadOtlpExporters } from "./observability/OtelEnvironment.ts";
 import { decodeOtlpTraceRecords } from "./observability/TraceRecord.ts";
 import { BrowserTraceCollector } from "./observability/Services/BrowserTraceCollector.ts";
 import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolver.ts";
+import { projectIconContentHash } from "./project/readProjectIcon.ts";
 import {
   PROJECT_AVATAR_ID_PATTERN,
   ProjectAvatarStore,
@@ -51,8 +57,13 @@ import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 const PROJECT_FAVICON_CACHE_CONTROL = "private, max-age=3600";
 const PROJECT_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 const PROJECT_AVATAR_CACHE_CONTROL = "private, max-age=0, must-revalidate";
+const PROJECT_AVATAR_VERSIONED_CACHE_CONTROL = "private, max-age=31536000, immutable";
 const STATIC_INDEX_CACHE_CONTROL = "no-cache";
 const STATIC_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+/** An attachment's id is random and its bytes never change: it is cached for good. */
+const ATTACHMENT_CACHE_CONTROL = "private, max-age=31536000, immutable";
+/** The original standing in for a preview not made yet: asked for again soon. */
+const ATTACHMENT_PREVIEW_PENDING_CACHE_CONTROL = "private, max-age=60";
 const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#6b728080" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-fallback="project-favicon"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></svg>`;
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 export const SERVER_ENVIRONMENT_DESCRIPTOR_PATH = "/.well-known/ryco/environment";
@@ -119,6 +130,11 @@ export function resolveStaticCacheControl(staticRelativePath: string): string {
   const normalized = staticRelativePath.replace(/\\/g, "/");
   if (normalized === "index.html" || normalized.endsWith("/index.html")) {
     return STATIC_INDEX_CACHE_CONTROL;
+  }
+
+  // The file icons sit in a folder named after their package version.
+  if (/^vscode-icons\/v\d+\.\d+\.\d+[^/]*\//u.test(normalized)) {
+    return STATIC_IMMUTABLE_CACHE_CONTROL;
   }
 
   const basename = normalized.split("/").at(-1) ?? normalized;
@@ -494,6 +510,20 @@ export function parseAttachmentByteRange(
   return { start, end };
 }
 
+/**
+ * Validator of a stored attachment file (a preview gets its own namespace).
+ * Attachments never change once stored, so metadata identifies the bytes.
+ */
+export function attachmentFileEtag(
+  fileInfo: { readonly size: bigint; readonly mtime: Option.Option<Date> },
+  previewSize?: number,
+): string | null {
+  const etag = staticFileEtag(fileInfo);
+  return etag === null || previewSize === undefined
+    ? etag
+    : `${etag.slice(0, -1)}-p${previewSize}"`;
+}
+
 export const attachmentsRouteLayer = HttpRouter.add(
   "GET",
   `${ATTACHMENTS_ROUTE_PREFIX}/*`,
@@ -549,6 +579,75 @@ export const attachmentsRouteLayer = HttpRouter.add(
       path.extname(filePath) ||
       (isIdLookup ? attachmentIdExtensionSegment(normalizedRelativePath) : null) ||
       "";
+    const ifNoneMatch = request.headers["if-none-match"];
+
+    // `?preview=<size>`: the image's smaller copy, to show it in a thread. An
+    // image without one is served as it is, under the same rules.
+    const previewSize =
+      downloadName === null
+        ? parseAttachmentPreviewSize(url.value.searchParams.get("preview"))
+        : null;
+    const attachmentId =
+      previewSize === null
+        ? null
+        : isIdLookup
+          ? normalizedRelativePath
+          : parseAttachmentIdFromRelativePath(normalizedRelativePath);
+    const preview =
+      previewSize === null || attachmentId === null
+        ? null
+        : yield* Effect.promise(() =>
+            // Loaded on first use: sharp and the preview cache stay out of boot.
+            import("./attachmentPreview.ts").then(({ resolveAttachmentPreview }) =>
+              resolveAttachmentPreview({
+                attachmentsDir: config.attachmentsDir,
+                attachmentId,
+                sourcePath: filePath,
+                extension,
+                size: previewSize,
+              }),
+            ),
+          );
+    if (preview?.kind === "preview" && previewSize !== null) {
+      const previewInfo = yield* fileSystem
+        .stat(preview.path)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      if (previewInfo && previewInfo.type === "File") {
+        const etag = attachmentFileEtag(previewInfo, previewSize);
+        const headers = {
+          "Cache-Control": ATTACHMENT_CACHE_CONTROL,
+          "X-Content-Type-Options": "nosniff",
+          ...(etag ? { ETag: etag } : {}),
+        };
+        if (etag && ifNoneMatchSatisfies(ifNoneMatch, etag)) {
+          return HttpServerResponse.empty({ status: 304, headers });
+        }
+        return yield* HttpServerResponse.file(preview.path, {
+          status: 200,
+          contentType: "image/webp",
+          headers,
+        }).pipe(
+          Effect.map(HttpServerResponse.setHeaders(headers)),
+          Effect.catch(() =>
+            Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
+          ),
+        );
+      }
+    }
+    // An attachment's address names bytes that never change, so it is cached for
+    // good; a preview address standing in for a preview not made yet is not.
+    const cacheControl =
+      preview?.kind === "unavailable" || (preview?.kind === "preview" && previewSize !== null)
+        ? ATTACHMENT_PREVIEW_PENDING_CACHE_CONTROL
+        : ATTACHMENT_CACHE_CONTROL;
+    const etag = attachmentFileEtag(fileInfo);
+    if (etag && ifNoneMatchSatisfies(ifNoneMatch, etag)) {
+      return HttpServerResponse.empty({
+        status: 304,
+        headers: { "Cache-Control": cacheControl, ETag: etag },
+      });
+    }
+
     const mediaContentType = INLINE_MEDIA_CONTENT_TYPES[extension.toLowerCase()];
     const size = Number(fileInfo.size);
     // If-Range validators are not compared here: sending the complete response
@@ -562,7 +661,7 @@ export const attachmentsRouteLayer = HttpRouter.add(
         status: 416,
         headers: {
           "Content-Range": `bytes */${size}`,
-          "Cache-Control": "private, max-age=3600",
+          "Cache-Control": cacheControl,
         },
       });
     }
@@ -574,25 +673,29 @@ export const attachmentsRouteLayer = HttpRouter.add(
         }
       : {};
 
+    const headers = {
+      ...(mediaContentType
+        ? {
+            "Content-Type": mediaContentType,
+            "X-Content-Type-Options": "nosniff",
+            "Accept-Ranges": "bytes",
+          }
+        : userAssetResponseHeaders(filePath, path)),
+      "Cache-Control": cacheControl,
+      ...(etag ? { ETag: etag } : {}),
+      ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${size}` } : {}),
+      ...mediaHeaders,
+      ...(downloadName !== null
+        ? { "Content-Disposition": downloadContentDisposition(downloadName) }
+        : {}),
+    };
     return yield* HttpServerResponse.file(filePath, {
       status: range ? 206 : 200,
       ...(range ? { offset: range.start, bytesToRead: range.end - range.start + 1 } : {}),
-      headers: {
-        ...(mediaContentType
-          ? {
-              "Content-Type": mediaContentType,
-              "Cache-Control": "private, max-age=3600",
-              "X-Content-Type-Options": "nosniff",
-              "Accept-Ranges": "bytes",
-            }
-          : userAssetResponseHeaders(filePath, path)),
-        ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${size}` } : {}),
-        ...mediaHeaders,
-        ...(downloadName !== null
-          ? { "Content-Disposition": downloadContentDisposition(downloadName) }
-          : {}),
-      },
+      headers,
     }).pipe(
+      // The platform generates its own ETag; keep the validator checked above.
+      Effect.map(HttpServerResponse.setHeaders(headers)),
       Effect.catch(() =>
         Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
       ),
@@ -798,10 +901,15 @@ export const projectFaviconRouteLayer = HttpRouter.add(
       return fallbackProjectFaviconResponse(PROJECT_FAVICON_CACHE_CONTROL);
     }
 
+    const etag = `"${projectIconContentHash(favicon.bytes)}"`;
+    const headers = { ...inlineImageResponseHeaders(favicon.path), ETag: etag };
+    if (ifNoneMatchSatisfies(request.headers["if-none-match"], etag)) {
+      return HttpServerResponse.empty({ status: 304, headers });
+    }
     return HttpServerResponse.uint8Array(favicon.bytes, {
       status: 200,
       contentType: resolveStaticContentType(favicon.path, yield* Path.Path),
-      headers: inlineImageResponseHeaders(favicon.path),
+      headers,
     });
   }).pipe(
     Effect.catchTag("ProjectFaviconUnavailable", () =>
@@ -876,13 +984,22 @@ export const projectAvatarServeRouteLayer = HttpRouter.add(
     const store = yield* ProjectAvatarStore;
     const stored = yield* store.read(projectId as ProjectId);
     if (!stored) return HttpServerResponse.text("Not Found", { status: 404 });
+    const etag = `"${stored.contentHash}"`;
+    const headers = {
+      // An address naming the avatar's content hash (`v`) names those bytes for good.
+      "Cache-Control":
+        url.value.searchParams.get("v") === stored.contentHash
+          ? PROJECT_AVATAR_VERSIONED_CACHE_CONTROL
+          : PROJECT_AVATAR_CACHE_CONTROL,
+      ETag: etag,
+    };
+    if (ifNoneMatchSatisfies(request.headers["if-none-match"], etag)) {
+      return HttpServerResponse.empty({ status: 304, headers });
+    }
     return HttpServerResponse.uint8Array(stored.bytes, {
       status: 200,
       contentType: "image/png",
-      headers: {
-        "Cache-Control": PROJECT_AVATAR_CACHE_CONTROL,
-        ETag: `"${stored.contentHash}"`,
-      },
+      headers,
     });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );

@@ -92,7 +92,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         Effect.gen(function* () {
           if (Option.isNone(ctx.projectionProjects)) return null;
           const project = yield* ctx.projectionProjects.value
-            .getById(input)
+            .getById({ projectId: input.projectId })
             .pipe(
               Effect.mapError(
                 () => new ProjectReadIconError({ message: "Could not load project artwork." }),
@@ -105,6 +105,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
               favicon: Option.getOrNull(ctx.projectFaviconResolver),
               avatar: Option.getOrNull(ctx.projectAvatarStore),
             },
+            input.knownHash,
           );
         }),
       ),

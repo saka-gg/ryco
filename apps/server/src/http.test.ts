@@ -112,6 +112,15 @@ describe("static asset caching", () => {
     expect(resolveStaticCacheControl("favicon.png")).toBe("no-cache");
   });
 
+  it("marks the versioned file icon folder immutable", () => {
+    // Short names have no build hash to go by; the version folder names them.
+    expect(resolveStaticCacheControl("vscode-icons/v12.17.0/LICENSE.txt")).toBe(
+      "public, max-age=31536000, immutable",
+    );
+    expect(resolveStaticCacheControl("vscode-icons/LICENSE.txt")).toBe("no-cache");
+    expect(resolveStaticCacheControl("other/v12.17.0/LICENSE.txt")).toBe("no-cache");
+  });
+
   it("derives a stable weak etag from size and mtime", () => {
     const first = staticFileEtag(fileInfo(1234n, new Date(1_700_000_000_000)));
     const again = staticFileEtag(fileInfo(1234n, new Date(1_700_000_000_000)));

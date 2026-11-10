@@ -8,8 +8,15 @@ const MAX_ICON_BYTES_PER_ENVIRONMENT = 8 * 1024 * 1024;
 /** Environments whose artwork is kept at once; the least recently used is dropped. */
 const MAX_ICON_CACHE_ENVIRONMENTS = 16;
 
+interface ResolvedIcon {
+  readonly source: string | null;
+  readonly expiresAt: number;
+  /** Names `source` on the node, so an expired entry revalidates without the bytes. */
+  readonly hash?: string | undefined;
+}
+
 interface EnvironmentIconCache {
-  readonly resolved: LRUCache<{ readonly source: string | null; readonly expiresAt: number }>;
+  readonly resolved: LRUCache<ResolvedIcon>;
   readonly pending: Map<string, Promise<string | null>>;
   /** Set by an explicit clear: answers still in flight are discarded. */
   cleared: boolean;
@@ -91,17 +98,26 @@ export function readProjectIconSource(
   if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.source);
   const pending = cache.pending.get(key);
   if (pending) return pending;
+  // An expired entry the node named asks whether that artwork is still current:
+  // `unchanged` costs a few bytes where the artwork would cost all of them.
+  const knownHash = cached?.source ? cached.hash : undefined;
   const request = api.projects
-    .readIcon({ projectId })
+    .readIcon(knownHash === undefined ? { projectId } : { projectId, knownHash })
     .then((result) => {
       // Cleared meanwhile: neither publish nor re-cache.
       if (cache.cleared) return null;
-      const source = result ? `data:${result.mimeType};base64,${result.dataBase64}` : null;
+      const unchanged = result !== null && "unchanged" in result;
+      const source = unchanged
+        ? (cached?.source ?? null)
+        : result
+          ? `data:${result.mimeType};base64,${result.dataBase64}`
+          : null;
+      const hash = unchanged ? knownHash : result?.hash;
       // An environment dropped for capacity still answers its rows.
       if (caches.get(environmentId) === cache) {
         cache.resolved.set(
           key,
-          { source, expiresAt: Date.now() + PROJECT_ICON_TTL_MS },
+          { source, expiresAt: Date.now() + PROJECT_ICON_TTL_MS, hash },
           (source?.length ?? 0) * 2,
         );
       }

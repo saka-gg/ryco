@@ -689,11 +689,23 @@ export const ChatFileAttachment = Schema.Struct({
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
 export const CHAT_ATTACHMENT_READ_CHUNK_BYTES = 256 * 1024;
+/**
+ * The longest edge, in pixels, of the smaller copies a server makes of an
+ * image attachment to show it in a thread. The original is for opening it.
+ */
+export const CHAT_ATTACHMENT_PREVIEW_SIZES = [512, 1024] as const;
+export const ChatAttachmentPreviewSize = Schema.Literals(CHAT_ATTACHMENT_PREVIEW_SIZES);
+export type ChatAttachmentPreviewSize = typeof ChatAttachmentPreviewSize.Type;
 export const ChatAttachmentReadChunkInput = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   attachmentId: ChatAttachmentId,
   offset: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  /**
+   * Read the image's preview of this size instead of the original. Older
+   * servers ignore it and serve the original, without `preview` in the result.
+   */
+  preview: Schema.optional(ChatAttachmentPreviewSize),
 });
 export type ChatAttachmentReadChunkInput = typeof ChatAttachmentReadChunkInput.Type;
 export const ChatAttachmentReadChunkResult = Schema.Struct({
@@ -702,6 +714,12 @@ export const ChatAttachmentReadChunkResult = Schema.Struct({
   ),
   offset: NonNegativeInt,
   totalBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  /**
+   * Answers a read that asked for a `preview`: true when these are the
+   * preview's bytes, false when the original is served instead (the image is
+   * small already, or no preview can be made of it). Absent otherwise.
+   */
+  preview: Schema.optional(Schema.Boolean),
 });
 export type ChatAttachmentReadChunkResult = typeof ChatAttachmentReadChunkResult.Type;
 export class ChatAttachmentReadError extends Schema.TaggedError<ChatAttachmentReadError>()(
