@@ -701,6 +701,28 @@ describe("batch-owned containers", () => {
     expect(environmentOf(published).threadShellById[a]?.updatedAt).toBe("2026-10-01T00:00:00.000Z");
   });
 
+  it("keeps the latest turn's object while streamed deltas leave it unchanged", () => {
+    const published = syncServerShellSnapshot(
+      emptyState,
+      makeSnapshot([makeThreadShell("a")]),
+      environmentId,
+    );
+    const a = ThreadId.make("a");
+    const first = applyOrchestrationEvent(
+      published,
+      detailEvent(2, "thread.message-sent", "a"),
+      environmentId,
+    );
+    const second = applyOrchestrationEvent(
+      first,
+      detailEvent(3, "thread.message-sent", "a"),
+      environmentId,
+    );
+    const latestTurn = environmentOf(first).threadTurnStateById[a]?.latestTurn;
+    expect(latestTurn).toMatchObject({ turnId: "turn-1", state: "running" });
+    expect(environmentOf(second).threadTurnStateById[a]?.latestTurn).toBe(latestTurn);
+  });
+
   it("copies the per-thread records once for a frame of shell upserts", () => {
     useStore
       .getState()

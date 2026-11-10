@@ -20,11 +20,7 @@ import {
 } from "@ryco/shared/retiredFeatures";
 import { useStore as useZustandStore } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  LegendList,
-  type LegendListRef,
-  type LegendListRenderItemProps,
-} from "@legendapp/list/react-native";
+import { type LegendListRef, type LegendListRenderItemProps } from "@legendapp/list/react-native";
 import { CommonActions, StackActions, useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import {
@@ -214,7 +210,6 @@ import {
   isStreamHapticsEnabled,
   usePreferences,
 } from "../../state/preferencesStore";
-import { useThreadStreamHaptics } from "./threadStreamHaptics";
 import { FloatingThreadControl } from "./FloatingThreadControl";
 import { ImageGalleryProvider } from "./ImageGalleryModal";
 import {
@@ -265,7 +260,9 @@ import {
   modelSelectionsEqual,
   summarizeQueuedThreadMessage,
 } from "../../state/threadOutboxModel";
-import { useThreadTimeline } from "../../state/threadTimeline";
+import { useThreadTimelineOf } from "../../state/threadTimeline";
+import { createThreadChromeSelector, createThreadSummaryChromeSelector } from "./threadChromeModel";
+import { ThreadFeedList } from "./ThreadFeedList";
 import {
   selectEnvironmentHydratedFromCacheAt,
   selectProjectByRef,
@@ -426,7 +423,6 @@ import {
 import { ForkOriginRow } from "./ForkOriginRow";
 import { useForkSheetState } from "./useForkSheetState";
 import {
-  createThreadListRowAnnotator,
   nextThreadMessageAnchorStep,
   resolveOpenThreadNavigation,
   type ThreadListRow,
@@ -439,6 +435,8 @@ const NO_PENDING_FOLLOW_UPS: ReadonlyArray<PendingFollowUpAdd> = [];
 const NO_FIND_MESSAGES: ReadonlyArray<ThreadFindMessage> = [];
 const NO_ARTIFACT_MESSAGES: ReadonlyArray<ChatMessage> = [];
 const SERVER_QUEUE_EDIT_IN_PROGRESS = "Save or cancel the message you are editing first.";
+/** The clock the anchor's rows are built with: their positions do not depend on it. */
+const ANCHOR_ROWS_CLOCK = new Date(0).toISOString();
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
 
@@ -743,19 +741,12 @@ export function ThreadDetailScreen(props: {
     selectEnvironmentHydratedFromCacheAt(state, environmentId),
   );
 
-  const built = useThreadTimeline(environmentId, threadId);
-  useThreadStreamHaptics(
-    `${environmentId}:${threadId}`,
-    built?.timeline,
-    isStreamHapticsEnabled(preferences),
-  );
   // A task sent from New Task opens here before the node shows it: the launch
   // carries it (setup stages, failure, Retry, Edit task) until the thread has
   // messages of its own.
   const launchKey = newTaskLaunchKey(environmentId, threadId);
   const newTaskLaunch = useNewTaskLaunchStore((state) => state.launchesByKey[launchKey]);
   const worktreeLaunch = useWorktreeLaunchStore((state) => state.launchesByKey[launchKey]);
-  const threadHasMessages = (built?.timeline.length ?? 0) > 0;
   // Capability-routed file attachments: capability + direct HTTP base enable the
   // streaming upload path; without either, only the legacy image dataUrl flow.
   const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);
@@ -771,11 +762,25 @@ export function ThreadDetailScreen(props: {
     // when rows appear or leave.
     [attachments, fileUploadRecords],
   );
+  // The thread as the chrome reads it: a streamed delta keeps the object (`sameThreadChrome`),
+  // so it re-renders the feed (`ThreadFeedList`) and not this whole screen.
+  const [selectThreadChrome] = useState(createThreadChromeSelector);
   const thread = useStore((state) =>
-    selectThreadByRef(state, scopeThreadRef(environmentId, threadId)),
+    selectThreadChrome(selectThreadByRef(state, scopeThreadRef(environmentId, threadId))),
+  );
+  // The chrome's timeline: approvals, questions and row positions. The feed builds its own from
+  // the live thread.
+  const built = useThreadTimelineOf(environmentId, threadId, thread);
+  const threadHasMessages = (built?.timeline.length ?? 0) > 0;
+  const [selectSummaryChrome] = useState(() =>
+    createThreadSummaryChromeSelector<
+      NonNullable<ReturnType<typeof selectSidebarThreadSummaryByRef>>
+    >(),
   );
   const sidebarThread = useStore((state) =>
-    selectSidebarThreadSummaryByRef(state, scopeThreadRef(environmentId, threadId)),
+    selectSummaryChrome(
+      selectSidebarThreadSummaryByRef(state, scopeThreadRef(environmentId, threadId)),
+    ),
   );
   const threadDetailLoaded = useStore((state) =>
     selectThreadDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
@@ -2713,10 +2718,9 @@ export function ThreadDetailScreen(props: {
         entries: built?.timeline ?? [],
         runningTurnId,
         expandedFoldIds,
-        // Running folds deliberately use a stable "Working…" label. Sampling
-        // the clock only when the timeline changes avoids rebuilding the whole
-        // virtualized list every second for a duration that is not displayed.
-        now: new Date().toISOString(),
+        // Only the rows' positions are read here (a link's anchor); the feed shows them with
+        // their own clock (`ThreadFeedList`).
+        now: ANCHOR_ROWS_CLOCK,
       }),
     [built?.timeline, expandedFoldIds, runningTurnId],
   );
@@ -2881,7 +2885,6 @@ export function ThreadDetailScreen(props: {
 
   // Fork eligibility and the anchored message live outside the timeline; they go onto the rows
   // so LegendList re-renders the rows they change (it never re-renders on a new renderItem).
-  const [annotateRows] = useState(createThreadListRowAnnotator);
   // The plan the settled latest turn proposed and nobody implemented: Implement is offered on it
   // while the chat can take a turn (the shared rule web's plan follow-up reads).
   const latestTurnSettled = thread
@@ -2914,22 +2917,19 @@ export function ThreadDetailScreen(props: {
     share: (plan) => planHandlersRef.current?.share(plan),
   }));
   const highlightedMessageId = messageAnchor?.messageId ?? null;
-  const listRows = useMemo(
-    () =>
-      annotateRows(timelineRows, {
-        forkableMessageIds,
-        editableMessageIds,
-        undoableMessageIds,
-        highlightedMessageId,
-        actionablePlanId,
-      }),
+  const feedFlags = useMemo(
+    () => ({
+      forkableMessageIds,
+      editableMessageIds,
+      undoableMessageIds,
+      highlightedMessageId,
+      actionablePlanId,
+    }),
     [
       actionablePlanId,
-      annotateRows,
       editableMessageIds,
       forkableMessageIds,
       highlightedMessageId,
-      timelineRows,
       undoableMessageIds,
     ],
   );
@@ -3771,61 +3771,64 @@ export function ThreadDetailScreen(props: {
       <HtmlRenderFullScreenProvider>
         <ImageGalleryProvider>
           <View className="min-h-0 flex-1">
-            <LegendList
-              ref={listRef}
-              data={listRows}
-              renderItem={renderItem}
-              keyExtractor={(row) => row.id}
-              alignItemsAtEnd
-              initialScrollAtEnd
-              // Following keeps the end from any distance; reading back, the rows on screen stay put.
-              {...feedEndMaintenance}
-              keyboardDismissMode="interactive"
-              keyboardShouldPersistTaps="handled"
-              contentInsetAdjustmentBehavior="never"
-              // The header floats over the feed: the first message starts under it (and under any
-              // banner), and scrolls up beneath its glass.
-              contentContainerStyle={{ paddingBottom: 10 }}
-              scrollIndicatorInsets={{ top: feedTopInset }}
-              // Room under the newest message whenever the floating status capsule shows.
-              ListFooterComponent={
-                floatingCapsuleShown ? (
+            <ThreadFeedList
+              listRef={listRef}
+              environmentId={environmentId}
+              threadId={threadId}
+              runningTurnId={runningTurnId}
+              expandedFoldIds={expandedFoldIds}
+              flags={feedFlags}
+              streamHapticsEnabled={isStreamHapticsEnabled(preferences)}
+              listProps={{
+                renderItem: renderItem,
+                keyExtractor: (row) => row.id,
+                alignItemsAtEnd: true,
+                initialScrollAtEnd: true,
+                // Following keeps the end from any distance; reading back, the rows on screen stay put.
+                ...feedEndMaintenance,
+                keyboardDismissMode: "interactive",
+                keyboardShouldPersistTaps: "handled",
+                contentInsetAdjustmentBehavior: "never",
+                // The header floats over the feed: the first message starts under it (and under any
+                // banner), and scrolls up beneath its glass.
+                contentContainerStyle: { paddingBottom: 10 },
+                scrollIndicatorInsets: { top: feedTopInset },
+                // Room under the newest message whenever the floating status capsule shows.
+                ListFooterComponent: floatingCapsuleShown ? (
                   <View style={{ height: FLOATING_CONTROL_CLEARANCE }} />
-                ) : null
-              }
-              onStartReached={loadOlderMessages}
-              onStartReachedThreshold={0.35}
-              onScroll={onFeedScroll}
-              onScrollBeginDrag={onFeedScrollBeginDrag}
-              onScrollEndDrag={onFeedScrollEndDrag}
-              onMomentumScrollBegin={onFeedMomentumScrollBegin}
-              onMomentumScrollEnd={onFeedMomentumScrollEnd}
-              scrollEventThrottle={64}
-              // A spacer the list measures (unlike contentContainerStyle padding), so following
-              // the end and anchoring still add up.
-              ListHeaderComponent={
-                <>
-                  <View style={{ height: feedTopInset }} />
-                  {messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      disabled={messageHistoryLoad?.status === "loading"}
-                      onPress={loadOlderMessages}
-                      className="items-center px-4 py-3"
-                    >
-                      <Text className="text-xs text-muted-foreground">
-                        {messageHistoryLoad?.status === "loading"
-                          ? "Loading earlier history…"
-                          : messageHistoryLoad?.status === "error"
-                            ? "Retry earlier history"
-                            : "Load earlier history"}
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </>
-              }
-              ListEmptyComponent={
-                launchView ? (
+                ) : null,
+                onStartReached: loadOlderMessages,
+                onStartReachedThreshold: 0.35,
+                onScroll: onFeedScroll,
+                onScrollBeginDrag: onFeedScrollBeginDrag,
+                onScrollEndDrag: onFeedScrollEndDrag,
+                onMomentumScrollBegin: onFeedMomentumScrollBegin,
+                onMomentumScrollEnd: onFeedMomentumScrollEnd,
+                scrollEventThrottle: 64,
+                // A spacer the list measures (unlike contentContainerStyle padding), so following
+                // the end and anchoring still add up.
+                ListHeaderComponent: (
+                  <>
+                    <View style={{ height: feedTopInset }} />
+                    {messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        disabled={messageHistoryLoad?.status === "loading"}
+                        onPress={loadOlderMessages}
+                        className="items-center px-4 py-3"
+                      >
+                        <Text className="text-xs text-muted-foreground">
+                          {messageHistoryLoad?.status === "loading"
+                            ? "Loading earlier history…"
+                            : messageHistoryLoad?.status === "error"
+                              ? "Retry earlier history"
+                              : "Load earlier history"}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </>
+                ),
+                ListEmptyComponent: launchView ? (
                   <NewTaskLaunchCard
                     view={launchView}
                     onRetry={() => {
@@ -3864,8 +3867,8 @@ export function ThreadDetailScreen(props: {
                       }
                     />
                   </View>
-                )
-              }
+                ),
+              }}
             />
             {/* The header's glass floats over the feed: a fade under it keeps the title and
                 the buttons readable while messages scroll beneath. */}

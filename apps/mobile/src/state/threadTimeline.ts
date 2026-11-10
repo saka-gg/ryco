@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 
 import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
+import type { Thread } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import {
@@ -24,6 +25,18 @@ export function useThreadTimeline(
   const thread = useStore((state) =>
     selectThreadByRef(state, scopeThreadRef(environmentId, threadId)),
   );
+  return useThreadTimelineOf(environmentId, threadId, thread);
+}
+
+/**
+ * The timeline of a thread the caller already holds (the thread screen's chrome selection,
+ * which skips streamed text), with this device's unconfirmed sends after the node's messages.
+ */
+export function useThreadTimelineOf(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  thread: Thread | null | undefined,
+): ThreadTimeline | null {
   const threadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
   const pending = useOptimisticUserMessages(threadKey);
   const buildTimeline = useMemo(() => createThreadTimelineBuilder(), []);
