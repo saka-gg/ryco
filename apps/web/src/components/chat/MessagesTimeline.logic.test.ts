@@ -1393,6 +1393,119 @@ describe("chapter rows", () => {
     expect(chapters(rows)[0]?.entries.map((entry) => entry.id)).toEqual(["w1"]);
   });
 
+  describe("earlier steps of a working turn", () => {
+    const runningEntries = [
+      userEntry,
+      assistant("c1", "2026-01-01T00:00:02Z", "Looking at the client."),
+      work("w1", "2026-01-01T00:00:03Z"),
+      work("w2", "2026-01-01T00:00:04Z"),
+      assistant("c2", "2026-01-01T00:00:10Z", "Found it; editing."),
+      work("w3", "2026-01-01T00:00:11Z"),
+      assistant("c3", "2026-01-01T00:00:20Z", "Running the tests.", true),
+    ];
+    const running = {
+      ...baseInput,
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:01Z",
+      runningTurnId: turnId,
+      latestTurn: {
+        turnId,
+        state: "running" as const,
+        startedAt: "2026-01-01T00:00:01Z",
+        completedAt: null,
+      },
+      foldEarlierChapters: true,
+    };
+
+    it("folds the chapters before the current one into one toggle", () => {
+      const rows = deriveMessagesTimelineRows({ ...running, timelineEntries: runningEntries });
+
+      expect(rows.map((row) => row.id)).toEqual([
+        "user-entry",
+        "turn-fold:running:turn-ch",
+        "work-toggle:earlier-steps:turn-ch",
+        "chapter:c3",
+      ]);
+      // Two paragraphs and their three steps.
+      expect(rows[2]).toMatchObject({ earlierSteps: true, hiddenCount: 5, expanded: false });
+      expect(chapters(rows)[0]).toMatchObject({ status: "active", isFirstInTurn: true });
+    });
+
+    it("lists them again under the toggle once opened, or when a search hit is inside", () => {
+      const opened = deriveMessagesTimelineRows({
+        ...running,
+        timelineEntries: runningEntries,
+        workGroupExpandedById: { "earlier-steps:turn-ch": true },
+      });
+      const ids = [
+        "user-entry",
+        "turn-fold:running:turn-ch",
+        "work-toggle:earlier-steps:turn-ch",
+        "chapter:c1",
+        "chapter:c2",
+        "chapter:c3",
+      ];
+      expect(opened.map((row) => row.id)).toEqual(ids);
+      expect(chapters(opened).map((row) => row.isFirstInTurn)).toEqual([true, false, false]);
+
+      const revealed = deriveMessagesTimelineRows({
+        ...running,
+        timelineEntries: runningEntries,
+        revealedMessageIds: new Set(["c1"]),
+      });
+      expect(revealed.map((row) => row.id)).toEqual(ids);
+    });
+
+    it("leaves a single earlier chapter, the phone tier and a turn the user opened alone", () => {
+      const single = deriveMessagesTimelineRows({
+        ...running,
+        timelineEntries: runningEntries.filter((entry) => !/^(c1|w1|w2)-/.test(entry.id)),
+      });
+      expect(single.map((row) => row.kind)).toEqual(["message", "turn-fold", "chapter", "chapter"]);
+
+      const phone = deriveMessagesTimelineRows({
+        ...running,
+        foldEarlierChapters: false,
+        timelineEntries: runningEntries,
+      });
+      expect(chapters(phone)).toHaveLength(3);
+
+      const settled = {
+        ...baseInput,
+        foldEarlierChapters: true,
+        timelineEntries: [
+          ...runningEntries.slice(0, -1),
+          assistant("c3", "2026-01-01T00:00:20Z", "Running the tests."),
+          work("w4", "2026-01-01T00:00:21Z"),
+          assistant("final", "2026-01-01T00:00:30Z", "Done."),
+        ],
+        latestTurn: {
+          turnId,
+          state: "completed" as const,
+          startedAt: "2026-01-01T00:00:01Z",
+          completedAt: "2026-01-01T00:00:31Z",
+        },
+      };
+      const openedByUser = deriveMessagesTimelineRows({
+        ...settled,
+        turnFoldExpandedById: { "turn-fold:settled:turn-ch": true },
+      });
+      expect(chapters(openedByUser)).toHaveLength(3);
+      // Watched to its end, the turn keeps the shape it had while it worked.
+      const watched = deriveMessagesTimelineRows({
+        ...settled,
+        liveSettledTurnIds: new Set([turnId]),
+      });
+      expect(watched.map((row) => row.id)).toEqual([
+        "user-entry",
+        "turn-fold:settled:turn-ch",
+        "work-toggle:earlier-steps:turn-ch",
+        "chapter:c3",
+        "final-entry",
+      ]);
+    });
+  });
+
   it("moves thinking that precedes an update into that update's chapter", () => {
     const rows = deriveMessagesTimelineRows({
       ...baseInput,

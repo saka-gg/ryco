@@ -23,7 +23,7 @@ import type {
 } from "@ryco/contracts/agent-control";
 import { useRouter } from "@tanstack/react-router";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
-import { type ReactNode, useLayoutEffect, useMemo, useState } from "react";
+import { Fragment, type ReactNode, use, useLayoutEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
@@ -46,6 +46,13 @@ import { modelDisplayName } from "../inboxSidebar/inboxSidebarModel";
 import { InboxStatusGlyph } from "../inboxSidebar/InboxStatusGlyph";
 import { useInboxClock } from "../inboxSidebar/useInboxListMotion";
 import { DelegationDockChildPeek } from "./DelegationDockChildPeek";
+import { DockLiveWorkSection, dockLiveWorkSegments, type DockHeaderSegment } from "./DockLiveWork";
+import {
+  summarizeThreadLiveWork,
+  ThreadLiveWorkContext,
+  type ThreadLiveWork,
+  type ThreadLiveWorkSummary,
+} from "./threadLiveWork";
 import {
   buildDelegationDockChildren,
   buildDelegationDockLog,
@@ -168,10 +175,12 @@ function ChildStateText(props: { readonly child: DelegationDockChild }) {
 }
 
 /**
- * The thread's delegation, docked at the top of the composer: one line with
- * its delegated threads' state, opening into those threads, its pending Agent
- * Control approvals and its Agent Control log. A delegated thread sees where it
- * came from. Off the frozen phone tier (ChatView never mounts it there).
+ * The thread's dock at the top of the composer: one line for everything that
+ * lives beside the thread's own turn. Its working subagents and background
+ * tasks (`ThreadLiveWorkContext`), where it was delegated from, its delegated
+ * threads' state, and its Agent Control log. Opened, each part lists its
+ * detail; pending Agent Control approvals always show. Off the frozen phone
+ * tier (ChatView never mounts it there).
  */
 export function DelegationDock(props: DelegationDockProps) {
   const { environmentId, threadId, onPresenceChange } = props;
@@ -211,8 +220,17 @@ export function DelegationDock(props: DelegationDockProps) {
     [queueState, threadId],
   );
 
+  const liveWork = use(ThreadLiveWorkContext);
+  const liveSummary = useMemo(
+    () => (liveWork === null ? null : summarizeThreadLiveWork(liveWork)),
+    [liveWork],
+  );
+  const live =
+    liveWork !== null && liveSummary?.present ? { liveWork, summary: liveSummary } : null;
+
   // Most threads have nothing here: they stop before subscribing to titles.
   const present =
+    live !== null ||
     selection.delegatedFromThreadId !== null ||
     selection.managerThreadId !== null ||
     children.length > 0 ||
@@ -230,8 +248,19 @@ export function DelegationDock(props: DelegationDockProps) {
       childThreads={children}
       selection={selection}
       ownReturn={ownReturn}
+      live={live}
     />
   );
+}
+
+/** Sets the collapsed line's segments apart with a hairline. */
+function HeaderSegments(props: { readonly segments: ReadonlyArray<DockHeaderSegment> }) {
+  return props.segments.map((segment, index) => (
+    <Fragment key={segment.key}>
+      {index > 0 ? <i aria-hidden className="h-3 w-px shrink-0 bg-border" /> : null}
+      {segment.node}
+    </Fragment>
+  ));
 }
 
 /** A user decision the server has carried out (not a stale or failed one). */
@@ -252,8 +281,12 @@ function DelegationDockContent(props: {
   readonly childThreads: ReadonlyArray<SidebarThreadSummary>;
   readonly selection: AgentControlThreadActivity;
   readonly ownReturn: AgentControlCompletionReturn | null;
+  readonly live: {
+    readonly liveWork: ThreadLiveWork;
+    readonly summary: ThreadLiveWorkSummary;
+  } | null;
 }) {
-  const { environmentId, threadId, childThreads, selection, ownReturn } = props;
+  const { environmentId, threadId, childThreads, selection, ownReturn, live } = props;
   const router = useRouter({ warn: false });
   const threadShells = useStore(
     (state) => state.environmentStateById[environmentId]?.threadShellById,
@@ -313,11 +346,9 @@ function DelegationDockContent(props: {
   const [logOpen, setLogOpen] = useState(false);
   const [openLogProposalId, setOpenLogProposalId] = useState<string | null>(null);
   const [detailsProposalId, setDetailsProposalId] = useState<string | null>(null);
-  const [originOpen, setOriginOpen] = useState(false);
   const [decided, setDecided] = useState<Readonly<Record<string, "accept" | "reject">>>({});
 
   const hasOrigin = parentThreadId !== null || managerThreadId !== null;
-  const hasHeader = dockChildren.length > 0 || log.length > 0;
   const decidedLines = selection.activity.filter((proposal) => {
     const decision = decided[proposal.proposalId];
     return decision !== undefined && decisionApplied(proposal, decision);
@@ -366,6 +397,93 @@ function DelegationDockContent(props: {
     );
   }
   const latestLog = log[0];
+
+  // The collapsed line: one segment per part of the dock that has something.
+  const headerSegments: DockHeaderSegment[] = live
+    ? dockLiveWorkSegments(live.liveWork, live.summary)
+    : [];
+  if (hasOrigin) {
+    headerSegments.push({
+      key: "origin",
+      node: (
+        <span className="flex min-w-0 items-center gap-2">
+          <DelegatedFromIcon />
+          {parentThreadId !== null ? (
+            <>
+              <span className="shrink-0 whitespace-nowrap">
+                {/* The word the icon stands for, for whoever cannot see it. */}
+                <span className="sr-only">Delegated </span>from
+              </span>
+              <b className="min-w-0 truncate font-medium text-foreground">
+                {titleOf(parentThreadId)}
+              </b>
+            </>
+          ) : null}
+          {parentThreadId !== null && managerThreadId !== null ? (
+            <span aria-hidden className="shrink-0">
+              ·
+            </span>
+          ) : null}
+          {managerThreadId !== null ? (
+            <>
+              <span className="shrink-0 whitespace-nowrap">Managed by</span>
+              <b className="min-w-0 truncate font-medium text-foreground">
+                {titleOf(managerThreadId)}
+              </b>
+            </>
+          ) : null}
+          {ownReturn !== null ? (
+            <span className="shrink-0 whitespace-nowrap">
+              {completionReturnPresentation(ownReturn.status).pending
+                ? "· result returns when you finish"
+                : `· ${completionReturnPresentation(ownReturn.status).label.toLowerCase()}`}
+            </span>
+          ) : null}
+        </span>
+      ),
+    });
+  }
+  if (dockChildren.length > 0) {
+    headerSegments.push({
+      key: "delegated",
+      node: (
+        <span className="flex min-w-0 items-center gap-[9px]">
+          <DelegationIcon />
+          <span className="font-semibold whitespace-nowrap text-foreground">
+            {dockChildren.length} delegated
+          </span>
+          <span aria-hidden className="inline-flex gap-0.5">
+            {dockChildren.map((child) => (
+              <i
+                key={child.thread.id}
+                className={cn("block h-1 w-3.5 rounded-[2px]", BAR_TONE[child.tone])}
+              />
+            ))}
+          </span>
+          <span className="min-w-0 truncate">
+            {summaryParts.flatMap((part, index) => (index === 0 ? [part] : [" · ", part]))}
+          </span>
+        </span>
+      ),
+    });
+  } else if (log.length > 0) {
+    headerSegments.push({
+      key: "log",
+      node: (
+        <span className="flex min-w-0 items-center gap-[9px]">
+          <DelegationIcon />
+          <span className="font-semibold whitespace-nowrap text-foreground">
+            Agent Control · {log.length}
+          </span>
+          {latestLog ? (
+            <span className="min-w-0 truncate">
+              {latestLog.action} · {latestLog.target}
+            </span>
+          ) : null}
+        </span>
+      ),
+    });
+  }
 
   const logList = (
     <div className="delegation-dock-rise pt-1 pr-3 pb-2 pl-[30px] text-[11.5px] text-muted-foreground">
@@ -417,127 +535,17 @@ function DelegationDockContent(props: {
       data-chat-composer-collapsed-controls="true"
       data-testid="delegation-dock"
     >
-      {hasOrigin ? (
-        <>
-          <button
-            type="button"
-            aria-expanded={originOpen}
-            className={cn(
-              "flex w-full items-center gap-2 px-3 py-2 text-left text-muted-foreground hover:bg-foreground/6",
-              ROW_FOCUS,
-            )}
-            onClick={() => setOriginOpen((open) => !open)}
-          >
-            <DelegatedFromIcon />
-            {parentThreadId !== null ? (
-              <>
-                <span className="shrink-0 whitespace-nowrap">Delegated from</span>
-                <b className="min-w-0 truncate font-medium text-foreground">
-                  {titleOf(parentThreadId)}
-                </b>
-              </>
-            ) : null}
-            {parentThreadId !== null && managerThreadId !== null ? (
-              <span aria-hidden className="shrink-0">
-                ·
-              </span>
-            ) : null}
-            {managerThreadId !== null ? (
-              <>
-                <span className="shrink-0 whitespace-nowrap">Managed by</span>
-                <b className="min-w-0 truncate font-medium text-foreground">
-                  {titleOf(managerThreadId)}
-                </b>
-              </>
-            ) : null}
-            {ownReturn !== null ? (
-              <span className="shrink-0 whitespace-nowrap">
-                {completionReturnPresentation(ownReturn.status).pending
-                  ? "· result returns when you finish"
-                  : `· ${completionReturnPresentation(ownReturn.status).label.toLowerCase()}`}
-              </span>
-            ) : null}
-            <ChevronDownIcon
-              aria-hidden
-              className={cn(
-                "ml-auto size-3 shrink-0 text-muted-foreground transition-transform duration-(--app-motion-duration-pop)",
-                originOpen && "rotate-180",
-              )}
-            />
-          </button>
-          {originOpen ? (
-            <div className="delegation-dock-rise pt-0.5 pr-3 pb-2.5 pl-[33px] text-muted-foreground">
-              {taskText ? (
-                <>
-                  <div className="mb-0.5 text-[10.5px] tracking-[0.06em] uppercase">Task</div>
-                  <p className="mb-2 text-foreground">
-                    {threadForkReplyExcerpt(taskText, TASK_MAX_CHARS)}
-                  </p>
-                </>
-              ) : null}
-              {parentThreadId !== null ? (
-                <a
-                  className="text-(--chat-link) hover:underline"
-                  href={threadHref(environmentId, parentThreadId)}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    openThread(parentThreadId);
-                  }}
-                >
-                  Open {titleOf(parentThreadId)} ↗
-                </a>
-              ) : null}
-              {siblingCount > 0 ? (
-                <span>
-                  {" · "}
-                  {siblingCount} sibling {siblingCount === 1 ? "thread" : "threads"}
-                </span>
-              ) : null}
-            </div>
-          ) : null}
-        </>
-      ) : null}
-
-      {hasHeader ? (
+      {headerSegments.length > 0 ? (
         <button
           type="button"
           aria-expanded={expanded}
           className={cn(
-            "flex w-full items-center gap-[9px] px-3 py-2 text-left not-first:border-t not-first:border-border/65 hover:bg-foreground/6",
+            "flex w-full items-center gap-2.5 overflow-hidden px-3 py-2 text-left text-muted-foreground hover:bg-foreground/6",
             ROW_FOCUS,
           )}
           onClick={() => setExpanded((open) => !open)}
         >
-          <DelegationIcon />
-          {dockChildren.length > 0 ? (
-            <>
-              <span className="font-semibold whitespace-nowrap text-foreground">
-                {dockChildren.length} delegated
-              </span>
-              <span aria-hidden className="inline-flex gap-0.5">
-                {dockChildren.map((child) => (
-                  <i
-                    key={child.thread.id}
-                    className={cn("block h-1 w-3.5 rounded-[2px]", BAR_TONE[child.tone])}
-                  />
-                ))}
-              </span>
-              <span className="min-w-0 truncate text-muted-foreground">
-                {summaryParts.flatMap((part, index) => (index === 0 ? [part] : [" · ", part]))}
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="font-semibold whitespace-nowrap text-foreground">
-                Agent Control · {log.length}
-              </span>
-              {latestLog ? (
-                <span className="min-w-0 truncate text-muted-foreground">
-                  {latestLog.action} · {latestLog.target}
-                </span>
-              ) : null}
-            </>
-          )}
+          <HeaderSegments segments={headerSegments} />
           <ChevronDownIcon
             aria-hidden
             className={cn(
@@ -694,9 +702,44 @@ function DelegationDockContent(props: {
         );
       })}
 
+      {live ? (
+        <DockLiveWorkSection liveWork={live.liveWork} summary={live.summary} open={expanded} />
+      ) : null}
+
+      {expanded && hasOrigin ? (
+        <div className="delegation-dock-rise border-t border-border/65 px-3 py-2 text-muted-foreground">
+          {taskText ? (
+            <>
+              <div className="mb-0.5 text-[10.5px] tracking-[0.06em] uppercase">Task</div>
+              <p className="mb-2 text-foreground">
+                {threadForkReplyExcerpt(taskText, TASK_MAX_CHARS)}
+              </p>
+            </>
+          ) : null}
+          {parentThreadId !== null ? (
+            <a
+              className="text-(--chat-link) hover:underline"
+              href={threadHref(environmentId, parentThreadId)}
+              onClick={(event) => {
+                event.preventDefault();
+                openThread(parentThreadId);
+              }}
+            >
+              Open {titleOf(parentThreadId)} ↗
+            </a>
+          ) : null}
+          {siblingCount > 0 ? (
+            <span>
+              {parentThreadId !== null ? " · " : null}
+              {siblingCount} sibling {siblingCount === 1 ? "thread" : "threads"}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
       {expanded && dockChildren.length > 0 ? (
         <>
-          <div className="delegation-dock-rise px-1.5 pt-0.5 pb-1.5">
+          <div className="delegation-dock-rise border-t border-border/65 px-1.5 pt-1 pb-1.5">
             {dockChildren.map((child) => {
               const open = selectedChildId === child.thread.id;
               const glyph =
@@ -782,7 +825,9 @@ function DelegationDockContent(props: {
           ) : null}
         </>
       ) : null}
-      {expanded && dockChildren.length === 0 && log.length > 0 ? logList : null}
+      {expanded && dockChildren.length === 0 && log.length > 0 ? (
+        <div className="border-t border-border/65">{logList}</div>
+      ) : null}
     </div>
   );
 }

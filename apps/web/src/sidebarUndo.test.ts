@@ -53,8 +53,10 @@ vi.mock("./store", () => ({
   },
 }));
 vi.mock("./lib/utils", () => ({ newCommandId: () => "command" }));
-vi.mock("./components/ui/toast", () => ({
+vi.mock("./components/ui/toastManager", () => ({
   toastManager: { add: vi.fn(), close: vi.fn(), update: vi.fn() },
+}));
+vi.mock("./components/ui/toastHelpers", () => ({
   stackedThreadToast: (options: unknown) => options,
 }));
 import {
@@ -64,7 +66,7 @@ import {
   sidebarUndo,
 } from "./sidebarUndo";
 import { requestThreadPinChange } from "./threadPinning";
-import { toastManager } from "./components/ui/toast";
+import { toastManager } from "./components/ui/toastManager";
 const target = { environmentId: EnvironmentId.make("node"), threadId: ThreadId.make("thread") };
 beforeEach(() => {
   vi.useFakeTimers();

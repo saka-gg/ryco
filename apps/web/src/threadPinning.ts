@@ -8,7 +8,8 @@ import {
   type ThreadPinStore,
 } from "@ryco/client-runtime/state/threads/threadPins";
 import { sidebarUndo } from "./sidebarUndo";
-import { stackedThreadToast, toastManager } from "./components/ui/toast";
+import { stackedThreadToast } from "./components/ui/toastHelpers";
+import { toastManager } from "./components/ui/toastManager";
 import { readLocalApi } from "./localApi";
 import { useUiStateStore } from "./uiStateStore";
 

@@ -493,8 +493,12 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 774 KiB on 2026-11-09: main measured 773.0 KiB after the phone parity rounds
  * (moved shared logic, renamed chunk imports); the conversation import move
  * changed no chat-route module, only chunk hashes, and tipped it over.
+ * 783 KiB on 2026-11-10 (route 780.8 KiB): the toast UI left boot, so the
+ * route's own importers of it (about 9.8 KiB with its Base UI parts) count
+ * here; the capsule toasts and the composer dock are in that figure. A first
+ * load of boot, shell and a thread is about the same size as before.
  */
-const CHAT_ROUTE_GZIP_BUDGET = 774 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 783 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
@@ -502,6 +506,18 @@ const CHAT_ROUTE_GZIP_BUDGET = 774 * KIB;
  * can add a file as easily as adding them.
  */
 const CHAT_ROUTE_MAX_FILES = 156;
+
+/**
+ * The toast UI (the capsule and its Base UI parts) renders in the shell. Boot
+ * modules raise toasts through `ui/toastManager`, which carries only the
+ * managers.
+ */
+const TOAST_UI_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^apps\/web\/src\/components\/ui\/toast(?:\.logic)?\.tsx?$/u,
+    reason: "toast UI (boot raises toasts through ui/toastManager)",
+  },
+];
 
 /** OTLP export loads when client tracing is configured, never at boot. */
 const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
@@ -551,6 +567,10 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * automations, whose `webhook` schedule, owner hook RPC and hook view schemas the
  * boot RPC client carries (about 0.13 KiB). The trigger choice, the webhook
  * panel and its snippets load with the Automations dialog.
+ * 525 KiB on 2026-11-10 (boot 530.3 → 521.8 KiB): the toast UI left boot.
+ * Five boot modules imported the toast manager from the UI module and carried
+ * all of it; they import `ui/toastManager` now, and the capsule renders with
+ * the shell.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -559,7 +579,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 529 * KIB,
+      maxGzipBytes: 525 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
@@ -573,6 +593,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...PROJECT_COPY_RPC_SOURCES,
         ...PROJECT_NODES_DIALOG_STORE_SOURCES,
         ...THREE_SOURCES,
+        ...TOAST_UI_SOURCES,
       ],
     },
     {
@@ -586,7 +607,9 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // 403 KiB and 107 with the queued message summary's quote citation
       // parser, which boot no longer carries. 403 KiB and 83 files on
       // 2026-10-31 with the alert dialog, which boot no longer carries.
-      maxGzipBytes: 420 * KIB,
+      // 428 KiB on 2026-11-10 (425.7 KiB, 93 files): the toast UI, which boot
+      // no longer carries.
+      maxGzipBytes: 428 * KIB,
       maxFiles: 115,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,

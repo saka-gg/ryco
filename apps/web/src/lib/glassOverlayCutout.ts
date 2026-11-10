@@ -1,7 +1,8 @@
 /**
  * On a translucent window, cuts the page out from under floating overlays, so a
- * translucent menu, picker, popover or toast shows the window's glass rather
- * than the text it covers. Ported from Synara's glassOverlayCutout (MIT, see
+ * translucent menu, picker or popover shows the window's glass rather than the
+ * text it covers. Toasts are not cut out: they take a dense plate (index.css),
+ * so a notification looks the same wherever it lands. Ported from Synara's glassOverlayCutout (MIT, see
  * docs/licenses/synara-computer-use.txt).
  *
  * A backdrop blur cannot hide what sits behind an element over a see-through
@@ -33,7 +34,7 @@ const HOVER_OVERLAY_SELECTOR = '[data-slot="tooltip-popup"], [data-slot="preview
  * The floating overlay surfaces. Keep in step with the overlay rules of the
  * translucent window block in index.css.
  */
-export const GLASS_OVERLAY_SELECTOR = `:is(.selection-glass-surface, .app-toast-surface, [data-slot="popover-popup"], [data-slot="autocomplete-popup"]):not(${HOVER_OVERLAY_SELECTOR})`;
+export const GLASS_OVERLAY_SELECTOR = `:is(.selection-glass-surface, [data-slot="popover-popup"], [data-slot="autocomplete-popup"]):not(${HOVER_OVERLAY_SELECTOR})`;
 
 /**
  * Set on a portaled overlay that sits on another portaled layer instead of on
@@ -116,6 +117,9 @@ function isBackedByPortaledLayer(overlay: HTMLElement, root: HTMLElement): boole
     // Ancestors include the body, whose coat must never count as backing.
     if (overlay.contains(element) || element.contains(overlay)) continue;
     if (root.contains(element)) return false;
+    // A scrim (a dialog's or the command palette's backdrop) dims the page but
+    // holds nothing to read, so the page under it is still what shows through.
+    if (element.childElementCount === 0 && element.textContent === "") continue;
     const style = getComputedStyle(element);
     if (
       style.backgroundImage !== "none" ||

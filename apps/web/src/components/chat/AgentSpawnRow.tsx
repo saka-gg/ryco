@@ -1,8 +1,10 @@
 /**
- * The chat's one row per spawn batch (a workflow run or a turn's direct
- * spawns): the agents' monograms, what the most recently active one is doing,
- * and how many still work. It expands in place into the agents' rows; a row
- * opens that agent in the Agents panel, which stays the full roster.
+ * The chat's one-line marker per spawn batch (a workflow run or a turn's direct
+ * spawns): the agents' monograms, what was started and how many still work, or
+ * that it finished and what it cost. It keeps the batch's place in the story
+ * without a card; live detail belongs to the dock above the composer. It
+ * expands in place into the agents' rows; a row opens that agent in the Agents
+ * panel, which stays the full roster.
  */
 import { ChevronRightIcon } from "lucide-react";
 import { memo, useId } from "react";
@@ -21,7 +23,6 @@ import {
   AgentRowList,
   useAgentRowLabel,
 } from "../agents/agentRoster";
-import { glassSurfaceClassName } from "../mobile/GlassSurface";
 import {
   summarizeAgentSpawn,
   type AgentSpawnRef,
@@ -63,22 +64,26 @@ function AgentSpawnRowContent({
 }) {
   const labelOf = useAgentRowLabel();
   const listId = useId();
-  const { members, visibleMembers, agentCount, live, workingCount, failedCount, latestWorking } =
-    summary;
+  const { members, visibleMembers, agentCount, live, failedCount, latestWorking } = summary;
   const noun = `subagent${agentCount === 1 ? "" : "s"}`;
-  const lead = live ? `Kicked off ${agentCount} ${noun}` : `Ran ${agentCount} ${noun}`;
-  const status = agentWorkflowStatusText({
-    live,
-    livePhase: summary.livePhase,
-    workingCount,
-    failedCount,
-  });
-  // Live: who acted last and what they are doing. Settled: which agents ran.
-  const detail = latestWorking
-    ? { name: labelOf(latestWorking), text: agentActivityText(latestWorking) }
-    : summary.latestWorkflowActivity
-      ? { name: null, text: summary.latestWorkflowActivity }
-      : { name: null, text: visibleMembers.map(labelOf).join(", ") };
+  const lead = live ? `Kicked off ${agentCount} ${noun}` : `${agentCount} ${noun} finished`;
+  // What the batch is: the run's name, else the agents that made it up.
+  const subject = summary.workflowName ?? (live ? null : visibleMembers.map(labelOf).join(", "));
+  // Live: the phase and how many still work. Settled: only a failure is news.
+  const status = live
+    ? agentWorkflowStatusText({
+        live,
+        livePhase: summary.livePhase,
+        workingCount: summary.workingCount,
+        failedCount,
+      })
+    : failedCount > 0
+      ? `${failedCount} failed`
+      : null;
+  // Who acted last stays a hover away; the dock above the composer shows it live.
+  const activity = latestWorking
+    ? [labelOf(latestWorking), agentActivityText(latestWorking)].filter(Boolean).join(" · ")
+    : (summary.latestWorkflowActivity ?? undefined);
   const hidden = Math.max(agentCount, members.length) - visibleMembers.length;
 
   return (
@@ -88,36 +93,24 @@ function AgentSpawnRowContent({
         onClick={() => onExpandedChange(!expanded)}
         aria-expanded={expanded}
         aria-controls={expanded ? listId : undefined}
-        className={cn(
-          glassSurfaceClassName("chip"),
-          "group/agent-spawn grid min-h-[40px] w-full grid-cols-[auto_minmax(0,1fr)_auto_1rem] items-center gap-x-2.5 rounded-lg border border-border/50 px-2.5 py-1 text-left transition-colors hover:border-border/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-        )}
+        title={activity || undefined}
+        className="group/agent-spawn flex min-h-[30px] w-full items-center gap-2 rounded-md px-2 text-left text-[12px] leading-5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
-        <AgentMonogramStack agents={visibleMembers} total={agentCount} />
-        <span className="flex min-w-0 flex-col">
-          <span className="truncate text-[12px] leading-[18px]">
-            <span className="font-medium text-foreground/90">{lead}</span>
-            {summary.workflowName ? (
-              <span className="text-muted-foreground"> · {summary.workflowName}</span>
-            ) : null}
-          </span>
-          {detail.text ? (
-            <span className="truncate text-[11px] leading-4 text-muted-foreground">
-              {detail.name ? <span className="text-foreground/80">{detail.name} · </span> : null}
-              {detail.text}
-            </span>
+        <AgentMonogramStack agents={visibleMembers} max={3} total={agentCount} />
+        <span className="min-w-0 flex-1 truncate">
+          {lead}
+          {subject ? ` · ${subject}` : null}
+          {status ? (
+            <>
+              {" · "}
+              <span className={live ? "text-info-foreground" : "text-destructive-foreground"}>
+                {status}
+              </span>
+            </>
           ) : null}
-        </span>
-        <span className="flex shrink-0 items-center gap-2 text-[11px] leading-5 text-muted-foreground">
-          <span
-            className={cn(
-              live ? "text-info-foreground" : failedCount > 0 && "text-destructive-foreground",
-            )}
-          >
-            {status}
-          </span>
-          {summary.totalTokens > 0 ? (
+          {!live && summary.totalTokens > 0 ? (
             <span className="tabular-nums">
+              {" · "}
               {formatSubagentTokenCount(summary.totalTokens)} tok
             </span>
           ) : null}
@@ -125,7 +118,7 @@ function AgentSpawnRowContent({
         <ChevronRightIcon
           aria-hidden
           className={cn(
-            "size-3.5 text-muted-foreground/60 transition-[color,rotate] group-hover/agent-spawn:text-foreground",
+            "size-3.5 shrink-0 opacity-60 transition-[rotate]",
             expanded && "rotate-90",
           )}
         />

@@ -368,6 +368,8 @@ describe("ChatView render cost while a reply streams", () => {
       await nextFrame();
       // A newer paragraph opens the next chapter, which folds this one.
       applyReplyDelta(1, "Next paragraph.", true, nextParagraphId);
+      // A working turn tucks its finished chapters behind "N earlier steps".
+      await page.getByRole("button", { name: /earlier steps?$/u }).click();
       await vi.waitFor(() => expect(foldedTitle()).toContain("Planning the change"));
       // The folded paragraph streams on. Its first delta names it the turn's
       // reply again (structure); the next one changes only text, so the chat

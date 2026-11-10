@@ -48,7 +48,9 @@ describe("thread error notification", () => {
       });
       const root = document.querySelector<HTMLElement>('[data-slot="toast-root"]')!;
       expect(root.dataset.type).toBe("error");
-      expect(root.classList.contains("app-toast-surface")).toBe(true);
+      // The capsule plate: the solid popover, not the translucent toast glass.
+      expect(root.classList.contains("app-toast-surface")).toBe(false);
+      expect(getComputedStyle(root).backgroundColor).not.toMatch(/\/ 0?\.\d+\)$|rgba\(/);
       expect(root.querySelectorAll(":scope > .liquid-glass-ring")).toHaveLength(0);
       expect(root.textContent).toContain("Thread references an unknown provider instance.");
       expect(document.querySelector('[data-slot="alert"]')).toBeNull();

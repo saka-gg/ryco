@@ -16,7 +16,7 @@ import { render } from "vitest-browser-react";
 import { deriveAgentPanelModel, deriveThreadSubagents } from "../threadWorkspaceViewModel";
 import { makeRuntimeAgent } from "./agents/agentRosterTestFixtures";
 import { agentStopRequests } from "./agents/agentStopRequests";
-import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
+import { LiveWorkDock, makeThreadLiveWork } from "./delegation/threadLiveWorkTestFixtures";
 import { AgentsPanel } from "./AgentsPanel";
 
 function rowIds(): string[] {
@@ -56,33 +56,36 @@ describe("AgentsPanel", () => {
   it("separates background navigation from stopping and identifies waiting agents", async () => {
     const onOpenAgents = vi.fn();
     const onStop = vi.fn();
+    const agentPanelModel = deriveAgentPanelModel({
+      agents: [makeRuntimeAgent("a"), makeRuntimeAgent("b", { status: "waiting" })],
+    });
     mounted = await render(
-      <BackgroundLivenessChip
-        liveness="working"
-        liveCount={2}
-        waitingCount={1}
-        onOpenAgents={onOpenAgents}
-        onStop={onStop}
-        stopping={false}
+      <LiveWorkDock
+        liveWork={makeThreadLiveWork({
+          liveness: "working",
+          agentPanelModel,
+          onOpenAgents,
+          onStopAll: onStop,
+        })}
       />,
     );
-    await page
-      .getByRole("button", { name: "2 agents active in the background · 1 waiting" })
-      .click();
+    await page.getByRole("button", { name: /2 agents working · 1 waiting/ }).click();
+    await page.getByRole("button", { name: "Open Agents" }).click();
     expect(onOpenAgents).toHaveBeenCalledOnce();
     expect(onStop).not.toHaveBeenCalled();
-    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await page.getByRole("button", { name: "Stop all", exact: true }).click();
     expect(onStop).toHaveBeenCalledOnce();
     await mounted.rerender(
-      <BackgroundLivenessChip
-        liveness="monitoring"
-        liveCount={0}
-        onStop={onStop}
-        stopping={true}
+      <LiveWorkDock
+        liveWork={makeThreadLiveWork({
+          liveness: "monitoring",
+          onStopAll: onStop,
+          stoppingAll: true,
+        })}
       />,
     );
     await expect
-      .element(page.getByRole("status", { name: "Monitoring in the background" }))
+      .element(page.getByRole("button", { name: "Monitoring in the background" }))
       .toBeVisible();
     await expect.element(page.getByRole("button", { name: "Stopping…" })).toBeDisabled();
   });
