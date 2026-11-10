@@ -10,7 +10,7 @@ import {
   ARTIFACT_HISTORY_PAGE_LIMIT,
   readEarlierArtifactMessages,
   type ReadArtifactHistoryPage,
-} from "./earlierThreadArtifacts";
+} from "./earlierThreadArtifacts.ts";
 
 const THREAD_ID = ThreadId.make("thread-1");
 const START = OrchestrationThreadHistoryCursor.make("v1.start");

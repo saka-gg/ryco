@@ -18,6 +18,7 @@ export * from "./approvalResponses.ts";
 export * from "./htmlRenderTimeline.ts";
 export * from "./htmlRenderMessages.ts";
 export * from "./threadArtifacts.ts";
+export * from "./earlierThreadArtifacts.ts";
 export * from "./checkpointRevert.ts";
 export * from "./commandLabel.ts";
 export * from "./userInputExchange.ts";

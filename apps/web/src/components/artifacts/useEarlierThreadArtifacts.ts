@@ -1,53 +1,19 @@
-import type { ThreadArtifactSource } from "@ryco/client-runtime/state/session";
+import {
+  createEarlierArtifactReads,
+  earlierArtifactReadIdentity,
+  type EarlierArtifactMessages,
+  type ThreadArtifactSource,
+} from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, OrchestrationThreadHistoryCursor, ThreadId } from "@ryco/contracts";
 import { useEffect, useEffectEvent, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
-import { LRUCache } from "../../lib/lruCache";
 import { useWsConnectionOpenedCount } from "../../rpc/wsConnectionState";
-import {
-  readEarlierArtifactMessages,
-  type EarlierArtifactMessages,
-} from "./earlierThreadArtifacts";
 
-/**
- * Keyed by where the thread as loaded begins: a timeline that pages further
- * back, or a window that starts over, begins somewhere else, and the read
- * starts over from there. A remount reads nothing it already has.
- */
-const readByStart = new LRUCache<EarlierArtifactMessages>(32, Number.POSITIVE_INFINITY);
-const inflight = new Map<string, Promise<EarlierArtifactMessages>>();
+const reads = createEarlierArtifactReads();
 
 export function __resetEarlierThreadArtifactsForTests(): void {
-  readByStart.clear();
-  inflight.clear();
-}
-
-function readFrom(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-  identity: string,
-  read: EarlierArtifactMessages | null,
-  cursor: OrchestrationThreadHistoryCursor,
-): Promise<EarlierArtifactMessages> {
-  const key = `${identity}:${cursor}`;
-  const existing = inflight.get(key);
-  if (existing) return existing;
-  const request = Promise.resolve()
-    .then(() => {
-      const readPage = readEnvironmentApi(environmentId)?.orchestration.getThreadHistoryPage;
-      // Not connected (yet): asked again once a connection opens.
-      if (!readPage) throw new Error("The environment cannot read thread history right now.");
-      return readEarlierArtifactMessages(readPage, threadId, cursor);
-    })
-    .then((page) => {
-      const next = { messages: [...(read?.messages ?? []), ...page.messages], cursor: page.cursor };
-      readByStart.set(identity, next, 1);
-      return next;
-    })
-    .finally(() => inflight.delete(key));
-  inflight.set(key, request);
-  return request;
+  reads.clear();
 }
 
 export interface EarlierThreadArtifacts {
@@ -85,12 +51,8 @@ export function useEarlierThreadArtifacts(input: {
   readonly enabled: boolean;
 }): EarlierThreadArtifacts {
   const { environmentId, threadId, startCursor } = input;
-  const identity =
-    environmentId && threadId && startCursor ? `${environmentId}:${threadId}:${startCursor}` : "";
-  const initialState = (): ReadState => ({
-    identity,
-    read: identity ? readByStart.get(identity) : null,
-  });
+  const identity = earlierArtifactReadIdentity(environmentId, threadId, startCursor);
+  const initialState = (): ReadState => ({ identity, read: reads.cached(identity) });
   const [stored, setState] = useState<ReadState>(initialState);
   const state = stored.identity === identity ? stored : initialState();
   const openCount = useWsConnectionOpenedCount();
@@ -108,14 +70,22 @@ export function useEarlierThreadArtifacts(input: {
     if (!due || !environmentId || !threadId || !cursor) return;
     const startedAtOpenCount = readOpenCount();
     let cancelled = false;
-    readFrom(environmentId, threadId, identity, read, cursor).then(
-      (next) => {
-        if (!cancelled) setState({ identity, read: next });
-      },
-      () => {
-        if (!cancelled) setState({ identity, read, failedAtOpenCount: startedAtOpenCount });
-      },
-    );
+    reads
+      .readFrom({
+        identity,
+        threadId,
+        read,
+        cursor,
+        readPage: () => readEnvironmentApi(environmentId)?.orchestration.getThreadHistoryPage,
+      })
+      .then(
+        (next) => {
+          if (!cancelled) setState({ identity, read: next });
+        },
+        () => {
+          if (!cancelled) setState({ identity, read, failedAtOpenCount: startedAtOpenCount });
+        },
+      );
     return () => {
       cancelled = true;
     };

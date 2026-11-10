@@ -133,6 +133,17 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
         module.clearPullRequestDeviceData(environmentId),
       ),
     );
+    // Attachment files read over a machine's connection live for one run of
+    // the app: the previous run's go now, and a machine's go with its cached
+    // content. Loaded off the launch path (expo-file-system stays out of it).
+    registerEnvironmentDevicePurge((environmentId) =>
+      import("../features/threads/attachmentFiles").then((module) =>
+        module.purgeAttachmentFiles(environmentId),
+      ),
+    );
+    void import("../features/threads/attachmentFiles")
+      .then((module) => module.clearAttachmentFilesFromEarlierRuns())
+      .catch(() => undefined);
     // Wave 2: hydrate the snapshot cache (cached node roster + per-environment
     // projections) before the hosted lifecycle can attempt a connection.
     // Catalog hydration must land first or the orphan check would misread

@@ -5,7 +5,6 @@ import {
 } from "@ryco/client-runtime/state/threads";
 
 import { mobileClock, mobileFrameScheduler, mobileObservability } from "../platform";
-import { getMobileEndpoint } from "../connection/runtimeConfig";
 
 // Mobile binding of the threads runtime, mirroring apps/web/src/store.ts. The
 // configurator is registered lazily (invoked on first runtime use) so this
@@ -19,8 +18,11 @@ setThreadsRuntimeConfigurator(() => {
     },
     observability: mobileObservability,
     isHostedHubMode: () => false,
-    resolveAttachmentPreviewUrl: ({ attachmentId }) =>
-      getMobileEndpoint().resolveHttpUrl(`/attachments/${encodeURIComponent(attachmentId)}`),
+    // No URL reaches a message attachment from the phone: each paired or Hub
+    // machine has its own authorized connection, and the app's credentials
+    // never go into an image request. Attachments are read over that
+    // connection instead (features/threads/attachmentFiles.ts).
+    resolveAttachmentPreviewUrl: () => undefined,
   });
 });
 
