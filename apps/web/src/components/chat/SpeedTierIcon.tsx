@@ -1,7 +1,7 @@
 import { ZapIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
-import type { SpeedTier } from "./modelTuning.logic";
+import type { SpeedTier } from "@ryco/client-runtime/state/composer/modelTuning";
 
 /** Lucide's `zap` bolt, so the doubled glyph matches the single one. */
 const BOLT_PATH =

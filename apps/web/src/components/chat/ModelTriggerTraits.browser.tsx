@@ -6,7 +6,7 @@ import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
 import { ModelTriggerTraits } from "./ModelTriggerTraits";
-import type { ModelTuningSummary } from "./modelTuning.logic";
+import type { ModelTuningSummary } from "@ryco/client-runtime/state/composer/modelTuning";
 
 const COOLDOWN: FastModeNotice = {
   kind: "cooldown",

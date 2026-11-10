@@ -3,7 +3,7 @@ import type {
   ProviderOptionDescriptor,
   ProviderOptionSelection,
 } from "@ryco/contracts";
-import type { FastModeNotice } from "@ryco/client-runtime/state/session";
+import type { FastModeNotice } from "../session/fastModeNotice.ts";
 import {
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,

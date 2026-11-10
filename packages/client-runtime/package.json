@@ -482,6 +482,10 @@
       "types": "./src/state/composer/index.ts",
       "import": "./src/state/composer/index.ts"
     },
+    "./state/composer/footerLayout": {
+      "types": "./src/state/composer/footerLayout.ts",
+      "import": "./src/state/composer/footerLayout.ts"
+    },
     "./state/composer/imageCompression": {
       "types": "./src/state/composer/imageCompression.ts",
       "import": "./src/state/composer/imageCompression.ts"
@@ -489,6 +493,10 @@
     "./state/composer/legacyModelFold": {
       "types": "./src/state/composer/legacyModelFold.ts",
       "import": "./src/state/composer/legacyModelFold.ts"
+    },
+    "./state/composer/modelTuning": {
+      "types": "./src/state/composer/modelTuning.ts",
+      "import": "./src/state/composer/modelTuning.ts"
     },
     "./state/composer/providerUpdateRequiredNotice": {
       "types": "./src/state/composer/providerUpdateRequiredNotice.ts",

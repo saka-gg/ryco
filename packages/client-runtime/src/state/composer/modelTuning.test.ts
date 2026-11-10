@@ -12,7 +12,7 @@ import {
   resolveModelTuning,
   stepTuningScale,
   summarizeModelTuning,
-} from "./modelTuning.logic";
+} from "./modelTuning.ts";
 
 const CLAUDE_EFFORT = {
   id: "effort",

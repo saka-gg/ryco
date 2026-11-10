@@ -118,7 +118,7 @@ import {
 import {
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
-} from "../composerFooterLayout";
+} from "@ryco/client-runtime/state/composer/footerLayout";
 import { type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";

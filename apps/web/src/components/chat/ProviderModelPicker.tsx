@@ -15,7 +15,7 @@ import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { ModelTriggerTraits } from "./ModelTriggerTraits";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
-import type { ModelTuningSummary } from "./modelTuning.logic";
+import type { ModelTuningSummary } from "@ryco/client-runtime/state/composer/modelTuning";
 import { LazyPhoneModelSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";

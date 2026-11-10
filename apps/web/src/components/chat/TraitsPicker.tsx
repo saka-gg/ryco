@@ -33,7 +33,7 @@ import {
   reasoningTone,
   SPEED_TIER_LABELS,
   withSpeedTier,
-} from "./modelTuning.logic";
+} from "@ryco/client-runtime/state/composer/modelTuning";
 import { applyDescriptorSelection, replaceDescriptorCurrentValue } from "./traitsMenuLogic";
 import {
   useProviderOptionsUpdater,

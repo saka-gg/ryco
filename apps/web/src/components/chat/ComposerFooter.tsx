@@ -30,7 +30,7 @@ import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
-import type { ModelTuningSummary } from "./modelTuning.logic";
+import type { ModelTuningSummary } from "@ryco/client-runtime/state/composer/modelTuning";
 import {
   CAUTION_RUNTIME_MODE,
   CAUTION_RUNTIME_MODE_CLASS_NAME,
