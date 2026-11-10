@@ -27,6 +27,7 @@ import {
   readDesktopThreadContentCacheEnabled,
   readDesktopWorkspaceState,
   subscribeDesktopThreadContentCacheEnabled,
+  subscribeDesktopWorkspaceState,
 } from "./desktopWorkspace";
 
 /** A machine's copy is written this long after its tasks last changed. */
@@ -158,19 +159,31 @@ export async function installDesktopTaskListCache(store?: TasksStore): Promise<v
     }
     hydratedAt.clear();
   });
-  uninstall.push(unsubscribeTasks, unsubscribeSetting);
+  const unsubscribeWorkspace = subscribeDesktopWorkspaceState(retryWaitingMachines);
+  uninstall.push(unsubscribeTasks, unsubscribeSetting, unsubscribeWorkspace);
   // Machines whose tasks were asked for before this module loaded.
-  for (const [id, environment] of Object.entries(tasks.getState().byEnvironment)) {
-    if (environment.readAt === null) hydrateOnce(id as EnvironmentId);
-  }
+  retryWaitingMachines();
 }
 
-/** Machines whose copy was asked for in this session: each is painted at most once. */
-const hydrationRequested = new Set<EnvironmentId>();
+/**
+ * The workspace state each machine's copy was last asked for under. Main can
+ * answer nothing while its workspace is still starting (the machine not yet in
+ * the catalog, the local machine's catalog id not yet known), so a machine is
+ * asked again once the workspace state changed, until a read or a copy shows.
+ */
+const askedUnder = new Map<EnvironmentId, object>();
 function hydrateOnce(environmentId: EnvironmentId): void {
-  if (hydrationRequested.has(environmentId)) return;
-  hydrationRequested.add(environmentId);
+  const workspace = readDesktopWorkspaceState();
+  if (askedUnder.get(environmentId) === workspace) return;
+  askedUnder.set(environmentId, workspace);
   void hydrateDesktopTaskList(environmentId).catch(() => undefined);
+}
+/** Asks again for every machine still waiting for its first read and without a copy shown. */
+function retryWaitingMachines(): void {
+  for (const [id, environment] of Object.entries(tasksStore?.getState().byEnvironment ?? {})) {
+    const environmentId = id as EnvironmentId;
+    if (environment.readAt === null && !hydratedAt.has(environmentId)) hydrateOnce(environmentId);
+  }
 }
 
 /**
@@ -184,7 +197,8 @@ export async function hydrateDesktopTaskList(environmentId: EnvironmentId): Prom
   if (store === null || (environmentOf(environmentId)?.readAt ?? null) !== null) return;
   if (!(await whenSettingKnown())) return;
   const saved = decodeSavedTaskList(await read(machineIdFor(environmentId)).catch(() => null));
-  if (saved === null) return;
+  // Turned off while main answered: the copy it sent is already deleted.
+  if (saved === null || readDesktopThreadContentCacheEnabled() !== true) return;
   // Recorded first: the store tells its subscribers while the copy is applied.
   hydratedAt.set(environmentId, saved.readAt);
   if (!applySavedTaskList(store, environmentId, saved)) {
@@ -201,7 +215,7 @@ export function resetDesktopTaskListCacheForTests(): void {
   timers.clear();
   writtenFrom.clear();
   hydratedAt.clear();
-  hydrationRequested.clear();
+  askedUnder.clear();
   for (const stop of uninstall.splice(0)) stop();
   installed = false;
   tasksStore = null;

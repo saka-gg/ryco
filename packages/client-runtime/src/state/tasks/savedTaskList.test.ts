@@ -103,6 +103,15 @@ describe("applying a saved task list", () => {
     ).toBe(false);
   });
 
+  it("shows no copy for a machine that refuses this account its tasks", () => {
+    useLocalTasksStore
+      .getState()
+      .setError(environmentId, { kind: "forbidden", message: "No access" });
+    expect(
+      applySavedTaskList(useLocalTasksStore, environmentId, boundSavedTaskList([task("a")], 1)!),
+    ).toBe(false);
+  });
+
   it("applies nothing for an empty copy", () => {
     expect(applySavedTaskList(useLocalTasksStore, environmentId, boundSavedTaskList([], 10)!)).toBe(
       false,

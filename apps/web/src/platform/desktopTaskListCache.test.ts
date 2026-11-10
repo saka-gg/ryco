@@ -9,7 +9,43 @@ import {
   isDesktopTaskListCopy,
   resetDesktopTaskListCacheForTests,
 } from "./desktopTaskListCache";
-import { setDesktopThreadContentCacheEnabled } from "./desktopWorkspace";
+
+// The workspace bridge's setting and state, driven by the tests.
+const workspace = vi.hoisted(() => {
+  const settingListeners = new Set<() => void>();
+  const stateListeners = new Set<() => void>();
+  const state = {
+    enabled: null as boolean | null,
+    workspace: { localEnvironmentId: null as string | null } as object,
+  };
+  return {
+    state,
+    settingListeners,
+    stateListeners,
+    setEnabled(enabled: boolean) {
+      state.enabled = enabled;
+      for (const listener of settingListeners) listener();
+    },
+    changeWorkspace(next: { localEnvironmentId: string | null }) {
+      state.workspace = { ...next };
+      for (const listener of stateListeners) listener();
+    },
+  };
+});
+vi.mock("./desktopWorkspace", () => ({
+  readDesktopThreadContentCacheEnabled: () => workspace.state.enabled,
+  subscribeDesktopThreadContentCacheEnabled: (listener: () => void) => {
+    workspace.settingListeners.add(listener);
+    return () => workspace.settingListeners.delete(listener);
+  },
+  readDesktopWorkspaceState: () => workspace.state.workspace,
+  subscribeDesktopWorkspaceState: (listener: () => void) => {
+    workspace.stateListeners.add(listener);
+    return () => workspace.stateListeners.delete(listener);
+  },
+}));
+const setDesktopThreadContentCacheEnabled = async (enabled: boolean) =>
+  workspace.setEnabled(enabled);
 
 const environmentId = "environment-desktop-tasks" as EnvironmentId;
 
@@ -33,6 +69,7 @@ function task(taskId: string, title = `Task ${taskId}`): LocalTask {
 }
 
 let stored: unknown = null;
+let read = vi.fn(async (_environmentId: EnvironmentId): Promise<unknown> => stored);
 const publish = vi.fn(async (_environmentId: EnvironmentId, list: unknown) => {
   stored = list;
   return true;
@@ -42,13 +79,17 @@ beforeEach(async () => {
   vi.useFakeTimers();
   stored = null;
   publish.mockClear();
+  read = vi.fn(async (_environmentId: EnvironmentId): Promise<unknown> => stored);
+  workspace.settingListeners.clear();
+  workspace.stateListeners.clear();
+  workspace.state.enabled = null;
+  workspace.state.workspace = { localEnvironmentId: null };
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: {
       desktopBridge: {
-        setDesktopThreadContentCacheEnabled: async (enabled: boolean) => enabled,
         publishDesktopTaskList: publish,
-        getDesktopTaskList: async () => stored,
+        getDesktopTaskList: (environmentId: EnvironmentId) => read(environmentId),
       },
     },
   });
@@ -113,6 +154,40 @@ describe("Desktop saved task lists", () => {
     useLocalTasksStore.getState().setLoading(environmentId);
     await vi.advanceTimersByTimeAsync(0);
     expect(Object.values(shown().tasks).map((entry) => entry.title)).toEqual(["From the copy"]);
+  });
+
+  it("asks again once main's workspace changed, until a copy shows", async () => {
+    // At launch main's workspace is not up yet: it has nothing for the machine.
+    useLocalTasksStore.getState().setLoading(environmentId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(shown().readAt).toBeNull();
+    // An unrelated store change asks nothing more under the same workspace state.
+    useLocalTasksStore.getState().setLoading(environmentId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(1);
+
+    stored = { version: 1, readAt: 4, tasks: [task("late", "Once main was up")] };
+    workspace.changeWorkspace({ localEnvironmentId: "local-machine" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(Object.values(shown().tasks).map((entry) => entry.title)).toEqual(["Once main was up"]);
+    // Shown: no more asking.
+    workspace.changeWorkspace({ localEnvironmentId: "local-machine" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("paints nothing when the setting is turned off while main answers", async () => {
+    stored = { version: 1, readAt: 4, tasks: [task("gone")] };
+    let answer: (value: unknown) => void = () => undefined;
+    read = vi.fn(() => new Promise<unknown>((resolve) => (answer = resolve)));
+    const pending = hydrateDesktopTaskList(environmentId);
+    await vi.advanceTimersByTimeAsync(0);
+    await setDesktopThreadContentCacheEnabled(false);
+    answer(stored);
+    await pending;
+    expect(shown().readAt).toBeNull();
   });
 
   it("ignores an unreadable copy", async () => {

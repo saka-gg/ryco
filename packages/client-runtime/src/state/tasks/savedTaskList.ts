@@ -95,6 +95,9 @@ export function applySavedTaskList(
   const state = store.getState();
   const current = state.byEnvironment[environmentId];
   if ((current?.readAt ?? null) !== null || saved.tasks.length === 0) return false;
+  // A machine that refuses this account its tasks, or has none, shows no copy either.
+  if (environmentId in state.forbidden || current?.error?.kind === "forbidden") return false;
+  if (current?.error?.kind === "unsupported") return false;
   state.applyList(environmentId, saved.tasks, {
     since: current?.writeEpoch ?? 0,
     readAt: saved.readAt,
