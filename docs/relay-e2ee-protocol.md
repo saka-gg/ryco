@@ -1266,10 +1266,22 @@ A response is compressed only when all of the following hold:
 
 The default allowlist:
 
-| Class                | Method and values                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| shell snapshot pages | `orchestration.subscribeShell`: `snapshot-threads` pages, and `snapshot-end` sharing a page |
-| provider lists       | `subscribeServerConfig`: full `providerStatuses` lists                                      |
+| Class                  | Method and values                                                                                  | Padding  |
+| ---------------------- | -------------------------------------------------------------------------------------------------- | -------- |
+| shell snapshot pages   | `orchestration.subscribeShell`: `snapshot-threads` pages, and `snapshot-end` sharing a page        | standard |
+| provider lists         | `subscribeServerConfig`: full `providerStatuses` lists                                             | standard |
+| server config          | `subscribeServerConfig`: `snapshot` and `settingsUpdated`; `server.getConfig` results              | standard |
+| file tree              | `projects.listEntries` results                                                                     | standard |
+| finished history pages | `orchestration.getThreadHistoryPage` results whose every item belongs to a turn that ended (below) | standard |
+| thread windows         | `orchestration.subscribeThreadWindow` `snapshot` items, `orchestration.getThreadWindow` results    | coarse   |
+
+A stream batch is compressed under the first class that accepts **all** of its values; a batch
+mixing values of two classes (for example a full provider list and a delta) is sent as it is. A
+history page counts as finished when none of its items is streaming, carries the id of the
+thread's running turn, or changed (`updatedAt`, else `createdAt`, else `completedAt`) at or after
+that turn was requested. The node reads the running turn from the thread's shell row when it
+answers; when it cannot tell (no such thread, a failed read, an item without a timestamp) the page
+is not compressed.
 
 What each class carries, stated because none of it is credential-free by construction:
 
@@ -1283,6 +1295,19 @@ What each class carries, stated because none of it is credential-free by constru
   endpoint it controls shaping its own catalog. Current clients ask for `providerStatusesDelta`
   and therefore receive no full list after the snapshot; full lists are compressed only for
   clients that do not take deltas.
+- **Server config** carries the client copy of `ServerSettings` (with keybindings, provider
+  statuses and the environment descriptor in a snapshot). That copy holds no secrets
+  (`redactServerSettingsForClient` in `apps/server/src/serverSettings.ts`,
+  `@ryco/shared/settingsSecrets`): sensitive provider environment variables, CLIProxyAPI hub keys
+  and the OpenCode server password are presence-only, and credentials embedded in provider and
+  telemetry URLs are replaced by a marker. Provider environment variables the user did not mark
+  sensitive are still sent as entered.
+- **File tree** carries workspace-relative paths and their kinds (file or directory). Never file
+  contents.
+- **Finished history pages** carry message text, activity payloads (commands, tool output),
+  proposed plans and checkpoint summaries of turns that ended.
+- **Thread windows** carry the same for the newest part of a thread, including the running turn
+  and its streaming message.
 
 Never compressed:
 
@@ -1292,19 +1317,14 @@ Never compressed:
   thread page, the node splits it off into an uncompressed message of its own ahead of the
   compressed page. The client acknowledges both messages; the node withholds the first of those
   two acknowledgements from the RPC server, which sent one chunk and waits for one.
-- Every event and delta, including `providerStatusesDelta`.
-- The server config snapshot, `settingsUpdated` and `server.getConfig`. They carry
-  `ServerSettings`. Its client copy no longer holds secrets (`redactServerSettingsForClient` in
-  `apps/server/src/serverSettings.ts`, `@ryco/shared/settingsSecrets`): sensitive provider
-  environment variables, CLIProxyAPI hub keys and the OpenCode server password are presence-only,
-  and credentials embedded in provider and telemetry URLs are replaced by a marker. Provider
-  environment variables the user did not mark sensitive are still sent as entered. Adding these
-  messages to the allowlist is now possible but is a separate decision.
+- Every event and delta, including `providerStatusesDelta`, `keybindingsUpdated` and every thread
+  window event.
+- History pages that are not finished (above).
+- Diffs (turn and thread diffs, change-request diffs) and file contents (file reads and chunks,
+  content search results). They mix repository content an attacker may have written with whatever
+  else the file or diff holds, `.env` files included, and they are fetched again on every change.
 - Errors and defects, authentication, pairing and token methods, terminals, and device and
   computer streams.
-- Thread windows (`orchestration.subscribeThreadWindow` snapshots, `orchestration.getThreadWindow`
-  and `orchestration.getThreadHistoryPage` results). Their rules are defined as an opt-in class and
-  are off by default (§4.6.6).
 
 The node compresses before §4.2 step 1, inside the RPC session's single output lock, so a
 response waiting on the compressor keeps its place and per-channel order holds. On an `e2ee`
@@ -1313,9 +1333,17 @@ channel the compressed frame is the record body, and it alone is checked against
 
 #### 4.6.4 Padding
 
-The frame is zero-padded to a multiple of `max(1 KiB, P / 16)`, where `P` is the largest power of
-two not above the unpadded frame length. The overhead stays below 6.25% at every size. A receiver
-rejects non-zero padding.
+The frame is zero-padded to a bucket. `P` is the largest power of two not above the unpadded frame
+length.
+
+- **Standard** padding rounds up to a multiple of `max(1 KiB, P / 16)`; the overhead stays below
+  6.25% at every size.
+- **Coarse** padding rounds up to a multiple of `max(16 KiB, P / 4)`; the overhead stays below 25%.
+  It is used for thread windows (§4.6.6).
+
+A receiver rejects non-zero padding and accepts any amount of zero padding, so the bucket is the
+node's choice alone: frame version 1 has accepted both since it was introduced, and a node may
+change its buckets without negotiation.
 
 #### 4.6.5 Client inflation and its guard
 
@@ -1381,14 +1409,48 @@ and timing, and it can close channels at will.
   unchanged content repeats the same length and teaches nothing, so each new guess still needs new
   attacker-controlled content inside the same message, for shell pages through thread titles or
   goals an attacker can steer.
-- **Per class.** Shell thread pages pair attacker-steerable titles and goals with other threads'
-  titles, goals, branches and provider error text. Credentials there are not expected but are not
-  excluded either: a user can paste a token into a title or goal, and provider error text can echo
-  one. Provider lists carry update output, status messages and account email, and attacker
-  influence over them is weak. Project data, settings, every event and every thread window stay
-  uncompressed by default. Thread windows would pair whatever the user pasted and tools printed
-  (environment dumps, configuration files, tokens) with repository content, fetched pages and
-  model output an attacker can shape; that is why they are opt-in.
+- **Per class.** What decides a class's exposure is whether an attacker can get **fresh content of
+  its own** into the **same message** as a secret, many times, and see each result's length.
+  - _Shell thread pages_ pair attacker-steerable titles and goals with other threads' titles,
+    goals, branches and provider error text. Credentials there are not expected but are not
+    excluded either: a user can paste a token into a title or goal, and provider error text can
+    echo one.
+  - _Provider lists_ carry update output, status messages and account email, and attacker
+    influence over them is weak.
+  - _Server config_ holds no secret by construction: the client copy of the settings is redacted
+    before it is encoded, so the only credential-like values left are provider environment
+    variables the user chose not to mark sensitive. An attacker's influence is weak as well: the
+    settings change only through the settings RPCs and the settings file, which an attacker would
+    have to control already. The few fields an agent can change (for example through Agent Control
+    tools that write settings) are user-approved operations, each of which is one observation. What
+    a probe would need — a stream of attacker-chosen variations beside an unchanging secret — the
+    class does not offer.
+  - _File tree_ carries paths. A path is a poor place for a secret (it is shown in every file
+    picker, in git status and in diffs), and a listing carries nothing else. An attacker who can
+    create files can shape the listing, but can learn only other paths, which the same attacker
+    can usually list directly. The risk accepted here is a secret a user put into a file **name**.
+  - _Finished history pages_ hold content that no longer changes. Every delivery of the same page —
+    a page is addressed by its cursor and limit — has the same length, so repeating it teaches
+    nothing; an attacker cannot add a guess to a finished turn. What remains is the one observation
+    each new page gives. That is the shell page case and smaller: a page holds content of turns that
+    ended, and fresh attacker content (a running turn's tool output or fetched page) is exactly what
+    the finished-turn rule keeps out. The rule is conservative on purpose: unknown state means no
+    compression.
+  - _Thread windows_ are the exposed class: they hold the running turn, whose tool output and
+    fetched pages an attacker can shape, beside whatever the user pasted and tools printed
+    (environment dumps, configuration files, tokens). A client re-reads a window when it opens the
+    thread, reconnects or refreshes it, so an attacker that steers the running turn and forces
+    reconnects can collect observations. Thread windows are therefore coarsely padded (§4.6.4): one
+    observation resolves the compressed size only to a quarter of its power of two (at least 16
+    KiB), a probe has to drive its guess across a bucket boundary with injected filler of known
+    length first, and that calibration is lost whenever the turn adds output, which a running turn
+    does continuously. This raises the cost by about `log2(bucket)` observations per character and
+    adds noise from the turn itself; it does not make the attack impossible, and it is accepted on
+    the grounds of §2.4 and the next bullet.
+  - _Diffs and file contents_ stay uncompressed. They are the largest class with the strongest
+    attacker influence (a repository file an attacker wrote, next to `.env` contents), they are
+    re-fetched on every change, and their secrets are exactly the format-prefixed tokens a probe
+    needs.
 - **Mitigations and their limits.** Fresh per-message contexts confine the channel to one
   message: no message can probe another. Padding hides the one to three bytes a guess changes
   unless the message sits within those bytes of a bucket boundary; an attacker who controls the
@@ -1399,11 +1461,16 @@ and timing, and it can close channels at will.
   it. Level 1 finds slightly fewer matches than higher levels, which adds noise but no protection.
 - **Per tier.** On the unsigned web tier an active Hub can already read everything through the
   code it serves (§2.4). On the native tiers, where §2.2 promises that the Hub learns only §2.5
-  metadata, shell-page compression is a residual risk for any secret that ends up in a thread title,
-  goal or provider error, against a Hub that also steers what those fields contain.
-- **The levers.** Every class is one entry of `RELAY_COMPRESSION_ALLOWLIST`; deleting
-  `shellSnapshotPages` or `providerStatuses` removes it, and adding
-  `RELAY_COMPRESSION_OPT_IN_CLASSES.threadWindows` turns thread windows on.
+  metadata, compression is a residual risk for any secret that ends up in a thread title, goal or
+  provider error (shell pages), in a file name (file tree), or in a thread window, against a Hub
+  that also steers what those fields contain and forces the re-reads. §17 records it.
+- **What it buys.** Measured on eight real threads (60 messages and 100 activities per window, the
+  web window): windows 1,237,542 to 508,224 bytes (2.4 times, coarse padding included), history
+  pages 1,189,276 to 366,208 bytes (3.2 times). That is what a thread open and a scroll through
+  history cost on a phone link.
+- **The levers.** Every class is one entry of `RELAY_COMPRESSION_ALLOWLIST`
+  (`apps/server/src/ws/relayResponseCompression.ts`); deleting an entry removes that class, and a
+  class's `padding` chooses its buckets.
 
 ## 5. Capability advertisement and negotiation
 
@@ -6515,6 +6582,16 @@ Entries are numbered and are referenced elsewhere in this document as §17.\<n\>
     unreachable against any conforming version-1 node — element 14 always contains `"IK"` — so this
     item, like item 19, is mostly a forward-looking bound on the first revision that ships a new
     tier or pattern, and §7.6's element-14 closure names the two places such a revision changes.
+
+21. **Compressed thread windows leak a coarse, content-dependent length to the Hub.** §4.6.6
+    compresses thread windows, which hold the running turn, and pads them coarsely instead of
+    leaving them plain. A Hub that also steers the running turn's tool output and forces the
+    client to re-read the window (by closing its channel) can probe a secret in the same window,
+    at a cost of roughly `log2(bucket)` additional observations per character and against the noise
+    of a turn that keeps adding output. The owner accepted this for the bandwidth a thread open
+    saves on phone links (§4.6.6, "What it buys"). The lever is one line: removing `threadWindows`
+    from `RELAY_COMPRESSION_ALLOWLIST` sends windows plain again; finished history pages, whose
+    content cannot change under observation, do not share this exposure.
 
 ## 18. Account-enrolled native authorization
 

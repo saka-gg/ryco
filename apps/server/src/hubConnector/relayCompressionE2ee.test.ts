@@ -79,7 +79,14 @@ const snapshot = {
   updatedAt: "2026-07-18T00:00:00.000Z",
 };
 
-async function e2eeNode() {
+const handlers: { [method: string]: unknown } = {
+  [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
+    Stream.fromArrays(...pageShellSnapshot(snapshot as never, 96 * 1_024)),
+};
+
+async function e2eeNode(
+  compressor: () => RelayResponseCompressor = () => new RelayResponseCompressor(),
+) {
   return harness({
     rpc: async (e2ee) => {
       const scope = await Effect.runPromise(Scope.make("sequential"));
@@ -92,14 +99,7 @@ async function e2eeNode() {
       const session = await Effect.runPromise(
         makeRpcByteSession(
           WsRpcGroup,
-          WsRpcGroup.toLayer(
-            Effect.succeed(
-              WsRpcGroup.of({
-                [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
-                  Stream.fromArrays(...pageShellSnapshot(snapshot as never, 96 * 1_024)),
-              } as never),
-            ),
-          ),
+          WsRpcGroup.toLayer(Effect.succeed(WsRpcGroup.of(handlers as never))),
           nodeE2eeRpcSink(e2ee),
           {
             queueCapacity: 64,
@@ -112,7 +112,7 @@ async function e2eeNode() {
                 ),
               ),
             onOutputFailure: () => e2ee.abandon(),
-            compressor: new RelayResponseCompressor(),
+            compressor: compressor(),
           },
         ).pipe(Effect.provideService(Scope.Scope, scope)),
       );
@@ -144,19 +144,28 @@ interface Record {
 
 /** Subscribe to the shell over the E2EE channel and read it to its exit, acking each chunk. */
 async function subscribe(advertise: boolean) {
-  const node = await e2eeNode();
+  return call(advertise, ORCHESTRATION_WS_METHODS.subscribeShell, { snapshotDelivery: "paged" });
+}
+
+/**
+ * One request over a fresh E2EE channel, read to its exit (acking each chunk).
+ * `hubBytes`: every data payload the node sent the Hub for it — what the relay
+ * carries, envelope and chunk headers included.
+ */
+async function call(
+  advertise: boolean,
+  tag: string,
+  payload: unknown,
+  compressor?: () => RelayResponseCompressor,
+) {
+  const node = await e2eeNode(compressor);
   const advertisement = await node.open();
   const client: EstablishedClient = await establish(node, "web", advertisement);
   const request = encoder.encode(
-    JSON.stringify({
-      _tag: "Request",
-      id: "1",
-      tag: ORCHESTRATION_WS_METHODS.subscribeShell,
-      payload: { snapshotDelivery: "paged" },
-      headers: [],
-    }),
+    JSON.stringify({ _tag: "Request", id: "1", tag, payload, headers: [] }),
   );
   let cursor = node.dataPayloads().length;
+  const start = cursor;
   await clientSend(
     node,
     client,
@@ -195,7 +204,11 @@ async function subscribe(advertise: boolean) {
       if (message._tag === "Exit") done = true;
     }
   }
-  return { node, records };
+  const hubBytes = node
+    .dataPayloads()
+    .slice(start, cursor)
+    .reduce((sum, bytes) => sum + bytes.byteLength, 0);
+  return { node, records, hubBytes };
 }
 
 function inflate(frame: Uint8Array): Uint8Array {
@@ -226,5 +239,111 @@ describe("relay payload compression on a real E2EE channel", () => {
     const { records } = await subscribe(false);
     expect(records.length).toBeGreaterThan(3);
     expect(records.some((record) => isCompressedRelayPayload(record.body))).toBe(false);
+  });
+
+  it("carries a thread open and a history page in far fewer relay bytes (H1)", async () => {
+    // A conversation shaped like a real one: prose, code, command output and
+    // file paths, from a small vocabulary with per-item variation. Sized like the
+    // phone's first window (30 messages, 40 activities), which this harness's
+    // relay queue carries uncompressed in one go.
+    const words = (seed: number, count: number) =>
+      Array.from(
+        { length: count },
+        (_, index) =>
+          [
+            "relay",
+            "session",
+            "channel",
+            "the",
+            "compress",
+            "pnpm",
+            "test",
+            "src/ws/index.ts",
+            "error",
+            "passed",
+            "const",
+            "await",
+            "function",
+            "frame",
+            "Hub",
+            "node",
+            "client",
+            `${(seed * 31 + index * 7) % 997}`,
+          ][(seed * 13 + index * 5) % 18],
+      ).join(" ");
+    const at = (minute: number) => `2026-11-10T09:${String(minute % 60).padStart(2, "0")}:00.000Z`;
+    const message = (index: number) => ({
+      id: `message-${index}`,
+      role: index % 4 === 0 ? "user" : "assistant",
+      text: words(index, 120 + (index % 7) * 40),
+      turnId: `turn-${Math.floor(index / 4)}`,
+      streaming: false,
+      createdAt: at(index),
+      updatedAt: at(index),
+    });
+    const activity = (index: number) => ({
+      id: `activity-${index}`,
+      tone: "tool",
+      kind: "tool.completed",
+      summary: `Ran ${words(index, 3)}`,
+      payload: { command: `bun run test ${words(index, 2)}`, output: words(index * 3, 200) },
+      turnId: `turn-${Math.floor(index / 6)}`,
+      sequence: index,
+      createdAt: at(index),
+    });
+    const window = {
+      snapshotSequence: 40,
+      thread: {
+        ...shellThread(1),
+        deletedAt: null,
+        messages: Array.from({ length: 30 }, (_, index) => message(index)),
+        activities: Array.from({ length: 40 }, (_, index) => activity(index)),
+        proposedPlans: [],
+        checkpoints: [],
+      },
+      history: Object.fromEntries(
+        ["messages", "proposedPlans", "activities", "checkpoints"].map((collection) => [
+          collection,
+          { oldestCursor: null, newestCursor: null, hasMoreBefore: false },
+        ]),
+      ),
+    };
+    const page = {
+      collection: "messages",
+      snapshotSequence: 40,
+      items: Array.from({ length: 40 }, (_, index) => message(index)),
+      page: { oldestCursor: null, newestCursor: null, hasMoreBefore: true },
+    };
+    handlers[ORCHESTRATION_WS_METHODS.getThreadWindow] = () => Effect.succeed(window);
+    handlers[ORCHESTRATION_WS_METHODS.getThreadHistoryPage] = () => Effect.succeed(page);
+    const idle = () =>
+      new RelayResponseCompressor({ turnState: { runningTurnOf: async () => null } });
+    const windowInput = {
+      threadId: "thread-1",
+      limits: { messages: 60, proposedPlans: 10, activities: 100, checkpoints: 10 },
+    };
+    const pageInput = {
+      threadId: "thread-1",
+      collection: "messages",
+      mode: { kind: "before", cursor: "cursor-1" },
+      limit: 60,
+    };
+    const open = ORCHESTRATION_WS_METHODS.getThreadWindow;
+    const history = ORCHESTRATION_WS_METHODS.getThreadHistoryPage;
+    const openBefore = await call(false, open, windowInput, idle);
+    const openAfter = await call(true, open, windowInput, idle);
+    const pageBefore = await call(false, history, pageInput, idle);
+    const pageAfter = await call(true, history, pageInput, idle);
+    for (const result of [openAfter, pageAfter]) {
+      expect(isCompressedRelayPayload(result.records[0]!.body)).toBe(true);
+    }
+    // Synthetic text compresses better than real threads (measured 2.4x for
+    // windows and 3.2x for history pages on real ones); only the direction is pinned.
+    expect(openAfter.hubBytes).toBeLessThan(openBefore.hubBytes / 2);
+    expect(pageAfter.hubBytes).toBeLessThan(pageBefore.hubBytes / 2);
+    console.info(
+      `H1 relay bytes: thread open ${openBefore.hubBytes} -> ${openAfter.hubBytes}, ` +
+        `history page ${pageBefore.hubBytes} -> ${pageAfter.hubBytes}`,
+    );
   });
 });

@@ -7,6 +7,7 @@ import {
   decodeCompressedRelayPayload,
   isCompressedRelayPayload,
   relayCompressionAdvertisement,
+  relayCompressionPaddedLength,
 } from "@ryco/shared/relayPayloadCompression";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -14,8 +15,8 @@ import { pageShellSnapshot } from "./context/shellSnapshotPages.ts";
 import {
   RELAY_COMPRESSION_ALLOWLIST,
   RELAY_COMPRESSION_MAX_TRACKED_REQUESTS,
-  RELAY_COMPRESSION_OPT_IN_CLASSES,
   RELAY_COMPRESSION_THRESHOLD_BYTES,
+  type RelayCompressionTurnState,
   RelayResponseCompressor,
   deflateRelayRpcMessage,
 } from "./relayResponseCompression.ts";
@@ -44,19 +45,52 @@ function encoded(response: unknown): Uint8Array {
   return encoder.encode(JSON.stringify(response));
 }
 
-function request(id: string, tag: string) {
-  return { _tag: "Request", id, tag, payload: {}, headers: [] };
+function request(id: string, tag: string, payload: unknown = {}) {
+  return { _tag: "Request", id, tag, payload, headers: [] };
 }
 
 /** A compressor whose client advertised, with `tags` requested as ids 1, 2, … */
 function advertisedCompressor(
   tags: ReadonlyArray<string>,
   options: ConstructorParameters<typeof RelayResponseCompressor>[0] = {},
+  payload: unknown = {},
 ): RelayResponseCompressor {
   const compressor = new RelayResponseCompressor(options);
   compressor.acceptInbound(appendRelayCompressionAdvertisement(encoder.encode("{}")));
-  tags.forEach((tag, index) => compressor.admitInbound(request(String(index + 1), tag)));
+  tags.forEach((tag, index) => compressor.admitInbound(request(String(index + 1), tag, payload)));
   return compressor;
+}
+
+function success(requestId: string, value: unknown) {
+  return { _tag: "Exit", requestId, exit: { _tag: "Success", value } };
+}
+
+/** History items: `count` finished assistant messages of turn `turnId`, changed at `at`. */
+function messages(count: number, turnId: string, at: string, streaming = false) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `message-${turnId}-${index}`,
+    role: "assistant",
+    text: `Ran the relay suite, case ${index % 13}: everything passed after the retry.`,
+    turnId,
+    streaming,
+    createdAt: at,
+    updatedAt: at,
+  }));
+}
+
+function historyPage(items: ReadonlyArray<unknown>) {
+  return {
+    collection: "messages",
+    snapshotSequence: 9,
+    items,
+    page: { oldestCursor: null, newestCursor: null, hasMoreBefore: true },
+  };
+}
+
+function turnState(
+  running: { readonly turnId: string; readonly requestedAt: string } | null | undefined,
+): RelayCompressionTurnState {
+  return { runningTurnOf: async () => running };
 }
 
 async function encode(
@@ -184,57 +218,120 @@ describe("RelayResponseCompressor", () => {
     }
   });
 
-  it("compresses full provider lists but no delta and nothing settings-bearing", async () => {
+  it("compresses full provider lists, the config snapshot and settings, never a delta", async () => {
     const compressor = advertisedCompressor([WS_METHODS.subscribeServerConfig]);
     const providers = threads(400);
-    const statuses = chunk("1", [{ version: 1, type: "providerStatuses", payload: { providers } }]);
-    const [frame] = await encode(compressor, statuses);
-    expect(isCompressedRelayPayload(frame!)).toBe(true);
-    for (const type of [
-      "providerStatusesDelta",
-      "snapshot",
-      "settingsUpdated",
-      "keybindingsUpdated",
-    ]) {
+    for (const type of ["providerStatuses", "snapshot", "settingsUpdated"]) {
       const response = chunk("1", [{ version: 1, type, payload: { providers } }]);
+      const [frame] = await encode(compressor, response);
+      expect(isCompressedRelayPayload(frame!)).toBe(true);
+      expect(inflate(frame!)).toEqual(encoded(response));
+    }
+    for (const values of [
+      [{ version: 1, type: "providerStatusesDelta", payload: { providers } }],
+      [{ version: 1, type: "keybindingsUpdated", payload: { providers } }],
+      // Two classes in one batch: neither accepts it whole.
+      [
+        { version: 1, type: "providerStatuses", payload: { providers } },
+        { version: 1, type: "providerStatusesDelta", payload: { providers } },
+      ],
+    ]) {
+      const response = chunk("1", values);
       expect(await encode(compressor, response)).toEqual([encoded(response)]);
     }
     const getConfig = advertisedCompressor([WS_METHODS.serverGetConfig]);
-    const config = { _tag: "Exit", requestId: "1", exit: { _tag: "Success", value: providers } };
-    expect(await encode(getConfig, config)).toEqual([encoded(config)]);
+    const [config] = await encode(getConfig, success("1", providers));
+    expect(isCompressedRelayPayload(config!)).toBe(true);
   });
 
-  it("does not compress thread windows by default", async () => {
+  it("compresses file-tree listings but never file contents or diffs", async () => {
+    const entries = Array.from({ length: 2_000 }, (_, index) => ({
+      path: `src/components/feature-${index % 40}/Widget${index}.tsx`,
+      kind: "file",
+      parentPath: `src/components/feature-${index % 40}`,
+    }));
+    const tree = advertisedCompressor([WS_METHODS.projectsListEntries]);
+    const [listing] = await encode(tree, success("1", { entries, truncated: false }));
+    expect(isCompressedRelayPayload(listing!)).toBe(true);
+    for (const method of [
+      WS_METHODS.projectsReadFile,
+      WS_METHODS.projectsReadFileChunk,
+      WS_METHODS.projectsSearchContent,
+      ORCHESTRATION_WS_METHODS.getTurnDiff,
+      ORCHESTRATION_WS_METHODS.getFullThreadDiff,
+      WS_METHODS.sourceControlGetChangeRequestDiff,
+    ]) {
+      const response = success("1", { contents: JSON.stringify(entries) });
+      expect(await encode(advertisedCompressor([method]), response)).toEqual([encoded(response)]);
+    }
+  });
+
+  it("compresses thread windows with coarse padding, but never their failure", async () => {
     const compressor = advertisedCompressor([
       ORCHESTRATION_WS_METHODS.getThreadWindow,
+      ORCHESTRATION_WS_METHODS.getThreadWindow,
       ORCHESTRATION_WS_METHODS.subscribeThreadWindow,
-      ORCHESTRATION_WS_METHODS.getThreadHistoryPage,
     ]);
-    const window = { _tag: "Exit", requestId: "1", exit: { _tag: "Success", value: threads(400) } };
-    expect(await encode(compressor, window)).toEqual([encoded(window)]);
-    const stream = chunk("2", [{ kind: "snapshot", snapshot: { threads: threads(400) } }]);
-    expect(await encode(compressor, stream)).toEqual([encoded(stream)]);
-    const page = { _tag: "Exit", requestId: "3", exit: { _tag: "Success", value: threads(400) } };
-    expect(await encode(compressor, page)).toEqual([encoded(page)]);
-  });
-
-  it("compresses an opted-in thread window's success but never its failure", async () => {
-    const compressor = advertisedCompressor(
-      [ORCHESTRATION_WS_METHODS.getThreadWindow, ORCHESTRATION_WS_METHODS.getThreadWindow],
-      { allowlist: { ...RELAY_COMPRESSION_ALLOWLIST, ...RELAY_COMPRESSION_OPT_IN_CLASSES } },
-    );
-    const success = {
-      _tag: "Exit",
-      requestId: "1",
-      exit: { _tag: "Success", value: threads(400) },
-    };
-    expect(isCompressedRelayPayload((await encode(compressor, success))[0]!)).toBe(true);
+    const window = success("1", {
+      thread: { messages: messages(300, "turn-1", "2026-11-10T09:00:00.000Z") },
+    });
+    const [frame] = await encode(compressor, window);
+    expect(isCompressedRelayPayload(frame!)).toBe(true);
+    expect(inflate(frame!)).toEqual(encoded(window));
+    const decoded = decodeCompressedRelayPayload(frame!);
+    if (decoded.kind !== "ok") throw new Error(decoded.reason);
+    const unpadded = 12 + decoded.body.byteLength;
+    expect(frame!.byteLength).toBe(relayCompressionPaddedLength(unpadded, "coarse"));
+    expect(frame!.byteLength % (16 * 1_024)).toBe(0);
     const failure = {
       _tag: "Exit",
       requestId: "2",
       exit: { _tag: "Failure", cause: [{ _tag: "Fail", error: { message: "x".repeat(40_000) } }] },
     };
     expect(await encode(compressor, failure)).toEqual([encoded(failure)]);
+    const snapshot = chunk("3", [{ kind: "snapshot", snapshot: { threads: threads(400) } }]);
+    expect(isCompressedRelayPayload((await encode(compressor, snapshot))[0]!)).toBe(true);
+    const event = chunk("3", [{ kind: "event", event: { pad: "x".repeat(40_000) } }]);
+    expect(await encode(compressor, event)).toEqual([encoded(event)]);
+  });
+
+  it("compresses a history page only when all of it belongs to turns that ended", async () => {
+    const before = "2026-11-10T09:00:00.000Z";
+    const after = "2026-11-10T09:30:00.000Z";
+    const running = { turnId: "turn-9", requestedAt: "2026-11-10T09:10:00.000Z" };
+    const compress = async (
+      state: RelayCompressionTurnState | undefined,
+      items: ReadonlyArray<unknown>,
+      payload: unknown = { threadId: "thread-1" },
+    ) => {
+      const compressor = advertisedCompressor(
+        [ORCHESTRATION_WS_METHODS.getThreadHistoryPage],
+        state === undefined ? {} : { turnState: state },
+        payload,
+      );
+      const [frame] = await encode(compressor, success("1", historyPage(items)));
+      return isCompressedRelayPayload(frame!);
+    };
+    const old = messages(300, "turn-1", before);
+    // No turn runs, or the page is older than the running one: compressed.
+    expect(await compress(turnState(null), old)).toBe(true);
+    expect(await compress(turnState(running), old)).toBe(true);
+    // Anything of the running turn, anything changed after it began, or anything streaming: plain.
+    expect(await compress(turnState(running), [...old, ...messages(1, "turn-9", before)])).toBe(
+      false,
+    );
+    expect(await compress(turnState(running), [...old, ...messages(1, "turn-2", after)])).toBe(
+      false,
+    );
+    expect(await compress(turnState(null), [...old, ...messages(1, "turn-1", before, true)])).toBe(
+      false,
+    );
+    // Turn state unknown or unavailable, or no thread in the request: plain.
+    expect(await compress(turnState(undefined), old)).toBe(false);
+    expect(await compress(undefined, old)).toBe(false);
+    expect(await compress(turnState(null), old, {})).toBe(false);
+    // An item without a timestamp: plain.
+    expect(await compress(turnState(null), [...old, { id: "x", turnId: "turn-1" }])).toBe(false);
   });
 
   it("leaves a large response of a method outside the allowlist alone", async () => {
@@ -247,13 +344,25 @@ describe("RelayResponseCompressor", () => {
     expect(await encode(compressor, response)).toEqual([encoded(response)]);
   });
 
-  it("keeps the default allowlist to shell thread pages and full provider lists", () => {
-    const methods = Object.values(RELAY_COMPRESSION_ALLOWLIST).flatMap((rules) =>
-      Object.keys(rules),
-    );
-    expect(methods.toSorted()).toEqual(
-      [ORCHESTRATION_WS_METHODS.subscribeShell, WS_METHODS.subscribeServerConfig].toSorted(),
-    );
+  it("keeps the default allowlist to the classes of docs/relay-e2ee-protocol.md §4.6.3", () => {
+    expect(
+      Object.fromEntries(
+        Object.entries(RELAY_COMPRESSION_ALLOWLIST).map(([name, rules]) => [
+          name,
+          Object.keys(rules).toSorted(),
+        ]),
+      ),
+    ).toEqual({
+      shellSnapshotPages: [ORCHESTRATION_WS_METHODS.subscribeShell],
+      providerStatuses: [WS_METHODS.subscribeServerConfig],
+      serverConfig: [WS_METHODS.serverGetConfig, WS_METHODS.subscribeServerConfig].toSorted(),
+      fileTree: [WS_METHODS.projectsListEntries],
+      finishedHistoryPages: [ORCHESTRATION_WS_METHODS.getThreadHistoryPage],
+      threadWindows: [
+        ORCHESTRATION_WS_METHODS.getThreadWindow,
+        ORCHESTRATION_WS_METHODS.subscribeThreadWindow,
+      ].toSorted(),
+    });
   });
 
   it("skips messages under the threshold and over the relay message limit", async () => {
