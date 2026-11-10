@@ -126,6 +126,10 @@
       "types": "./src/relayMessageChunks.ts",
       "import": "./src/relayMessageChunks.ts"
     },
+    "./threadReadCachePatch": {
+      "types": "./src/threadReadCachePatch.ts",
+      "import": "./src/threadReadCachePatch.ts"
+    },
     "./relayPayloadCompression": {
       "types": "./src/relayPayloadCompression.ts",
       "import": "./src/relayPayloadCompression.ts"

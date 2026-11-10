@@ -17,8 +17,18 @@ and recent conversation text to a compatible Hub. This is off by default: enabli
 allows Hub to read and persist that content, even when execution traffic uses end-to-end encryption.
 It does not change the node's relay encryption or admission policy.
 
-The node coalesces orchestration changes for 250 milliseconds and starts at most one upload per
-second, with a five-second reconciliation fallback and up to 16 snapshots and two MiB per batch.
+The node coalesces orchestration changes for 250 milliseconds and, while changes keep coming (an
+agent streaming), starts at most one upload every five seconds; a turn that ends is uploaded at
+once. Batches hold up to 16 items and two MiB of JSON.
+
+A Hub that supports it announces `patch-v1` and `deflate` in its `begin` answer. The node then
+uploads only what changed since the Hub's stored copy — the thread rows that changed or left the
+index (`shellPatch`), and per thread the messages that are new or changed (`threadPatch`, with a
+digest of the whole result the Hub checks) — and deflates the request body. A patch the Hub cannot
+apply is a revision conflict (the node starts a new generation) or, for a thread body the Hub
+evicted, is named in the answer and uploaded whole next. An older Hub announces nothing and keeps
+receiving whole items; an older node ignores the announcement. Both sides apply patches with
+`@ryco/shared/threadReadCachePatch`.
 Initial synchronization starts with the most recently updated threads and retains at most
 512 thread bodies, each containing at most 150 messages and one MiB of UTF-8 JSON. Attachments,
 tool output, credentials, terminal data, pending actions, and relay frames are excluded. An
