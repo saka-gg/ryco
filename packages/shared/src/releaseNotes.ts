@@ -32,6 +32,46 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.46",
+    date: "November 10, 2026",
+    dateTime: "2026-11-10",
+    summary:
+      "Ryco sends and stores far less: reconnects resume instead of loading everything again, images arrive as previews, a recurring server freeze is gone, and agent pages can be zoomed.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.46`,
+    highlights: [
+      {
+        title: "Reconnects that pick up where they left off",
+        summary:
+          "After a network change, a wake from sleep or a switch between machines, Ryco now fetches only what changed instead of the whole thread list and every open thread. Terminal output goes only to windows that show that terminal, and hidden tabs do far less work.",
+      },
+      {
+        title: "Lighter threads, files and diffs",
+        summary:
+          "Long tool output and very long messages arrive as a preview with the rest one click away. Files, file trees and local changes that have not changed are no longer downloaded again, and large diffs load file by file.",
+      },
+      {
+        title: "Images as previews, cached for good",
+        summary:
+          "Images in a chat load as small previews and open in full size on click. Once loaded, images, project icons and avatars stay cached instead of being fetched again after an hour.",
+      },
+      {
+        title: "Zoom for agent pages and images",
+        summary:
+          "Pages an agent publishes can be zoomed with buttons, the keyboard or a pinch, and fitted to the panel width. Images zoom at the pointer and can be dragged around.",
+      },
+      {
+        title: "No more freezes, and a smaller database",
+        summary:
+          "A cleanup that paused the server for several seconds every few hours now runs without anyone noticing. Settings → Storage lists old database backups and offers “Compact now” when the database holds a lot of unused space.",
+      },
+      {
+        title: "A quicker, more complete iPhone app",
+        summary:
+          "The iPhone app, still in development, shows images, pages and files an agent attached, keeps its connection through a short app switch and opens faster with large saved data. Approval and question alerts show the command or question, and the app icon carries a badge.",
+      },
+    ],
+  },
+  {
     version: "0.1.45",
     date: "November 10, 2026",
     dateTime: "2026-11-10",
