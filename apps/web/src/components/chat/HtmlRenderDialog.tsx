@@ -2,11 +2,9 @@ import type { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import type { HtmlRenderMetadata } from "@ryco/shared/htmlRender";
 import { createContext, use, useCallback, useState, type ReactNode } from "react";
 
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import type { ChatFileAttachment } from "../../types";
-import { Dialog, DialogDescription, DialogHeader, DialogPopup, DialogTitle } from "../ui/dialog";
-import { useHtmlRenderMessageSend } from "./htmlRenderMessages";
-import { HtmlRenderFullView, HtmlRenderViewActions } from "./HtmlRenderView";
-import { useHtmlRenderSource } from "./useHtmlRenderSource";
+import { Dialog } from "../ui/dialog";
 
 /** An HTML render of a thread: the stored page and what it is called. */
 export interface HtmlRenderTarget {
@@ -29,53 +27,13 @@ type OpenHtmlRender = (request: HtmlRenderOpenRequest) => void;
 
 const HtmlRenderOpenerContext = createContext<OpenHtmlRender | null>(null);
 
-function HtmlRenderDialogPopup(props: {
-  readonly request: HtmlRenderOpenRequest;
-  readonly onClose: () => void;
-}) {
-  const { target, origin } = props.request;
-  const { title } = target.htmlRender;
-  // A page already shown inline comes from memory.
-  const source = useHtmlRenderSource(target);
-  const [showSource, setShowSource] = useState(false);
-  const onSendMessage = useHtmlRenderMessageSend({
-    environmentId: target.environmentId,
-    threadId: target.threadId,
-    title,
-    enabled: target.canSendMessages === true,
-  });
-  return (
-    <DialogPopup
-      className="h-[85dvh] max-w-5xl overflow-hidden"
-      bottomStickOnMobile={false}
-      morph={origin ? { origin } : "auto"}
-    >
-      <DialogHeader className="shrink-0 flex-row items-center gap-2 border-b py-3 pr-14 pl-5 max-sm:pb-3">
-        <DialogTitle className="min-w-0 flex-1 truncate text-base" title={title}>
-          {title}
-        </DialogTitle>
-        <DialogDescription className="sr-only">
-          A page the agent published, running in a sandbox.
-        </DialogDescription>
-        <HtmlRenderViewActions
-          html={source.html}
-          title={title}
-          showSource={showSource}
-          onShowSourceChange={setShowSource}
-        />
-      </DialogHeader>
-      {/* A gutter, so the page's content never meets the dialog's edge. */}
-      <HtmlRenderFullView
-        source={source}
-        title={title}
-        sizeBytes={target.attachment.sizeBytes}
-        showSource={showSource}
-        onEscape={props.onClose}
-        onSendMessage={onSendMessage}
-        className="rounded-b-[calc(min(var(--radius-2xl),1.25rem)-1px)] px-4 pt-4 sm:px-6"
-      />
-    </DialogPopup>
-  );
+const LazyHtmlRenderDialogPopup = preloadableLazy(() =>
+  import("./HtmlRenderDialogPopup").then((module) => module.HtmlRenderDialogPopup),
+);
+
+/** Loads the dialog's body ahead of a click: the reader is about to open a page full size. */
+export function preloadHtmlRenderDialog(): void {
+  void LazyHtmlRenderDialogPopup.preload();
 }
 
 /** An HTML render at full size, with its source and a download. */
@@ -86,6 +44,8 @@ export function HtmlRenderDialog(props: {
   readonly onClosed?: () => void;
 }) {
   const { request } = props;
+  // The body is its own chunk; the dialog opens once it is in (at once after the first).
+  const ready = useLazyComponentReady(LazyHtmlRenderDialogPopup, props.open && request !== null);
   return (
     <Dialog
       open={props.open && request !== null}
@@ -94,8 +54,8 @@ export function HtmlRenderDialog(props: {
         if (!open) props.onClosed?.();
       }}
     >
-      {request && (
-        <HtmlRenderDialogPopup
+      {request && ready && (
+        <LazyHtmlRenderDialogPopup
           // Another page starts over: its own source toggle, its own frame.
           key={`${request.target.messageId}:${request.target.attachment.id}`}
           request={request}

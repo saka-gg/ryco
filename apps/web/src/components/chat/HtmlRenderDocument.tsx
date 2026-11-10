@@ -5,12 +5,24 @@ import {
   htmlRenderThemeWindowName,
   isHtmlRenderEscape,
   readHtmlRenderContentHeight,
+  readHtmlRenderContentWidth,
   readHtmlRenderLinkRequest,
   readHtmlRenderMessageRequest,
   readHtmlRenderPointerInside,
+  readHtmlRenderZoomRequest,
   type HtmlRenderTheme,
+  type HtmlRenderZoomRequest,
 } from "@ryco/shared/htmlRender";
-import { memo, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import type { HtmlRenderContentWidth } from "@ryco/shared/htmlRenderZoom";
+import {
+  memo,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 
 import { cn } from "~/lib/utils";
 import { useHtmlRenderTheme } from "~/themes/htmlRenderTheme";
@@ -50,6 +62,16 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
    * frame name tells the page.
    */
   readonly onSendMessage?: HtmlRenderPageMessageSender | undefined;
+  /**
+   * The page is shown where it can be zoomed: its zoom keys and pinches come
+   * here instead of zooming the browser. Like `onSendMessage`, whether it is
+   * present must not change while the frame lives (the frame name tells the page).
+   */
+  readonly onZoomRequest?: ((request: HtmlRenderZoomRequest) => void) | undefined;
+  /** Receives the page's content width and the width it is laid out at, for fitting it. */
+  readonly onContentWidth?: ((content: HtmlRenderContentWidth) => void) | undefined;
+  /** Where and how large the frame sits (its zoom); merged over its own style. */
+  readonly frameStyle?: CSSProperties | undefined;
 }) {
   const theme = useHtmlRenderTheme();
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -57,7 +79,10 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
   // for the frame's lifetime; later themes arrive as messages.
   const [initial] = useState(() => ({
     html: props.html,
-    name: htmlRenderThemeWindowName(theme, { sendMessages: props.onSendMessage !== undefined }),
+    name: htmlRenderThemeWindowName(theme, {
+      sendMessages: props.onSendMessage !== undefined,
+      zoom: props.onZoomRequest !== undefined,
+    }),
   }));
   const [loaded, setLoaded] = useState(false);
 
@@ -162,6 +187,25 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
     return () => window.removeEventListener("message", resize);
   }, [onContentHeight]);
 
+  // The frame name already told the page whether it may zoom. The handlers
+  // follow the view's zoom, so the listener follows them.
+  const { onZoomRequest, onContentWidth } = props;
+  useEffect(() => {
+    if (onZoomRequest === undefined && onContentWidth === undefined) return;
+    const listen = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow) return;
+      const request = onZoomRequest ? readHtmlRenderZoomRequest(event.data) : undefined;
+      if (request !== undefined) {
+        onZoomRequest?.(request);
+        return;
+      }
+      const width = onContentWidth ? readHtmlRenderContentWidth(event.data) : undefined;
+      if (width !== undefined) onContentWidth?.(width);
+    };
+    window.addEventListener("message", listen);
+    return () => window.removeEventListener("message", listen);
+  }, [onContentWidth, onZoomRequest]);
+
   const { onEscape } = props;
   useEffect(() => {
     if (onEscape === undefined) return;
@@ -213,7 +257,11 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
         loaded ? "opacity-100" : "scheme-light opacity-0",
         props.className,
       )}
-      style={loaded ? { colorScheme: theme.appearance } : undefined}
+      style={
+        loaded
+          ? { ...props.frameStyle, colorScheme: theme.appearance }
+          : (props.frameStyle ?? undefined)
+      }
     />
   );
 });

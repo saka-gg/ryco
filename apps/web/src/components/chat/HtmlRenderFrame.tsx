@@ -13,7 +13,7 @@ import { cn } from "~/lib/utils";
 import type { ChatFileAttachment } from "../../types";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { useHtmlRenderOpener } from "./HtmlRenderDialog";
+import { preloadHtmlRenderDialog, useHtmlRenderOpener } from "./HtmlRenderDialog";
 import { HtmlRenderDocument } from "./HtmlRenderDocument";
 import { useHtmlRenderMessageSend } from "./htmlRenderMessages";
 import { HtmlRenderSourceStatus } from "./HtmlRenderView";
@@ -146,6 +146,9 @@ export const HtmlRenderFrame = memo(function HtmlRenderFrame(props: {
                       variant="ghost"
                       // A plate of its own, so it reads over any page.
                       className="border-border bg-background/85 text-foreground/75 shadow-sm/10 backdrop-blur-sm hover:bg-background hover:text-foreground"
+                      // The full-size view is its own chunk: fetch it as the reader reaches for it.
+                      onPointerEnter={preloadHtmlRenderDialog}
+                      onFocus={preloadHtmlRenderDialog}
                       onClick={() =>
                         open({
                           target: {

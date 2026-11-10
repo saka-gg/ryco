@@ -58,6 +58,10 @@
       "types": "./src/htmlRender.ts",
       "import": "./src/htmlRender.ts"
     },
+    "./htmlRenderZoom": {
+      "types": "./src/htmlRenderZoom.ts",
+      "import": "./src/htmlRenderZoom.ts"
+    },
     "./htmlRenderToolPresentation": {
       "types": "./src/htmlRenderToolPresentation.ts",
       "import": "./src/htmlRenderToolPresentation.ts"

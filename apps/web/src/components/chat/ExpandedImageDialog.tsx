@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useState } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { hasNoShortcutModifiers } from "../../keybindings";
 import { Button } from "../ui/button";
-import { ExpandedImageContent } from "./ExpandedImageContent";
+import { ZoomableImage } from "./ZoomableImage";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 
 interface ExpandedImageDialogProps {
@@ -180,7 +180,7 @@ function ExpandedImageStage({
         >
           <XIcon />
         </Button>
-        <ExpandedImageContent
+        <ZoomableImage
           image={item}
           {...(contained
             ? { className: "mx-auto max-h-[calc(100cqh-1.5rem)] max-w-[100cqw]" }
