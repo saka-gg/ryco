@@ -21,6 +21,12 @@ import {
 import type { DpopSignerService } from "@ryco/client-runtime/platform";
 
 import { mobileAppLifecycle } from "../platform/appLifecycle";
+import {
+  isMobileHubSessionOnline,
+  mobileHubSessionStreamFactory,
+  probeMobileHubSession,
+  watchMobileHubSession,
+} from "./hubSession";
 import { createMobileDpopSigner } from "../platform/dpopSigner";
 import { isE2eePairingRecord } from "../platform/e2eeTrustModel";
 import { mobileE2eeTrustStore } from "../platform/e2eeTrustStore";
@@ -108,6 +114,8 @@ installHostedEnvironmentConnectionFactory(createHostedEnvironmentConnection);
  */
 
 let configured = false;
+/** Stops the account session watcher (`hubSession.ts`). */
+let stopHubSession: (() => void) | null = null;
 let session: Promise<void> | undefined;
 let selectionWatch: (() => void) | undefined;
 let enrollmentCoordinator: NativeE2eeEnrollmentCoordinator | null = null;
@@ -252,9 +260,12 @@ export async function configureMobileHostedRuntime(
     isForeground: () => mobileAppLifecycle.isForeground(),
     subscribeForeground,
     hasPendingRelayRequests: hasHostedRelayPendingRequests,
-    // No account subscription here, and every directory read is device-key
-    // signed: poll quickly only while a screen shows node presence.
+    // Every directory read is device-key signed: poll quickly only while a
+    // screen shows node presence, and at the two-minute backstop while the
+    // account session (`hubSession.ts`) pushes directory changes.
     demandDrivenDirectoryRefresh: true,
+    hasLiveHubSubscription: isMobileHubSessionOnline,
+    probeHubSubscription: probeMobileHubSession,
     resetRelayAttemptFactory: resetHostedRelayAttemptFactory,
     relayUrl: mobileHostedRelayUrl,
     // Each environment's relay binding prepares its E2EE context and issues its
@@ -279,8 +290,11 @@ export async function configureMobileHostedRuntime(
         ...input,
         e2ee: providerForMobileRelaySocketContext(input.preparedSocketContext),
         disposePreparedContext: () => disposeMobileRelaySocketContext(input.preparedSocketContext),
+        // A stream of the account session while it is online; its own socket otherwise.
+        sessionStream: mobileHubSessionStreamFactory(),
       }),
   });
+  stopHubSession = watchMobileHubSession();
   enrollmentCoordinator = createNativeE2eeEnrollmentCoordinator({
     platform: mobileNativeE2eePlatform,
     api: getHostedHubApi(),
@@ -589,6 +603,8 @@ export function ensureMobileHostedSession(): Promise<void> {
 /** Invalidate hosted availability after a deliberate Hub profile change. */
 export function invalidateMobileHostedRuntime(): void {
   configured = false;
+  stopHubSession?.();
+  stopHubSession = null;
   setMobileHostedModeAvailable(false);
   session = undefined;
   selectionWatch?.();

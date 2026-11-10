@@ -16,7 +16,7 @@ import type {
   SessionCredentialsService,
 } from "@ryco/client-runtime/platform";
 
-import { HostedHubApi, HostedHubApiError } from "./api.ts";
+import { HostedHubApi, HostedHubApiError, HUB_NATIVE_SESSION_FEATURE } from "./api.ts";
 import { encodeBase64Url } from "../relay/base64url.ts";
 
 const PASSKEY_ID = "pkey_aaaaaaaaaaaaaaaaaaaaaa";
@@ -786,6 +786,26 @@ describe("HostedHubApi", () => {
       protocolMajor: 1,
       protocolMinor: 3,
     });
+  });
+
+  it("records the features the Hub announces with its directory, and tells listeners of changes", async () => {
+    const api = createApi();
+    const nodeId = `node_${"n".repeat(22)}`;
+    const changes = vi.fn();
+    api.subscribeHubFeatures(changes);
+    expect(api.hubFeatures()).toEqual([]);
+    globalThis.fetch = vi.fn(async () =>
+      response({ nodes: [hostedNode(nodeId)], hubFeatures: ["native-session-v1", 7, "later"] }),
+    );
+    await api.listNodes();
+    expect(api.hubFeatures()).toEqual([HUB_NATIVE_SESSION_FEATURE, "later"]);
+    await api.listNodes();
+    expect(changes).toHaveBeenCalledOnce();
+    // An older Hub announces nothing.
+    globalThis.fetch = vi.fn(async () => response({ nodes: [hostedNode(nodeId)] }));
+    await api.listNodes();
+    expect(api.hubFeatures()).toEqual([]);
+    expect(changes).toHaveBeenCalledTimes(2);
   });
 
   it("rejects malformed directory and ticket responses", async () => {

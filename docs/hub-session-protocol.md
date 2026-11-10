@@ -6,7 +6,8 @@ authorized logical relay streams through the browser session. Changing a thread 
 closing a logical stream, or losing a node does not close the account socket.
 
 The upgrade requires the same exact-origin, matching-host, HttpOnly browser-session policy
-as the existing relay client endpoint. Native DPoP clients retain `/v1/relay/client`.
+as the existing relay client endpoint. Native apps may use the same endpoint with DPoP
+authentication instead (see "Native sessions" below); otherwise they keep `/v1/relay/client`.
 The physical session grants no node or mutation authority. Each logical stream still
 consumes a fresh single-use node ticket, negotiates the existing relay protocol and E2EE
 channel, and accepts a current shell snapshot before mutations become available. On version 2
@@ -129,6 +130,39 @@ terminal; ordinary network loss uses bounded, jittered retries. Signing out disp
 every logical stream and the physical socket. Account/session generations fence stale
 callbacks. An unsupported session endpoint or protocol does not silently fall back to
 a weaker transport.
+
+## Native sessions
+
+The iPhone and Mac apps authenticate with a DPoP-bound session token rather than a cookie. A Hub
+that accepts them on this endpoint announces it with `"hubFeatures": ["native-session-v1"]` in the
+answer of `GET /api/nodes`, the directory read every client already makes; a Hub that does not
+announces nothing, and an app then keeps one `/v1/relay/client` socket per machine and its directory
+polling exactly as before (`HostedHubApi.hubFeatures`, `HUB_NATIVE_SESSION_FEATURE`).
+
+- **Upgrade.** `Authorization: DPoP <token>` and a `DPoP` proof over `GET` and the full
+  `wss://<hub>/v1/relay/session` URL, exactly as on `/v1/relay/client`: the proof is bound to the
+  session's key and single-use, a `Cookie` is refused, and the token must belong to a native
+  session (a browser token presented this way is refused). No Origin or Sec-Fetch checks apply to
+  this branch. The Hub re-authorizes the stored token for pings, opens and invalidations; a revoked,
+  expired or replaced session closes the socket with 4411.
+- **Version 1 only.** A native session negotiates version 1 whatever it offers, so it never sees
+  version 2 `ready` or `openNode`. Each machine's stream authenticates with the app's own native
+  relay ticket in its relay `auth` frame (`open`), bought over HTTPS as before: that ticket carries
+  the account-grant context the suite-`0x02` handshake needs (relay-e2ee-protocol.md §18.5), which a
+  server-minted open would have to deliver in-band. A ticket opens a stream only on a socket of the
+  session it was issued to.
+- **What it saves.** One TLS connection and WebSocket upgrade (and its DPoP proof) per machine and
+  per wake, and directory polling: `invalidate` re-reads the directory on change, and polling falls
+  to the two-minute backstop while the session is online (`hasLiveHubSubscription`).
+- **When an app holds it** (`@ryco/client-runtime/relay/nativeHubSessionManager`): while signed in
+  on a Hub that announced it, opened only in the foreground, kept in the background only while a
+  machine channel still rides it (the app's own background rules decide how long channels stay),
+  replaced when the account, session or Space changes. Machine channels use it only while it is
+  online; one started while it connects or reconnects opens its own socket. A credential refusal
+  hands the session to its owner to revalidate and opens again at most once a minute. The phone's
+  upgrade is minted asynchronously before the socket exists
+  (`@ryco/client-runtime/relay/deferredHubSessionSocket`); the Mac holds the socket in its main
+  process (`apps/desktop/src/desktopHubSession.ts`).
 
 ## Subscriptions and lifecycle
 

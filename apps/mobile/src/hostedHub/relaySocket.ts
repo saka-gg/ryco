@@ -109,6 +109,11 @@ export interface MobileHostedRelaySocketOptions {
    * could not deliver, and then this socket neither advertises nor inflates.
    */
   readonly relayCompression?: boolean | undefined;
+  /**
+   * A logical stream of the account session (`hubSession.ts`) to run this channel on instead of
+   * a socket of its own. The ticket still authenticates the channel in its first frame.
+   */
+  readonly sessionStream?: (() => RelaySocket) | undefined;
 }
 
 export { EARLY_RELAY_SOCKET_TICKET_WAIT_MS };
@@ -122,7 +127,7 @@ export interface MobileEarlyRelaySocketOptions {
   readonly clearTimeout?: (timer: unknown) => void;
 }
 
-interface UpgradeHeaderOptions {
+export interface UpgradeHeaderOptions {
   readonly url: string;
   readonly dpopSigner?: (() => Promise<DpopSignerService>) | undefined;
   readonly readBearerToken?: (() => string | null) | undefined;
@@ -148,7 +153,7 @@ interface UpgradeHeaderOptions {
  * never enter the app-global store. Owner acceptance row 8 is what proves
  * it end to end.
  */
-async function prepareUpgradeHeaders(
+export async function prepareMobileUpgradeHeaders(
   options: UpgradeHeaderOptions,
 ): Promise<Readonly<Record<string, string>>> {
   const token = (
@@ -175,7 +180,7 @@ export class MobileEarlyRelaySocket extends EarlyRelaySocket<NativeSocketLike> {
   constructor(options: MobileEarlyRelaySocketOptions) {
     super({
       url: options.url,
-      prepareUpgradeHeaders: () => prepareUpgradeHeaders(options),
+      prepareUpgradeHeaders: () => prepareMobileUpgradeHeaders(options),
       createSocket: options.createSocket ?? defaultCreateSocket,
       ...(options.setTimeout === undefined ? {} : { setTimeout: options.setTimeout }),
       ...(options.clearTimeout === undefined ? {} : { clearTimeout: options.clearTimeout }),
@@ -183,10 +188,22 @@ export class MobileEarlyRelaySocket extends EarlyRelaySocket<NativeSocketLike> {
   }
 }
 
-/** Start the relay upgrade for an attempt whose ticket is still being issued. */
+/** Whether relay channels ride the account session now; set by `hubSession.ts`. */
+let sessionCarriesChannels: () => boolean = () => false;
+
+/** Install the account session's answer to "do channels ride you now?" (`hubSession.ts`). */
+export function setMobileRelayChannelsRideSession(predicate: () => boolean): void {
+  sessionCarriesChannels = predicate;
+}
+
+/**
+ * Start the relay upgrade for an attempt whose ticket is still being issued; none while the
+ * account session carries relay channels (`hubSession.ts`): the channel then opens a stream on it.
+ */
 export function openMobileEarlyRelaySocket(
   options?: Partial<MobileEarlyRelaySocketOptions>,
-): MobileEarlyRelaySocket {
+): MobileEarlyRelaySocket | undefined {
+  if (sessionCarriesChannels()) return undefined;
   return new MobileEarlyRelaySocket({ url: mobileHostedRelayUrl(), ...options });
 }
 
@@ -210,18 +227,19 @@ interface Registration {
   readonly once: boolean;
 }
 
-function defaultCreateSocket(
+export function defaultCreateSocket(
   url: string,
   headers: Readonly<Record<string, string>>,
+  protocols?: readonly string[],
 ): NativeSocketLike {
   // React Native's WebSocket accepts a third options argument carrying request
   // headers; the DOM lib's type does not model it.
   const constructor = globalThis.WebSocket as unknown as new (
     url: string,
-    protocols: undefined,
+    protocols: string[] | undefined,
     options: { headers: Readonly<Record<string, string>> },
   ) => NativeSocketLike;
-  return new constructor(url, undefined, { headers });
+  return new constructor(url, protocols === undefined ? undefined : [...protocols], { headers });
 }
 
 type InboundMessage =
@@ -295,7 +313,9 @@ export class MobileHostedRelaySocket {
     // let the engine send before the wire is up — and buffer its listener
     // registrations for replay against the real socket.
     const readSocket = (): NativeSocketLike | null => this.#socket;
-    const relaySocket: RelaySocket = {
+    const streamSocket = options.sessionStream?.();
+    if (streamSocket !== undefined) options.earlySocket?.discard();
+    const relaySocket: RelaySocket = streamSocket ?? {
       get bufferedAmount() {
         return readSocket()?.bufferedAmount ?? 0;
       },
@@ -361,7 +381,7 @@ export class MobileHostedRelaySocket {
       throw error;
     }
 
-    void this.#openWhenAuthorized(options);
+    if (streamSocket === undefined) void this.#openWhenAuthorized(options);
   }
 
   /**
@@ -403,7 +423,7 @@ export class MobileHostedRelaySocket {
         return;
       }
       if (this.#abandoned) return;
-      const headers = await prepareUpgradeHeaders({
+      const headers = await prepareMobileUpgradeHeaders({
         url: this.url,
         dpopSigner: options.dpopSigner,
         readBearerToken: options.readBearerToken,
