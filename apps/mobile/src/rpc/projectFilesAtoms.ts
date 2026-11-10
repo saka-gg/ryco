@@ -238,6 +238,20 @@ export function invalidateProjectFilesState(): void {
   projectFilesCache.invalidate();
 }
 
+/**
+ * The same, for one checkout a turn changed (`cwd` null: every checkout of the
+ * environment). Every key of this cache starts with the environment and the
+ * checkout, so other checkouts and other nodes keep what they hold.
+ */
+export function invalidateProjectFilesForCheckout(
+  environmentId: EnvironmentId,
+  cwd: string | null,
+): void {
+  projectFilesCache.refreshMatching(
+    (parts) => parts[1] === environmentId && (cwd === null || parts[2] === cwd),
+  );
+}
+
 /** Environment teardown: forget everything this cache holds for one node. */
 export function clearProjectFilesStateForEnvironment(environmentId: EnvironmentId): void {
   projectFilesCache.clearEnvironment(environmentId);

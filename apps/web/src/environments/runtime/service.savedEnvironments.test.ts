@@ -115,6 +115,7 @@ vi.mock("~/rpc/projectAtoms", () => ({
 
 vi.mock("~/rpc/providerAtoms", () => ({
   invalidateAllCheckpointDiffs: vi.fn(),
+  invalidateCheckpointDiffChanges: vi.fn(),
 }));
 
 vi.mock("~/store", () => ({

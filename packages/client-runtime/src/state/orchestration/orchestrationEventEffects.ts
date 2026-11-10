@@ -1,10 +1,62 @@
 import type { OrchestrationEvent, ThreadId } from "@ryco/contracts";
+import { CHECKPOINT_REVERT_ACTIVITY_KIND } from "@ryco/contracts/orchestration";
+
+/**
+ * Checkpoint diffs of one thread that may answer differently now. A diff
+ * between two turn counts reads two checkpoint commits, so it changes only
+ * when one of them does: every range of a reverted thread (its turn counts
+ * are reused), or a range that reads the checkpoint a completed turn just
+ * captured (`fromTurnCount`: ranges that reach that turn, and ones that never
+ * resolved). Every other cached diff stays exactly as it is.
+ */
+export interface CheckpointDiffChange {
+  readonly threadId: ThreadId;
+  /** Null: every range of the thread. */
+  readonly fromTurnCount: number | null;
+}
 
 export interface OrchestrationBatchEffects {
   promoteDraftThreadIds: ThreadId[];
   clearDeletedThreadIds: ThreadId[];
   removeTerminalStateThreadIds: ThreadId[];
+  /** Files changed in some thread's checkout: the node-owned file caches are stale. */
   needsProviderInvalidation: boolean;
+  /** Threads whose checkout files changed (turn diffs, reverts, files-only reverts). */
+  changedFileThreadIds: ThreadId[];
+  checkpointDiffChanges: CheckpointDiffChange[];
+}
+
+/**
+ * A files-only revert (`thread.files.revert`) changes files without
+ * `thread.reverted`: its journal row reaching an end says so. Checkpoints stay.
+ */
+function isFinishedFilesRevert(event: OrchestrationEvent): boolean {
+  if (event.type !== "thread.activity-appended") return false;
+  const { activity } = event.payload;
+  if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) return false;
+  const payload = activity.payload as {
+    readonly status?: unknown;
+    readonly rollbackConversation?: unknown;
+  } | null;
+  return (
+    payload?.rollbackConversation === false &&
+    payload.status !== "requested" &&
+    payload.status !== "restoring-files"
+  );
+}
+
+function noteCheckpointDiffChange(
+  changes: Map<ThreadId, number | null>,
+  threadId: ThreadId,
+  fromTurnCount: number | null,
+): void {
+  if (!changes.has(threadId)) {
+    changes.set(threadId, fromTurnCount);
+    return;
+  }
+  const current = changes.get(threadId) ?? null;
+  if (current === null) return;
+  changes.set(threadId, fromTurnCount === null ? null : Math.min(current, fromTurnCount));
 }
 
 export function deriveOrchestrationBatchEffects(
@@ -18,13 +70,29 @@ export function deriveOrchestrationBatchEffects(
       removeTerminalState: boolean;
     }
   >();
-  let needsProviderInvalidation = false;
+  const changedFileThreadIds = new Set<ThreadId>();
+  const checkpointDiffChanges = new Map<ThreadId, number | null>();
 
   for (const event of events) {
     switch (event.type) {
-      case "thread.turn-diff-completed":
+      case "thread.turn-diff-completed": {
+        changedFileThreadIds.add(event.payload.threadId);
+        noteCheckpointDiffChange(
+          checkpointDiffChanges,
+          event.payload.threadId,
+          event.payload.checkpointTurnCount,
+        );
+        break;
+      }
+
       case "thread.reverted": {
-        needsProviderInvalidation = true;
+        changedFileThreadIds.add(event.payload.threadId);
+        noteCheckpointDiffChange(checkpointDiffChanges, event.payload.threadId, null);
+        break;
+      }
+
+      case "thread.activity-appended": {
+        if (isFinishedFilesRevert(event)) changedFileThreadIds.add(event.payload.threadId);
         break;
       }
 
@@ -91,6 +159,11 @@ export function deriveOrchestrationBatchEffects(
     promoteDraftThreadIds,
     clearDeletedThreadIds,
     removeTerminalStateThreadIds,
-    needsProviderInvalidation,
+    needsProviderInvalidation: changedFileThreadIds.size > 0,
+    changedFileThreadIds: [...changedFileThreadIds],
+    checkpointDiffChanges: Array.from(checkpointDiffChanges, ([threadId, fromTurnCount]) => ({
+      threadId,
+      fromTurnCount,
+    })),
   };
 }
