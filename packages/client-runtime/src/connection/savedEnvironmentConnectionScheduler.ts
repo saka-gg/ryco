@@ -26,18 +26,37 @@ export function orderSavedEnvironmentConnectionQueue<T extends SavedEnvironmentC
   });
 }
 
-export async function runSavedEnvironmentConnectionQueue<T>(
+/**
+ * Connects `records` in order, `concurrency` at a time. Each free slot first
+ * takes a record `readPriority` names at that moment (the machine of a thread
+ * the user just opened), so it never waits behind machines that are asleep.
+ */
+export async function runSavedEnvironmentConnectionQueue<
+  T extends { readonly environmentId: EnvironmentId },
+>(
   records: ReadonlyArray<T>,
   options: {
     readonly concurrency: number;
     readonly connect: (record: T) => Promise<void>;
+    readonly readPriority?: () => ReadonlySet<EnvironmentId>;
   },
 ): Promise<void> {
   const concurrency = Math.max(1, Math.floor(options.concurrency));
   const queue = [...records];
+  const takeNext = (): T | undefined => {
+    const priority = options.readPriority?.();
+    const index =
+      priority === undefined || priority.size === 0
+        ? 0
+        : Math.max(
+            0,
+            queue.findIndex((record) => priority.has(record.environmentId)),
+          );
+    return queue.splice(index, 1)[0];
+  };
   const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
     for (;;) {
-      const record = queue.shift();
+      const record = takeNext();
       if (!record) {
         return;
       }

@@ -3,6 +3,7 @@ export * from "./presentation.ts";
 export * from "./proposalView.ts";
 export * from "./store.ts";
 export * from "./sync.ts";
+export * from "./retainedSync.ts";
 
 export * from "./automationCentre.ts";
 export * from "./automationSchedules.ts";

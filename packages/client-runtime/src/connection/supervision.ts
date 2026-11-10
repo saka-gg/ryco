@@ -45,6 +45,7 @@ import {
   runSavedEnvironmentConnectionQueue,
 } from "./savedEnvironmentConnectionScheduler.ts";
 import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
+import { jitterRetryDelayMs } from "../rpc/retryJitter.ts";
 
 const NOOP = () => undefined;
 /** A shell event of a kind a newer node added, queued in order with the rest. */
@@ -152,6 +153,12 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
    * client whose saved machines are its whole workspace asks for more.
    */
   readonly savedEnvironmentConnectConcurrency?: number;
+  /**
+   * Machines the user is looking at besides those of the threads a view has
+   * open (the supervisor knows those): the active environment, say. They
+   * connect before the other saved machines, ahead of any still queued.
+   */
+  readonly readPriorityEnvironmentIds?: () => Iterable<EnvironmentId>;
   readonly subscribeBrowserResume: (listener: (reason: string) => void) => () => void;
   /**
    * The device stayed online but moved to another network path (the platform's
@@ -246,9 +253,14 @@ export class SavedEnvironmentSwitchedOffError extends SavedEnvironmentConnection
   }
 }
 
+/** Spread per client (`jitterRetryDelayMs`), so the clients of a machine that restarts do not retry together. */
 export function savedEnvironmentRetryDelayMs(failedAttempts: number): number {
   const exponent = Math.max(0, Math.min(failedAttempts - 1, 8));
-  return Math.min(SAVED_ENVIRONMENT_RETRY_BASE_MS * 2 ** exponent, SAVED_ENVIRONMENT_RETRY_MAX_MS);
+  return jitterRetryDelayMs(
+    Math.min(SAVED_ENVIRONMENT_RETRY_BASE_MS * 2 ** exponent, SAVED_ENVIRONMENT_RETRY_MAX_MS),
+    exponent,
+    "saved-environment-retry",
+  );
 }
 
 /** Halves the message and activity limits, or null once they cannot shrink further. */
@@ -815,9 +827,13 @@ export function createEnvironmentConnectionSupervisor<
       }
       // A server-side load failure: retry the bounded window with backoff.
       failedWindowAttempts += 1;
-      const delayMs = Math.min(
-        THREAD_WINDOW_RETRY_BASE_MS * 2 ** Math.min(failedWindowAttempts - 1, 8),
-        THREAD_WINDOW_RETRY_MAX_MS,
+      const delayMs = jitterRetryDelayMs(
+        Math.min(
+          THREAD_WINDOW_RETRY_BASE_MS * 2 ** Math.min(failedWindowAttempts - 1, 8),
+          THREAD_WINDOW_RETRY_MAX_MS,
+        ),
+        failedWindowAttempts,
+        "thread-window-retry",
       );
       clearRetry();
       retryTimeoutId = input.setTimeout(() => {
@@ -1184,6 +1200,7 @@ export function createEnvironmentConnectionSupervisor<
       entry.viewCount += 1;
       entry.viewRetains += 1;
       if (entry.viewCount === 1) announceHistoryRecoveryMode(entry);
+      connectViewedSavedEnvironment(environmentId);
     }
     // A view already open, or one opened while this retain is held, means the
     // user has looked at the thread: its release then goes to the idle cache.
@@ -1522,30 +1539,65 @@ export function createEnvironmentConnectionSupervisor<
       }
     }
     const connectable = records.filter((record) => !awaitingRepair(record.environmentId));
-    await runSavedEnvironmentConnectionQueue(orderSavedEnvironmentConnectionQueue(connectable), {
-      concurrency:
-        input.savedEnvironmentConnectConcurrency ?? SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
-      connect: async (record) => {
-        try {
-          await connectWithinSlot(
-            record.environmentId,
-            ensureSavedEnvironmentConnection(record, (isCancelled, signal) =>
-              input.connectSavedEnvironment(record, isCancelled, signal),
-            ),
-          );
-          clearSavedRetry(record.environmentId);
-        } catch (error) {
-          if (
-            error instanceof SavedEnvironmentCredentialError ||
-            error instanceof SavedEnvironmentConnectionCancelledError
-          ) {
-            clearSavedRetry(record.environmentId);
-            return;
-          }
-          scheduleSavedRetry(record.environmentId);
-        }
+    const priority = readPriorityEnvironmentIds();
+    await runSavedEnvironmentConnectionQueue(
+      orderSavedEnvironmentConnectionQueue(connectable, priority),
+      {
+        concurrency:
+          input.savedEnvironmentConnectConcurrency ?? SAVED_ENVIRONMENT_CONNECT_CONCURRENCY,
+        // A thread opened while the queue runs moves its machine to the next slot.
+        readPriority: readPriorityEnvironmentIds,
+        connect: connectSavedRecord,
       },
-    });
+    );
+  };
+  /** One saved machine's connect within its slot, with the retry ladder on failure. */
+  const connectSavedRecord = async (record: SavedEnvironmentRecord) => {
+    try {
+      await connectWithinSlot(
+        record.environmentId,
+        ensureSavedEnvironmentConnection(record, (isCancelled, signal) =>
+          input.connectSavedEnvironment(record, isCancelled, signal),
+        ),
+      );
+      clearSavedRetry(record.environmentId);
+    } catch (error) {
+      if (
+        error instanceof SavedEnvironmentCredentialError ||
+        error instanceof SavedEnvironmentConnectionCancelledError
+      ) {
+        clearSavedRetry(record.environmentId);
+        return;
+      }
+      scheduleSavedRetry(record.environmentId);
+    }
+  };
+  /**
+   * A view opened a thread of a saved machine that is neither connected nor
+   * connecting: it connects now instead of waiting for a slot that machines
+   * asleep may hold for up to a minute. A machine switched off or waiting to be
+   * paired again is left to the user.
+   */
+  const connectViewedSavedEnvironment = (environmentId: EnvironmentId) => {
+    if (activeService === null || input.isHostedMode()) return;
+    if (read(environmentId) || pendingSavedEnvironmentConnections.has(environmentId)) return;
+    if (input.isSavedEnvironmentAwaitingRepair?.(environmentId) === true) return;
+    const record = input
+      .listSavedEnvironmentRecords()
+      .find((candidate) => candidate.environmentId === environmentId);
+    if (record === undefined || isSavedEnvironmentSwitchedOff(record)) return;
+    void connectSavedRecord(record);
+  };
+  /** The machines the user is looking at: those of threads a view has open, then the platform's. */
+  const readPriorityEnvironmentIds = (): ReadonlySet<EnvironmentId> => {
+    const priority = new Set<EnvironmentId>();
+    for (const entry of threadDetailSubscriptions.values()) {
+      if (entry.viewCount > 0) priority.add(entry.environmentId);
+    }
+    for (const environmentId of input.readPriorityEnvironmentIds?.() ?? []) {
+      priority.add(environmentId);
+    }
+    return priority;
   };
   const createSyncScheduler = () => {
     let active: Promise<void> | null = null;

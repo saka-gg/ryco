@@ -10,6 +10,7 @@ import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { isEnvironmentNodeNewer, resetNewerNodeStateForTests } from "../rpc/newerNodeState.ts";
+import { setRetryJitterForTests } from "../rpc/retryJitter.ts";
 import type { ResumableSubscriptionOptions } from "../rpc/wsRpcClient.ts";
 import type { SubscriptionFailureKind } from "../rpc/wsTransport.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
@@ -83,6 +84,7 @@ function makeSupervisor(
     readonly disconnectSavedEnvironment?: (environmentId: EnvironmentId) => Promise<void>;
     readonly applyThreadDetailEvent?: (environmentId: EnvironmentId, event: unknown) => void;
     readonly savedEnvironmentConnectConcurrency?: number;
+    readonly readPriorityEnvironmentIds?: () => Iterable<EnvironmentId>;
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
@@ -117,6 +119,9 @@ function makeSupervisor(
     isSavedEnvironmentAwaitingRepair: overrides.isSavedEnvironmentAwaitingRepair,
     disconnectSavedEnvironment: overrides.disconnectSavedEnvironment ?? (() => Promise.resolve()),
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
+    ...(overrides.readPriorityEnvironmentIds === undefined
+      ? {}
+      : { readPriorityEnvironmentIds: overrides.readPriorityEnvironmentIds }),
     ...(overrides.savedEnvironmentConnectConcurrency === undefined
       ? {}
       : { savedEnvironmentConnectConcurrency: overrides.savedEnvironmentConnectConcurrency }),
@@ -164,6 +169,10 @@ const connectionFor = (record: Record) =>
 const numbered = (prefix: string, from: number, to: number) =>
   Array.from({ length: to - from }, (_, index) => `${prefix}${from + index}`);
 
+// The schedules below are timed exactly; their spread is tested on its own.
+beforeEach(() => setRetryJitterForTests({ enabled: false }));
+afterEach(() => setRetryJitterForTests(null));
+
 describe("saved environment retry", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -171,6 +180,18 @@ describe("saved environment retry", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("spreads each retry per client by up to a quarter", () => {
+    setRetryJitterForTests({ seed: 0.42 });
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      setRetryJitterForTests({ enabled: false });
+      const plain = savedEnvironmentRetryDelayMs(attempt);
+      setRetryJitterForTests({ seed: 0.42 });
+      const spread = savedEnvironmentRetryDelayMs(attempt);
+      expect(spread).toBeGreaterThanOrEqual(plain * 0.75);
+      expect(spread).toBeLessThanOrEqual(plain * 1.25);
+    }
   });
 
   it("backs off from five seconds to a one-minute ceiling", () => {
@@ -528,6 +549,62 @@ describe("saved environment retry", () => {
     settle.get(hungA)?.(connectionA);
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts.get(hungA)).toBe(2);
+    stop();
+  });
+
+  it("connects the machine of a thread the user opens at once, while asleep ones hold every slot", async () => {
+    const hungA = "env-hung-a" as EnvironmentId;
+    const hungB = "env-hung-b" as EnvironmentId;
+    const viewed = "env-viewed" as EnvironmentId;
+    const attempted: EnvironmentId[] = [];
+    const { supervisor } = makeSupervisor(
+      (record) => {
+        attempted.push(record.environmentId);
+        return new Promise<EnvironmentConnection>(() => undefined);
+      },
+      {
+        records: [
+          { environmentId: hungA, lastConnectedAt: "2026-10-03T00:00:02.000Z" },
+          { environmentId: hungB, lastConnectedAt: "2026-10-03T00:00:01.000Z" },
+          { environmentId: viewed, lastConnectedAt: "2026-10-03T00:00:00.000Z" },
+        ],
+      },
+    );
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempted).toEqual([hungA, hungB]);
+
+    // Before: it waited up to a minute for a hung attempt's slot.
+    supervisor.retainThreadDetailSubscription(viewed, "thread-1" as ThreadId, { view: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempted).toEqual([hungA, hungB, viewed]);
+    // Another thread of it opened meanwhile joins that attempt.
+    supervisor.retainThreadDetailSubscription(viewed, "thread-2" as ThreadId, { view: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempted).toEqual([hungA, hungB, viewed]);
+    stop();
+  });
+
+  it("queues the machine the user is looking at first", async () => {
+    const attempted: EnvironmentId[] = [];
+    const looking = "env-looking" as EnvironmentId;
+    const { supervisor } = makeSupervisor(
+      (record) => {
+        attempted.push(record.environmentId);
+        return new Promise<EnvironmentConnection>(() => undefined);
+      },
+      {
+        records: [
+          { environmentId: "env-a" as EnvironmentId, lastConnectedAt: "2026-10-03T00:00:02.000Z" },
+          { environmentId: "env-b" as EnvironmentId, lastConnectedAt: "2026-10-03T00:00:01.000Z" },
+          { environmentId: looking, lastConnectedAt: "2026-10-03T00:00:00.000Z" },
+        ],
+        readPriorityEnvironmentIds: () => [looking],
+      },
+    );
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempted).toEqual([looking, "env-a"]);
     stop();
   });
 

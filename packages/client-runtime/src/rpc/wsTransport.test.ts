@@ -13,7 +13,10 @@ import { makeProjectCopyRpcProtocolClient } from "./projectCopyRpcClient.ts";
 import { type RpcRequestAdmission, type WsProtocolLifecycleHandlers } from "./protocol.ts";
 import { resetRequestLatencyStateForTests } from "./requestLatencyState.ts";
 import { resetWsConnectionStateForTests } from "./wsConnectionState.ts";
+import { setRetryJitterForTests } from "./retryJitter.ts";
 import {
+  disconnectedSubscriptionRetryDelayMs,
+  DISCONNECTED_SUBSCRIPTION_MAX_DELAY_MS,
   isResponseTooLargeError,
   isUnsupportedRpcError,
   RESYNC_SUBSCRIPTION_MAX_DELAY_MS,
@@ -733,5 +736,69 @@ describe("WsTransport reconnect wakes", () => {
     expect(sockets).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(sockets).toHaveLength(2);
+  });
+});
+
+describe("WsTransport subscriptions while the socket is down", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setRetryJitterForTests({ enabled: false });
+  });
+
+  afterEach(() => {
+    setRetryJitterForTests(null);
+    vi.useRealTimers();
+  });
+
+  it("backs off while every reconnect fails, and resubscribes as soon as a socket opens", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const transport = new WsTransport("ws://node.test/ws", fakeSocketPlatform(sockets), {
+      preserveSocketPath: true,
+      recordConnectionState: false,
+      persistentReconnect: true,
+      getReconnectDelayMs: () => 1_000,
+    });
+    transports.push(transport);
+    let attempts = 0;
+    transport.subscribe(
+      (client) => {
+        attempts += 1;
+        return client[AGENT_CONTROL_WS_METHODS.subscribeProposals]({});
+      },
+      () => undefined,
+      { tag: AGENT_CONTROL_WS_METHODS.subscribeProposals },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const before = attempts;
+    sockets[0]!.drop();
+    // Every later socket fails to open: the node is down for ten seconds.
+    for (let elapsed = 0; elapsed < 10_000; elapsed += 50) {
+      for (const socket of sockets.slice(1)) if (socket.readyState === 0) socket.drop();
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    // A flat 250 ms wait made 40 attempts here; the doubling wait makes 6
+    // (250 ms, 0.5 s, 1 s, 2 s, then 4 s apart).
+    expect(attempts - before).toBeLessThanOrEqual(6);
+
+    // The node is back: the subscription does not sit out its 4 s wait.
+    const socketCount = sockets.length;
+    for (let waited = 0; sockets.length === socketCount && waited < 2_000; waited += 50) {
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    const socket = sockets.at(-1)!;
+    expect(socket.readyState).toBe(0);
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(proposalRequests(socket)).toHaveLength(1);
+  });
+
+  it("doubles the wait from the base delay up to its ceiling", () => {
+    expect(disconnectedSubscriptionRetryDelayMs(250, 0)).toBe(250);
+    expect(disconnectedSubscriptionRetryDelayMs(250, 3)).toBe(2_000);
+    expect(disconnectedSubscriptionRetryDelayMs(250, 9)).toBe(
+      DISCONNECTED_SUBSCRIPTION_MAX_DELAY_MS,
+    );
   });
 });
