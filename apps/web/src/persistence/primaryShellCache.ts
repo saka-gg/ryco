@@ -1,4 +1,12 @@
 import type { EnvironmentId } from "@ryco/contracts";
+import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
+import {
+  THREAD_READING_POSITION_CAPACITY,
+  decodeCachedEnvironmentContent,
+  decodeThreadReadingAnchor,
+  type CachedThreadContent,
+  type SavedThreadReadingAnchor,
+} from "@ryco/client-runtime/state/threads";
 import {
   boundWorkspaceMetadataSnapshot,
   isWorkspaceMetadataSnapshot,
@@ -7,39 +15,50 @@ import {
 
 import { selectEnvironmentState, useStore, type AppState } from "../store";
 import { openIndexedDbRecords } from "./indexedDbRecords";
+import type { PrimaryShellCacheWriterInput } from "./primaryShellCacheWriter";
+import { threadReadingPositions } from "./threadReadingPositions";
 import {
   readWorkspaceMetadataSnapshot,
   workspaceMetadataToCachedShellSnapshot,
 } from "../workspaceMetadataProjection";
 
 /**
- * Last-known shell of the primary environment, so a direct (local or desktop)
- * boot renders its sidebar before the connection and the shell snapshot have
- * completed. Hosted mode has its own account-fenced read cache and never uses
- * this one.
+ * Last-known state of the primary environment, so a direct (local or desktop)
+ * boot renders its sidebar, and the conversations last read there, before the
+ * connection and the shell snapshot have completed. Hosted mode has its own
+ * account-fenced read cache and never uses this one.
  *
  * The cache only ever paints. Hydration goes through
  * `hydrateEnvironmentStateFromCache`: the environment stays not bootstrapped
  * and carries `hydratedFromCacheAt`, so every live/mutation gate keeps treating
  * it as not live and the UI shows it as last known; live data always replaces
  * it, and a live environment is never overwritten by it. The cache holds the
- * same bounded metadata the hosted cache holds (no message content, sessions
- * or liveness), is persisted only for a loopback page or the desktop app (no
- * device that merely paired with a node keeps a copy without asking), belongs
- * to one environment id, and is dropped when the session is no longer
- * authenticated.
+ * same bounded metadata the hosted cache holds, the display text of recent
+ * conversations under the shared content-cache policy (no sessions, liveness
+ * or attachments; none at all when the Desktop keeps no recent conversations)
+ * and where threads were left. It is persisted only for a loopback page or the
+ * desktop app (no device that merely paired with a node keeps a copy without
+ * asking), belongs to one environment id, and is dropped when the session is
+ * no longer authenticated. Writing it lives in `primaryShellCacheWriter`,
+ * loaded after the paint.
  */
 
 const DATABASE_NAME = "ryco-primary-shell-v1";
 const STORE_NAME = "shells";
-/** Wait this long after the last change before writing, then for an idle moment. */
-export const PRIMARY_SHELL_CACHE_WRITE_DELAY_MS = 2_000;
 
 export interface PrimaryShellCacheRecord {
   readonly origin: string;
   readonly environmentId: EnvironmentId;
   readonly savedAt: number;
   readonly snapshot: WorkspaceMetadataSnapshot;
+  /**
+   * Display content of recent conversations, by thread id. Absent from
+   * records written before it existed and while the Desktop keeps no recent
+   * conversations.
+   */
+  readonly content?: Readonly<Record<string, CachedThreadContent>>;
+  /** Where this environment's threads were left away from their end, by scoped thread key. */
+  readonly readingPositions?: Readonly<Record<string, SavedThreadReadingAnchor>>;
 }
 
 export interface PrimaryShellCacheStorage {
@@ -48,17 +67,54 @@ export interface PrimaryShellCacheStorage {
   readonly remove: (origin: string) => Promise<void>;
 }
 
+/**
+ * The saved anchors that are still valid and belong to `environmentId`, the
+ * most recently left `THREAD_READING_POSITION_CAPACITY` of them.
+ */
+function decodeReadingPositions(
+  value: unknown,
+  environmentId: EnvironmentId,
+): Record<string, SavedThreadReadingAnchor> {
+  const readingPositions: Record<string, SavedThreadReadingAnchor> = {};
+  if (typeof value !== "object" || value === null) return readingPositions;
+  for (const [key, entry] of Object.entries(value).slice(-THREAD_READING_POSITION_CAPACITY)) {
+    const anchor = decodeThreadReadingAnchor(entry);
+    if (anchor && parseScopedThreadKey(key)?.environmentId === environmentId)
+      readingPositions[key] = anchor;
+  }
+  return readingPositions;
+}
+
+/**
+ * The record for this origin and environment, read as untrusted: the
+ * metadata must be valid, and content and anchors keep only what decodes
+ * within the shared limits (content only for threads the metadata lists).
+ * Fields it does not know are dropped, so a newer record still reads.
+ */
 export function decodePrimaryShellCacheRecord(
   value: unknown,
   origin: string,
   environmentId: EnvironmentId,
 ): PrimaryShellCacheRecord | null {
   if (typeof value !== "object" || value === null) return null;
-  const record = value as Partial<PrimaryShellCacheRecord>;
+  const record = value as Partial<Record<keyof PrimaryShellCacheRecord, unknown>>;
   if (record.origin !== origin || record.environmentId !== environmentId) return null;
   if (typeof record.savedAt !== "number" || !Number.isFinite(record.savedAt)) return null;
   if (!isWorkspaceMetadataSnapshot(record.snapshot, environmentId)) return null;
-  return record as PrimaryShellCacheRecord;
+  const snapshot = record.snapshot;
+  const threadIds = new Set(snapshot.threads.map((thread) => thread.id as string));
+  return {
+    origin,
+    environmentId,
+    savedAt: record.savedAt,
+    snapshot,
+    ...(record.content === undefined
+      ? {}
+      : { content: decodeCachedEnvironmentContent({ content: record.content }, threadIds) }),
+    ...(record.readingPositions === undefined
+      ? {}
+      : { readingPositions: decodeReadingPositions(record.readingPositions, environmentId) }),
+  };
 }
 
 export function createIndexedDbPrimaryShellCacheStorage(
@@ -75,7 +131,7 @@ export function createIndexedDbPrimaryShellCacheStorage(
 }
 
 let browserStorage: PrimaryShellCacheStorage | null = null;
-function getBrowserStorage(): PrimaryShellCacheStorage | null {
+export function getPrimaryShellCacheBrowserStorage(): PrimaryShellCacheStorage | null {
   if (browserStorage) return browserStorage;
   if (typeof indexedDB === "undefined") return null;
   browserStorage = createIndexedDbPrimaryShellCacheStorage(indexedDB);
@@ -88,7 +144,7 @@ function getBrowserStorage(): PrimaryShellCacheStorage | null {
  * read with its network round trips.
  */
 export function readPrimaryShellCache(
-  storage: PrimaryShellCacheStorage | null = getBrowserStorage(),
+  storage: PrimaryShellCacheStorage | null = getPrimaryShellCacheBrowserStorage(),
   origin: string = window.location.origin,
 ): Promise<unknown> {
   if (storage === null) return Promise.resolve(null);
@@ -97,7 +153,7 @@ export function readPrimaryShellCache(
 
 /** Drops the cached shell, e.g. once the session is no longer authenticated. */
 export function clearPrimaryShellCache(
-  storage: PrimaryShellCacheStorage | null = getBrowserStorage(),
+  storage: PrimaryShellCacheStorage | null = getPrimaryShellCacheBrowserStorage(),
   origin: string = window.location.origin,
 ): Promise<void> {
   if (storage === null) return Promise.resolve();
@@ -105,8 +161,26 @@ export function clearPrimaryShellCache(
 }
 
 /**
- * Paints the cached shell for `environmentId` when the store has nothing for
- * it yet. A record for another environment (a reset or replaced node) is
+ * Drops the recent conversations and reading positions the cached record
+ * holds and keeps its shell: the Desktop stopped keeping recent conversations.
+ */
+export async function dropPrimaryShellCacheConversations(
+  storage: PrimaryShellCacheStorage | null = getPrimaryShellCacheBrowserStorage(),
+  origin: string = window.location.origin,
+): Promise<void> {
+  if (storage === null) return;
+  const value = await storage.read(origin).catch(() => null);
+  if (typeof value !== "object" || value === null) return;
+  const record = value as Partial<PrimaryShellCacheRecord>;
+  if (record.content === undefined && record.readingPositions === undefined) return;
+  const { content: _content, readingPositions: _readingPositions, ...shell } = record;
+  await storage.write(shell as PrimaryShellCacheRecord).catch(() => undefined);
+}
+
+/**
+ * Paints the cached shell for `environmentId`, with the conversations it
+ * holds, when the store has nothing for it yet, and restores where its threads
+ * were left. A record for another environment (a reset or replaced node) is
  * discarded. Returns whether anything was hydrated.
  */
 export function hydratePrimaryShellFromCache(input: {
@@ -121,13 +195,26 @@ export function hydratePrimaryShellFromCache(input: {
     if (input.value != null) void clearPrimaryShellCache(input.storage, origin);
     return false;
   }
+  // Anchors left in this session stay; saved ones fill in behind them.
+  if (record.readingPositions)
+    threadReadingPositions.restore(Object.entries(record.readingPositions));
   if (useStore.getState().environmentStateById[input.environmentId] !== undefined) return false;
-  useStore
-    .getState()
-    .hydrateEnvironmentStateFromCache(
-      workspaceMetadataToCachedShellSnapshot(record.snapshot),
-      input.environmentId,
-    );
+  const shell = workspaceMetadataToCachedShellSnapshot(record.snapshot);
+  const content = record.content;
+  useStore.getState().hydrateEnvironmentStateFromCache(
+    content === undefined
+      ? shell
+      : {
+          ...shell,
+          // The rows are this projection's own, so the content goes onto them.
+          threads: shell.threads.map((thread) =>
+            Object.hasOwn(content, thread.shell.id)
+              ? Object.assign(thread, { content: content[thread.shell.id] })
+              : thread,
+          ),
+        },
+    input.environmentId,
+  );
   return (
     useStore.getState().environmentStateById[input.environmentId]?.hydratedFromCacheAt !== undefined
   );
@@ -147,80 +234,19 @@ export function capturePrimaryShellSnapshot(
 }
 
 /**
- * Keeps the cache current while the page lives: a change to the primary
- * environment's shell schedules one write after `PRIMARY_SHELL_CACHE_WRITE_DELAY_MS`
- * of quiet, at an idle moment. Returns a stop function.
+ * Keeps the cache current while the page lives (see `primaryShellCacheWriter`,
+ * loaded here so the paint above does not wait for it). Returns a stop function.
  */
-let activePersistence: (() => void) | null = null;
-
-export function startPrimaryShellCachePersistence(input: {
-  readonly environmentId: EnvironmentId;
-  readonly storage?: PrimaryShellCacheStorage | null;
-  readonly origin?: string;
-  readonly now?: () => number;
-  readonly setTimeout?: (callback: () => void, delayMs: number) => unknown;
-  readonly clearTimeout?: (handle: unknown) => void;
-  readonly whenIdle?: (callback: () => void) => void;
-}): () => void {
-  const storage = input.storage === undefined ? getBrowserStorage() : input.storage;
-  if (storage === null) return () => undefined;
-  const origin = input.origin ?? window.location.origin;
-  const now = input.now ?? Date.now;
-  const schedule =
-    input.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
-  const cancel =
-    input.clearTimeout ??
-    ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
-  const whenIdle =
-    input.whenIdle ??
-    ((callback: () => void) => {
-      if (typeof requestIdleCallback === "function")
-        requestIdleCallback(callback, { timeout: 5_000 });
-      else globalThis.setTimeout(callback, 0);
-    });
+export function startPrimaryShellCachePersistence(input: PrimaryShellCacheWriterInput): () => void {
+  let stopWriter: (() => void) | null = null;
   let stopped = false;
-  let timer: unknown = null;
-  let lastWritten: string | null = null;
-  let observed = selectEnvironmentState(useStore.getState(), input.environmentId);
-  const write = () => {
-    if (stopped) return;
-    const snapshot = capturePrimaryShellSnapshot(input.environmentId, useStore.getState(), now());
-    if (snapshot === null) return;
-    const { capturedAt: _capturedAt, ...content } = snapshot;
-    const fingerprint = JSON.stringify(content);
-    if (fingerprint === lastWritten) return;
-    lastWritten = fingerprint;
-    void storage
-      .write({ origin, environmentId: input.environmentId, savedAt: snapshot.capturedAt, snapshot })
-      .catch(() => {
-        lastWritten = null;
-      });
-  };
-  const scheduleWrite = (environment: ReturnType<typeof selectEnvironmentState>) => {
-    if (!environment.bootstrapComplete || environment.hydratedFromCacheAt !== undefined) return;
-    if (timer !== null) cancel(timer);
-    timer = schedule(() => {
-      timer = null;
-      whenIdle(write);
-    }, PRIMARY_SHELL_CACHE_WRITE_DELAY_MS);
-  };
-  const unsubscribe = useStore.subscribe((state) => {
-    const environment = selectEnvironmentState(state, input.environmentId);
-    if (environment === observed) return;
-    observed = environment;
-    scheduleWrite(environment);
-  });
-  scheduleWrite(observed);
-  // One writer per page: a later start (a re-run boot) replaces the earlier one.
-  activePersistence?.();
-  const stop = () => {
-    if (stopped) return;
+  void import("./primaryShellCacheWriter")
+    .then((writer) => {
+      if (!stopped) stopWriter = writer.startPrimaryShellCacheWriter(input);
+    })
+    .catch(() => undefined);
+  return () => {
     stopped = true;
-    unsubscribe();
-    if (timer !== null) cancel(timer);
-    timer = null;
-    if (activePersistence === stop) activePersistence = null;
+    stopWriter?.();
   };
-  activePersistence = stop;
-  return stop;
 }
