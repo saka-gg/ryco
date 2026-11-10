@@ -800,6 +800,9 @@ describe("WsTransport subscriptions while the socket is down", () => {
     expect(disconnectedSubscriptionRetryDelayMs(250, 9)).toBe(
       DISCONNECTED_SUBSCRIPTION_MAX_DELAY_MS,
     );
+  });
+});
+
 describe("WsTransport keepalive", () => {
   const pings = (socket: FakeWebSocket) =>
     socket.sent.filter((frame) => (JSON.parse(frame) as { _tag: string })._tag === "Ping");
