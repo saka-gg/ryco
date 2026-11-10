@@ -25,13 +25,13 @@ import {
   recordEnvironmentShellSettlementPolicy,
   resetEnvironmentServerConfigsForTests,
   resolveEnvironmentThreadCapabilities,
-  serverConfigForDevice,
   startActiveEnvironmentServerConfigProjection,
   subscribeEnvironmentServerConfigs,
   subscribeReportedThreadCapabilities,
   writeEnvironmentServerConfig,
   writeSavedEnvironmentServerConfig,
 } from "./environmentServerConfigs.ts";
+import { serverConfigForDevice } from "./serverConfigForDevice.ts";
 import {
   applyProvidersUpdated,
   applySettingsUpdated,

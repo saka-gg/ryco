@@ -24,7 +24,6 @@ export * from "./savedEnvironmentSession.ts";
 export * from "./savedSessionRenewal.ts";
 export * from "./supervision.ts";
 export * from "./threadHistoryPagination.ts";
-export * from "./threadNavigationIntent.ts";
 export * from "./projectIconSource.ts";
 
 export * from "./threadExport.ts";

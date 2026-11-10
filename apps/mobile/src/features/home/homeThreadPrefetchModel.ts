@@ -1,7 +1,7 @@
 import {
   createThreadNavigationIntents,
   type ReleaseIntentRetain,
-} from "@ryco/client-runtime/connection";
+} from "@ryco/client-runtime/connection/threadNavigationIntent";
 import type { ScopedThreadRef } from "@ryco/contracts";
 
 // Home's thread prefetch: a press on a row starts the thread's detail

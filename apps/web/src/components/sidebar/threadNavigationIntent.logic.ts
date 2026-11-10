@@ -8,7 +8,7 @@ export {
   type ReleaseIntentRetain,
   type ThreadNavigationIntentDeps,
   type ThreadNavigationIntents,
-} from "@ryco/client-runtime/connection";
+} from "@ryco/client-runtime/connection/threadNavigationIntent";
 
 /** At most one environment is connected ahead of a press in this window. */
 export const NODE_PRECONNECT_INTERVAL_MS = 5_000;

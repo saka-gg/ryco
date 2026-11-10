@@ -1,10 +1,10 @@
 import {
   getEnvironmentServerConfigsSnapshot,
   isEnvironmentServerConfigSaved,
-  serverConfigForDevice,
   subscribeEnvironmentServerConfigs,
   writeSavedEnvironmentServerConfig,
 } from "@ryco/client-runtime/rpc";
+import { serverConfigForDevice } from "@ryco/client-runtime/rpc/serverConfigForDevice";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import { ServerConfig as ServerConfigSchema } from "@ryco/contracts/server";
 
