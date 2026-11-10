@@ -38,6 +38,7 @@ import { readResourceTelemetry, recordResourceAttribution } from "../ResourceTel
 import { readProcessDiagnostics } from "../ProcessDiagnostics.ts";
 import { summarizeOperationalMetrics } from "../OperationalMetrics.ts";
 import type { DiagnosticsShape, DiagnosticsSnapshotInput } from "../Services/Diagnostics.ts";
+import { makeRingBuffer } from "../../ringBuffer.ts";
 
 const TRACE_RECORD_LIMIT = 2_000;
 const RESOURCE_SAMPLE_LIMIT = 240;
@@ -56,26 +57,6 @@ const EVENT_LIMIT = 80;
 const RAW_MESSAGE_LIMIT = 1_200;
 
 const SENSITIVE_KEY_PATTERN = DIAGNOSTIC_SECRET_KEY_PATTERN;
-
-interface RingBuffer<A> {
-  readonly push: (value: A) => void;
-  readonly values: () => ReadonlyArray<A>;
-  readonly size: () => number;
-}
-
-function makeRingBuffer<A>(limit: number): RingBuffer<A> {
-  const values: A[] = [];
-  return {
-    push(value) {
-      values.push(value);
-      if (values.length > limit) {
-        values.splice(0, values.length - limit);
-      }
-    },
-    values: () => [...values],
-    size: () => values.length,
-  };
-}
 
 interface ResourceSampler {
   readonly sample: () => Promise<DiagnosticsResourceSample>;

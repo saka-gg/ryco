@@ -119,9 +119,11 @@ describe("generateFixtureHome", () => {
           "SELECT COUNT(*) AS count FROM projection_thread_activities WHERE kind = 'agent.message'",
         ),
       ).toBe(rich.turns);
+      // Each write is its own command with a per-emission id, as live provider ingestion mints
+      // them. The engine keeps those ids' receipts in memory, so the events carry them.
       expect(
         count(
-          "SELECT COUNT(*) AS count FROM orchestration_command_receipts WHERE command_id GLOB 'provider:????????-????-4???-????-????????????:thread-activity-append:*'",
+          "SELECT COUNT(DISTINCT command_id) AS count FROM orchestration_events WHERE command_id GLOB 'provider:????????-????-4???-????-????????????:thread-activity-append:*'",
         ),
       ).toBe(rich.progressWrites + rich.reasoningWrites + rich.subagentWrites);
     } finally {

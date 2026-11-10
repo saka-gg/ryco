@@ -2277,6 +2277,101 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("keeps receipts of process-scoped command ids in memory and still dedupes their retries", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+    const receiptRows = (commandId: string) =>
+      system.run(
+        system.sql<{
+          readonly status: string;
+        }>`SELECT status FROM orchestration_command_receipts WHERE command_id = ${commandId}`,
+      );
+    const eventCount = async () =>
+      (
+        await system.run(
+          system.sql<{
+            readonly count: number;
+          }>`SELECT COUNT(*) AS count FROM orchestration_events`,
+        )
+      )[0]!.count;
+    try {
+      await system.run(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-process-scoped-project"),
+          projectId: asProjectId("project-process-scoped"),
+          title: "Process scoped",
+          workspaceRoot: "/tmp/project-process-scoped",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-process-scoped-thread"),
+          threadId: ThreadId.make("thread-process-scoped"),
+          projectId: asProjectId("project-process-scoped"),
+          title: "Process scoped",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      // Client ids keep their durable receipt.
+      expect(await receiptRows("cmd-process-scoped-thread")).toEqual([{ status: "accepted" }]);
+
+      const activity = (commandId: string, threadId: string) =>
+        ({
+          type: "thread.activity.append",
+          commandId: CommandId.make(commandId),
+          threadId: ThreadId.make(threadId),
+          activity: {
+            id: EventId.make(`activity-${commandId}`),
+            tone: "tool",
+            kind: "tool.updated",
+            summary: "Running",
+            turnId: null,
+            payload: {},
+            createdAt,
+          },
+          createdAt,
+        }) as const;
+      const accepted = activity(
+        "provider:0f8fad5b-d9cb-469f-a165-70867728950e:thread-activity-append",
+        "thread-process-scoped",
+      );
+      const first = await system.run(engine.dispatch(accepted));
+      const eventsAfterFirst = await eventCount();
+      expect(await system.run(engine.dispatch(accepted))).toEqual(first);
+      expect(await eventCount()).toBe(eventsAfterFirst);
+      expect(await receiptRows(accepted.commandId)).toEqual([]);
+
+      const rejected = activity(
+        "provider:7c9e6679-7425-40de-944b-e07fc1f90ae7:thread-activity-append",
+        "thread-process-scoped-missing",
+      );
+      await expect(system.run(engine.dispatch(rejected))).rejects.toThrow("does not exist");
+      await expect(system.run(engine.dispatch(rejected))).rejects.toThrow(
+        "Command previously rejected",
+      );
+      expect(await receiptRows(rejected.commandId)).toEqual([]);
+
+      const clientRejected = activity("cmd-process-scoped-client", "thread-process-scoped-missing");
+      await expect(system.run(engine.dispatch(clientRejected))).rejects.toThrow("does not exist");
+      expect(await receiptRows(clientRejected.commandId)).toEqual([{ status: "rejected" }]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it("rejects duplicate thread creation", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

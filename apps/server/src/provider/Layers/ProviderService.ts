@@ -123,6 +123,7 @@ import {
 } from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
+import { makeRingBuffer } from "../../ringBuffer.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 
 /**
@@ -143,6 +144,8 @@ export interface ProviderServiceLiveOptions {
 
 const DEFAULT_MAX_CONCURRENT_PROVIDER_STARTS_PER_INSTANCE = 4;
 const DEFAULT_MAX_PENDING_PROVIDER_STARTS_PER_INSTANCE = 64;
+/** Provider runtime events kept for `readRecentEventSummaries` (Agent Control diagnostics). */
+const RECENT_RUNTIME_EVENT_LIMIT = 500;
 const DEFAULT_STALE_SESSION_STOP_TIMEOUT_MS = 2_000;
 /** Project skills and commands change rarely; a stale list is refreshed behind the reader. */
 const PROJECT_COMMANDS_FRESH_MS = 5 * 60_000;
@@ -405,7 +408,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // The host-wide provider install lock; harnesses without one start sessions without waiting.
   const installLock = Option.getOrUndefined(yield* Effect.serviceOption(ProviderInstallLock));
   const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(4_096);
-  const recentRuntimeEvents = yield* Ref.make<ReadonlyArray<ProviderRuntimeEventSummary>>([]);
+  const recentRuntimeEvents = makeRingBuffer<ProviderRuntimeEventSummary>(
+    RECENT_RUNTIME_EVENT_LIMIT,
+  );
   const staleSessionBindings = yield* Ref.make(new Map<string, ProviderRuntimeBinding>());
   const staleSessionStopTimeoutMs = normalizePositiveInt(
     options?.staleSessionStopTimeoutMs,
@@ -653,18 +658,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.tap((canonicalEvent) =>
         canonicalEvent.providerInstanceId === undefined
           ? Effect.void
-          : Ref.update(recentRuntimeEvents, (current) =>
-              [
-                {
-                  eventId: canonicalEvent.eventId,
-                  type: canonicalEvent.type,
-                  threadId: canonicalEvent.threadId,
-                  providerInstanceId: canonicalEvent.providerInstanceId!,
-                  turnId: canonicalEvent.turnId ?? null,
-                  occurredAt: canonicalEvent.createdAt,
-                },
-                ...current,
-              ].slice(0, 500),
+          : Effect.sync(() =>
+              recentRuntimeEvents.push({
+                eventId: canonicalEvent.eventId,
+                type: canonicalEvent.type,
+                threadId: canonicalEvent.threadId,
+                providerInstanceId: canonicalEvent.providerInstanceId!,
+                turnId: canonicalEvent.turnId ?? null,
+                occurredAt: canonicalEvent.createdAt,
+              }),
             ),
       ),
       Effect.tap((canonicalEvent) =>
@@ -2711,19 +2713,23 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     rollbackConversation,
     listRuntimeActivity: () => Effect.sync(() => [...runtimeActivity.values()]),
     readRecentEventSummaries: (input) =>
-      Ref.get(recentRuntimeEvents).pipe(
-        Effect.map((events) =>
-          events
-            .filter(
-              (event) =>
-                event.occurredAt >= input.since &&
-                (input.threadId === undefined || event.threadId === input.threadId) &&
-                (input.providerInstanceId === undefined ||
-                  event.providerInstanceId === input.providerInstanceId),
-            )
-            .slice(0, Math.min(Math.max(1, Math.floor(input.limit)), 50)),
-        ),
-      ),
+      Effect.sync(() => {
+        const limit = Math.min(Math.max(1, Math.floor(input.limit)), 50);
+        const matches: Array<ProviderRuntimeEventSummary> = [];
+        // Newest first; stops at the limit instead of filtering every retained event.
+        for (const event of recentRuntimeEvents.newestFirst()) {
+          if (
+            event.occurredAt >= input.since &&
+            (input.threadId === undefined || event.threadId === input.threadId) &&
+            (input.providerInstanceId === undefined ||
+              event.providerInstanceId === input.providerInstanceId)
+          ) {
+            matches.push(event);
+            if (matches.length >= limit) break;
+          }
+        }
+        return matches;
+      }),
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

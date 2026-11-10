@@ -15,6 +15,7 @@ import type {
   OrchestrationEvent,
   OrchestrationMessage,
   OrchestrationProject,
+  OrchestrationProposedPlan,
   OrchestrationProjectShell,
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
@@ -586,21 +587,44 @@ export interface ProjectionSnapshotQueryShape {
 
   /**
    * Read a single projected proposed plan by id. Plan finalization only needs
-   * the prior timestamps of the plan it replaces. Optional so existing test
-   * doubles stay valid; callers fall back to `getThreadDetailById`.
+   * the plan it replaces, and marking a source plan implemented re-upserts it.
+   * Optional so existing test doubles stay valid; callers fall back to
+   * `getThreadDetailById`.
    */
   readonly getThreadProposedPlanById?: (input: {
     readonly threadId: ThreadId;
     readonly planId: string;
-  }) => Effect.Effect<
-    Option.Option<{
-      readonly id: string;
-      readonly createdAt: string;
-      readonly implementedAt: string | null;
-      readonly implementationThreadId: ThreadId | null;
-    }>,
-    ProjectionRepositoryError
-  >;
+  }) => Effect.Effect<Option.Option<OrchestrationProposedPlan>, ProjectionRepositoryError>;
+
+  /**
+   * Whether one turn has an assistant message (only a streaming one with `streamingOnly`),
+   * without reading message bodies. Event intake asks this at message ends and approvals.
+   * Optional so existing test doubles stay valid; callers fall back to `getThreadDetailById`.
+   */
+  readonly hasThreadAssistantMessageForTurn?: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly streamingOnly: boolean;
+  }) => Effect.Effect<boolean, ProjectionRepositoryError>;
+
+  /**
+   * The thread's pending-request lifecycle activities (`PENDING_REQUEST_ACTIVITY_KINDS`), in
+   * thread order. Turn boundaries derive the requests to invalidate from these alone.
+   * Optional so existing test doubles stay valid; callers fall back to `getThreadDetailById`.
+   */
+  readonly listThreadPendingRequestActivities?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * One task's `task.started`, `task.progress` and `task.updated` activities, in thread order,
+   * for recovering a task's title. Optional so existing test doubles stay valid; callers fall
+   * back to `getThreadDetailById`.
+   */
+  readonly listThreadTaskActivities?: (input: {
+    readonly threadId: ThreadId;
+    readonly taskId: string;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationThreadActivity>, ProjectionRepositoryError>;
 
   /**
    * Newest `checkpoint.revert` activity per live thread whose status is still
