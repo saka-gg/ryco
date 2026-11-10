@@ -65,9 +65,11 @@ describe("the push keychain group", () => {
     expect(twice["keychain-access-groups"]).toHaveLength(2);
   });
 
-  it("is the only group the extension gets", () => {
+  it("is the only keychain group the extension gets, beside the app's shared App Group", () => {
     expect(plugin.notificationServiceEntitlements(BUNDLE_ID)).toEqual({
       "keychain-access-groups": ["$(AppIdentifierPrefix)dev.ryco.app.dev.push"],
+      // Where it leaves an approval's or question's excerpt for the app.
+      "com.apple.security.application-groups": ["group.dev.ryco.app.dev"],
     });
   });
 });
@@ -82,6 +84,7 @@ describe("the extension's Info.plist", () => {
         NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).NotificationService",
       },
       RycoPushKeychainGroup: "$(AppIdentifierPrefix)dev.ryco.app.dev.push",
+      RycoAppGroup: "group.dev.ryco.app.dev",
       RycoAppScheme: "ryco-dev",
     });
   });
@@ -137,6 +140,7 @@ describe("EAS Build", () => {
         bundleIdentifier: "dev.ryco.app.dev.RycoNotificationService",
         entitlements: {
           "keychain-access-groups": ["$(AppIdentifierPrefix)dev.ryco.app.dev.push"],
+          "com.apple.security.application-groups": ["group.dev.ryco.app.dev"],
         },
       },
     ]);
@@ -183,6 +187,7 @@ describe("the extension target", () => {
       const phases = extension.buildPhases as Array<{ value: string; comment: string }>;
       const sources = phases.find((phase) => phase.comment === "Sources")!;
       expect(phaseFiles(project, sources.value, "PBXSourcesBuildPhase").toSorted()).toEqual([
+        "AlertExcerptStore.swift in Sources",
         "NotificationService.swift in Sources",
         "PushAlertOpener.swift in Sources",
         "PushKeyStore.swift in Sources",

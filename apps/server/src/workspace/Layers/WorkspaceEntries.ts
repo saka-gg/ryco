@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as OS from "node:os";
 import fsPromises from "node:fs/promises";
 import type { Dirent } from "node:fs";
@@ -239,9 +240,39 @@ function selectShallowestEntries(
  */
 function buildWorkspaceListing(index: WorkspaceIndex): ProjectListEntriesResult {
   const selected = selectShallowestEntries(index.entries, WORKSPACE_LIST_ENTRIES_MAX);
+  const truncated = index.partial || selected.length < index.entries.length;
   return {
     entries: selected.map((entry) => ({ path: entry.path, kind: entry.kind })),
-    truncated: index.partial || selected.length < index.entries.length,
+    truncated,
+    revision: workspaceListingRevision(selected, truncated),
+  };
+}
+
+/**
+ * The listing's content identity: a rebuild that finds the same entries (a
+ * turn that only edited files) keeps it, so a client holding it is told
+ * `unchanged` instead of receiving the listing again. Computed once per index.
+ */
+function workspaceListingRevision(
+  entries: ReadonlyArray<IndexedWorkspaceEntry>,
+  truncated: boolean,
+): string {
+  const hash = createHash("sha256");
+  hash.update(truncated ? "t" : "f");
+  for (const entry of entries) {
+    hash.update(entry.kind === "directory" ? "\0d" : "\0f");
+    hash.update(entry.path);
+  }
+  return `l1.${hash.digest("base64url").slice(0, 27)}`;
+}
+
+/** The answer to a client that already holds `listing`. */
+function unchangedListing(listing: ProjectListEntriesResult): ProjectListEntriesResult {
+  return {
+    entries: [],
+    truncated: listing.truncated,
+    ...(listing.revision !== undefined ? { revision: listing.revision } : {}),
+    unchanged: true,
   };
 }
 
@@ -1327,6 +1358,9 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     // The newest index: a rebuild may have landed while this read waited.
     const index = slot?.index ?? read.index;
     index.listing ??= buildWorkspaceListing(index);
+    if (input.knownRevision !== undefined && input.knownRevision === index.listing.revision) {
+      return unchangedListing(index.listing);
+    }
     return index.listing;
   });
 

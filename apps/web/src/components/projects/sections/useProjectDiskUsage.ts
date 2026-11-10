@@ -7,7 +7,10 @@ import { useShallow } from "zustand/react/shallow";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../store";
 import { readLifecycleApi, useWorkspaceLifecycleChanges } from "../../../workspaceLifecycle";
-import type { DiskUsageReading } from "@ryco/client-runtime/projectSettings/diskUsage";
+import {
+  type DiskUsageReading,
+  readDiskUsageProgressively,
+} from "@ryco/client-runtime/projectSettings/diskUsage";
 import { workspaceInspectionSignature } from "@ryco/client-runtime/projectSettings/workspaces";
 
 /**
@@ -28,9 +31,10 @@ const useDiskRemeasure = create<{
 
 /**
  * How much disk each of a checkout's workspaces takes on its device. The node
- * measures and caches; this reads again when the workspace set changes or after
- * a lifecycle action (both answered from the node's cache unless a checkout is
- * new), and `remeasure` asks the node to measure everything afresh. A node that
+ * measures and caches, and answers at once from its last figures while it
+ * measures afresh (`readDiskUsageProgressively`); this reads again when the
+ * workspace set changes or after a lifecycle action, and `remeasure` asks the
+ * node to measure everything afresh. A node that
  * predates the measurement, or a reader who may not inspect workspaces, gets
  * `unavailable`.
  */
@@ -56,25 +60,21 @@ export function useProjectDiskUsage(input: {
 
   useEffect(() => {
     if (!diskUsage) return;
-    let cancelled = false;
     const refresh = refreshNonce !== sentNonce.current;
     sentNonce.current = refreshNonce;
-    diskUsage({ projectId: ProjectId.make(projectId), refresh }).then(
-      (result) => {
-        if (!cancelled)
-          setSettled({
-            scopeKey,
-            requestKey,
-            value: { status: "ready", workspaces: result.workspaces, refreshing: false },
-          });
-      },
-      () => {
-        if (!cancelled) setSettled({ scopeKey, requestKey, value: { status: "unavailable" } });
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
+    // The node's last figures at once, as refreshing while it measures afresh.
+    return readDiskUsageProgressively({
+      read: diskUsage,
+      projectId: ProjectId.make(projectId),
+      refresh,
+      onResult: (result, final) =>
+        setSettled({
+          scopeKey,
+          requestKey,
+          value: { status: "ready", workspaces: result.workspaces, refreshing: !final },
+        }),
+      onError: () => setSettled({ scopeKey, requestKey, value: { status: "unavailable" } }),
+    });
     // `requestKey` folds in the signature and lifecycle revision.
   }, [diskUsage, projectId, refreshNonce, requestKey, scopeKey]);
 

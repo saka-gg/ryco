@@ -9,11 +9,11 @@ import { Directory, File, Paths } from "expo-file-system";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   Platform,
   Pressable,
   ScrollView,
-  Share,
   View,
 } from "react-native";
 import { WebView } from "react-native-webview";
@@ -22,6 +22,7 @@ import { AppText as Text } from "../../components/AppText";
 import { readEnvironmentApi } from "../../connection/environmentApi";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { canPreviewAttachment as canPreviewAttachmentOn } from "./attachmentPreviewModel";
+import { shareAttachment } from "./attachmentShare";
 
 /**
  * Only iOS's web view renders PDFs; Android's has no PDF viewer and would show a blank sheet, so a
@@ -75,8 +76,6 @@ export interface PreviewableAttachment {
   readonly name: string;
   readonly mimeType: string;
   readonly sizeBytes: number;
-  /** The file's URL, for Share. */
-  readonly previewUrl: string;
 }
 
 type Loaded =
@@ -196,7 +195,17 @@ export function AttachmentPreviewModal(props: {
             accessibilityRole="button"
             disabled={!attachment}
             onPress={() => {
-              if (attachment) void Share.share({ url: attachment.previewUrl }).catch(() => {});
+              if (!attachment) return;
+              void shareAttachment({
+                environmentId: attachment.environmentId,
+                threadId: attachment.threadId,
+                messageId: attachment.messageId,
+                attachmentId: attachment.attachmentId,
+                name: attachment.name,
+                sizeBytes: attachment.sizeBytes,
+              }).catch(() =>
+                Alert.alert("Could not share the file", "Ryco could not load it from the machine."),
+              );
             }}
             className="h-11 justify-center rounded-full px-1 active:opacity-60"
           >

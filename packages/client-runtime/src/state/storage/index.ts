@@ -122,5 +122,45 @@ export function createStorageManagementController(input: {
         });
         return { result, preview: null, snapshot: null };
       }),
+    /**
+     * One-click compaction (`storage.databaseCompactionStatus`): who runs it here, what it would
+     * cut off now, and the last run. Null without a connection or on a node that predates it.
+     * Read outside the busy state: Storage settings polls it while it waits for the node to idle.
+     */
+    readCompactionStatus: async () => {
+      const client = input.readClient();
+      if (!client || !canManage()) return null;
+      try {
+        return await client.storage.databaseCompactionStatus({});
+      } catch {
+        return null;
+      }
+    },
+    /** Starts a background service's compaction (the node restarts); null without a connection. */
+    startServiceCompaction: async () => {
+      const client = input.readClient();
+      if (!client || !canManage()) return null;
+      return await client.storage.startDatabaseCompaction({});
+    },
+    /**
+     * Removes one database backup the last scan listed (the owner's click on its row; nothing
+     * removes backups on its own). The scan's list drops it; its space shows at the next scan.
+     */
+    removeDatabaseBackup: (name: string) =>
+      run(async (client) => {
+        await client.storage.removeDatabaseBackup({ name });
+        const snapshot = state.snapshot;
+        const database = snapshot?.database;
+        if (!snapshot || !database?.backups) return {};
+        return {
+          snapshot: {
+            ...snapshot,
+            database: {
+              ...database,
+              backups: database.backups.filter((backup) => backup.name !== name),
+            },
+          },
+        };
+      }),
   };
 }

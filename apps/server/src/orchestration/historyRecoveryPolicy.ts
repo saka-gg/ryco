@@ -94,8 +94,15 @@ export function decideHistoryRecovery(input: {
   return trails && state.failures === 0 ? { kind: "trail", afterMs: remainingMs } : SKIP;
 }
 
+/** The part of an event history recovery reads: full and slim events both carry it. */
+type ThreadEventBody = OrchestrationEvent extends infer E
+  ? E extends OrchestrationEvent
+    ? Pick<E, "type" | "payload">
+    : never
+  : never;
+
 /** A thread event saying its session stopped working: a turn ended, or it stopped or failed. */
-export function settlesThreadSession(event: OrchestrationEvent | undefined): boolean {
+export function settlesThreadSession(event: ThreadEventBody | undefined): boolean {
   if (event?.type !== "thread.session-set") return false;
   const session = event.payload.session;
   return (
@@ -104,10 +111,10 @@ export function settlesThreadSession(event: OrchestrationEvent | undefined): boo
   );
 }
 
-/** A thread subscription item: a snapshot, a resume marker or one event. */
+/** A thread subscription item: a snapshot, a resume marker or one event (full or slim). */
 export interface ThreadStreamItemLike {
   readonly kind: string;
-  readonly event?: OrchestrationEvent;
+  readonly event?: ThreadEventBody;
 }
 
 /** Turns one thread subscription's history recovery on (`"active"`) or off (`"passive"`). */
@@ -247,7 +254,13 @@ export const withThreadHistoryRecovery = <A extends ThreadStreamItemLike, E, R>(
       }
       return stream.pipe(
         Stream.mapArrayEffect((items) =>
-          active && items.some((item) => item.kind === "event" && settlesThreadSession(item.event))
+          active &&
+          items.some(
+            (item) =>
+              (item.kind === "event" || item.kind === "slim-event") &&
+              item.event !== undefined &&
+              settlesThreadSession(item.event),
+          )
             ? Effect.forkIn(reconcile(threadId, "session-settled"), scope).pipe(Effect.as(items))
             : Effect.succeed(items),
         ),

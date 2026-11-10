@@ -49,7 +49,13 @@ const FRAME_ID = "ryco-render";
 // before the frame exists and never miss a fast page's first report. A theme
 // message also updates the wrapper's color scheme: a frame whose scheme differs
 // from its embedder's paints an opaque canvas.
-const RELAY_SCRIPT = `(function(){var h={"ui/notifications/size-changed":1,"ui/open-link":1,"ui/message":1};function f(){var e=document.getElementById(${JSON.stringify(FRAME_ID)});return e&&e.contentWindow;}window.__rycoPost=function(m){var t=m&&m.params&&m.params.theme,w=f();if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;if(w)w.postMessage(m,"*");};window.addEventListener("message",function(e){var d=e.data,w=f(),n=window.ReactNativeWebView;if(!w||e.source!==w||!d||typeof d!=="object"||d.jsonrpc!=="2.0"||!h.hasOwnProperty(d.method)||!n)return;try{n.postMessage(JSON.stringify({jsonrpc:"2.0",id:d.id,method:d.method,params:d.params}));}catch(x){}});})();`;
+//
+// Full screen (`fit`), a page wider than the screen (a fixed-width mockup) is
+// fitted to its width once, the way web's "Fit width" does: its frame is laid
+// out as wide as the page needs and scaled down to the screen. The reader can
+// still pinch-zoom the wrapper in from there.
+const relayScript = (fit: boolean) =>
+  `(function(){var h={"ui/notifications/size-changed":1,"ui/open-link":1,"ui/message":1},fw=${fit ? "0" : "-1"};function f(){var e=document.getElementById(${JSON.stringify(FRAME_ID)});return e&&e.contentWindow;}function fz(){var e=document.getElementById(${JSON.stringify(FRAME_ID)}),z;if(!e||fw<=0)return;z=Math.min(1,Math.max(0.25,window.innerWidth/fw));e.style.width=e.style.height=z<1?(100/z)+"%":"";e.style.transform=z<1?"scale("+z+")":"";e.style.transformOrigin="0 0";}window.addEventListener("resize",fz);window.__rycoPost=function(m){var t=m&&m.params&&m.params.theme,w=f();if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;if(w)w.postMessage(m,"*");};window.addEventListener("message",function(e){var d=e.data,w=f(),n=window.ReactNativeWebView,p;if(!w||e.source!==w||!d||typeof d!=="object"||d.jsonrpc!=="2.0"||!h.hasOwnProperty(d.method)||!n)return;p=d.params;if(fw===0&&d.method==="ui/notifications/size-changed"&&p&&typeof p.width==="number"&&typeof p.viewportWidth==="number"&&p.width>p.viewportWidth+1&&p.width<100000){fw=p.width;fz();}try{n.postMessage(JSON.stringify({jsonrpc:"2.0",id:d.id,method:d.method,params:d.params}));}catch(x){}});})();`;
 
 export interface HtmlRenderDocumentInput {
   /** The stored page, bootstrap included, exactly as the server stored it. */
@@ -81,7 +87,7 @@ export function buildHtmlRenderDocument(input: HtmlRenderDocumentInput): string 
     `<meta name="color-scheme" content="${scheme}">`,
     `<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:transparent;color-scheme:${scheme}}`,
     "iframe{display:block;width:100%;height:100%;border:0;background:transparent}</style>",
-    `<script>${RELAY_SCRIPT}</script>`,
+    `<script>${relayScript(input.zoomable)}</script>`,
     "</head>",
     "<body>",
     `<iframe id="${FRAME_ID}" title="${escapeHtmlAttributeValue(input.title)}"`,

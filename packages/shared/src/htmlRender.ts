@@ -559,6 +559,10 @@ const POINTER_CHANGED_METHOD = "ryco/notifications/pointer-changed";
 // Not part of MCP Apps. Keys pressed inside the out-of-process page never
 // reach the client, so a page in a dialog reports Escape for it to close.
 const ESCAPE_METHOD = "ryco/notifications/escape";
+// Not part of MCP Apps. Zoom keys and pinches inside the out-of-process page
+// never reach the client either; a page shown where it can be zoomed (its
+// frame name says so) reports them instead of letting the browser zoom.
+const ZOOM_METHOD = "ryco/notifications/zoom";
 /** The event a page's own scripts can listen for to redraw after a theme change. */
 export const HTML_RENDER_THEME_CHANGE_EVENT = "ryco-theme-change";
 
@@ -584,6 +588,58 @@ export function readHtmlRenderPointerInside(data: unknown): boolean | undefined 
       ? (params as { inside?: unknown }).inside
       : undefined;
   return typeof inside === "boolean" ? inside : undefined;
+}
+
+/**
+ * The content width a framed render reports beside its height, and the width
+ * it is laid out at: a page wider than its frame overflows sideways. Absent
+ * from pages of builds before zoom.
+ */
+export function readHtmlRenderContentWidth(
+  data: unknown,
+): { readonly width: number; readonly viewportWidth: number } | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const { jsonrpc, method, params } = data as Record<string, unknown>;
+  if (jsonrpc !== "2.0" || method !== SIZE_CHANGED_METHOD) return undefined;
+  if (typeof params !== "object" || params === null) return undefined;
+  const { width, viewportWidth } = params as { width?: unknown; viewportWidth?: unknown };
+  return typeof width === "number" &&
+    Number.isFinite(width) &&
+    width > 0 &&
+    typeof viewportWidth === "number" &&
+    Number.isFinite(viewportWidth) &&
+    viewportWidth > 0
+    ? { width, viewportWidth }
+    : undefined;
+}
+
+/** What the reader asked of a zoomable framed render from inside it. */
+export type HtmlRenderZoomRequest =
+  | { readonly action: "in" | "out" | "reset" }
+  /** Ctrl+wheel or a trackpad pinch (Chromium): positive zooms out, in pixels. */
+  | { readonly action: "wheel"; readonly deltaY: number }
+  /** A trackpad pinch (WebKit): the factor since the last report. */
+  | { readonly action: "scale"; readonly factor: number };
+
+/** A framed render's zoom request, from its `zoom` notification. */
+export function readHtmlRenderZoomRequest(data: unknown): HtmlRenderZoomRequest | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const { jsonrpc, method, params } = data as Record<string, unknown>;
+  if (jsonrpc !== "2.0" || method !== ZOOM_METHOD) return undefined;
+  if (typeof params !== "object" || params === null) return undefined;
+  const { action, deltaY, factor } = params as {
+    action?: unknown;
+    deltaY?: unknown;
+    factor?: unknown;
+  };
+  if (action === "in" || action === "out" || action === "reset") return { action };
+  if (action === "wheel" && typeof deltaY === "number" && Number.isFinite(deltaY)) {
+    return { action, deltaY };
+  }
+  if (action === "scale" && typeof factor === "number" && Number.isFinite(factor) && factor > 0) {
+    return { action, factor };
+  }
+  return undefined;
 }
 
 /** Whether `data` is a framed render reporting that the reader pressed Escape in it. */
@@ -791,9 +847,13 @@ export function htmlRenderThemeFragment(theme: HtmlRenderTheme): string {
  */
 export function htmlRenderThemeWindowName(
   theme: HtmlRenderTheme,
-  options: { readonly sendMessages?: boolean } = {},
+  options: { readonly sendMessages?: boolean; readonly zoom?: boolean } = {},
 ): string {
-  const state = options.sendMessages === true ? { ...theme, send: true } : theme;
+  const state = {
+    ...theme,
+    ...(options.sendMessages === true ? { send: true } : {}),
+    ...(options.zoom === true ? { zoom: true } : {}),
+  };
   return `${THEME_WINDOW_NAME_PREFIX}${JSON.stringify(state)}`;
 }
 
@@ -843,7 +903,7 @@ function rootRule(theme: HtmlRenderTheme): string {
 // hint, outside a frame, and without a user gesture, but those checks only
 // spare a page a round trip: the client checks everything again and asks the
 // reader before anything is sent.
-const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById(${JSON.stringify(HTML_RENDER_THEME_STYLE_ID)}),n=0,f=window.parent!==window,v=false,q={};if(!s)return;var b=${JSON.stringify(BASE_CSS)};function a(t){if(!t||typeof t!=="object"||!t.variables||typeof t.variables!=="object")return;var c=":root{color-scheme:"+(t.appearance==="light"?"light":"dark")+";";for(var k in t.variables){if(/^--[a-z0-9-]+$/.test(k))c+=k+":"+String(t.variables[k]).replace(/[;{}<>]/g,"")+";";}s.textContent=c+"}"+b;try{var o={appearance:t.appearance==="light"?"light":"dark",variables:t.variables};if(v)o.send=true;window.name=${JSON.stringify(THEME_WINDOW_NAME_PREFIX)}+JSON.stringify(o);}catch(x){}}try{var m=/[#&]${THEME_FRAGMENT_KEY}=([^&]*)/.exec(location.hash),w=window.name;if(m){a(JSON.parse(decodeURIComponent(m[1])));history.replaceState(history.state,"",location.pathname+location.search);}else if(typeof w==="string"&&w.indexOf(${JSON.stringify(THEME_WINDOW_NAME_PREFIX)})===0){var p=JSON.parse(w.slice(${THEME_WINDOW_NAME_PREFIX.length}));v=f&&!!p&&p.send===true;a(p);}}catch(e){}window.addEventListener("message",function(e){var d=e.data,p=d&&d.params;if(f&&e.source!==window.parent)return;if(f&&d&&d.jsonrpc==="2.0"&&typeof d.id==="string"&&Object.prototype.hasOwnProperty.call(q,d.id)&&(d.error||d.result)){var c=q[d.id];delete q[d.id];if(d.error)c[1](new Error(String(d.error.message||"The message was not sent.")));else c[0]();return;}if(d&&d.jsonrpc==="2.0"&&d.method===${JSON.stringify(HOST_CONTEXT_CHANGED_METHOD)}&&p&&p.styles){a({appearance:p.theme,variables:p.styles.variables});try{window.dispatchEvent(new Event(${JSON.stringify(HTML_RENDER_THEME_CHANGE_EVENT)}));}catch(x){}}});window.ryco=Object.freeze({send:function(t){return new Promise(function(r,j){var u=navigator.userActivation,i;if(typeof t!=="string"||!t.trim())return j(new Error("ryco.send needs text."));if(!v)return j(new Error("Sending messages is not available here."));if(u&&!u.isActive)return j(new Error("ryco.send works only from a click or key press in the page."));i="ryco-message-"+(++n);q[i]=[r,j];try{window.parent.postMessage({jsonrpc:"2.0",id:i,method:${JSON.stringify(MESSAGE_METHOD)},params:{role:"user",content:[{type:"text",text:t}]}},"*");}catch(x){delete q[i];j(x);}});}});document.addEventListener("click",function(e){var l=e.isTrusted?e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}):null,h,u;if(!l)return;h=(l.getAttribute("href")||"").trim();if(h.charAt(0)==="#")return;try{u=new URL(h,document.baseURI);}catch(x){u=null;}if(!u||!/^https?:\\/\\//i.test(h)||!/^https?:$/.test(u.protocol)){if(f)e.preventDefault();return;}if(u.href.split("#")[0]===location.href.split("#")[0])return;if(f){e.preventDefault();window.parent.postMessage({jsonrpc:"2.0",id:"ryco-link-"+(++n),method:${JSON.stringify(OPEN_LINK_METHOD)},params:{url:u.href}},"*");}else{l.setAttribute("target","_blank");l.setAttribute("rel","noopener noreferrer");}},true);if(f){window.addEventListener("keydown",function(e){if(e.key==="Escape"&&!e.defaultPrevented&&!e.isComposing)window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(ESCAPE_METHOD)}},"*");});var pv=false,pp=function(v){if(v===pv)return;pv=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(POINTER_CHANGED_METHOD)},params:{inside:v}},"*");};document.addEventListener("pointerover",function(){pp(true);},true);document.addEventListener("pointerout",function(e){if(!e.relatedTarget)pp(false);},true);document.documentElement.addEventListener("pointerleave",function(){pp(false);});window.addEventListener("blur",function(){pp(false);});var h0,o,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h0)return;h0=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(SIZE_CHANGED_METHOD)},params:{height:v}},"*");};if(window.ResizeObserver){o=new ResizeObserver(z);o.observe(document.documentElement);}document.addEventListener("DOMContentLoaded",function(){if(o&&document.body)o.observe(document.body);z();});window.addEventListener("load",z);}})();`;
+const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById(${JSON.stringify(HTML_RENDER_THEME_STYLE_ID)}),n=0,f=window.parent!==window,v=false,zm=false,q={};if(!s)return;var b=${JSON.stringify(BASE_CSS)};function a(t){if(!t||typeof t!=="object"||!t.variables||typeof t.variables!=="object")return;var c=":root{color-scheme:"+(t.appearance==="light"?"light":"dark")+";";for(var k in t.variables){if(/^--[a-z0-9-]+$/.test(k))c+=k+":"+String(t.variables[k]).replace(/[;{}<>]/g,"")+";";}s.textContent=c+"}"+b;try{var o={appearance:t.appearance==="light"?"light":"dark",variables:t.variables};if(v)o.send=true;if(zm)o.zoom=true;window.name=${JSON.stringify(THEME_WINDOW_NAME_PREFIX)}+JSON.stringify(o);}catch(x){}}try{var m=/[#&]${THEME_FRAGMENT_KEY}=([^&]*)/.exec(location.hash),w=window.name;if(m){a(JSON.parse(decodeURIComponent(m[1])));history.replaceState(history.state,"",location.pathname+location.search);}else if(typeof w==="string"&&w.indexOf(${JSON.stringify(THEME_WINDOW_NAME_PREFIX)})===0){var p=JSON.parse(w.slice(${THEME_WINDOW_NAME_PREFIX.length}));v=f&&!!p&&p.send===true;zm=f&&!!p&&p.zoom===true;a(p);}}catch(e){}window.addEventListener("message",function(e){var d=e.data,p=d&&d.params;if(f&&e.source!==window.parent)return;if(f&&d&&d.jsonrpc==="2.0"&&typeof d.id==="string"&&Object.prototype.hasOwnProperty.call(q,d.id)&&(d.error||d.result)){var c=q[d.id];delete q[d.id];if(d.error)c[1](new Error(String(d.error.message||"The message was not sent.")));else c[0]();return;}if(d&&d.jsonrpc==="2.0"&&d.method===${JSON.stringify(HOST_CONTEXT_CHANGED_METHOD)}&&p&&p.styles){a({appearance:p.theme,variables:p.styles.variables});try{window.dispatchEvent(new Event(${JSON.stringify(HTML_RENDER_THEME_CHANGE_EVENT)}));}catch(x){}}});window.ryco=Object.freeze({send:function(t){return new Promise(function(r,j){var u=navigator.userActivation,i;if(typeof t!=="string"||!t.trim())return j(new Error("ryco.send needs text."));if(!v)return j(new Error("Sending messages is not available here."));if(u&&!u.isActive)return j(new Error("ryco.send works only from a click or key press in the page."));i="ryco-message-"+(++n);q[i]=[r,j];try{window.parent.postMessage({jsonrpc:"2.0",id:i,method:${JSON.stringify(MESSAGE_METHOD)},params:{role:"user",content:[{type:"text",text:t}]}},"*");}catch(x){delete q[i];j(x);}});}});document.addEventListener("click",function(e){var l=e.isTrusted?e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}):null,h,u;if(!l)return;h=(l.getAttribute("href")||"").trim();if(h.charAt(0)==="#")return;try{u=new URL(h,document.baseURI);}catch(x){u=null;}if(!u||!/^https?:\\/\\//i.test(h)||!/^https?:$/.test(u.protocol)){if(f)e.preventDefault();return;}if(u.href.split("#")[0]===location.href.split("#")[0])return;if(f){e.preventDefault();window.parent.postMessage({jsonrpc:"2.0",id:"ryco-link-"+(++n),method:${JSON.stringify(OPEN_LINK_METHOD)},params:{url:u.href}},"*");}else{l.setAttribute("target","_blank");l.setAttribute("rel","noopener noreferrer");}},true);if(f){window.addEventListener("keydown",function(e){if(e.key==="Escape"&&!e.defaultPrevented&&!e.isComposing)window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(ESCAPE_METHOD)}},"*");});var pv=false,pp=function(v){if(v===pv)return;pv=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(POINTER_CHANGED_METHOD)},params:{inside:v}},"*");};document.addEventListener("pointerover",function(){pp(true);},true);document.addEventListener("pointerout",function(e){if(!e.relatedTarget)pp(false);},true);document.documentElement.addEventListener("pointerleave",function(){pp(false);});window.addEventListener("blur",function(){pp(false);});if(zm){var zp=function(t){window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(ZOOM_METHOD)},params:t},"*");},gs=1;window.addEventListener("keydown",function(e){var k=e.key,x;if(!(e.metaKey||e.ctrlKey)||e.altKey||e.isComposing||e.defaultPrevented)return;x=k==="+"||k==="="?"in":k==="-"||k==="_"?"out":k==="0"?"reset":null;if(!x)return;e.preventDefault();zp({action:x});});window.addEventListener("wheel",function(e){if(!e.ctrlKey)return;e.preventDefault();zp({action:"wheel",deltaY:e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?400:1)});},{passive:false});window.addEventListener("gesturestart",function(e){e.preventDefault();gs=1;});window.addEventListener("gesturechange",function(e){e.preventDefault();if(e.scale>0){zp({action:"scale",factor:e.scale/gs});gs=e.scale;}});}var h0,w0,c0,o,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height),w=Math.ceil(r.scrollWidth),c=r.clientWidth;if(v===h0&&w===w0&&c===c0)return;h0=v;w0=w;c0=c;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(SIZE_CHANGED_METHOD)},params:{height:v,width:w,viewportWidth:c}},"*");};if(window.ResizeObserver){o=new ResizeObserver(z);o.observe(document.documentElement);}document.addEventListener("DOMContentLoaded",function(){if(o&&document.body)o.observe(document.body);z();});window.addEventListener("load",z);}})();`;
 
 const INJECTED_CHARSET = '<meta charset="utf-8">';
 const INJECTED_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1">';

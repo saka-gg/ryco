@@ -142,6 +142,80 @@ describe("CheckpointDiffQueryLive", () => {
     });
   });
 
+  it("answers a file view: the file list, then single files' patches (D6)", async () => {
+    const projectId = ProjectId.make("project-1");
+    const threadId = ThreadId.make("thread-1");
+    const fileCount = 40;
+    // 40 files of 2,500 changed lines each: a 10 MB-class patch kept to ~4 MB for the test.
+    const patch = Array.from({ length: fileCount }, (_, file) => {
+      const lines = Array.from({ length: 2_500 }, (__, line) => `+const v${line} = ${file};`);
+      return [
+        `diff --git a/src/file-${file}.ts b/src/file-${file}.ts`,
+        "index 0000000..1111111 100644",
+        `--- a/src/file-${file}.ts`,
+        `+++ b/src/file-${file}.ts`,
+        `@@ -0,0 +1,2500 @@`,
+        ...lines,
+      ].join("\n");
+    }).join("\n");
+    let diffs = 0;
+    const checkpointStore: CheckpointStoreShape = {
+      ...unusedStoreMethods,
+      resolveCheckpointCommits: ({ checkpointRefs }) =>
+        Effect.succeed(checkpointRefs.map((_, index) => `oid-${index}`)),
+      diffCheckpointCommits: () =>
+        Effect.sync(() => {
+          diffs += 1;
+          return patch;
+        }),
+    };
+    const layer = makeLayer(
+      checkpointStore,
+      makeThreadCheckpointContext({
+        projectId,
+        threadId,
+        workspaceRoot: "/tmp/workspace",
+        worktreePath: null,
+        checkpointTurnCount: 1,
+        checkpointRef: checkpointRefForThreadTurn(threadId, 1),
+      }),
+    );
+    const [whole, index, oneFile] = await Effect.runPromise(
+      Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery;
+        const range = { threadId, fromTurnCount: 0, toTurnCount: 1 } as const;
+        return [
+          yield* query.getTurnDiff(range),
+          yield* query.getTurnDiff({ ...range, fileView: { kind: "index" } }),
+          yield* query.getFullThreadDiff({
+            threadId,
+            toTurnCount: 1,
+            fileView: { kind: "files", indices: [3] },
+          }),
+        ] as const;
+      }).pipe(Effect.provide(layer)),
+    );
+    expect(diffs).toBe(1);
+    expect(index.diff).toBe("");
+    expect(index.fileView?.fromCommitOid).toBe("oid-0");
+    expect(index.fileView?.files).toHaveLength(fileCount);
+    expect(index.fileView?.files?.[3]).toEqual({
+      index: 3,
+      path: "src/file-3.ts",
+      status: "modified",
+      additions: 2_500,
+      deletions: 0,
+      patchChars: expect.any(Number),
+    });
+    expect(oneFile.fileView?.patches?.map((entry) => entry.index)).toEqual([3]);
+    expect(oneFile.fileView?.patches?.[0]?.patch).toContain("+++ b/src/file-3.ts");
+    const wholeBytes = JSON.stringify(whole).length;
+    const indexBytes = JSON.stringify(index).length;
+    const fileBytes = JSON.stringify(oneFile).length;
+    expect(indexBytes).toBeLessThan(wholeBytes / 400);
+    expect(fileBytes).toBeLessThan(wholeBytes / 30);
+  });
+
   it("defaults to hide whitespace changes", async () => {
     const projectId = ProjectId.make("project-default-whitespace");
     const threadId = ThreadId.make("thread-default-whitespace");

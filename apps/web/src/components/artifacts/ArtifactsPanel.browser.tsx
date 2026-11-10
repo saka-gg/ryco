@@ -120,7 +120,10 @@ describe("ArtifactsPanel", () => {
     document.body.innerHTML = "";
   });
 
-  async function mount(messages: ReadonlyArray<ChatMessage>) {
+  async function mount(
+    messages: ReadonlyArray<ChatMessage>,
+    options: { readonly asWorkspacePanel?: boolean } = {},
+  ) {
     installHistoryReads();
     const onOpenPage = vi.fn();
     const onShowInThread = vi.fn();
@@ -129,6 +132,12 @@ describe("ArtifactsPanel", () => {
     host.style.width = "480px";
     host.style.height = "640px";
     host.style.display = "flex";
+    if (options.asWorkspacePanel) {
+      // As in the workspace panel: off to the side, and the containing block of
+      // fixed elements inside it (a transformed ancestor).
+      host.style.marginLeft = "560px";
+      host.style.transform = "translateZ(0)";
+    }
     document.body.append(host);
     mounted = await render(
       <ArtifactsPanel
@@ -191,6 +200,46 @@ describe("ArtifactsPanel", () => {
     await page.getByRole("button", { name: "Show report.csv in thread" }).click();
     await page.getByRole("button", { name: "Show Pricing mockup in thread" }).click();
     expect(onShowInThread.mock.calls).toEqual([["export"], ["pricing"]]);
+  });
+
+  it("opens an image inside the panel, never spilling out into the window", async () => {
+    await page.viewport(1280, 900);
+    seedHistory(NO_MORE);
+    await mount(
+      [
+        message("image", 1, [
+          {
+            type: "image",
+            id: "chart",
+            name: "chart.svg",
+            mimeType: "image/svg+xml",
+            sizeBytes: 120,
+            previewUrl: `data:image/svg+xml,${encodeURIComponent(
+              `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900"><rect width="100%" height="100%" fill="teal"/></svg>`,
+            )}`,
+            width: 1600,
+            height: 900,
+          },
+        ]),
+      ],
+      { asWorkspacePanel: true },
+    );
+    await page.getByRole("button", { name: "Preview chart.svg" }).click();
+    const viewer = page.getByRole("dialog", { name: "Expanded image preview" });
+    await expect.element(viewer).toBeVisible();
+    const panel = document.querySelector("[data-artifacts-panel]")!.getBoundingClientRect();
+    await vi.waitFor(() => {
+      const image = viewer.element().querySelector("img")!.getBoundingClientRect();
+      expect(image.width).toBeGreaterThan(0);
+      expect(image.left).toBeGreaterThanOrEqual(panel.left);
+      expect(image.right).toBeLessThanOrEqual(panel.right);
+      expect(image.bottom).toBeLessThanOrEqual(panel.bottom);
+    });
+    const close = viewer.getByRole("button", { name: "Close image preview" }).last();
+    const closeBox = close.element().getBoundingClientRect();
+    expect(closeBox.right).toBeLessThanOrEqual(panel.right);
+    await close.click();
+    await expect.element(viewer).not.toBeInTheDocument();
   });
 
   it("reads the artifacts further back than the thread as loaded, a page at a time", async () => {

@@ -27,6 +27,7 @@ import {
   toHydratedDraftThreadState,
   type DraftThreadState,
 } from "@ryco/client-runtime/state/composer";
+import { listRunningThreadKeys } from "@ryco/client-runtime/state/threads/runningThreads";
 import { useStore } from "../store";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useUiStateStore } from "../uiStateStore";
@@ -102,11 +103,26 @@ let authorityPurge: Promise<void> | null = null;
 let pending: Promise<void> = Promise.resolve();
 /** The scheduled save while it waits out the throttle, or for an idle period. */
 let scheduledSave: Promise<void> | null = null;
+/** The scheduled save's throttle timer and when it fires, while it waits out the throttle. */
+let scheduledSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let scheduledSaveDueAt = 0;
+let fireScheduledSave: (() => void) | null = null;
 interface SaveTiming {
   readonly throttleMs: number;
   readonly idleTimeoutMs: number;
+  /**
+   * The throttle while a turn runs anywhere. A save rebuilds, encrypts and
+   * writes a whole machine record (up to the record budget); a streaming turn
+   * changes it with every token, so it is saved this often instead of about
+   * once a second. Its end, a hidden page and page hide still save at once.
+   */
+  readonly streamingThrottleMs: number;
 }
-const SAVE_TIMING: SaveTiming = { throttleMs: 750, idleTimeoutMs: 2_000 };
+const SAVE_TIMING: SaveTiming = {
+  throttleMs: 750,
+  idleTimeoutMs: 2_000,
+  streamingThrottleMs: 8_000,
+};
 let saveTiming = SAVE_TIMING;
 const environments = new Map<EnvironmentId, CachedEnvironment>();
 /** The catalog last written for `owner`, so an unchanged catalog is not re-encrypted. */
@@ -589,24 +605,55 @@ function whenIdle(callback: () => void, timeoutMs: number): void {
   }
 }
 
+function saveThrottleMs(): number {
+  return listRunningThreadKeys(useStore.getState(), 1).length > 0
+    ? saveTiming.streamingThrottleMs
+    : saveTiming.throttleMs;
+}
+
 function scheduleSave() {
-  if (scheduledSave || !account || !snapshot.enabled) return;
+  if (!account || !snapshot.enabled) return;
+  const throttleMs = saveThrottleMs();
+  if (scheduledSave) {
+    // A turn ended while its save waits out the streaming throttle: the
+    // finished conversation is saved after the short one instead.
+    if (scheduledSaveTimer !== null && Date.now() + throttleMs < scheduledSaveDueAt) {
+      clearTimeout(scheduledSaveTimer);
+      armScheduledSave(throttleMs);
+    }
+    return;
+  }
   // Throttle, rather than debounce: continuous token output must still reach
   // disk. The encryption and write then wait for an idle period, so a busy
   // stream is not interrupted for them; page hide still flushes at once.
   scheduledSave = new Promise<void>((resolve) => {
-    setTimeout(() => {
+    fireScheduledSave = () => {
+      fireScheduledSave = null;
       whenIdle(() => {
         scheduledSave = null;
         resolve(queue(save));
       }, saveTiming.idleTimeoutMs);
-    }, saveTiming.throttleMs);
+    };
   });
+  armScheduledSave(throttleMs);
+}
+
+function armScheduledSave(delayMs: number): void {
+  scheduledSaveDueAt = Date.now() + delayMs;
+  scheduledSaveTimer = setTimeout(() => {
+    scheduledSaveTimer = null;
+    fireScheduledSave?.();
+  }, delayMs);
 }
 
 /** Shortens the save throttle and idle wait (`null` restores them), so tests need not wait them out. */
-export function setHostedReadCacheSaveTimingForTests(timing: SaveTiming | null): void {
-  saveTiming = timing ?? SAVE_TIMING;
+export function setHostedReadCacheSaveTimingForTests(
+  timing: (Omit<SaveTiming, "streamingThrottleMs"> & Partial<SaveTiming>) | null,
+): void {
+  saveTiming =
+    timing === null
+      ? SAVE_TIMING
+      : { ...timing, streamingThrottleMs: timing.streamingThrottleMs ?? timing.throttleMs };
 }
 
 /**

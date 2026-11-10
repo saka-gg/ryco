@@ -7,8 +7,10 @@ import {
 } from "@ryco/contracts";
 
 import {
+  clearWorkspaceFileReadCache,
   readWorkspaceFileBytes,
   readWorkspaceFileBytesFromTransport,
+  WORKSPACE_FILE_CHUNKS_IN_FLIGHT,
   type WorkspaceFileChunkTransport,
 } from "./workspaceFileRead.ts";
 
@@ -106,6 +108,103 @@ describe("readWorkspaceFileBytes", () => {
       readWorkspaceFileBytes({ reference, readChunk, signal: controller.signal }),
     ).rejects.toThrow("File load cancelled.");
     expect(readChunk).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("readWorkspaceFileBytes in flight and cached (D7)", () => {
+  /** A 4 MiB image served by a node with one round trip of latency per request. */
+  function imageNode(fingerprint = FINGERPRINT, answersUnchanged = true) {
+    const total = 4 * 1024 * 1024;
+    const file = new Uint8Array(total).map((_, index) => index % 251);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    // Round trips on the longest chain: a request waits on the one whose answer freed its lane.
+    let lastAnsweredDepth = 0;
+    let roundTrips = 0;
+    let base64Chars = 0;
+    const readChunk = vi.fn(async (input: ProjectReadFileChunkInput) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const depth = lastAnsweredDepth + 1;
+      roundTrips = Math.max(roundTrips, depth);
+      // Latency without a clock: the answer comes after other lanes had their turn.
+      for (let tick = 0; tick < 4; tick += 1) await Promise.resolve();
+      inFlight -= 1;
+      lastAnsweredDepth = depth;
+      const unchanged = answersUnchanged && input.knownFingerprint === fingerprint;
+      const slice = unchanged
+        ? new Uint8Array(0)
+        : file.subarray(input.offset, input.offset + PROJECT_READ_FILE_CHUNK_BYTES);
+      const dataBase64 = Buffer.from(slice).toString("base64");
+      base64Chars += dataBase64.length;
+      return {
+        relativePath: input.relativePath,
+        offset: input.offset,
+        totalBytes: total,
+        dataBase64,
+        mimeType: "image/png",
+        fingerprint,
+        ...(unchanged ? { unchanged: true as const } : {}),
+      };
+    });
+    return {
+      readChunk,
+      file,
+      stats: () => ({
+        requests: readChunk.mock.calls.length,
+        maxInFlight,
+        roundTrips,
+        base64Chars,
+      }),
+    };
+  }
+
+  it("reads the rest a few chunks at a time, then reopens an unchanged file from memory", async () => {
+    clearWorkspaceFileReadCache();
+    const node = imageNode();
+    const read = () =>
+      readWorkspaceFileBytes({ reference, readChunk: node.readChunk, cacheScope: "env-a" });
+    const first = await read();
+    expect(first.bytes).toEqual(node.file);
+    const opened = node.stats();
+    // 16 chunks: the first alone, then 15 three at a time (6 round trips instead of 16).
+    expect(opened.requests).toBe(16);
+    expect(opened.maxInFlight).toBe(WORKSPACE_FILE_CHUNKS_IN_FLIGHT);
+    expect(opened.roundTrips).toBe(6);
+
+    const again = await read();
+    expect(again.bytes).toEqual(node.file);
+    expect(again.bytes).not.toBe(first.bytes);
+    const reopened = node.stats();
+    expect(reopened.requests - opened.requests).toBe(1);
+    expect(reopened.base64Chars - opened.base64Chars).toBe(0);
+    expect(node.readChunk.mock.calls[16]?.[0]).toEqual({
+      ...reference,
+      offset: 0,
+      knownFingerprint: FINGERPRINT,
+    });
+  });
+
+  it("uses the cache against an older node too, and reads a changed file again", async () => {
+    clearWorkspaceFileReadCache();
+    const older = imageNode(FINGERPRINT, false);
+    await readWorkspaceFileBytes({ reference, readChunk: older.readChunk, cacheScope: "env-a" });
+    // The older node sends the first chunk anyway; its fingerprint says the rest is held.
+    await readWorkspaceFileBytes({ reference, readChunk: older.readChunk, cacheScope: "env-a" });
+    expect(older.stats().requests).toBe(17);
+
+    const changed = imageNode("stat:changed");
+    const result = await readWorkspaceFileBytes({
+      reference,
+      readChunk: changed.readChunk,
+      cacheScope: "env-a",
+    });
+    expect(result.fingerprint).toBe("stat:changed");
+    expect(changed.stats().requests).toBe(16);
+    // Another environment never shares the entry.
+    const other = imageNode();
+    await readWorkspaceFileBytes({ reference, readChunk: other.readChunk, cacheScope: "env-b" });
+    expect(other.readChunk.mock.calls[0]?.[0]).toEqual({ ...reference, offset: 0 });
   });
 });
 

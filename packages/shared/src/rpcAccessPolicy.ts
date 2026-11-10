@@ -30,6 +30,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.storageScan]: "owner",
   [WS_METHODS.storagePreview]: "owner",
   [WS_METHODS.storageExecute]: "owner",
+  [WS_METHODS.storageRemoveDatabaseBackup]: "owner",
+  [WS_METHODS.storageDatabaseCompactionStatus]: "owner",
+  [WS_METHODS.storageStartDatabaseCompaction]: "owner",
   [WS_METHODS.sessionImportSources]: "owner",
   [WS_METHODS.sessionImportReconcile]: "owner",
   [WS_METHODS.sessionImportAdopt]: "owner",
@@ -118,6 +121,7 @@ export const RPC_ACCESS_POLICY = {
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "viewer",
   // The full payload of an activity the window already sent as a preview.
   [ORCHESTRATION_WS_METHODS.getActivityPayload]: "viewer",
+  [ORCHESTRATION_WS_METHODS.getMessageText]: "viewer",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "viewer",
   // The same shells a viewer's shell subscription carries, for archived stubs.
   [ORCHESTRATION_WS_METHODS.getThreadShells]: "viewer",
@@ -222,6 +226,7 @@ export const RPC_ACCESS_POLICY = {
   // It only delays updates (a node-side timestamp, rate-limited per session); it never starts,
   // allows or reads one.
   [WS_METHODS.serverNoteClientInteraction]: "viewer",
+  [WS_METHODS.serverSetConnectionVisibility]: "viewer",
   [WS_METHODS.serverSubscribeNodeUpdate]: "viewer",
   [WS_METHODS.serverCheckNodeUpdate]: "owner",
   [WS_METHODS.serverUpdateNode]: "owner",
@@ -279,6 +284,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.subscribeVcsStatus]: "operator",
   [WS_METHODS.terminalClear]: "operator",
   [WS_METHODS.terminalClose]: "operator",
+  [WS_METHODS.terminalDetachOutput]: "operator",
   [WS_METHODS.terminalOpen]: "operator",
   [WS_METHODS.terminalResize]: "operator",
   [WS_METHODS.terminalRestart]: "operator",
@@ -365,6 +371,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.storageScan]: "read",
   [WS_METHODS.storagePreview]: "read",
   [WS_METHODS.storageExecute]: "mutation",
+  [WS_METHODS.storageRemoveDatabaseBackup]: "mutation",
+  [WS_METHODS.storageDatabaseCompactionStatus]: "read",
+  [WS_METHODS.storageStartDatabaseCompaction]: "mutation",
   [WS_METHODS.sessionImportSources]: "read",
   [WS_METHODS.sessionImportReconcile]: "mutation",
   [WS_METHODS.sessionImportAdopt]: "mutation",
@@ -450,6 +459,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [ORCHESTRATION_WS_METHODS.getTaskOutput]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "read",
   [ORCHESTRATION_WS_METHODS.getActivityPayload]: "read",
+  [ORCHESTRATION_WS_METHODS.getMessageText]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadShells]: "read",
   // Idempotent: it sets a mode and the server spaces recovery reads per thread.
@@ -559,6 +569,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverUpdateProvider]: "mutation",
   // Sets the node's last-interaction time to now: losing or repeating one is harmless.
   [WS_METHODS.serverNoteClientInteraction]: "read",
+  [WS_METHODS.serverSetConnectionVisibility]: "read",
   [WS_METHODS.serverSubscribeNodeUpdate]: "read",
   // Asks the registry (or the desktop updater) again; it changes nothing on the node.
   [WS_METHODS.serverCheckNodeUpdate]: "read",
@@ -611,6 +622,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.subscribeVcsStatus]: "read",
   [WS_METHODS.terminalClear]: "mutation",
   [WS_METHODS.terminalClose]: "mutation",
+  // Only narrows what this connection is sent; changes nothing on the node.
+  [WS_METHODS.terminalDetachOutput]: "read",
   [WS_METHODS.terminalOpen]: "mutation",
   [WS_METHODS.terminalResize]: "mutation",
   [WS_METHODS.terminalRestart]: "mutation",

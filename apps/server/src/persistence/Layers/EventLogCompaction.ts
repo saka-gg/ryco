@@ -56,6 +56,7 @@ import { Clock, Effect, Layer, Option, Schema } from "effect";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { isProcessScopedCommandId } from "../../orchestration/processScopedCommandIds.ts";
 import { toPersistenceSqlError } from "../Errors.ts";
 import { writeLifecycleMarker } from "../lifecycleMarkers.ts";
 import {
@@ -72,7 +73,7 @@ import {
 } from "../Services/EventLogCompaction.ts";
 import { SqliteReadClient } from "../SqliteReadClient.ts";
 import { compactionStateKey, readCompactionState } from "./EventLogCompactionState.ts";
-import { runRetentionPass } from "./EventLogRetention.ts";
+import { adaptDeleteBatchSize, runRetentionPass } from "./EventLogRetention.ts";
 
 /**
  * The largest selection window when selection runs on the main connection (no read worker):
@@ -84,15 +85,13 @@ const MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES = 500;
 /** Without deletions, the cursor is still saved this often (sequences scanned). */
 const CURSOR_SAVE_INTERVAL_SEQUENCES = 50_000;
 
-const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const PRUNABLE_RECEIPT_COMMAND_ID = new RegExp(`^(?:provider:${UUID}:|history:${UUID}$)`, "i");
-
 /**
  * Whether a receipt may be pruned once old: its command id embeds a UUID minted for one emission,
  * so only the emitting process could re-dispatch it, within seconds. Everything else is kept.
+ * The engine no longer writes these receipts (it keeps them in memory); rows written by earlier
+ * versions are still pruned here.
  */
-export const isPrunableReceiptCommandId = (commandId: string): boolean =>
-  PRUNABLE_RECEIPT_COMMAND_ID.test(commandId);
+export const isPrunableReceiptCommandId = isProcessScopedCommandId;
 
 const encodeState = Schema.encodeSync(Schema.fromJsonString(CompactionState));
 
@@ -150,16 +149,6 @@ export const receiptPageQuery = (client: SqlClient.SqlClient, afterRowid: number
     ORDER BY rowid
     LIMIT ${rows}
   `;
-
-const adaptBatchSize = (
-  size: number,
-  elapsedMs: number,
-  batch: EventLogCompactionPassOptions["deleteBatch"],
-) => {
-  if (elapsedMs > batch.targetMs * 2) return Math.max(batch.min, Math.floor(size / 2));
-  if (elapsedMs < batch.targetMs / 2) return Math.min(batch.max, Math.ceil(size * 1.5));
-  return size;
-};
 
 export interface EventLogCompactionDeps {
   /** Statistics' per-thread reader; retention keeps deleted threads' events without it. */
@@ -405,7 +394,7 @@ export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
                       { firstSequence: batch[0]?.sequence, events: batch.length },
                     );
                   }
-                  batchSize = adaptBatchSize(batchSize, elapsedMs, options.deleteBatch);
+                  batchSize = adaptDeleteBatchSize(batchSize, elapsedMs, options.deleteBatch);
                   yield* pauseAfter(elapsedMs);
                 }
               }
@@ -500,7 +489,7 @@ export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
                     mainThreadMs += elapsedMs;
                     maxBatchMs = Math.max(maxBatchMs, elapsedMs);
                     receiptBatchDurationsMs.push(elapsedMs);
-                    receiptBatchSize = adaptBatchSize(receiptBatchSize, elapsedMs, {
+                    receiptBatchSize = adaptDeleteBatchSize(receiptBatchSize, elapsedMs, {
                       ...options.deleteBatch,
                       max: Math.max(1, receipts.deleteBatch),
                     });
@@ -528,6 +517,8 @@ export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
                 compactedThroughSequence: cursor,
                 overTime,
                 readThreadUsage: deps.readThreadUsage,
+                reader,
+                batchTiming: options.deleteBatch,
                 afterBatch: (elapsedMs) =>
                   Effect.suspend(() => {
                     mainThreadMs += elapsedMs;

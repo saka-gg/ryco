@@ -33,7 +33,7 @@ import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { logOnceEvery } from "../logOnceEvery.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
-import { readCheckoutHead } from "./gitCheckoutHead.ts";
+import type { RefSummarySources } from "./refSummarySources.ts";
 
 const DEFAULT_VCS_STATUS_REFRESH_INTERVAL = Duration.seconds(30);
 /** Folders whose last status stays cached; older ones reload on the next read. */
@@ -757,55 +757,41 @@ export const layer = Layer.effect(
         }),
       );
 
+    // Summary streams of one folder share one source (`refSummarySources`), loaded with the
+    // first summary stream, off the boot path.
+    let refSummarySources: RefSummarySources | null = null;
+    const loadRefSummarySources = yield* Effect.cached(
+      Effect.promise(() => import("./refSummarySources.ts")).pipe(
+        Effect.map(({ makeRefSummarySources }) => {
+          refSummarySources = makeRefSummarySources({
+            refSummary: (cwd) => inBackgroundProcessLane(workflow.refSummary(cwd)),
+            subscribeFolder,
+            scope: broadcasterScope,
+            headPollInterval: REF_SUMMARY_HEAD_POLL_INTERVAL,
+            minPollInterval: REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL,
+            triggerDebounce: REF_SUMMARY_TRIGGER_DEBOUNCE,
+            channelCapacity: FOLDER_CHANNEL_CAPACITY,
+          });
+          return refSummarySources;
+        }),
+      ),
+    );
+    yield* Effect.addFinalizer(() =>
+      Effect.suspend(() => (refSummarySources === null ? Effect.void : refSummarySources.stopAll)),
+    );
+
     const streamRefSummary = (
       input: VcsStatusInput,
     ): Stream.Stream<VcsStatusStreamEvent, GitManagerServiceError> =>
       Stream.unwrap(
-        Effect.gen(function* () {
-          const cwd = normalizeCwd(input.cwd);
-          // Status work for many folders at once yields to interactive git.
-          const readSummary = inBackgroundProcessLane(workflow.refSummary(cwd));
-          const subscription = yield* subscribeFolder(cwd);
-          const initial = yield* readSummary;
-          const pollIntervalMs = input.automaticRemoteRefreshIntervalMs ?? 0;
-
-          // Recompute on: a publication for this folder (a refresh after a git
-          // action or agent turn), a checkout switch seen on disk, and — when
-          // polling is enabled — a slow periodic re-read of change requests.
-          const triggers = Stream.mergeAll(
-            [
-              Stream.fromSubscription(subscription).pipe(Stream.as("published")),
-              Stream.tick(REF_SUMMARY_HEAD_POLL_INTERVAL).pipe(
-                Stream.mapEffect(() => readCheckoutHead(cwd)),
-                Stream.map((head) => head?.branch ?? null),
-                Stream.changes,
-                Stream.drop(1),
-                Stream.as("head"),
-              ),
-              pollIntervalMs > 0
-                ? Stream.tick(
-                    Duration.max(
-                      Duration.millis(pollIntervalMs),
-                      REF_SUMMARY_MIN_REMOTE_REFRESH_INTERVAL,
-                    ),
-                  ).pipe(Stream.drop(1), Stream.as("poll"))
-                : Stream.empty,
-            ],
-            { concurrency: "unbounded" },
-          );
-          const updates = triggers.pipe(
-            Stream.debounce(REF_SUMMARY_TRIGGER_DEBOUNCE),
-            Stream.mapEffect(() => readSummary.pipe(Effect.catchCause(() => Effect.succeed(null)))),
-            Stream.filter((summary): summary is VcsRefSummary => summary !== null),
-          );
-
-          return Stream.concat(Stream.make(initial), updates).pipe(
-            Stream.map(refSummaryToStatusEvent),
-            Stream.changesWith(
-              (left, right) => fingerprintStatusPart(left) === fingerprintStatusPart(right),
-            ),
-          );
-        }),
+        Effect.map(loadRefSummarySources, (sources) =>
+          sources.stream(normalizeCwd(input.cwd), input.automaticRemoteRefreshIntervalMs ?? 0),
+        ),
+      ).pipe(
+        Stream.map(refSummaryToStatusEvent),
+        Stream.changesWith(
+          (left, right) => fingerprintStatusPart(left) === fingerprintStatusPart(right),
+        ),
       );
 
     return VcsStatusBroadcaster.of({

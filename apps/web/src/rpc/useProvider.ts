@@ -27,6 +27,7 @@ export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffSta
     ignoreWhitespace,
     cacheScope,
     cacheSlot,
+    fileIndex,
   } = input;
   const enabled = input.enabled;
   const key = isCheckpointDiffEnabled(input) ? checkpointDiffCacheKey(input) : null;
@@ -43,6 +44,7 @@ export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffSta
       ignoreWhitespace,
       ...(cacheScope !== undefined ? { cacheScope } : {}),
       ...(cacheSlot !== undefined ? { cacheSlot } : {}),
+      ...(fileIndex ? { fileIndex } : {}),
       ...(enabled !== undefined ? { enabled } : {}),
     });
   }, [
@@ -54,6 +56,7 @@ export function useCheckpointDiff(input: CheckpointDiffInput): CheckpointDiffSta
     ignoreWhitespace,
     cacheScope,
     cacheSlot,
+    fileIndex,
     enabled,
   ]);
 

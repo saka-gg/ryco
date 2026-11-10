@@ -107,12 +107,14 @@ Two facts the series established that any future work must respect:
 
 The snapshot cache also keeps bounded recent conversation text next to each environment's shell,
 so a thread opened right after a cold start shows its last messages before the relay, handshake
-and window have completed. This is a device-local exception to the native app otherwise keeping
+and window have completed. A launch reads only each environment's thread list; a thread's text is
+read from the device when the thread opens (its screen, a notification tap, a finger on its row). This is a device-local exception to the native app otherwise keeping
 only shell metadata. It is separate from the hosted browser client's opt-in storage described in
 [the hosted Hub client](./hosted-hub-client.md).
 
-- **What is stored:** the messages (ids, turn ids, role, text and timestamps) of up to 32 recently
-  active conversations per environment, limited to a bounded number of recent messages and a
+- **What is stored:** the messages (ids, turn ids, role, text and timestamps) and the approval or
+  question cards still open (their request ids and the fields the cards show, no attachments) of up
+  to 32 recently active conversations per environment, limited to a bounded number of recent messages and a
   bounded amount of text per conversation. The text of one environment also has its own size cap,
   an equal share of the cache's total budget, inside the per-environment record cap, so recent
   conversations alone do not push other environments' cached shells out of the cache. When a cap is
@@ -121,7 +123,8 @@ only shell metadata. It is separate from the hosted browser client's opt-in stor
 - **The setting:** Settings, Stored on this device, "Keep recent conversations on this device".
   It is on by default and per device. Turning it off removes the stored text of every environment
   immediately and stops it being stored; the cached shells stay.
-- **At rest:** the text lives in the app's local SQLite database, in the same row as the shell.
+- **At rest:** the text lives in the app's local SQLite database, one row per conversation beside
+  the environment's thread rows.
   It relies on the operating system's data protection for the app's storage (iOS file protection;
   Android app-private storage), which keeps the files encrypted and unreadable until the device is
   first unlocked after a restart. Once it has been unlocked the app can read them again, also
@@ -138,7 +141,8 @@ only shell metadata. It is separate from the hosted browser client's opt-in stor
 - **Display only:** stored text is shown as last-known state under the existing cached-view
   presentation and is replaced when the thread's live window arrives. It is never a replay
   baseline, a session or a dispatch queue, and it does not make a thread writable: mutations still
-  wait for a live connection.
+  wait for a live connection, and a saved card cannot be answered until the thread's live window
+  has arrived.
 
 ## Open delivery slices
 

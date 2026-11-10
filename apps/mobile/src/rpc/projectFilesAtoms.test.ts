@@ -39,6 +39,7 @@ import {
   clearProjectFilesStateForEnvironment,
   clearProjectFileCache,
   projectFilesCacheStats,
+  invalidateProjectFilesForCheckout,
   invalidateProjectFilesState,
   PROJECT_LIST_ENTRIES_RETAINED_KEY_LIMIT,
   PROJECT_READ_FILE_BINARY_RETAINED_KEY_LIMIT,
@@ -457,6 +458,40 @@ describe("projectFilesAtoms invalidation", () => {
     const releaseAfterInvalidation = projectListEntriesQuery.watch(input);
     await vi.waitFor(() => expect(listedPath(cacheKey)).toBe("call-2.ts"));
     releaseAfterInvalidation();
+  });
+});
+
+describe("projectFilesAtoms per-checkout invalidation (D2, D3)", () => {
+  it("re-reads only the changed checkout, sending the held revision", async () => {
+    const listEntries = vi.fn(async (input: { cwd: string; knownRevision?: string }) =>
+      input.knownRevision === `rev-${input.cwd}`
+        ? { entries: [], truncated: false, revision: input.knownRevision, unchanged: true as const }
+        : { ...listResult(`${input.cwd}/a.ts`), revision: `rev-${input.cwd}` },
+    );
+    setProjectsApi(ENV, { listEntries });
+    const changed = { environmentId: ENV, cwd: CWD };
+    const other = { environmentId: ENV, cwd: "/work/other" };
+    const releaseChanged = projectListEntriesQuery.watch(changed);
+    const releaseOther = projectListEntriesQuery.watch(other);
+    await vi.waitFor(() => expect(listEntries).toHaveBeenCalledTimes(2));
+    await flush();
+    const held = projectListEntriesQuery.getSnapshot(projectListEntriesQuery.keyOf(changed)).data;
+
+    invalidateProjectFilesForCheckout(ENV, CWD);
+    await vi.waitFor(() => expect(listEntries).toHaveBeenCalledTimes(3));
+    expect(listEntries.mock.calls[2]?.[0]).toEqual({ cwd: CWD, knownRevision: `rev-${CWD}` });
+    await flush();
+    // Unchanged: the very same listing object stays.
+    expect(projectListEntriesQuery.getSnapshot(projectListEntriesQuery.keyOf(changed)).data).toBe(
+      held,
+    );
+
+    // Another node's change touches nothing here.
+    invalidateProjectFilesForCheckout(OTHER_ENV, CWD);
+    await flush();
+    expect(listEntries).toHaveBeenCalledTimes(3);
+    releaseChanged();
+    releaseOther();
   });
 });
 

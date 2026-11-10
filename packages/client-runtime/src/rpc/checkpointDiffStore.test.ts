@@ -114,4 +114,33 @@ describe("createCheckpointDiffStore", () => {
     release();
     expect(read(conversation(2)).data?.diff).toBe("conversation-2");
   });
+
+  it("refetches only the diffs a turn or a revert can change (D1)", async () => {
+    const { store, watchUntilResolved, getTurnDiff } = makeStore({ maxInactiveEntries: 8 });
+    activeStore = store;
+    // Three diffs on screen: turns 1->2, 2->3 and 3->4.
+    const releases = [
+      await watchUntilResolved(turn(1)),
+      await watchUntilResolved(turn(2)),
+      await watchUntilResolved(turn(3)),
+    ];
+    expect(getTurnDiff).toHaveBeenCalledTimes(3);
+
+    // Turn 5 completed: no open range reads its checkpoint, nothing is fetched.
+    store.invalidateCheckpointDiffChanges([{ threadId, fromTurnCount: 5 }]);
+    // Another thread's turn: nothing either.
+    store.invalidateCheckpointDiffChanges([{ threadId: "thread-2" as ThreadId, fromTurnCount: 1 }]);
+    await Promise.resolve();
+    expect(getTurnDiff).toHaveBeenCalledTimes(3);
+
+    // Turn 4's checkpoint was captured again: only the range that reads it.
+    store.invalidateCheckpointDiffChanges([{ threadId, fromTurnCount: 4 }]);
+    await vi.waitFor(() => expect(getTurnDiff).toHaveBeenCalledTimes(4));
+    expect(getTurnDiff.mock.calls[3]?.[0]).toMatchObject({ fromTurnCount: 3, toTurnCount: 4 });
+
+    // A revert reuses the thread's turn counts: every range of the thread.
+    store.invalidateCheckpointDiffChanges([{ threadId, fromTurnCount: null }]);
+    await vi.waitFor(() => expect(getTurnDiff).toHaveBeenCalledTimes(7));
+    for (const release of releases) release();
+  });
 });

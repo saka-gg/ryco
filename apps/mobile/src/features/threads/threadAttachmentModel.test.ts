@@ -5,6 +5,7 @@ import type { ChatAttachment } from "@ryco/client-runtime/state/threads";
 import {
   DEFAULT_MEDIA_ASPECT_RATIO,
   IMAGE_ATTACHMENT_SLOT_WIDTH,
+  imageAttachmentPreviewSize,
   isVideoFileAttachment,
   readAttachmentDimensions,
 } from "./threadAttachmentModel";
@@ -113,5 +114,13 @@ describe("slot constants", () => {
 
   it("defaults unknown media dimensions to a 16:9 slot", () => {
     expect(DEFAULT_MEDIA_ASPECT_RATIO).toBeCloseTo(16 / 9);
+  });
+});
+
+describe("imageAttachmentPreviewSize", () => {
+  it("picks the smaller preview where it is sharp on a 3x screen", () => {
+    expect(imageAttachmentPreviewSize({ width: 2880, height: 1800 })).toBe(512);
+    expect(imageAttachmentPreviewSize({ width: 1170, height: 2532 })).toBe(1024);
+    expect(imageAttachmentPreviewSize(null)).toBe(1024);
   });
 });

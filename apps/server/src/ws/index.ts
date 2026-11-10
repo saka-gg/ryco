@@ -25,6 +25,7 @@ import { makeAgentControlHandlers } from "./agentControlRpc.ts";
 import { makeOrchestrationHandlers } from "./orchestrationRpc.ts";
 import { makeGitHandlers } from "./gitRpc.ts";
 import { makeTerminalHandlers } from "./terminalRpc.ts";
+import { makeConnectionVisibilityHandlers } from "./connectionVisibilityRpc.ts";
 import { makeProjectHandlers } from "./projectRpc.ts";
 import { makeChatProjectHandlers } from "./chatProjectRpc.ts";
 import { makeProjectCopyHandlers } from "./projectCopyRpc.ts";
@@ -71,6 +72,7 @@ type WsRpcHandlerMap = ReturnType<typeof makeAgentControlHandlers> &
   ReturnType<typeof makeClientInteractionHandlers> &
   ReturnType<typeof makeGitHandlers> &
   ReturnType<typeof makeTerminalHandlers> &
+  ReturnType<typeof makeConnectionVisibilityHandlers> &
   ReturnType<typeof makeNodeBrowserHandlers>;
 
 type WsRpcContextBuild = ReturnType<typeof makeWsRpcContext>;
@@ -116,6 +118,7 @@ const makeWsRpcHandlers = (
       ...makePushHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
+      ...makeConnectionVisibilityHandlers(ctx),
       ...makeNodeBrowserHandlers(ctx),
     });
   });

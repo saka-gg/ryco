@@ -11,6 +11,7 @@ import {
 } from "@ryco/contracts";
 import { SCRATCH_INDEX_CONFIG_ARGS } from "./GitDurableWrites.ts";
 import { authorizeGitReadWorkspace } from "./GitReadWorkspace.ts";
+import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { BINARY_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
 
 const LIMIT = 2_000_000;
@@ -392,8 +393,14 @@ export const makeAuthorizedIndexReader = Effect.fn("makeAuthorizedIndexReader")(
 export const readGitLocalChanges = Effect.fn("readGitLocalChanges")(function* (
   execute: GitVcsDriverShape["execute"],
   input: GitLocalChangesInput,
-) {
-  return yield* (yield* makeReader(execute, input.cwd)).read();
+): Effect.fn.Return<GitLocalChangesResult, GitCommandError, WorkspaceAccessPolicy> {
+  const review = yield* (yield* makeReader(execute, input.cwd)).read();
+  // The client holds this review: the git work is the same, the patches are not sent again.
+  if (input.knownRevision !== undefined && input.knownRevision === review.revision) {
+    const empty = { patch: "", files: [] };
+    return { ...review, staged: empty, unstaged: empty, unchanged: true as const };
+  }
+  return review;
 });
 
 /**

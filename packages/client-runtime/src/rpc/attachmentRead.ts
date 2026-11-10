@@ -53,37 +53,99 @@ export async function readOverPinnedTransport<Request, Response, Result>(input: 
   return result;
 }
 
-/** Sequential, bounded reads over the existing authorized transport; no URLs or platform imports. */
+/** Chunk reads in flight at once: a slow link waits one round trip per few chunks, not per chunk. */
+export const ATTACHMENT_READ_CONCURRENCY = 4;
+
+export function assertNotAborted(signal: AbortSignal | undefined) {
+  if (signal?.aborted) throw new Error("Attachment load cancelled.");
+}
+
+/** One validated chunk of a read whose total size is known. */
+export function decodeAttachmentChunk(
+  result: ChatAttachmentReadChunkResult,
+  offset: number,
+  totalBytes: number,
+): Uint8Array<ArrayBuffer> {
+  if (
+    result.offset !== offset ||
+    result.totalBytes !== totalBytes ||
+    result.dataBase64.length > maxBase64ChunkLength(CHAT_ATTACHMENT_READ_CHUNK_BYTES)
+  )
+    throw new Error("Attachment changed during loading.");
+  const chunk = decodeByteChunk(result.dataBase64, CHAT_ATTACHMENT_READ_CHUNK_BYTES);
+  if (chunk === null || offset + chunk.length > totalBytes)
+    throw new Error("Invalid attachment chunk.");
+  return chunk;
+}
+
+/**
+ * Reads the rest of a file whose first chunk is `first`: every later chunk is
+ * as long as the first (the server's chunk size), the last one shorter, and up
+ * to `ATTACHMENT_READ_CONCURRENCY` are in flight at once. The first failure
+ * stops the read.
+ */
+export async function readRemainingChunks(input: {
+  readonly first: Uint8Array<ArrayBuffer>;
+  readonly totalBytes: number;
+  readonly readAt: (offset: number) => Promise<ChatAttachmentReadChunkResult>;
+  readonly signal?: AbortSignal | undefined;
+}): Promise<Uint8Array<ArrayBuffer>> {
+  const { first, totalBytes } = input;
+  if (first.length === totalBytes) return first;
+  const bytes = new Uint8Array(totalBytes);
+  bytes.set(first, 0);
+  const step = first.length;
+  let next = step;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < totalBytes) {
+      const offset = next;
+      next += step;
+      try {
+        assertNotAborted(input.signal);
+        const result = await input.readAt(offset);
+        assertNotAborted(input.signal);
+        const chunk = decodeAttachmentChunk(result, offset, totalBytes);
+        if (chunk.length !== Math.min(step, totalBytes - offset))
+          throw new Error("Invalid attachment chunk.");
+        bytes.set(chunk, offset);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  const workers = Math.min(ATTACHMENT_READ_CONCURRENCY, Math.ceil((totalBytes - step) / step));
+  await Promise.all(Array.from({ length: workers }, worker));
+  return bytes;
+}
+
+export function assertAttachmentSize(sizeBytes: number) {
+  if (
+    !Number.isSafeInteger(sizeBytes) ||
+    sizeBytes <= 0 ||
+    sizeBytes > PROVIDER_SEND_TURN_MAX_FILE_BYTES
+  )
+    throw new Error("Invalid attachment size.");
+}
+
+/** Bounded reads over the existing authorized transport, several in flight; no URLs or platform imports. */
 export async function readAttachmentBytes(input: {
   reference: Omit<ChatAttachmentReadChunkInput, "offset">;
   sizeBytes: number;
   readChunk: (input: ChatAttachmentReadChunkInput) => Promise<ChatAttachmentReadChunkResult>;
   signal?: AbortSignal;
 }): Promise<Uint8Array<ArrayBuffer>> {
-  if (
-    !Number.isSafeInteger(input.sizeBytes) ||
-    input.sizeBytes <= 0 ||
-    input.sizeBytes > PROVIDER_SEND_TURN_MAX_FILE_BYTES
-  )
-    throw new Error("Invalid attachment size.");
-  const bytes = new Uint8Array(input.sizeBytes);
-  for (let offset = 0; offset < bytes.length;) {
-    if (input.signal?.aborted) throw new Error("Attachment load cancelled.");
-    const result = await input.readChunk({ ...input.reference, offset });
-    if (input.signal?.aborted) throw new Error("Attachment load cancelled.");
-    if (
-      result.offset !== offset ||
-      result.totalBytes !== bytes.length ||
-      result.dataBase64.length > maxBase64ChunkLength(CHAT_ATTACHMENT_READ_CHUNK_BYTES)
-    )
-      throw new Error("Attachment changed during loading.");
-    const chunk = decodeByteChunk(result.dataBase64, CHAT_ATTACHMENT_READ_CHUNK_BYTES);
-    if (chunk === null || offset + chunk.length > bytes.length)
-      throw new Error("Invalid attachment chunk.");
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return bytes;
+  assertAttachmentSize(input.sizeBytes);
+  assertNotAborted(input.signal);
+  const result = await input.readChunk({ ...input.reference, offset: 0 });
+  assertNotAborted(input.signal);
+  return readRemainingChunks({
+    first: decodeAttachmentChunk(result, 0, input.sizeBytes),
+    totalBytes: input.sizeBytes,
+    readAt: (offset) => input.readChunk({ ...input.reference, offset }),
+    signal: input.signal,
+  });
 }
 
 export interface AttachmentReadTransport {

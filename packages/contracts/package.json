@@ -16,10 +16,20 @@
       "import": "./src/threadReadCache.ts",
       "require": "./src/threadReadCache.ts"
     },
+    "./thread-read-cache-upload": {
+      "types": "./src/threadReadCacheUpload.ts",
+      "import": "./src/threadReadCacheUpload.ts",
+      "require": "./src/threadReadCacheUpload.ts"
+    },
     "./push": {
       "types": "./src/push.ts",
       "import": "./src/push.ts",
       "require": "./src/push.ts"
+    },
+    "./push-alert": {
+      "types": "./src/pushAlert.ts",
+      "import": "./src/pushAlert.ts",
+      "require": "./src/pushAlert.ts"
     },
     "./push-hub": {
       "types": "./src/pushHub.ts",

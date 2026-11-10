@@ -145,7 +145,7 @@ import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { useLazyComponentReady } from "../../lib/preloadableLazy";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
-import { LazyDelegationDock } from "./chatViewLazySurfaces";
+import { LazyComposerStashPicker, LazyDelegationDock } from "./chatViewLazySurfaces";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
 import {
   captureWindowIntoComposer,
@@ -192,7 +192,6 @@ import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "..
 import { isTerminalFocused } from "../../lib/terminalFocus";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ComposerStashBadge } from "./ComposerStashBadge";
-import { ComposerStashPicker } from "./ComposerStashPicker";
 import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingContextHandoffChip";
 import { ComposerGoalHeader } from "./ComposerGoalHeader";
 import { derivePendingComposerHandoff, derivePendingContextHandoff } from "./pendingContextHandoff";
@@ -1081,6 +1080,9 @@ export const ChatComposer = memo(
       LazyPhoneThreadDock,
       phoneThreadDock !== null,
     );
+    const stashPickerReady = useLazyComponentReady(LazyComposerStashPicker, isStashPickerOpen, {
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("stash list", error, retry),
+    });
     const delegationDockReady = useLazyComponentReady(LazyDelegationDock, delegationDock !== null, {
       onLoadError: (error, retry) => notifySurfaceLoadFailure("delegation dock", error, retry),
     });
@@ -3129,8 +3131,8 @@ export const ChatComposer = memo(
               open={isStashPickerOpen}
               onToggle={() => setIsStashPickerOpen((open) => !open)}
             />
-            {isStashPickerOpen ? (
-              <ComposerStashPicker
+            {isStashPickerOpen && stashPickerReady ? (
+              <LazyComposerStashPicker
                 entries={stashEntries}
                 onRestore={(id) => restoreStashEntry(id)}
                 onDelete={deleteStashEntry}

@@ -65,6 +65,7 @@ import {
   type DesktopUpdateActionResult,
   type DesktopUpdateCheckResult,
   type DesktopRemoteInstallState,
+  type DesktopDatabaseCompactionState,
   type DesktopUpdateState,
   type DesktopWorkspaceTransportActivation,
 } from "@ryco/contracts";
@@ -211,6 +212,16 @@ import {
   runServerCli,
   type ServerCliLaunch,
 } from "./databaseRecovery.ts";
+import {
+  applyDoctorProgress,
+  compactionRecord,
+  DATABASE_COMPACTION_COMMAND,
+  DATABASE_COMPACTION_RECORD_FILE,
+  DATABASE_COMPACTION_TIMEOUT_MS,
+  parseDoctorProgressLine,
+  readCompactionOutcome,
+  startingState,
+} from "./databaseCompaction.ts";
 import { runRecoveryDialogLoop } from "./recoveryDialog.ts";
 import {
   attachRendererCrashRecovery,
@@ -576,9 +587,15 @@ const backendAgentWork = new BackendAgentWorkTracker({
 });
 // Window and power lifecycle for the workspace client: it backgrounds a while
 // after the window leaves sight, never on blur, and keeps machine presence fresh.
+/** The workspace is backgrounded (window out of sight past its grace); see the activity below. */
+let desktopWorkspaceBackgrounded = false;
+/** The account session socket (`desktopHubSession.ts`), created with the relay manager. */
+let desktopHubSession: ReturnType<typeof DesktopHubStack.startDesktopHubSession> | null = null;
 const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
   setBackgrounded: (backgrounded) => {
+    desktopWorkspaceBackgrounded = backgrounded;
     void desktopWorkspaceClient?.setBackgrounded(backgrounded).catch(() => undefined);
+    desktopHubSession?.sync();
   },
   refreshCatalog: () => {
     void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
@@ -1199,8 +1216,22 @@ const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
     if (desktopWorkspaceRelayManager !== null) return desktopWorkspaceRelayManager;
     const context = await ensureDesktopNativeIdentityContext();
     const coordinator = await ensureDesktopHostedIdentityCoordinator();
-    const { DesktopWorkspaceRelayManager } = await loadDesktopHubStack();
+    const { DesktopWorkspaceRelayManager, startDesktopHubSession } = await loadDesktopHubStack();
+    // One account socket for every machine channel, on a Hub that offers it.
+    desktopHubSession ??= startDesktopHubSession({
+      identity: coordinator,
+      authority: () => {
+        const snapshot = desktopWorkspaceClient?.snapshot();
+        return snapshot?.status === "ready" ? snapshot.accountId : null;
+      },
+      isForeground: () => !desktopWorkspaceBackgrounded,
+      onDirectoryInvalidated: () => {
+        void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
+      },
+      revalidateSession: () => desktopWorkspaceClient?.refreshCatalog(),
+    });
     const manager = new DesktopWorkspaceRelayManager({
+      sessionStream: () => desktopHubSession?.manager.streamFactory(),
       authority: {
         resolveTarget: async (environmentId, pairingOnly) => {
           const client = await ensureDesktopWorkspaceClient();
@@ -1375,7 +1406,10 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
     },
   });
   disposeDesktopWorkspaceSubscription?.();
-  disposeDesktopWorkspaceSubscription = client.subscribe(emitDesktopWorkspaceState);
+  disposeDesktopWorkspaceSubscription = client.subscribe((snapshot) => {
+    emitDesktopWorkspaceState(snapshot);
+    desktopHubSession?.sync();
+  });
   desktopWorkspaceClient = client;
   return client;
 }
@@ -3812,6 +3846,134 @@ async function findRestorableBackup(): Promise<RestorableBackup | null> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// One-click database compaction (databaseCompaction.ts)
+// ---------------------------------------------------------------------------
+
+const DATABASE_COMPACTION_STATE_CHANNEL = "desktop:database-compaction-state";
+let databaseCompactionState: DesktopDatabaseCompactionState = { phase: "idle" };
+let databaseCompactionAbort: AbortController | null = null;
+
+function publishDatabaseCompactionState(state: DesktopDatabaseCompactionState): void {
+  databaseCompactionState = state;
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send(DATABASE_COMPACTION_STATE_CHANNEL, state);
+      window.setProgressBar(state.phase === "running" ? (state.fraction ?? 2) : -1);
+    }
+  }
+}
+
+/** The backend's state directory, where the database and the run's record live. */
+function backendStateDir(): string {
+  return Path.join(BACKEND_BASE_DIR, isDevelopment ? "dev" : "userdata");
+}
+
+/**
+ * Stops the server, runs the doctor's copy-and-swap and starts the server again (the window
+ * reconnects as after any restart). A run in progress is returned as it is.
+ */
+async function startDatabaseCompaction(): Promise<DesktopDatabaseCompactionState> {
+  if (databaseCompactionState.phase === "running" || isQuitting) return databaseCompactionState;
+  const startedAt = new Date();
+  const abort = new AbortController();
+  databaseCompactionAbort = abort;
+  let state = startingState(startedAt);
+  publishDatabaseCompactionState(state);
+  writeDesktopLogHeader("database compaction started; stopping the backend");
+  const stoppedAtMs = Date.now();
+  const stopQuit = () => abort.abort();
+  app.once("before-quit", stopQuit);
+  let finished: Extract<DesktopDatabaseCompactionState, { phase: "finished" }>;
+  try {
+    await stopBackendAndWaitForExit();
+    const result = abort.signal.aborted
+      ? { exitCode: null, stdout: "", stderr: "", timedOut: false }
+      : await runServerCli(
+          serverCliLaunch(),
+          DATABASE_COMPACTION_COMMAND,
+          DATABASE_COMPACTION_TIMEOUT_MS,
+          {
+            signal: abort.signal,
+            onStderrLine: (line) => {
+              const event = parseDoctorProgressLine(line);
+              if (event === null || state.phase !== "running") return;
+              state = applyDoctorProgress(state, event);
+              publishDatabaseCompactionState(state);
+            },
+          },
+        );
+    const outcome = readCompactionOutcome(result, abort.signal.aborted);
+    writeDesktopLogHeader(
+      `database compaction doctor exited exitCode=${result.exitCode ?? "null"} status=${outcome.status} message=${sanitizeLogValue(outcome.message)}`,
+    );
+    publishDatabaseCompactionState({
+      ...state,
+      text: "Starting Ryco's server",
+      detail: null,
+      fraction: null,
+      cancellable: false,
+    });
+    let downtimeMs: number | null = null;
+    if (!isQuitting) {
+      startBackend();
+      try {
+        // The startup wait's readiness path: `/` is the app shell, absent in development.
+        await waitForHttpReady(backendHttpUrl, {
+          timeoutMs: 120_000,
+          path: "/.well-known/ryco/environment",
+        });
+        downtimeMs = Date.now() - stoppedAtMs;
+      } catch (error) {
+        writeDesktopLogHeader(
+          `database compaction: backend not ready message=${sanitizeLogValue(String(error))}`,
+        );
+      }
+    }
+    finished = {
+      phase: "finished",
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      ...outcome,
+      downtimeMs,
+    };
+  } catch (error) {
+    finished = {
+      phase: "finished",
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      status: "failed",
+      message: `The compaction could not run: ${String(error)}. The database file was not replaced.`,
+      beforeBytes: null,
+      afterBytes: null,
+      downtimeMs: null,
+    };
+    if (!isQuitting && !backendProcess) startBackend();
+  } finally {
+    app.removeListener("before-quit", stopQuit);
+    databaseCompactionAbort = null;
+  }
+  await FS.promises
+    .writeFile(
+      Path.join(backendStateDir(), DATABASE_COMPACTION_RECORD_FILE),
+      `${JSON.stringify(compactionRecord(finished))}\n`,
+    )
+    .catch(() => undefined);
+  writeDesktopLogHeader(
+    `database compaction finished status=${finished.status} beforeBytes=${finished.beforeBytes ?? "null"} afterBytes=${finished.afterBytes ?? "null"} downtimeMs=${finished.downtimeMs ?? "null"}`,
+  );
+  publishDatabaseCompactionState(finished);
+  notifyRenderersToReconnect();
+  return finished;
+}
+
+/** Stops a run while the doctor has not started its swap; later, the swap finishes. */
+function cancelDatabaseCompaction(): void {
+  if (databaseCompactionState.phase !== "running" || !databaseCompactionState.cancellable) return;
+  writeDesktopLogHeader("database compaction cancelled");
+  databaseCompactionAbort?.abort();
+}
+
 /** The journal an interrupted in-place restore leaves next to the backend's database. */
 function databaseRestoreJournalExists(): boolean {
   const stateDir = Path.join(BACKEND_BASE_DIR, isDevelopment ? "dev" : "userdata");
@@ -4286,6 +4448,26 @@ function registerIpcHandlers(): void {
     } as const;
   });
 
+  const appSender = (event: Electron.IpcMainInvokeEvent) =>
+    BrowserWindow.fromWebContents(event.sender) !== null &&
+    event.senderFrame === event.sender.mainFrame;
+  ipcMain.removeHandler("desktop:database-compaction-get-state");
+  ipcMain.handle("desktop:database-compaction-get-state", (event) => {
+    if (!appSender(event)) throw new Error("Invalid sender.");
+    return databaseCompactionState;
+  });
+  ipcMain.removeHandler("desktop:database-compaction-start");
+  ipcMain.handle("desktop:database-compaction-start", (event) => {
+    if (!appSender(event)) throw new Error("Invalid sender.");
+    // Answers at once; progress and the result follow on the state channel.
+    void startDatabaseCompaction();
+    return databaseCompactionState;
+  });
+  ipcMain.removeHandler("desktop:database-compaction-cancel");
+  ipcMain.handle("desktop:database-compaction-cancel", (event) => {
+    if (!appSender(event)) throw new Error("Invalid sender.");
+    cancelDatabaseCompaction();
+  });
   ipcMain.removeHandler("desktop:save-thread-export");
   ipcMain.handle("desktop:save-thread-export", async (event, raw: unknown) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
@@ -4670,6 +4852,9 @@ function registerIpcHandlers(): void {
     DESKTOP_WORKSPACE_IPC.beginVerification,
     DESKTOP_WORKSPACE_IPC.cancelVerification,
     DESKTOP_WORKSPACE_IPC.verifyApproval,
+    DESKTOP_WORKSPACE_IPC.publishThreadContentChanges,
+    DESKTOP_WORKSPACE_IPC.publishTaskList,
+    DESKTOP_WORKSPACE_IPC.getTaskList,
     DESKTOP_WORKSPACE_IPC.getThreadContent,
     DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled,
     DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled,
@@ -4721,6 +4906,23 @@ function registerIpcHandlers(): void {
         handlers.publishThreadContent(rawEnvironmentId, rawContent),
       ).catch(() => undefined);
     },
+  );
+  ipcMain.handle(
+    DESKTOP_WORKSPACE_IPC.publishThreadContentChanges,
+    (_event, rawEnvironmentId: unknown, rawChanges: unknown) =>
+      withDesktopWorkspace((handlers) =>
+        handlers.publishThreadContentChanges(rawEnvironmentId, rawChanges),
+      ).catch(() => false),
+  );
+  ipcMain.handle(
+    DESKTOP_WORKSPACE_IPC.publishTaskList,
+    (_event, rawEnvironmentId: unknown, rawList: unknown) =>
+      withDesktopWorkspace((handlers) => handlers.publishTaskList(rawEnvironmentId, rawList)).catch(
+        () => false,
+      ),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getTaskList, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.getTaskList(raw)).catch(() => null),
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContent, (_event, raw: unknown) =>
     withDesktopWorkspace((handlers) => handlers.getThreadContent(raw)),
@@ -5752,8 +5954,10 @@ async function selectDesktopBackendPort(
 }
 
 async function startDesktopComputerUse(): Promise<void> {
+  markDesktopStartupPhase("desktop.computer-use.start");
   try {
     const stack = await import("./computerUse/desktopStack.ts");
+    markDesktopStartupPhase("desktop.computer-use.loaded");
     registerComputerUseStackIpc = (runtime) => {
       stack.registerComputerUseIpc(runtime, () => mainWindow);
       stack.registerProjectBrowserIpc(runtime.embedded, () => mainWindow);
@@ -5779,6 +5983,7 @@ async function startDesktopComputerUse(): Promise<void> {
       },
     });
     await computerUseRuntime.start();
+    markDesktopStartupPhase("desktop.computer-use.ready");
   } catch {
     computerUseRuntime?.dispose();
     computerUseRuntime = null;
@@ -5985,8 +6190,10 @@ async function bootstrap(): Promise<void> {
   }
   // The backend is the critical path. Everything its bootstrap envelope needs
   // comes first, in parallel; windows, IPC and the rest follow its start.
-  // Computer use only feeds the envelope's bridge binding: it runs beside the
-  // port selection and the shell environment, and nothing else waits for it.
+  // Computer use feeds the envelope's bridge binding, which the backend reads
+  // once at start: it runs beside the port selection and the shell
+  // environment, and the envelope waits for whichever ends last. The
+  // `desktop.backend.envelope.*` marks show how long that is (tens of ms).
   const computerUseStart = startDesktopComputerUse();
   const windowCaptureLoad = loadDesktopWindowCapture();
   const selectedPort = await selectDesktopBackendPort(configuredBackendPort);
@@ -6029,7 +6236,10 @@ async function bootstrap(): Promise<void> {
     // window in the meantime.
     ensurePackagedBootstrapWindowOpen("pre-backend-bootstrap");
   }
-  await Promise.all([shellEnvironmentCapture, computerUseStart]);
+  await shellEnvironmentCapture;
+  markDesktopStartupPhase("desktop.backend.envelope.shell-ready");
+  await computerUseStart;
+  markDesktopStartupPhase("desktop.backend.envelope.ready");
   startBackend();
   prepareDesktopHostedIdentityResume();
   writeDesktopLogHeader("bootstrap backend start requested");

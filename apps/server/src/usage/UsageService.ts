@@ -88,7 +88,6 @@ import {
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import type { UsageRecord } from "./usageRecord.ts";
 import {
-  USAGE_RATES_WARM_DELAY_MS,
   UsageService,
   type UsageServiceShape,
   usageRatesCachePath,
@@ -218,16 +217,6 @@ interface SourceTally {
   existingRootCount: number;
 }
 
-export interface UsageServiceOptions {
-  /**
-   * When a node that downloaded rates before refreshes them if stale, after construction:
-   * 30 s by default, `null` for never. The deferred layer passes 0 when its own warm-up loads
-   * the pipeline, and `null` when a summary does, because that summary refreshes stale rates
-   * itself and a second refresh would read the rates file from disk twice at the same time.
-   */
-  readonly ratesWarmDelayMs?: number | null;
-}
-
 function isValidCalendarDate(value: UsageCalendarDate): boolean {
   const timestamp = Date.parse(`${value}T00:00:00.000Z`);
   return !Number.isNaN(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;
@@ -309,7 +298,7 @@ function coverageMessage(
  * Builds the usage pipeline. The server loads this module on first use
  * (`UsageServiceDeferred.ts`); tests build it eagerly with {@link UsageServiceLive}.
  */
-export const makeUsageService = Effect.fnUntraced(function* (options: UsageServiceOptions = {}) {
+export const makeUsageService = Effect.fnUntraced(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
@@ -490,17 +479,6 @@ export const makeUsageService = Effect.fnUntraced(function* (options: UsageServi
     );
     return done;
   });
-
-  // Users who opened usage before get fresh rates before their next visit.
-  const ratesWarmDelayMs =
-    options.ratesWarmDelayMs === undefined ? USAGE_RATES_WARM_DELAY_MS : options.ratesWarmDelayMs;
-  if (ratesWarmDelayMs !== null)
-    yield* Effect.sleep(Duration.millis(ratesWarmDelayMs)).pipe(
-      Effect.andThen(fileSystem.exists(ratesCachePath)),
-      Effect.flatMap((exists) => (exists ? startRatesRefresh : Effect.void)),
-      Effect.catchCause(() => Effect.void),
-      Effect.forkIn(serviceScope),
-    );
 
   const readSettings = settingsService.getSettings.pipe(
     Effect.mapError(

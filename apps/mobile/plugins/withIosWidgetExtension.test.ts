@@ -150,6 +150,8 @@ describe("EAS Build", () => {
         bundleIdentifier: "dev.ryco.app.dev.RycoNotificationService",
         entitlements: {
           "keychain-access-groups": ["$(AppIdentifierPrefix)dev.ryco.app.dev.push"],
+          // The same group: the notification service leaves alert excerpts there for the app.
+          "com.apple.security.application-groups": [APP_GROUP],
         },
       },
       {

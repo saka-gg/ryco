@@ -1,4 +1,8 @@
-import { createTerminalStateStore } from "@ryco/client-runtime/state/terminal";
+import {
+  createTerminalHistoryMirrorCache,
+  createTerminalStateStore,
+  type TerminalHistoryMirrorCache,
+} from "@ryco/client-runtime/state/terminal";
 import type {
   EnvironmentApi,
   EnvironmentId,
@@ -74,6 +78,8 @@ function fakeApi() {
     answer: Deferred<TerminalSessionSnapshot>;
   }> = [];
   const writes: Array<{ input: { terminalId: string; data: string }; answer: Deferred<void> }> = [];
+  /** Terminals whose output the controller holds, with their hold counts. */
+  const holds = new Map<string, number>();
   const terminal = {
     open: vi.fn((input: Record<string, unknown>) => {
       const answer = deferred<TerminalSessionSnapshot>();
@@ -90,11 +96,24 @@ function fakeApi() {
     restart: vi.fn(() => Promise.resolve(snapshot({ history: "restarted" }))),
     close: vi.fn(() => Promise.resolve()),
     onEvent: vi.fn(() => () => undefined),
+    attachOutput: vi.fn((ref: { terminalId: string }) => {
+      holds.set(ref.terminalId, (holds.get(ref.terminalId) ?? 0) + 1);
+      return () => {
+        const count = (holds.get(ref.terminalId) ?? 0) - 1;
+        if (count > 0) holds.set(ref.terminalId, count);
+        else holds.delete(ref.terminalId);
+      };
+    }),
   };
-  return { api: { terminal } as unknown as EnvironmentApi, terminal, opens, writes };
+  return { api: { terminal } as unknown as EnvironmentApi, terminal, opens, writes, holds };
 }
 
-function setup(options: { readonly mutationReady?: boolean } = {}) {
+function setup(
+  options: {
+    readonly mutationReady?: boolean;
+    readonly historyMirrors?: TerminalHistoryMirrorCache;
+  } = {},
+) {
   const store = createTerminalStateStore();
   const lifecycleListeners = new Set<(foreground: boolean) => void>();
   let foreground = true;
@@ -117,6 +136,7 @@ function setup(options: { readonly mutationReady?: boolean } = {}) {
       },
     },
     createTerminalId: () => `mobile-${(createdIds += 1)}`,
+    ...(options.historyMirrors ? { historyMirrors: options.historyMirrors } : {}),
     scheduleFrame: (callback) => frames.push(callback),
     setTimer: (callback) => {
       timers.push(callback);
@@ -224,16 +244,22 @@ describe("terminal controller", () => {
     expect(context.sent.at(-1)).toEqual({ type: "connection", writable: true });
   });
 
-  it("writes typed input in order, one write at a time", async () => {
+  it("writes typed input in order, merging keys typed while a write is unanswered", async () => {
     const context = setup();
     await startHydrated(context);
     context.renderer({ type: "input", terminalId: "default", data: "l" });
     context.renderer({ type: "input", terminalId: "default", data: "s" });
+    context.renderer({ type: "input", terminalId: "default", data: " -a" });
     await flush();
     expect(context.server.writes.map((write) => write.input.data)).toEqual(["l"]);
     context.server.writes[0]!.answer.resolve();
     await flush();
-    expect(context.server.writes.map((write) => write.input.data)).toEqual(["l", "s"]);
+    expect(context.server.writes.map((write) => write.input.data)).toEqual(["l", "s -a"]);
+    context.server.writes[1]!.answer.resolve();
+    await flush();
+    context.renderer({ type: "input", terminalId: "default", data: "\r" });
+    await flush();
+    expect(context.server.writes.map((write) => write.input.data)).toEqual(["l", "s -a", "\r"]);
   });
 
   it("turns the next key into a control code after a one-shot Ctrl", async () => {
@@ -496,5 +522,100 @@ describe("terminal controller", () => {
     });
     expect(context.sent).toContainEqual({ type: "dispose", terminalId: "default" });
     expect(context.controller.getSnapshot().hasSession).toBe(false);
+  });
+});
+
+describe("terminal output scope and kept scrollback", () => {
+  const mirrors = () =>
+    createTerminalHistoryMirrorCache({
+      maxEntries: 4,
+      maxHistoryUnits: 100_000,
+      maxTotalUnits: 400_000,
+    });
+
+  it("holds the shown session's output from before its open, and lets go in the background", async () => {
+    const context = setup();
+    context.controller.startTerminal();
+    context.renderer({ type: "resize", terminalId: "default", cols: 80, rows: 24 });
+    await flush();
+    // The open went out while the output was already held.
+    expect(context.server.opens).toHaveLength(1);
+    expect(context.server.holds.get("default")).toBe(1);
+    context.server.opens[0]!.answer.resolve(snapshot());
+    await flush();
+    context.setForeground(false);
+    expect(context.server.holds.size).toBe(0);
+    context.setForeground(true);
+    expect(context.server.holds.get("default")).toBe(1);
+    context.detach();
+    expect(context.server.holds.size).toBe(0);
+  });
+
+  it("reopens a terminal with the kept cursor and shows the kept scrollback plus the delta", async () => {
+    const kept = mirrors();
+    const first = setup({ historyMirrors: kept });
+    await startHydrated(first, "one\r\n$ ");
+    first.store
+      .getState()
+      .applyTerminalEvent({ environmentId: ENV, threadId: THREAD }, output(6, "ls\r\nfile\r\n$ "));
+    first.runFrames();
+    first.detach();
+
+    // A new screen: a fresh renderer, the same device.
+    const second = setup({ historyMirrors: kept });
+    second.controller.startTerminal();
+    second.renderer({ type: "resize", terminalId: "default", cols: 80, rows: 24 });
+    await flush();
+    const open = second.server.opens.at(-1)!;
+    expect(open.input.sinceCursor).toEqual({ generation: "g1", sequence: 6 });
+    open.answer.resolve(
+      snapshot({
+        history: "later\r\n$ ",
+        cursor: { generation: "g1", sequence: 9 },
+        historySince: { generation: "g1", sequence: 6 },
+      }),
+    );
+    await flush();
+    const hydrate = second.sent.findLast((message) => message.type === "hydrate");
+    expect(hydrate?.type === "hydrate" && hydrate.history).toBe(
+      "one\r\n$ ls\r\nfile\r\n$ later\r\n$ ",
+    );
+  });
+
+  it("asks again for the full history when a delta's base is gone", async () => {
+    const kept = mirrors();
+    const context = setup({ historyMirrors: kept });
+    kept.hydrate(
+      "env-a:thread-a\u0000default",
+      { history: "old", cursor: { generation: "g1", sequence: 3 } },
+      undefined,
+    );
+    context.controller.startTerminal();
+    context.renderer({ type: "resize", terminalId: "default", cols: 80, rows: 24 });
+    await flush();
+    expect(context.server.opens[0]!.input.sinceCursor).toEqual({ generation: "g1", sequence: 3 });
+    kept.delete("env-a:thread-a\u0000default");
+    context.server.opens[0]!.answer.resolve(
+      snapshot({
+        history: "tail",
+        cursor: { generation: "g1", sequence: 9 },
+        historySince: { generation: "g1", sequence: 3 },
+      }),
+    );
+    await flush();
+    expect(context.server.opens).toHaveLength(2);
+    expect(context.server.opens[1]!.input.sinceCursor).toBeUndefined();
+  });
+
+  it("re-hydrates after a detach and a new attach instead of trusting the buffer", async () => {
+    const context = setup();
+    await startHydrated(context);
+    expect(context.server.opens).toHaveLength(1);
+    context.detach();
+    expect(context.server.holds.size).toBe(0);
+    context.controller.attach();
+    await flush();
+    expect(context.server.opens).toHaveLength(2);
+    expect(context.server.holds.get("default")).toBe(1);
   });
 });

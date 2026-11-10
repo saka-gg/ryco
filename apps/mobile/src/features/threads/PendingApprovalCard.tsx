@@ -9,6 +9,7 @@ import {
 } from "@ryco/client-runtime/state/session";
 
 import { AppText as Text } from "../../components/AppText";
+import { setPendingNotificationAction } from "../../notifications/pendingNotificationAction";
 import { answerThreadApproval } from "./threadRequestAnswers";
 
 /** The answer as the card shows it the moment it is chosen. */
@@ -31,6 +32,13 @@ export function PendingApprovalCard(props: {
   readonly approval: PendingApproval;
   /** Cached/degraded threads render the prompt but cannot answer it. */
   readonly disabled?: boolean;
+  /**
+   * An approval a background alert described, until the thread's live detail loads
+   * (`alertExcerpts.ts`): Allow and Deny become the same pending action as the alert's own
+   * buttons, carried out for this request once the thread is live, or refused there when it was
+   * answered meanwhile.
+   */
+  readonly fromAlert?: boolean;
 }) {
   // The chosen answer shows at once and stays until the node settles the request (the card
   // leaves); a failed delivery takes it back and says so.
@@ -42,6 +50,18 @@ export function PendingApprovalCard(props: {
   const respond = async (decision: ProviderApprovalDecision) => {
     setChosen(decision);
     setError(null);
+    if (props.fromAlert === true) {
+      setPendingNotificationAction(
+        { environmentId: props.environmentId, threadId: props.threadId },
+        {
+          kind: decision === "accept" ? "approve" : "deny",
+          turnId: props.approval.turnId ?? null,
+          requestId: props.approval.requestId,
+        },
+        Date.now(),
+      );
+      return;
+    }
     try {
       await answerThreadApproval({
         environmentId: props.environmentId,
@@ -58,7 +78,7 @@ export function PendingApprovalCard(props: {
     }
   };
   const answerLocked =
-    props.disabled === true ||
+    (props.disabled === true && props.fromAlert !== true) ||
     (props.approval.responseState !== undefined && props.approval.responseState !== "retryable");
 
   return (
@@ -97,6 +117,13 @@ export function PendingApprovalCard(props: {
         </Text>
       ) : null}
       {error ? <Text className="mt-2 font-sans text-sm text-danger">{error}</Text> : null}
+      {props.fromAlert === true ? (
+        <Text className="mt-2 text-xs text-foreground-muted">
+          {chosen === null
+            ? "From the alert. Ryco is reaching this machine."
+            : "Sends once Ryco reaches this machine."}
+        </Text>
+      ) : null}
       {chosen !== null ? (
         <View
           accessibilityLiveRegion="polite"

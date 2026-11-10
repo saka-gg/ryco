@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Context, Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
@@ -11,7 +11,11 @@ import {
 import { OrchestrationEventStore } from "../Services/OrchestrationEventStore.ts";
 import { readStatisticsThreadPartial } from "../../statistics/statisticsRows.ts";
 import { makeEventLogCompaction, makeEventLogCompactionWith } from "./EventLogCompaction.ts";
-import { runRetentionPass } from "./EventLogRetention.ts";
+import {
+  liveCandidatesPageQuery,
+  runRetentionPass,
+  SELECTION_THREAD_PAGE,
+} from "./EventLogRetention.ts";
 import { ONLINE_COMPACTION_PASS_OPTIONS } from "./EventLogCompactionDeferred.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -567,6 +571,124 @@ describe("EventLogRetention", () => {
         );
         assert.isAbove((yield* remaining(sql, thread))[0]!.sequence, deletion - 1);
       }),
+  );
+
+  retentionTest("looks up each thread's latest turn start in the turn-start index", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const [text, params] = liveCandidatesPageQuery(sql, 100, iso(30), ["thread-a"]).compile();
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${text}`,
+        params,
+      );
+      assert.isTrue(
+        plan.some((row) => row.detail.includes("idx_orch_events_thread_turn_starts")),
+        plan.map((row) => row.detail).join("\n"),
+      );
+    }),
+  );
+
+  retentionTest("selects candidates on the reader it is given", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* deletedThread(sql, "thread-main-only", 10);
+        yield* markProjected(sql);
+        // An empty database as the reader: it sees no candidate, so nothing is removed.
+        const emptyReader = Context.get(
+          yield* Layer.build(Layer.fresh(SqlitePersistenceMemory)),
+          SqlClient.SqlClient,
+        );
+        const pass = (reader: SqlClient.SqlClient | undefined) =>
+          runRetentionPass({
+            options: PASS.retention!,
+            mode: "delete",
+            nowMs: NOW_MS,
+            compactedThroughSequence: Number.MAX_SAFE_INTEGER,
+            overTime: () => false,
+            afterBatch: () => Effect.void,
+            readThreadUsage: readStatisticsThreadPartial,
+            ...(reader === undefined ? {} : { reader }),
+          });
+        assert.equal((yield* pass(emptyReader)).deletedEvents, 0);
+        assert.equal((yield* pass(undefined)).deletedEvents, 5);
+      }),
+    ),
+  );
+
+  retentionTest("pages through more threads than one selection statement reads", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const count = SELECTION_THREAD_PAGE + 5;
+      for (let index = 0; index < count; index += 1) {
+        const thread = `thread-page-${String(index).padStart(3, "0")}`;
+        yield* insertThread(sql, thread);
+        yield* insertEvent(sql, { threadId: thread, type: "thread.created", occurredAt: iso(60) });
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.message-sent",
+          occurredAt: iso(60),
+        });
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.turn-start-requested",
+          occurredAt: iso(50),
+        });
+      }
+      yield* markProjected(sql);
+      const result = yield* runRetentionPass({
+        options: PASS.retention!,
+        mode: "delete",
+        nowMs: NOW_MS,
+        compactedThroughSequence: Number.MAX_SAFE_INTEGER,
+        overTime: () => false,
+        afterBatch: () => Effect.void,
+        readThreadUsage: readStatisticsThreadPartial,
+      });
+      assert.equal(result.trimmedThreads, count);
+      assert.equal(result.deletedEvents, count);
+    }),
+  );
+
+  retentionTest("finishes a live thread a budget cut short on the next pass", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const compaction = yield* EventLogCompaction;
+      const thread = "thread-live-budget";
+      yield* insertThread(sql, thread);
+      yield* insertEvent(sql, { threadId: thread, type: "thread.created", occurredAt: iso(60) });
+      for (let index = 0; index < 8; index += 1) {
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.message-sent",
+          occurredAt: iso(59),
+        });
+      }
+      const latestTurn = yield* insertEvent(sql, {
+        threadId: thread,
+        type: "thread.turn-start-requested",
+        occurredAt: iso(40),
+      });
+      yield* markProjected(sql);
+
+      const cut = yield* compaction.runPass({
+        ...PASS,
+        retention: { ...PASS.retention!, maxEventsPerPass: 3 },
+      });
+      assert.isTrue(cut.retention?.backlog);
+      assert.equal(cut.retention?.deletedEvents, 3);
+      // The floor covers what was removed, not the whole bound: the rest is still found.
+      const floor = yield* floorOf(sql, "thread", thread);
+      assert.isBelow(floor, latestTurn - 1);
+
+      const next = yield* compaction.runPass(PASS);
+      assert.equal(next.retention?.deletedEvents, 5);
+      assert.deepEqual(
+        (yield* remaining(sql, thread)).map((row) => row.type),
+        ["thread.created", "thread.turn-start-requested"],
+      );
+      assert.equal(yield* floorOf(sql, "thread", thread), latestTurn - 1);
+    }),
   );
 
   it("is checked against every projector: a new one must seed from projections", () => {

@@ -59,7 +59,8 @@ export function combineLocalTasksRefreshTriggers(
  * the tasks: the same client reconnected, and tasks may have changed while
  * it was away (a new client swaps the reader, which reads by itself). The
  * first snapshot of a connection adds nothing to the read already under
- * way, unless that read failed.
+ * way, unless that read failed. It is a catch-up read: while the node's
+ * change stream is live, the stream's own word after the drop decides.
  */
 export function localTasksShellReadinessTrigger(
   environmentId: EnvironmentId,
@@ -87,7 +88,8 @@ export function localTasksShellReadinessTrigger(
         const reread = next !== null && next !== ready && (seenReady || status === "error");
         if (next !== null) seenReady = true;
         ready = next;
-        if (reread) refresh();
+        // A live change stream catches up by itself (its word after the drop).
+        if (reread) refresh({ catchUp: true });
       });
     };
     const unsubscribe = connections.subscribe(watch);

@@ -94,9 +94,11 @@ export function useLocalChanges(
     () =>
       createLocalChangesController({
         cwd: cwd ?? "",
-        read: () => {
+        read: (knownRevision) => {
           if (!environmentId || !cwd) return Promise.reject(new Error("Repository unavailable."));
-          return ensureEnvironmentApi(environmentId).vcs.readLocalChanges({ cwd });
+          return ensureEnvironmentApi(environmentId).vcs.readLocalChanges(
+            knownRevision ? { cwd, knownRevision } : { cwd },
+          );
         },
         apply: async (input) => {
           if (!environmentId) throw new Error("Repository unavailable.");

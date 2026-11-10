@@ -14,6 +14,7 @@ import {
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Duration, Effect, Layer, Logger, Option } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
 import { AgentControlAuditRepositoryLive } from "../../persistence/Layers/AgentControlAudit.ts";
@@ -36,7 +37,7 @@ import {
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./AgentControlProposalEvents.ts";
 import { AgentControlProposalStoreLive } from "./AgentControlProposalStore.ts";
-import { makeAgentControlAutomationLive } from "./AgentControlAutomation.ts";
+import { makeAgentControlAutomationLive, nextSchedulerSleepMs } from "./AgentControlAutomation.ts";
 
 const projectId = ProjectId.make("project-automation-lifecycle");
 const otherProjectId = ProjectId.make("project-automation-other");
@@ -683,3 +684,64 @@ it.effect("keeps the background scheduler idle while Agent Control is disabled",
     ),
   );
 });
+
+it("sleeps until the next due schedule and retries one it could not claim", () => {
+  const nowMs = Date.parse("2026-08-18T00:00:00.000Z");
+  const sleep = (input: Partial<Parameters<typeof nextSchedulerSleepMs>[0]>) =>
+    nextSchedulerSleepMs({
+      nowMs,
+      nextDueAt: null,
+      claimed: 0,
+      retry: false,
+      maxMs: 600_000,
+      ...input,
+    });
+  assert.strictEqual(sleep({}), 600_000, "nothing due: the longest sleep");
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-18T00:02:00.000Z" }), 120_000);
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-19T00:00:00.000Z" }), 600_000);
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-17T23:00:00.000Z", claimed: 25 }), 0);
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-17T23:00:00.000Z" }), 30_000);
+  assert.strictEqual(sleep({ retry: true }), 30_000, "a run recovery retries");
+});
+
+it.effect("wakes for a new schedule and sleeps only until it is due", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const repository = yield* AgentControlAutomationRepository;
+    const automations = yield* AgentControlAutomationService;
+    yield* Effect.yieldNow;
+    // Due in ten minutes; the scheduler's longest sleep is an hour.
+    const runAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const automationId = AgentControlAutomationId.make("automation-sleeps-until-due");
+    yield* automations.applyLifecycle({
+      proposalId: AgentControlProposalId.make("proposal-sleeps-until-due"),
+      requestId: AgentControlRequestId.make("request-sleeps-until-due"),
+      principal,
+      planVersion: 1,
+      plan: {
+        kind: "createAutomation",
+        automationId,
+        definition: makeAutomation("sleeps-until-due", runAt).definition,
+      },
+      planDigest: "f".repeat(64),
+      riskTags: [AGENT_CONTROL_RISK_TAGS.createsAutomation],
+      promptSummary: "Create schedule definition",
+      status: "executing",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      decidedAt: new Date().toISOString(),
+      result: null,
+    });
+    const runCount = Effect.gen(function* () {
+      for (let attempt = 0; attempt < 100; attempt += 1) yield* Effect.yieldNow;
+      return (yield* repository.listRuns({ automationId, limit: 10 })).length;
+    });
+    assert.strictEqual(yield* runCount, 0);
+    // Ten minutes pass: claims compare against the wall clock, so the row is made due too.
+    yield* sql`UPDATE agent_control_automations SET next_run_at = ${new Date(Date.now() - 1_000).toISOString()} WHERE automation_id = ${automationId}`;
+    yield* TestClock.adjust(Duration.minutes(11));
+    assert.strictEqual(yield* runCount, 1);
+    // The layer is built in the test's context, so the scheduler sleeps on the test clock.
+  }).pipe(Effect.provide(makeAutomationLayer(true, { schedulerIntervalMs: 3_600_000 }))),
+);

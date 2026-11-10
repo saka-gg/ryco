@@ -5,6 +5,7 @@ import {
   readThreadReadingAnchor,
   rememberThreadReadingAnchor,
   rememberThreadReadingAtEnd,
+  subscribeThreadReadingPositionChanges,
   threadReadingPositions,
 } from "./threadReadingPositions";
 
@@ -42,5 +43,22 @@ describe("thread reading positions", () => {
     rememberThreadReadingAtEnd("thread-a");
     rememberThreadReadingAtEnd("thread-a");
     expect(changed).toHaveBeenCalledTimes(3);
+  });
+
+  it("tells every subscriber of a change alongside the registered persistence", () => {
+    const persisted = vi.fn();
+    const listener = vi.fn();
+    configureThreadReadingPositionPersistence(persisted);
+    const unsubscribe = subscribeThreadReadingPositionChanges(listener);
+
+    rememberThreadReadingAnchor("thread-a", { rowId: "message-3", offsetWithinRow: 40 });
+    rememberThreadReadingAnchor("thread-a", { rowId: "message-3", offsetWithinRow: 40 });
+    expect(persisted).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    rememberThreadReadingAtEnd("thread-a");
+    expect(persisted).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenCalledOnce();
   });
 });

@@ -9,6 +9,7 @@ import type {
   ThreadId,
 } from "@ryco/contracts";
 
+import { requestSavedThreadBody } from "../persistence/savedThreadBodies";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { mobileHostedConnectionScopes } from "./hostedConnectionScopes";
 
@@ -22,6 +23,8 @@ export function retainThreadDetailSubscription(
   threadId: ThreadId,
   options?: ThreadDetailSubscriptionRetainOptions,
 ): () => void {
+  // The saved body shows until the live window arrives.
+  requestSavedThreadBody(environmentId, threadId);
   const releaseDetail = registry.driver.supervisor.retainThreadDetailSubscription(
     environmentId,
     threadId,
@@ -54,6 +57,7 @@ export function retainSpeculativeThreadDetailSubscription(
   environmentId: EnvironmentId,
   threadId: ThreadId,
 ): (options?: ThreadDetailSubscriptionReleaseOptions) => void {
+  requestSavedThreadBody(environmentId, threadId);
   return registry.driver.supervisor.retainThreadDetailSubscription(environmentId, threadId, {
     speculative: true,
   });

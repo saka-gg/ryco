@@ -111,6 +111,13 @@ interface QueuedFrame {
 function isControlFrame(type: HubSessionFrame["type"]): boolean {
   return type === "ping" || type === "pong";
 }
+/**
+ * Silence after which this session pings the Hub itself: the Hub's own heartbeat
+ * interval plus 5 s, so a Hub ping that is merely on its way is not raced. It
+ * leaves 20 s for the pong before {@link HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS}.
+ */
+export const HUB_SESSION_PING_AFTER_SILENCE_MS = HUB_SESSION_HEARTBEAT_INTERVAL_MS + 5_000;
+
 const SEND_HIGH_WATER_BYTES = 256 * 1_024;
 const CONTROL_RESERVE_BYTES = 4 * 1_024;
 const READY_TIMEOUT_MS = 10_000;
@@ -770,30 +777,36 @@ export class HostedHubSession {
     }, 10);
   }
 
+  /**
+   * Pings only after {@link HUB_SESSION_PING_AFTER_SILENCE_MS} in which nothing
+   * arrived. Any frame proves the path as well as a pong does, and the Hub
+   * judges this session's liveness by its OWN pings, which it sends about every
+   * heartbeat interval and this session answers: a session that receives data,
+   * or the Hub's pings, sends none of its own. The next check is due when the
+   * silence would reach that threshold, which still leaves 20 s for a pong
+   * before the liveness bound.
+   */
   #scheduleHeartbeat(): void {
+    const silence = this.#options.timers.now() - this.#lastReceived;
     this.#heartbeat = this.#options.timers.setTimeout(
       () => {
         this.#heartbeat = undefined;
         if (!this.#ready) return;
-        if (
-          this.#options.timers.now() - this.#lastReceived >=
-          HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS
-        ) {
+        const silent = this.#options.timers.now() - this.#lastReceived;
+        if (silent >= HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS) {
           this.#lost("network", true);
           return;
         }
         // Do not overwrite a pending probe: delayed valid pongs must remain valid.
-        if (!this.#probe) this.#sendPing();
+        if (!this.#probe && silent >= HUB_SESSION_PING_AFTER_SILENCE_MS) this.#sendPing();
         if (this.#ready) this.#scheduleHeartbeat();
       },
-      Math.min(
-        HUB_SESSION_HEARTBEAT_INTERVAL_MS,
-        Math.max(
-          1,
-          HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS -
-            (this.#options.timers.now() - this.#lastReceived),
-        ),
-      ),
+      silence < HUB_SESSION_PING_AFTER_SILENCE_MS
+        ? HUB_SESSION_PING_AFTER_SILENCE_MS - silence
+        : Math.min(
+            HUB_SESSION_HEARTBEAT_INTERVAL_MS,
+            Math.max(1, HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS - silence),
+          ),
     );
   }
 

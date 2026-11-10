@@ -25,6 +25,7 @@ import {
   listOpinionatedPlugins,
 } from "../opinionatedPlugins.ts";
 import { redactServerSettingsForClient } from "../serverSettings.ts";
+import { configSectionDigest, omitKnownConfigSections } from "./configSections.ts";
 import { omitKnownProviderCatalogs } from "./providerCatalogs.ts";
 import { makeProviderStatusDeltaTracker } from "./providerStatusDelta.ts";
 import type { BootstrapCredentialChange } from "../auth/Services/BootstrapCredentialService.ts";
@@ -752,6 +753,17 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
           );
 
           const config = yield* loadServerConfig;
+          // A settings change that leaves the client's settings as they were is not sent: the
+          // stream compares each with the last it sent (starting with the snapshot's).
+          let sentSettingsDigest = configSectionDigest("settings", config.settings);
+          const changedSettingsUpdates = settingsUpdates.pipe(
+            Stream.filter((event) => {
+              const digest = configSectionDigest("settings", event.payload.settings);
+              if (digest === sentSettingsDigest) return false;
+              sentSettingsDigest = digest;
+              return true;
+            }),
+          );
           // A client that takes deltas gets only what changed since this
           // stream's previous list (starting from the snapshot's), which spares
           // it the whole catalog-heavy list on every status change.
@@ -784,7 +796,7 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
           const liveUpdates = Stream.merge(
             keybindingsUpdates,
             Stream.merge(
-              Stream.merge(providerStatuses, settingsUpdates),
+              Stream.merge(providerStatuses, changedSettingsUpdates),
               streamChatsConfigSnapshots(config.chats),
             ),
           );
@@ -801,15 +813,19 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
             ),
           );
 
-          // A client that names the catalogs it holds gets them left out.
-          const snapshot: ServerConfigStreamEvent =
+          // A client that names the catalogs and sections it holds gets them left out.
+          const withCatalogs =
             input.knownProviderCatalogs === undefined
-              ? { version: 1 as const, type: "snapshot" as const, config }
-              : {
-                  version: 1 as const,
-                  type: "snapshot" as const,
-                  ...omitKnownProviderCatalogs(config, input.knownProviderCatalogs),
-                };
+              ? { config }
+              : omitKnownProviderCatalogs(config, input.knownProviderCatalogs);
+          const snapshot: ServerConfigStreamEvent = {
+            version: 1 as const,
+            type: "snapshot" as const,
+            ...withCatalogs,
+            ...(input.knownConfigSections === undefined
+              ? {}
+              : omitKnownConfigSections(withCatalogs.config, input.knownConfigSections)),
+          };
           return Stream.concat(Stream.make(snapshot), liveUpdatesAfterRevalidation);
         }),
         { "rpc.aggregate": "server" },

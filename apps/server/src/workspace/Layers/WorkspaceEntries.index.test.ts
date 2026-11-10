@@ -127,6 +127,47 @@ describe("WorkspaceEntries index store", () => {
     }).pipe(Effect.provide(makeLayer(() => Effect.succeed(listing(paths)))));
   });
 
+  it.effect("answers unchanged to a client that holds the current listing (D3)", () => {
+    let paths = Array.from(
+      { length: 30_000 },
+      (_, index) => `pkg${String(index % 30).padStart(2, "0")}/src/file-${index}.ts`,
+    );
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      const first = yield* workspaceEntries.listEntries({ cwd });
+      expect(first.revision).toMatch(/^l1\./);
+      expect(first.unchanged).toBeUndefined();
+
+      // A rebuild that finds the same files (a turn that only edited them) keeps the revision.
+      yield* workspaceEntries.invalidate(cwd);
+      const same = yield* workspaceEntries.listEntries({ cwd, knownRevision: first.revision });
+      expect(same).toEqual({
+        entries: [],
+        truncated: true,
+        revision: first.revision,
+        unchanged: true,
+      });
+      const fullBytes = JSON.stringify(first).length;
+      const unchangedBytes = JSON.stringify(same).length;
+      expect(fullBytes).toBeGreaterThan(1_000_000);
+      expect(unchangedBytes).toBeLessThan(100);
+
+      // A stale or foreign revision gets the listing.
+      expect(
+        (yield* workspaceEntries.listEntries({ cwd, knownRevision: "l1.other" })).entries,
+      ).toHaveLength(25_000);
+
+      // A new file is a new listing.
+      paths = ["new-file.ts", ...paths];
+      yield* workspaceEntries.invalidate(cwd);
+      const changed = yield* workspaceEntries.listEntries({ cwd, knownRevision: first.revision });
+      expect(changed.unchanged).toBeUndefined();
+      expect(changed.revision).not.toBe(first.revision);
+      expect(changed.entries.map((entry) => entry.path)).toContain("new-file.ts");
+    }).pipe(Effect.provide(makeLayer(() => Effect.sync(() => listing(paths)))));
+  });
+
   it.effect("ranks the shallowest entries first for an empty query", () =>
     Effect.gen(function* () {
       const cwd = yield* makeTempDir();

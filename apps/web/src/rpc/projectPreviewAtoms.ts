@@ -11,8 +11,15 @@ import {
   KEY_SEP,
   type KeyedQueryByKey,
 } from "@ryco/client-runtime/rpc";
+import { listEntriesSince, readFileSince } from "@ryco/client-runtime/state/files";
 
-const LIST_ENTRIES_STALE_TIME_MS = 0;
+import { onCheckoutFilesChanged } from "./checkoutFileChanges";
+
+// Like the phone: a turn that changed files invalidates its checkout's tree
+// (the runtime's workspace change flush), and a re-read the node answers
+// `unchanged` costs about a hundred bytes, so a reopen within this window
+// reads nothing at all.
+const LIST_ENTRIES_STALE_TIME_MS = 15_000;
 const READ_FILE_STALE_TIME_MS = 0;
 const FETCH_RETRY_COUNT = 1;
 const PROJECT_PREVIEW_GC_TIME_MS = 60_000;
@@ -109,10 +116,10 @@ export interface ProjectListEntriesInput {
   readonly enabled?: boolean;
 }
 
-export const projectListEntriesQuery = defineQuery<
+export const projectListEntriesQuery: ProjectPreviewQuery<
   ProjectListEntriesInput,
   ProjectListEntriesResult
->({
+> = defineQuery<ProjectListEntriesInput, ProjectListEntriesResult>({
   label: "listEntries",
   staleTime: LIST_ENTRIES_STALE_TIME_MS,
   isEnabled: (input) =>
@@ -121,9 +128,11 @@ export const projectListEntriesQuery = defineQuery<
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      projectsClient(input.environmentId as EnvironmentId).listEntries({
-        cwd: input.cwd as string,
-      }),
+      listEntriesSince(
+        projectsClient(input.environmentId as EnvironmentId).listEntries,
+        input.cwd as string,
+        projectListEntriesQuery.getSnapshot(projectListEntriesQuery.keyOf(input)).data,
+      ),
     ),
 });
 
@@ -138,7 +147,10 @@ export interface ProjectReadFileInput {
   readonly enabled?: boolean;
 }
 
-export const projectReadFileQuery = defineQuery<ProjectReadFileInput, ProjectReadFileResult>({
+export const projectReadFileQuery: ProjectPreviewQuery<
+  ProjectReadFileInput,
+  ProjectReadFileResult
+> = defineQuery<ProjectReadFileInput, ProjectReadFileResult>({
   label: "readFile",
   staleTime: READ_FILE_STALE_TIME_MS,
   isEnabled: (input) =>
@@ -151,10 +163,11 @@ export const projectReadFileQuery = defineQuery<ProjectReadFileInput, ProjectRea
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      projectsClient(input.environmentId as EnvironmentId).readFile({
-        cwd: input.cwd as string,
-        relativePath: input.relativePath as string,
-      }),
+      readFileSince(
+        projectsClient(input.environmentId as EnvironmentId).readFile,
+        { cwd: input.cwd as string, relativePath: input.relativePath as string },
+        projectReadFileQuery.getSnapshot(projectReadFileQuery.keyOf(input)).data,
+      ),
     ),
 });
 
@@ -189,6 +202,27 @@ export async function refetchProjectReadFileFresh(cacheKey: string | null): Prom
   if (controller) projectPreviewRegistry.cancel(controller);
   await projectReadFileQuery.refreshAsync(cacheKey);
 }
+
+/**
+ * A turn changed files in one checkout (`cwd` null: every checkout of the
+ * environment): its tree and file reads are stale. Observed ones read again in
+ * the background, sending what they hold, so an unchanged answer is tiny.
+ */
+export function invalidateProjectPreviewCheckout(
+  environmentId: EnvironmentId,
+  cwd: string | null,
+): void {
+  for (const compositeKey of projectPreviewRegistry.controllerKeys({ environmentId })) {
+    const controller = projectPreviewRegistry.controllers.get(compositeKey);
+    if (!controller) continue;
+    if (cwd !== null && compositeKey.split(KEY_SEP)[2] !== cwd) continue;
+    controller.lastFetchedAt = 0;
+    projectPreviewRegistry.cancel(controller);
+    if (controller.subscriberCount > 0) void projectPreviewRegistry.runController(controller);
+  }
+}
+
+onCheckoutFilesChanged(invalidateProjectPreviewCheckout);
 
 // ---------------------------------------------------------------------------
 // Test helpers

@@ -22,6 +22,8 @@ export function readEnvironmentWorkspaceFileBytes(input: {
   const { environmentId, cwd, relativePath } = input;
   return readWorkspaceFileBytesFromTransport({
     reference: { cwd, relativePath },
+    // Reopening an unchanged image or PDF costs one small request.
+    cacheScope: environmentId,
     currentTransport: () => {
       const readFileChunk = readEnvironmentApi(environmentId)?.projects.readFileChunk;
       return readFileChunk ? { readFileChunk } : undefined;

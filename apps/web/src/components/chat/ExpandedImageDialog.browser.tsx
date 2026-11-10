@@ -1,5 +1,5 @@
 import "../../index.css";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { ExpandedImageDialog } from "./ExpandedImageDialog";
@@ -123,6 +123,110 @@ it("fits large screenshots between resizable sidebars and preserves their propor
     await screen.rerender(layout(430, 500, false));
     await assertFit(0, false);
     await expect.element(page.getByRole("button", { name: "Next image" })).not.toBeInTheDocument();
+  } finally {
+    await screen.unmount();
+  }
+});
+
+it("zooms and pans an expanded image inside its box, from buttons, keys, pinch and drag", async () => {
+  await page.viewport(1200, 800);
+  const onClose = vi.fn();
+  const preview = {
+    index: 0,
+    images: [
+      {
+        name: "chart.svg",
+        src: `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400"><rect width="100%" height="100%" fill="teal"/></svg>`)}`,
+        width: 800,
+        height: 400,
+      },
+    ],
+  };
+  const screen = await render(
+    <div>
+      <input aria-label="Composer" />
+      <ExpandedImageDialog preview={preview} onClose={onClose} />
+    </div>,
+  );
+  const box = () => document.querySelector<HTMLElement>("[data-image-zoom]")!;
+  const scale = () => Number(box().getAttribute("data-image-zoom"));
+  const transform = () => box().querySelector("img")!.style.transform;
+  try {
+    await expect.element(page.getByRole("img", { name: "chart.svg" })).toBeVisible();
+    const fitted = box().getBoundingClientRect();
+    expect(scale()).toBe(1);
+    await expect.element(page.getByRole("button", { name: "Zoom out" })).toBeDisabled();
+
+    await page.getByRole("button", { name: "Zoom in" }).click();
+    expect(scale()).toBe(1.25);
+    expect(transform()).toBe("translate(0px, 0px) scale(1.25)");
+    // Zooming happens inside the box: the image's place on the page stays.
+    expect(box().getBoundingClientRect()).toEqual(fitted);
+
+    // A pinch (Ctrl+wheel) at the box's right edge zooms there, held back from the browser.
+    const pinch = new WheelEvent("wheel", {
+      deltaY: -100,
+      ctrlKey: true,
+      cancelable: true,
+      clientX: fitted.right - 10,
+      clientY: fitted.top + fitted.height / 2,
+    });
+    box().dispatchEvent(pinch);
+    expect(pinch.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(scale()).toBeCloseTo(1.5625, 3));
+    expect(transform()).toMatch(/^translate\(-\d/);
+
+    // A drag pans, never past the image's edges.
+    const element = box();
+    const start = { x: fitted.left + 100, y: fitted.top + 100 };
+    element.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerId: 7,
+        button: 0,
+        clientX: start.x,
+        clientY: start.y,
+        bubbles: true,
+      }),
+    );
+    element.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 7,
+        clientX: start.x + 5000,
+        clientY: start.y,
+        bubbles: true,
+      }),
+    );
+    element.dispatchEvent(
+      new PointerEvent("pointerup", {
+        pointerId: 7,
+        clientX: start.x + 5000,
+        clientY: start.y,
+        bubbles: true,
+      }),
+    );
+    const maxX = (fitted.width * (scale() - 1)) / 2;
+    await vi.waitFor(() => {
+      const [, x, y] = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(transform())!;
+      expect(Number(x)).toBeCloseTo(maxX, 1);
+      expect(Number(y)).toBe(0);
+    });
+
+    // Typing in the composer never zooms the image.
+    // (A contained viewer leaves the composer beside it; focus stands in for the click.)
+    (page.getByRole("textbox", { name: "Composer" }).element() as HTMLInputElement).focus();
+    await userEvent.keyboard("0-");
+    expect(scale()).toBeCloseTo(1.5625, 3);
+
+    // Keys anywhere else: 0 resets, + steps in, − steps out.
+    (document.activeElement as HTMLElement).blur();
+    await userEvent.keyboard("0");
+    expect(scale()).toBe(1);
+    expect(transform()).toBe("");
+    await userEvent.keyboard("=");
+    expect(scale()).toBe(1.25);
+    await userEvent.keyboard("-");
+    expect(scale()).toBe(1);
+    expect(onClose).not.toHaveBeenCalled();
   } finally {
     await screen.unmount();
   }

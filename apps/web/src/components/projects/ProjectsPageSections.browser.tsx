@@ -394,7 +394,7 @@ describe("Project page sections", () => {
       await screen.getByRole("button", { name: "Measure again" }).click();
       await expect
         .poll(() => lifecycle.diskRequests.at(-1))
-        .toEqual({ projectId: RYCO_LOCAL, refresh: true });
+        .toEqual({ projectId: RYCO_LOCAL, allowStale: true, refresh: true });
     });
   });
 
@@ -502,7 +502,8 @@ describe("Project page sections", () => {
       await expect.poll(() => mapNode("project", "on disk").textContent).toContain("≥ 2.1 GB");
       expect(mapNode("device", "This device").textContent).toContain("2.1 GB");
       expect(mapNode("workspace", "projects-page").textContent).toContain("512 MB");
-      expect(lifecycle.diskRequests).toEqual([{ projectId: RYCO_LOCAL, refresh: false }]);
+      // The first read asks for the node's last figures at once (\`allowStale\`).
+      expect(lifecycle.diskRequests).toEqual([{ projectId: RYCO_LOCAL, allowStale: true }]);
 
       await clickNode("project", "on disk");
       const inspector = screen.getByRole("complementary", { name: "Details" });
@@ -510,7 +511,7 @@ describe("Project page sections", () => {
       await inspector.getByRole("button", { name: "Measure again" }).click();
       await expect
         .poll(() => lifecycle.diskRequests.at(-1))
-        .toEqual({ projectId: RYCO_LOCAL, refresh: true });
+        .toEqual({ projectId: RYCO_LOCAL, allowStale: true, refresh: true });
     });
 
     it("fans a workspace's threads out from its tally, and folds them back", async () => {

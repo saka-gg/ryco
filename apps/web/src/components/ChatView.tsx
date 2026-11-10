@@ -1180,9 +1180,16 @@ export default function ChatView(props: ChatViewProps) {
         Date.now() - (launch.handedOffAtMs ?? 0) < CONTINUED_LAUNCH_WINDOW_MS)
     );
   });
+  // So does a view opened on a machine painted from its saved copy (a cold
+  // start): deferred, the timeline's low-priority pass kept restarting under
+  // the stream of live updates, and the saved text showed only with live data.
+  const [opensOnSavedCopy] = useState(
+    () =>
+      selectEnvironmentState(useStore.getState(), environmentId).hydratedFromCacheAt !== undefined,
+  );
   const deferredActiveThreadId = useDeferredValue(
     activeThreadIdRaw,
-    continuesWorktreeLaunch ? activeThreadIdRaw : null,
+    continuesWorktreeLaunch || opensOnSavedCopy ? activeThreadIdRaw : null,
   );
   const isActiveThreadIdFresh = deferredActiveThreadId === activeThreadIdRaw;
   // A thread opens where its reader left it: at its end, following live

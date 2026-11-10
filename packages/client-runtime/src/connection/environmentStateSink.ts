@@ -49,6 +49,13 @@ export interface EnvironmentStateSink {
     environmentId: EnvironmentId,
     threads: ReadonlyArray<OrchestrationThreadShell>,
   ) => void;
+  /**
+   * Whether the store still holds the environment's shell as live: a snapshot
+   * applied and not demoted to last-known state or replaced from a cache since.
+   * A shell resume replays only what changed, so it needs that shell; a
+   * platform that omits this resumes on top of whatever the store holds.
+   */
+  readonly isEnvironmentShellLive?: (environmentId: EnvironmentId) => boolean;
   readonly reconcileSnapshotDerivedState: () => void;
   readonly syncProjects: (environmentId: EnvironmentId) => void;
   readonly syncThreads: (environmentId: EnvironmentId) => void;

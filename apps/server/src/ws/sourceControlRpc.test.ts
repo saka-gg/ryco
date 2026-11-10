@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Option, Schema } from "effect";
+import { DateTime, Effect, FileSystem, Layer, Option, Schema } from "effect";
 import {
   AuthSessionId,
   GitCommandError,
@@ -91,6 +92,7 @@ function makeContext(
   },
 ) {
   const refreshes: Array<string> = [];
+  const linkedRefreshes: Array<unknown> = [];
   const listInvalidations: Array<string> = [];
   const resolved = { kind: "github", ...provider } as SourceControlProviderShape;
   const listCache = options?.listCache;
@@ -120,12 +122,22 @@ function makeContext(
         provider: SourceControlProviderShape,
       ) => Effect.Effect<A, SourceControlProviderError> | undefined;
     }) => input.invoke(resolved) ?? Effect.die("provider lacks the workflow method"),
-    refreshStateForLinkedReference: () => Effect.sync(() => refreshes.push("linked")),
+    refreshStateForLinkedReference: (input: unknown) =>
+      Effect.sync(() => {
+        refreshes.push("linked");
+        linkedRefreshes.push(input);
+      }),
     refreshLinkedWorktreeSourceControlStates: (input: { readonly reason: string }) =>
       Effect.sync(() => refreshes.push(`worktrees:${input.reason}`)),
     refreshGitStatus: () => Effect.sync(() => refreshes.push("git-status")),
   } as unknown as WsRpcContext;
-  return { handlers: makeSourceControlHandlers(ctx), ctx, refreshes, listInvalidations };
+  return {
+    handlers: makeSourceControlHandlers(ctx),
+    ctx,
+    refreshes,
+    linkedRefreshes,
+    listInvalidations,
+  };
 }
 
 describe("selectCreatedChangeRequest", () => {
@@ -451,11 +463,12 @@ describe("pull request page handlers", () => {
         undefined,
         { listCache },
       );
-      const read = (reference: string, view?: "row") =>
+      const read = (reference: string, view?: "row", fresh?: true) =>
         handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
           cwd: "/repo",
           reference,
           ...(view ? { view } : {}),
+          ...(fresh ? { fresh } : {}),
         }).pipe(Effect.provide(handlerLayer));
 
       yield* read("42", "row");
@@ -468,9 +481,12 @@ describe("pull request page handlers", () => {
       yield* read("42", "row");
       expect(lanes).toEqual(["background", "background", "background"]);
 
-      // Focused surfaces read fresh, in the interactive lane.
+      // Focused surfaces read in the interactive lane and share one read for a few seconds
+      // (apart from the rows' share); an explicit refresh reads again.
       yield* read("42");
       yield* read("42");
+      expect(lanes.slice(3)).toEqual(["interactive"]);
+      yield* read("42", undefined, true);
       expect(lanes.slice(3)).toEqual(["interactive", "interactive"]);
     }),
   );
@@ -552,6 +568,108 @@ describe("pull request page handlers", () => {
       fingerprint = { status: fingerprint.status, remarks: fingerprint.remarks };
       expect(yield* poll()).toMatchObject({ version: 6 });
       expect(yield* poll()).toMatchObject({ version: 7 });
+    }),
+  );
+
+  it.effect("stands focused reads on the fingerprint, reading in full every 5 minutes", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      let fingerprint = {
+        status: "OPEN MERGEABLE abc SUCCESS:3",
+        remarks: "0  0  0",
+        revision: "2026-10-30T00:00:00Z ready",
+      };
+      const lanes: Array<ProcessLane> = [];
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            ProcessLaneRef.pipe(
+              Effect.map((lane) => {
+                lanes.push(lane);
+                return {
+                  number: Number(input.reference),
+                  url: `https://github.com/acme/repo/pull/${input.reference}`,
+                  version: ++details,
+                } as never;
+              }),
+            ),
+          getChangeRequestWatchFingerprint: () => Effect.sync(() => fingerprint),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = (options?: { readonly fresh?: true; readonly cwd?: string }) =>
+        handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: options?.cwd ?? "/repo",
+          reference: "42",
+          fullContent: true,
+          ...(options?.fresh ? { fresh: true } : {}),
+        }).pipe(Effect.provide(handlerLayer));
+      // The cache and the revalidation's clock move together.
+      const advance = (ms: number) => {
+        now += ms;
+        return TestClock.adjust(ms);
+      };
+      const poll = () => advance(30_000).pipe(Effect.andThen(read()));
+
+      expect(yield* read()).toMatchObject({ version: 1 });
+      // Another surface or client within a few seconds shares that read.
+      yield* advance(2_000);
+      expect(yield* read()).toMatchObject({ version: 1 });
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      // From here the unmoved fingerprint stands for a full read...
+      for (let index = 0; index < 9; index += 1) {
+        expect(yield* poll()).toMatchObject({ version: 2 });
+      }
+      // ...until it is 5 minutes old.
+      expect(yield* poll()).toMatchObject({ version: 3 });
+      // A moved fingerprint reads at once.
+      fingerprint = { ...fingerprint, status: "OPEN MERGEABLE abc FAILURE:1,SUCCESS:2" };
+      expect(yield* poll()).toMatchObject({ version: 4 });
+      // An explicit refresh reads in full whatever the fingerprint says, and later reads
+      // stand on it, not on the read before it.
+      expect(yield* read({ fresh: true })).toMatchObject({ version: 5 });
+      expect(yield* read()).toMatchObject({ version: 5 });
+      expect(yield* poll()).toMatchObject({ version: 5 });
+      expect(lanes.every((lane) => lane === "interactive")).toBe(true);
+    }),
+  );
+
+  it.effect("hands the state a detail read reported to the linked workspaces", () =>
+    Effect.gen(function* () {
+      const mergedAt = DateTime.makeUnsafe("2026-11-09T10:00:00Z");
+      const { handlers, linkedRefreshes } = makeContext({
+        getChangeRequestDetail: (input) =>
+          Effect.succeed({
+            number: Number(input.reference),
+            url: "u",
+            state: input.reference === "42" ? "merged" : "open",
+            isDraft: false,
+            ...(input.reference === "42" ? { mergedAt } : {}),
+          } as never),
+      });
+      for (const reference of ["42", "43"]) {
+        yield* handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: "/repo",
+          reference,
+        }).pipe(Effect.provide(handlerLayer));
+      }
+      expect(linkedRefreshes).toEqual([
+        {
+          cwd: "/repo",
+          kind: "pr",
+          reference: "42",
+          reported: { state: "merged", isDraft: false, terminalAt: "2026-11-09T10:00:00.000Z" },
+        },
+        {
+          cwd: "/repo",
+          kind: "pr",
+          reference: "43",
+          reported: { state: "open", isDraft: false, terminalAt: null },
+        },
+      ]);
     }),
   );
 

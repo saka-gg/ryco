@@ -20,14 +20,8 @@ import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as TranscriptReader from "./usageTranscriptReader.ts";
-import {
-  makeUsageService,
-  UsageService,
-  UsageServiceLive,
-  type UsageServiceOptions,
-} from "./UsageService.ts";
+import { makeUsageService, UsageService, UsageServiceLive } from "./UsageService.ts";
 import { UsageServiceDeferredLive } from "./UsageServiceDeferred.ts";
-import { USAGE_RATES_WARM_DELAY_MS } from "./UsageServiceTag.ts";
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await FS.rm(root, { recursive: true, force: true });
@@ -617,7 +611,7 @@ it("lets a slow rates download finish once its headers arrived in time", async (
   );
 });
 
-it("refreshes stale cached rates 30 s after construction, or not at all when built without a warm-up", async () => {
+it("never fetches rates on its own after construction, even when the cached ones are stale", async () => {
   const root = await FS.mkdtemp(join(tmpdir(), "ryco-rates-warm-"));
   roots.push(root);
   const claudeHome = join(root, "claude");
@@ -633,12 +627,7 @@ it("refreshes stale cached rates 30 s after construction, or not at all when bui
     }),
   );
   const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
-  const cases: ReadonlyArray<readonly [UsageServiceOptions, number]> = [
-    [{}, 1],
-    // What the deferred layer builds for a summary, which refreshes stale rates itself.
-    [{ ratesWarmDelayMs: null }, 0],
-  ];
-  for (const [options, expectedFetches] of cases) {
+  {
     let fetches = 0;
     const hanging = () => {
       fetches += 1;
@@ -648,13 +637,10 @@ it("refreshes stale cached rates 30 s after construction, or not at all when bui
       Effect.gen(function* () {
         yield* UsageService;
         yield* settle;
-        yield* TestClock.adjust(Duration.millis(USAGE_RATES_WARM_DELAY_MS - 1));
-        yield* settle;
+        // The first summary refreshes them (stale-while-revalidate); nothing before it does.
+        yield* TestClock.adjust(Duration.hours(1));
+        for (let attempt = 0; attempt < 5; attempt++) yield* settle;
         expect(fetches).toBe(0);
-        yield* TestClock.adjust(Duration.millis(1));
-        for (let attempt = 0; attempt < 10 && fetches < Math.max(1, expectedFetches); attempt++)
-          yield* settle;
-        expect(fetches).toBe(expectedFetches);
       }).pipe(
         Effect.provide(
           testLayer(
@@ -662,7 +648,7 @@ it("refreshes stale cached rates 30 s after construction, or not at all when bui
             claudeSettings(claudeHome, root),
             {},
             hanging,
-            Layer.effect(UsageService, makeUsageService(options)),
+            Layer.effect(UsageService, makeUsageService()),
           ).pipe(Layer.provideMerge(TestClock.layer())),
         ),
         Effect.scoped,

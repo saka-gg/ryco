@@ -1,6 +1,17 @@
+import { createHash } from "node:crypto";
+
 import { Schema } from "effect";
-import type { OrchestrationShellSnapshot, OrchestrationMessage, ThreadId } from "@ryco/contracts";
+import type {
+  OrchestrationShellSnapshot,
+  OrchestrationMessage,
+  OrchestrationThreadShell,
+  ThreadId,
+} from "@ryco/contracts";
 import { ThreadReadCacheContent } from "@ryco/contracts/thread-read-cache";
+import type {
+  ThreadReadCacheShellPatch,
+  ThreadReadCacheThreadPatch,
+} from "@ryco/contracts/thread-read-cache-upload";
 
 const MAX_BATCH_BYTES = 2 * 1024 * 1024 - 4096;
 const MAX_THREAD_BYTES = 1024 * 1024;
@@ -21,7 +32,15 @@ export type ThreadReadCacheUpload =
       readonly threadId: string;
       readonly revision: number;
       readonly snapshot: ThreadReadCacheContent;
-    };
+    }
+  | ThreadReadCacheShellPatch
+  | ThreadReadCacheThreadPatch;
+
+/** What `begin` answered: the generation, and the upload forms the Hub announced. */
+export interface ThreadReadCacheBegun {
+  readonly generation: number;
+  readonly features: ReadonlyArray<string>;
+}
 
 export interface ThreadReadCachePublisherDeps {
   /** Null while offline or when this process does not own the enrolled identity. */
@@ -33,11 +52,12 @@ export interface ThreadReadCachePublisherDeps {
     readonly revision: number;
     readonly messages: ReadonlyArray<OrchestrationMessage>;
   } | null>;
-  readonly begin: () => Promise<number>;
+  readonly begin: () => Promise<number | ThreadReadCacheBegun>;
+  /** Resolves with the threads whose patch the Hub could not apply (`stalePatches`), if any. */
   readonly upload: (
     generation: number,
     items: ReadonlyArray<ThreadReadCacheUpload>,
-  ) => Promise<void>;
+  ) => Promise<ReadonlyArray<string> | void>;
 }
 
 /**
@@ -136,6 +156,120 @@ export function threadReadCacheContent(
   return Schema.decodeUnknownSync(ThreadReadCacheContent)({ messages: saved.toReversed() });
 }
 
+const payloadDigest = (value: unknown) =>
+  createHash("sha256").update(JSON.stringify(value)).digest("base64url");
+
+/** What the Hub holds of one thread, as far as this node uploaded it. */
+interface UploadedContent {
+  readonly revision: number;
+  /** Each message's id and a digest of its JSON, oldest first. */
+  readonly messages: ReadonlyArray<{ readonly id: string; readonly digest: string }>;
+}
+
+function uploadedContent(revision: number, content: ThreadReadCacheContent): UploadedContent {
+  return {
+    revision,
+    messages: content.messages.map((message) => ({
+      id: message.id,
+      digest: payloadDigest(message).slice(0, 22),
+    })),
+  };
+}
+
+/**
+ * The messages a thread changed since `held`, as a `threadPatch`, or `undefined` when a whole
+ * upload is due: nothing held, or the new content does not continue the held one (the held
+ * messages from some point on, in order, then new ones), as after a revert.
+ */
+export function threadReadCachePatch(
+  threadId: string,
+  revision: number,
+  held: UploadedContent | undefined,
+  content: ThreadReadCacheContent,
+): ThreadReadCacheThreadPatch | undefined {
+  if (held === undefined || content.messages.length === 0) return undefined;
+  const first = content.messages[0]!.id;
+  const start = held.messages.findIndex((message) => message.id === first);
+  if (start < 0) return undefined;
+  const overlap = held.messages.length - start;
+  if (overlap > content.messages.length) return undefined;
+  const messages: Array<ThreadReadCacheContent["messages"][number]> = [];
+  for (let index = 0; index < content.messages.length; index += 1) {
+    const message = content.messages[index]!;
+    if (index < overlap) {
+      const previous = held.messages[start + index]!;
+      if (previous.id !== message.id) return undefined;
+      if (previous.digest === payloadDigest(message).slice(0, 22)) continue;
+    }
+    messages.push(message);
+  }
+  return {
+    kind: "threadPatch",
+    threadId: threadId as ThreadId,
+    baseRevision: held.revision,
+    revision,
+    firstMessageId: content.messages[0]!.id,
+    messages,
+    digest: payloadDigest(content),
+  };
+}
+
+/** The shell as last uploaded: rows by id, and the JSON of everything besides the rows. */
+interface PublishedShell {
+  readonly revision: number;
+  readonly threads: ReadonlyMap<string, OrchestrationThreadShell>;
+  readonly rest: string;
+}
+
+function shellRest(shell: OrchestrationShellSnapshot) {
+  return {
+    projects: shell.projects,
+    ...(shell.worktrees === undefined ? {} : { worktrees: shell.worktrees }),
+    ...(shell.settlementPolicy === undefined ? {} : { settlementPolicy: shell.settlementPolicy }),
+  };
+}
+
+function publishedShell(shell: OrchestrationShellSnapshot): PublishedShell {
+  return {
+    revision: shell.snapshotSequence,
+    threads: new Map(shell.threads.map((thread) => [thread.id, thread])),
+    rest: JSON.stringify(shellRest(shell)),
+  };
+}
+
+/**
+ * The rows a (bounded) shell changed since `held` was uploaded, as a `shellPatch`. Rows are
+ * compared by identity first (the node's shell keeps unchanged rows), then by content.
+ */
+export function shellReadCachePatch(
+  held: PublishedShell,
+  shell: OrchestrationShellSnapshot,
+): ThreadReadCacheShellPatch {
+  const threads: OrchestrationThreadShell[] = [];
+  const present = new Set<string>();
+  for (const thread of shell.threads) {
+    present.add(thread.id);
+    const previous = held.threads.get(thread.id);
+    if (previous === thread) continue;
+    if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(thread)) continue;
+    threads.push(thread);
+  }
+  const removedThreadIds = [...held.threads.keys()].filter((id) => !present.has(id)) as ThreadId[];
+  const rest = shellRest(shell);
+  return {
+    kind: "shellPatch",
+    baseRevision: held.revision,
+    revision: shell.snapshotSequence,
+    updatedAt: shell.updatedAt,
+    threads,
+    removedThreadIds,
+    threadCount: shell.threads.length,
+    ...(JSON.stringify(rest) === held.rest ? {} : { rest }),
+  };
+}
+
+const encodedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
 /**
  * A single serialized publisher. A failed/ambiguous batch stays pending and is
  * retried with identical revisions. Reads never participate in relay readiness.
@@ -147,11 +281,20 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
   let refreshedAt = 0;
   let shell: OrchestrationShellSnapshot | null = null;
   const uploadedVersions = new Map<string, string>();
+  /** The Hub announced `patch-v1` in this generation's `begin`. */
+  let patching = false;
+  /** The shell the Hub holds at `publishedSequence`, while patching. */
+  let heldShell: PublishedShell | null = null;
+  /** The content the Hub holds per thread, while patching. */
+  const heldContent = new Map<string, UploadedContent>();
   let pending: {
     items: ThreadReadCacheUpload[];
     versions: Map<string, string>;
     shellSequence: number | null;
     shellThreadIds: ReadonlySet<string> | null;
+    /** What the Hub holds once this batch is stored. */
+    heldShell: PublishedShell | null;
+    heldContent: Map<string, UploadedContent>;
   } | null = null;
   /** The threads the last uploaded index lists. */
   let publishedThreadIds: ReadonlySet<string> = new Set();
@@ -180,6 +323,9 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
     shellCrowdedOutContent = false;
     publishedThreadIds = new Set();
     uploadedVersions.clear();
+    patching = false;
+    heldShell = null;
+    heldContent.clear();
   };
   const isCurrent = (expectedNode: string) => !stopped && deps.nodeId() === expectedNode;
   const synchronize = async () => {
@@ -190,9 +336,10 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       reset();
     }
     if (generation === null) {
-      const nextGeneration = await deps.begin();
+      const begun = await deps.begin();
       if (!isCurrent(currentNode)) return;
-      generation = nextGeneration;
+      generation = typeof begun === "number" ? begun : begun.generation;
+      patching = typeof begun !== "number" && begun.features.includes("patch-v1");
       refreshedAt = deps.now();
     }
     if (pending === null) {
@@ -215,6 +362,8 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
         if (refresh) {
           uploadedVersions.clear();
           publishedSequence = -1;
+          heldShell = null;
+          heldContent.clear();
           refreshedAt = deps.now();
         }
       }
@@ -222,7 +371,26 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       const versions = new Map<string, string>();
       let shellSequence: number | null = null;
       let shellThreadIds: ReadonlySet<string> | null = null;
+      let nextHeldShell: PublishedShell | null = null;
+      const nextHeldContent = new Map<string, UploadedContent>();
       let size = 2;
+      /**
+       * The shell item: a patch of what the Hub holds when it accepts patches and the patch is the
+       * smaller, otherwise the whole bounded shell.
+       */
+      const shellItem = (current: OrchestrationShellSnapshot) => {
+        const upload = shellUpload(current);
+        const snapshot = (upload.item as { snapshot: OrchestrationShellSnapshot }).snapshot;
+        nextHeldShell = patching ? publishedShell(snapshot) : null;
+        if (patching && heldShell !== null && heldShell.revision === publishedSequence) {
+          const patch = shellReadCachePatch(heldShell, snapshot);
+          const patchBytes = encodedBytes([patch]);
+          if (patchBytes < upload.batchBytes) {
+            return { ...upload, item: patch as ThreadReadCacheUpload, batchBytes: patchBytes };
+          }
+        }
+        return upload;
+      };
       const shellOutdated = publishedSequence !== shell.snapshotSequence;
       // An already published shell that crowded content out of the last batch
       // waits one batch for that content; the first shell never waits, since
@@ -230,7 +398,7 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       // such a batch is limited to threads the published index already lists.
       const shellYields = shellOutdated && shellCrowdedOutContent && publishedSequence !== -1;
       if (shellOutdated && !shellYields) {
-        const upload = shellUpload(shell);
+        const upload = shellItem(shell);
         items.push(upload.item);
         shellSequence = shell.snapshotSequence;
         shellThreadIds = upload.threadIds;
@@ -249,6 +417,9 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       for (const id of uploadedVersions.keys()) {
         if (!retainedIds.has(id as ThreadId)) uploadedVersions.delete(id);
       }
+      for (const id of heldContent.keys()) {
+        if (!retainedIds.has(id as ThreadId)) heldContent.delete(id);
+      }
       for (const thread of recentThreads) {
         if (items.length >= 16) break;
         // Include turn state: older projections can leave updatedAt unchanged
@@ -262,12 +433,17 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
         const detail = await deps.readThread(thread.id);
         if (!isCurrent(currentNode)) return;
         if (detail === null) continue;
-        const item: ThreadReadCacheUpload = {
+        const content = threadReadCacheContent(detail.messages);
+        const patch = patching
+          ? threadReadCachePatch(thread.id, detail.revision, heldContent.get(thread.id), content)
+          : undefined;
+        const item: ThreadReadCacheUpload = patch ?? {
           kind: "thread",
           threadId: thread.id,
           revision: detail.revision,
-          snapshot: threadReadCacheContent(detail.messages),
+          snapshot: content,
         };
+        if (patching) nextHeldContent.set(thread.id, uploadedContent(detail.revision, content));
         const itemSize = Buffer.byteLength(JSON.stringify(item), "utf8") + 1;
         if (size + itemSize > MAX_BATCH_BYTES) {
           contentLeftOut = true;
@@ -279,21 +455,47 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       }
       if (shellYields && items.length === 0) {
         // Nothing was waiting after all: the shell need not wait either.
-        const upload = shellUpload(shell);
+        const upload = shellItem(shell);
         items.push(upload.item);
         shellSequence = shell.snapshotSequence;
         shellThreadIds = upload.threadIds;
       }
       shellCrowdedOutContent = shellSequence !== null && contentLeftOut;
       if (items.length === 0) return;
-      pending = { items, versions, shellSequence, shellThreadIds };
+      pending = {
+        items,
+        versions,
+        shellSequence,
+        shellThreadIds,
+        heldShell: shellSequence === null ? null : nextHeldShell,
+        heldContent: nextHeldContent,
+      };
     }
     const batch = pending;
-    await deps.upload(generation, batch.items);
+    const stale = new Set((await deps.upload(generation, batch.items)) ?? []);
     if (!isCurrent(currentNode)) return;
-    if (batch.shellSequence !== null) publishedSequence = batch.shellSequence;
-    if (batch.shellThreadIds !== null) publishedThreadIds = batch.shellThreadIds;
+    // Threads whose patch found no base: the Hub stored nothing for them, so they go whole next.
+    for (const id of stale) {
+      batch.versions.delete(id);
+      batch.heldContent.delete(id);
+      heldContent.delete(id);
+      uploadedVersions.delete(id);
+    }
+    if (batch.shellSequence !== null) {
+      publishedSequence = batch.shellSequence;
+      heldShell = batch.heldShell;
+    }
+    if (batch.shellThreadIds !== null) {
+      publishedThreadIds = batch.shellThreadIds;
+      // The Hub dropped the bodies of threads its new index no longer lists.
+      for (const id of heldContent.keys()) {
+        if (!batch.shellThreadIds.has(id)) heldContent.delete(id);
+      }
+    }
     for (const [id, version] of batch.versions) uploadedVersions.set(id, version);
+    for (const [id, content] of batch.heldContent) {
+      if (batch.versions.has(id)) heldContent.set(id, content);
+    }
     pending = null;
   };
   return {

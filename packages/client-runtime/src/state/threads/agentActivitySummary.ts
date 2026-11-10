@@ -215,6 +215,24 @@ function compareRows(
   return byRecency !== 0 ? byRecency : left.row.key.localeCompare(right.row.key);
 }
 
+/**
+ * Each environment's "needs you" count by {@link summarizeAgentActivity}'s rule (live threads
+ * only): what a node seals into its alerts for the app icon badge, and what the phone counts live.
+ */
+export function countNeedsYouByEnvironment(
+  threads: ReadonlyArray<AgentActivityThread>,
+  nowMs: number,
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const thread of threads) {
+    if (!thread.live) continue;
+    const phase = phaseOf(thread, nowMs);
+    if (phase === null || !NEEDS_YOU.has(phase)) continue;
+    counts.set(thread.environmentId, (counts.get(thread.environmentId) ?? 0) + 1);
+  }
+  return counts;
+}
+
 export function summarizeAgentActivity(
   threads: ReadonlyArray<AgentActivityThread>,
   nowMs: number,

@@ -270,6 +270,7 @@ import type {
   TerminalCloseInput,
   TerminalEvent,
   TerminalOpenInput,
+  TerminalRef,
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
@@ -288,6 +289,8 @@ import type {
   ContextHandoffRawPayloadChunkInput,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
+  OrchestrationGetMessageTextInput,
+  OrchestrationGetMessageTextResult,
   OrchestrationGetActivityPayloadInput,
   OrchestrationGetActivityPayloadResult,
   OrchestrationGetThreadHistoryPageInput,
@@ -732,6 +735,12 @@ export type DesktopThreadContentProjectionMap = Readonly<
   Record<string, DesktopThreadContentProjection>
 >;
 
+/** An environment's thread content as a change to what main holds (see `publishDesktopThreadContentChanges`). */
+export interface DesktopThreadContentChanges {
+  readonly order: ReadonlyArray<string>;
+  readonly changed: DesktopThreadContentProjectionMap;
+}
+
 export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
@@ -964,8 +973,54 @@ export const DESKTOP_PASTE_AS_TEXT_MENU_ACTION = "paste-as-text";
 export const DESKTOP_NAVIGATE_BACK_MENU_ACTION = "navigate-back";
 export const DESKTOP_NAVIGATE_FORWARD_MENU_ACTION = "navigate-forward";
 
+/**
+ * The desktop app's one-click database compaction: it stops its own server, runs the doctor's
+ * copy-and-swap and starts the server again (`apps/desktop/src/databaseCompaction.ts`).
+ */
+export type DesktopDatabaseCompactionState =
+  | { readonly phase: "idle" }
+  | {
+      readonly phase: "running";
+      readonly startedAt: string;
+      /** The doctor's current step and its progress, in words. */
+      readonly text: string;
+      readonly detail: string | null;
+      /** 0..1 within the current step; null when unknown. */
+      readonly fraction: number | null;
+      /** Cancel still stops it before the database file is replaced. */
+      readonly cancellable: boolean;
+    }
+  | {
+      readonly phase: "finished";
+      readonly startedAt: string;
+      readonly finishedAt: string;
+      readonly status:
+        | "repaired"
+        | "compacted"
+        | "already-compact"
+        | "refused"
+        | "failed"
+        | "cancelled";
+      readonly message: string;
+      readonly beforeBytes: number | null;
+      readonly afterBytes: number | null;
+      /** From stopping the server to it answering again. */
+      readonly downtimeMs: number | null;
+    };
+
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
+  /**
+   * One-click compaction of this app's own database. Absent in desktop builds that predate it.
+   * The renderer starts it only when its server says nothing would be cut off.
+   */
+  databaseCompaction?: {
+    getState(): Promise<DesktopDatabaseCompactionState>;
+    start(): Promise<DesktopDatabaseCompactionState>;
+    /** Stops the run while it is still `cancellable`; the database file stays as it was. */
+    cancel(): Promise<void>;
+    onState(listener: (state: DesktopDatabaseCompactionState) => void): () => void;
+  };
   /** Install the `ryco` command for terminals. Absent in desktop builds that predate it. */
   cliCommand?: {
     getState(): Promise<DesktopCliCommandState>;
@@ -1199,9 +1254,30 @@ export interface DesktopBridge {
     environmentId: EnvironmentId,
     content: DesktopThreadContentProjectionMap,
   ) => void;
+  /**
+   * Publishes only what changed: `order` lists every thread the environment's
+   * content keeps (least recently visited first), `changed` the content of
+   * those that differ from what main last confirmed. Resolves to whether main
+   * stored it; `false` (it lacked a thread left out) asks for every thread on
+   * the next publication. Absent in a Desktop build without it.
+   */
+  publishDesktopThreadContentChanges?: (
+    environmentId: EnvironmentId,
+    changes: DesktopThreadContentChanges,
+  ) => Promise<boolean>;
   getDesktopThreadContent?: (
     environmentId: EnvironmentId,
   ) => Promise<DesktopThreadContentProjectionMap>;
+  /**
+   * A machine's last read task list, kept beside its recent conversations
+   * (same setting, same purges), so the Tasks page paints it before the
+   * machine answers. `list` is the shared saved-task-list shape
+   * (`@ryco/client-runtime/state/tasks/savedTaskList`), `null` removes it.
+   * Resolves to whether it was kept. Absent in a Desktop build without it.
+   */
+  publishDesktopTaskList?: (environmentId: EnvironmentId, list: unknown) => Promise<boolean>;
+  /** The kept task list (untrusted until decoded), or null. */
+  getDesktopTaskList?: (environmentId: EnvironmentId) => Promise<unknown>;
   getDesktopThreadContentCacheEnabled?: () => Promise<boolean>;
   /** Turning the cache off deletes what it holds. Resolves to the setting now in effect. */
   setDesktopThreadContentCacheEnabled?: (enabled: boolean) => Promise<boolean>;
@@ -1306,6 +1382,12 @@ export interface DesktopBridge {
   onNotificationBadgeCleared?: (listener: () => void) => () => void;
 }
 
+/** Lifecycle hooks of a task change subscription (`subscribeLocalTaskChanges`). */
+export interface LocalTaskChangeSubscriptionOptions {
+  readonly onResubscribe?: () => void;
+  readonly onError?: () => void;
+}
+
 /**
  * APIs bound to the local app shell, not to any particular backend environment.
  *
@@ -1405,9 +1487,14 @@ export interface LocalApi {
     removeLocalTaskFile?: (
       input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
-    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    /**
+     * Each task that changes on the node from now on; returns the unsubscribe.
+     * `onResubscribe` fires when the stream starts again after a drop (its
+     * first change follows), `onError` when it stopped for good.
+     */
     subscribeLocalTaskChanges?: (
       listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+      options?: LocalTaskChangeSubscriptionOptions,
     ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
@@ -1544,9 +1631,14 @@ export interface EnvironmentApi {
     removeLocalTaskFile?: (
       input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
-    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    /**
+     * Each task that changes on the node from now on; returns the unsubscribe.
+     * `onResubscribe` fires when the stream starts again after a drop (its
+     * first change follows), `onError` when it stopped for good.
+     */
     subscribeLocalTaskChanges?: (
       listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+      options?: LocalTaskChangeSubscriptionOptions,
     ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
@@ -1627,6 +1719,17 @@ export interface EnvironmentApi {
     restart: (input: typeof TerminalRestartInput.Encoded) => Promise<TerminalSessionSnapshot>;
     close: (input: typeof TerminalCloseInput.Encoded) => Promise<void>;
     onEvent: (callback: (event: TerminalEvent) => void) => () => void;
+    /**
+     * Shows a terminal until the returned release: its output keeps reaching this client from a
+     * node that scopes output, and `open` attaches it before taking the snapshot. Absent on APIs
+     * without a live connection.
+     */
+    attachOutput?: (ref: TerminalRef) => () => void;
+    /**
+     * Whether the node sends this connection output only for held terminals, so a client buffer
+     * misses the output of terminals nobody held. False for older nodes, which send all of it.
+     */
+    isOutputScoped?: () => boolean;
   };
   projects: {
     listEntries: (input: ProjectListEntriesInput) => Promise<ProjectListEntriesResult>;
@@ -1895,6 +1998,10 @@ export interface EnvironmentApi {
     getActivityPayload?: (
       input: OrchestrationGetActivityPayloadInput,
     ) => Promise<OrchestrationGetActivityPayloadResult>;
+    /** Optional so clients can feature-detect against older environments. */
+    getMessageText?: (
+      input: OrchestrationGetMessageTextInput,
+    ) => Promise<OrchestrationGetMessageTextResult>;
     replayEvents?: (
       input: OrchestrationReplayEventsInput,
     ) => Promise<OrchestrationReplayEventsResult>;

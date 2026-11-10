@@ -1,4 +1,4 @@
-import { CommandId, EventId, ProjectId } from "@ryco/contracts";
+import { CommandId, EventId, ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Schema, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -181,17 +181,20 @@ layer("OrchestrationEventStore", (it) => {
     Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;
       const since = "2026-08-18T00:00:00.000Z";
-      for (const index of [1, 2, 3]) {
+      for (const index of [0, 1, 2, 3, 4]) {
         yield* eventStore.append({
           type: "project.created",
           eventId: EventId.make(`evt-store-recent-${index}`),
           aggregateKind: "project",
           aggregateId: ProjectId.make(`project-recent-${index}`),
-          occurredAt: `2026-08-18T00:00:0${index}.000Z`,
-          commandId: CommandId.make(`cmd-store-recent-${index}`),
+          // Event 0 is older than `since`, event 4 newer than every later probe.
+          occurredAt: index === 0 ? "2026-08-17T23:59:59.000Z" : `2026-08-18T00:00:0${index}.000Z`,
+          commandId: CommandId.make(
+            index === 2 ? `provider:recent-${index}` : `cmd-store-recent-${index}`,
+          ),
           causationEventId: null,
           correlationId: CommandId.make(`cmd-store-recent-${index}`),
-          metadata: {},
+          metadata: index === 3 ? { providerTurnId: "turn-recent" } : {},
           payload: {
             projectId: ProjectId.make(`project-recent-${index}`),
             title: `Recent Project ${index}`,
@@ -204,10 +207,27 @@ layer("OrchestrationEventStore", (it) => {
         });
       }
 
-      const recent = yield* eventStore.readRecent!({ since, limit: 2 });
+      const recent = yield* eventStore.readRecent!({ since, limit: 3 });
       assert.deepEqual(
-        recent.map((event) => event.eventId),
-        [EventId.make("evt-store-recent-3"), EventId.make("evt-store-recent-2")],
+        recent.map((event) => [event.eventId, event.providerAttributed]),
+        [
+          [EventId.make("evt-store-recent-4"), false],
+          [EventId.make("evt-store-recent-3"), true],
+          [EventId.make("evt-store-recent-2"), true],
+        ],
+      );
+      assert.notProperty(recent[0], "payload");
+      assert.deepEqual(
+        (yield* eventStore.readRecent!({ since, limit: 50 }))
+          .map((event) => event.eventId)
+          .filter((eventId) => eventId.startsWith("evt-store-recent-")),
+        [4, 3, 2, 1].map((index) => EventId.make(`evt-store-recent-${index}`)),
+        "nothing older than since",
+      );
+      assert.isFalse(
+        (yield* eventStore.readRecent!({ since: "2026-08-18T00:00:05.000Z", limit: 50 })).some(
+          (event) => event.eventId.startsWith("evt-store-recent-"),
+        ),
       );
     }),
   );
@@ -312,6 +332,87 @@ layer("OrchestrationEventStore", (it) => {
       assert.isFalse(
         plan.some((row) => row.detail.startsWith("SCAN orchestration_events")),
         JSON.stringify(plan),
+      );
+    }),
+  );
+
+  it.effect("pages events without payloads, with only the ids and paths readers need", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const before = yield* eventStore.latestSequence;
+      const base = {
+        occurredAt: "2026-10-02T00:00:00.000Z",
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+      } as const;
+      const project = ProjectId.make("project-headers");
+      const thread = ThreadId.make("thread-headers");
+      const worktree = WorktreeId.make("worktree-headers");
+      yield* eventStore.append({
+        ...base,
+        type: "project.deleted",
+        eventId: EventId.make("evt-headers-project"),
+        aggregateKind: "project",
+        aggregateId: project,
+        payload: { projectId: project, deletedAt: base.occurredAt },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "thread.deleted",
+        eventId: EventId.make("evt-headers-thread"),
+        aggregateKind: "thread",
+        aggregateId: thread,
+        payload: { threadId: thread, deletedAt: base.occurredAt },
+      });
+      yield* eventStore.append({
+        ...base,
+        type: "worktree.relocated",
+        eventId: EventId.make("evt-headers-worktree"),
+        aggregateKind: "worktree",
+        aggregateId: worktree,
+        payload: {
+          worktreeId: worktree,
+          projectId: project,
+          sourcePath: "/tmp/from",
+          destinationPath: "/tmp/to",
+          relocatedAt: base.occurredAt,
+        },
+      } as never);
+
+      const page = yield* eventStore.readEventHeadersPage!(before, 2);
+      assert.equal(page.hasMore, true);
+      assert.equal(page.nextSequence, before + 2);
+      const rest = yield* eventStore.readEventHeadersPage!(page.nextSequence, 10);
+      assert.equal(rest.hasMore, false);
+      assert.deepEqual(
+        [...page.events, ...rest.events].map(({ sequence: _sequence, ...header }) => header),
+        [
+          {
+            type: "project.deleted",
+            aggregateKind: "project",
+            aggregateId: project,
+            payload: { projectId: project },
+          },
+          {
+            type: "thread.deleted",
+            aggregateKind: "thread",
+            aggregateId: thread,
+            payload: { threadId: thread },
+          },
+          {
+            type: "worktree.relocated",
+            aggregateKind: "worktree",
+            aggregateId: worktree,
+            payload: {
+              projectId: project,
+              worktreeId: worktree,
+              sourcePath: "/tmp/from",
+              destinationPath: "/tmp/to",
+            },
+          },
+        ],
       );
     }),
   );

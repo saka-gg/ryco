@@ -64,7 +64,14 @@ const initial: ComparisonState = {
 export function createComparisonController(input: {
   storage: KVService;
   storageKey: string;
-  read: (selection: GitComparisonSelection) => Promise<GitReadComparisonResult>;
+  /**
+   * `knownRevision`: the comparison held for `selection`, sent so a node with
+   * nothing new answers `unchanged` without the patch (older nodes ignore it).
+   */
+  read: (
+    selection: GitComparisonSelection,
+    knownRevision?: string,
+  ) => Promise<GitReadComparisonResult>;
 }) {
   let state = initial;
   let generation = 0;
@@ -82,10 +89,17 @@ export function createComparisonController(input: {
     const ticket = ++generation;
     const selection = state.selection;
     const previousOid = state.data?.source.refOid;
+    const held = state.data;
     // Retain the labeled immutable snapshot while refreshing so unchanged file renderers survive.
     publish({ ...state, error: null, isLoading: true, refMoved: false });
     const request = Promise.resolve()
-      .then(() => input.read(selection))
+      .then(() => input.read(selection, held?.source.revision))
+      .then((data) => {
+        if (data.unchanged !== true) return data;
+        // The same object: nothing downstream parses the patch again.
+        if (held && held.source.revision === data.source.revision) return held;
+        return input.read(selection);
+      })
       .then((data) => {
         // Older nodes drop `target` and compare with HEAD; never label that as working files.
         if (comparesWorkingTree(selection) !== comparesWorkingTree(data.selection))

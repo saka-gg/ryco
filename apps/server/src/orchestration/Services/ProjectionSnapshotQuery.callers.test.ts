@@ -1,6 +1,8 @@
 /**
  * Architecture guard: a whole shell snapshot (every live thread's summary, sessions, latest
- * turns, priorities) is what clients subscribe to, not a generic server-side lookup. Server code
+ * turns, priorities) is what clients subscribe to, not a generic server-side lookup. Outside a
+ * transaction it is the node's shared, event-patched thread list (shellSnapshotCopy.ts), so a
+ * read is cheap, but it still hands out every thread. Server code
  * that needs projects, workspaces or thread placement reads them through `readProjectShells`,
  * `readWorkspacePlacement` or another narrow query instead.
  *
@@ -20,9 +22,9 @@ const sourceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 const ALLOWED_SHELL_SNAPSHOT_CALLERS: Readonly<Record<string, { count: number; why: string }>> = {
   "ws/orchestrationRpc.ts": { count: 1, why: "the shell subscription itself" },
-  "hubConnector/threadReadCacheShellMirror.ts": {
+  "hubConnector/ThreadReadCacheSync.ts": {
     count: 1,
-    why: "the cloud index's periodic rebuild; between rebuilds it patches changed rows",
+    why: "the cloud index publishes the node's shared thread list (shellSnapshotCopy.ts)",
   },
   "orchestration/Services/ProjectionSnapshotQuery.ts": {
     count: 6,

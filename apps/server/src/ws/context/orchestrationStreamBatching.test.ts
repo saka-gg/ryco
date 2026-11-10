@@ -59,6 +59,7 @@ interface Harness {
   readonly live: PubSub.PubSub<OrchestrationEvent>;
   readonly pageReads: { count: number };
   readonly streamPageReads: { count: number };
+  readonly headerPageReads: { count: number };
   readonly shellReads: Array<ThreadId>;
   readonly probe: {
     anchored: boolean;
@@ -71,6 +72,9 @@ const makeHarnessWith = (options: {
   readonly getProjectShellById?: ProjectionSnapshotQueryShape["getProjectShellById"];
   /** Serve thread replay through the stream index, counting reads in `streamPageReads`. */
   readonly streamPages?: boolean;
+  /** Serve the shell's replay as payload-free headers, counting reads in `headerPageReads`. */
+  readonly headerPages?: boolean;
+  readonly getShellChangesSince?: ProjectionSnapshotQueryShape["getShellChangesSince"];
 }) =>
   Effect.gen(function* () {
     const harness: Harness = {
@@ -78,6 +82,7 @@ const makeHarnessWith = (options: {
       live: yield* PubSub.unbounded<OrchestrationEvent>(),
       pageReads: { count: 0 },
       streamPageReads: { count: 0 },
+      headerPageReads: { count: 0 },
       shellReads: [],
       probe: { anchored: true, eventsAfter: 0, streamEventsAfter: 0 },
     };
@@ -103,12 +108,39 @@ const makeHarnessWith = (options: {
         }),
       getProjectShellById: options.getProjectShellById ?? (() => Effect.succeed(Option.none())),
       getWorktreeShellById: () => Effect.succeed(Option.none()),
+      ...(options.getShellChangesSince === undefined
+        ? {}
+        : { getShellChangesSince: options.getShellChangesSince }),
     } as unknown as ProjectionSnapshotQueryShape;
     const helpers = makeOrchestrationStreamHelpers({
       orchestrationEngine,
       projectionSnapshotQuery,
       repositoryIdentityResolver: { resolve: () => Effect.succeed(null) },
       probeResume: () => Effect.sync(() => ({ ...harness.probe })),
+      ...(options.headerPages === true
+        ? {
+            readEventHeadersPage: (fromSequenceExclusive: number, limit: number) =>
+              Effect.sync(() => {
+                harness.headerPageReads.count += 1;
+                const after = harness.stored.filter(
+                  (event) => event.sequence > fromSequenceExclusive,
+                );
+                const events = after.slice(0, limit).map((event) => ({
+                  sequence: event.sequence,
+                  type: event.type,
+                  aggregateKind: event.aggregateKind,
+                  aggregateId: event.aggregateId,
+                  payload:
+                    event.type === "thread.deleted" ? { threadId: event.payload.threadId } : {},
+                }));
+                return {
+                  events,
+                  nextSequence: events.at(-1)?.sequence ?? fromSequenceExclusive,
+                  hasMore: after.length > limit,
+                };
+              }),
+          }
+        : {}),
       ...(options.streamPages === true
         ? {
             readStreamEventsPage: (input: {
@@ -211,7 +243,8 @@ describe("orchestration stream chunking", () => {
       assert.isAbove(eventChunks.length, 1);
       for (const chunk of eventChunks) {
         const bytes = chunk.reduce(
-          (total, item) => total + ("event" in item ? orchestrationEventBytes(item.event) : 0),
+          (total, item) =>
+            total + (item.kind === "event" ? orchestrationEventBytes(item.event) : 0),
           0,
         );
         assert.isAtMost(bytes, ORCHESTRATION_STREAM_CHUNK_MAX_BYTES);
@@ -254,6 +287,108 @@ describe("orchestration stream chunking", () => {
       );
       assert.deepEqual(harness.shellReads, [THREAD]);
       assert.equal(chunks.length, 2);
+    }),
+  );
+
+  it.effect("replays a shell resume from payload-free event headers", () =>
+    Effect.gen(function* () {
+      const { harness, helpers } = yield* makeHarnessWith({ headerPages: true });
+      const other = ThreadId.make("thread-batching-other");
+      for (let sequence = 11; sequence <= 510; sequence += 1) {
+        harness.stored.push(messageEvent(sequence, THREAD, 10));
+      }
+      harness.stored.push(deletedEvent(511, other));
+      harness.probe.eventsAfter = 501;
+
+      const chunks = yield* collectChunks(
+        helpers.makeReplayableShellStream(neverSnapshot, { resumeFromSequence: 10 }),
+        3,
+      );
+
+      assert.deepEqual(
+        chunks.flat().map((item) => [item.kind, "sequence" in item ? item.sequence : null]),
+        [
+          ["resumed", null],
+          ["thread-upserted", 510],
+          ["thread-removed", 511],
+        ],
+      );
+      // No event payload was read or decoded.
+      assert.equal(harness.pageReads.count, 0);
+      assert.isAbove(harness.headerPageReads.count, 0);
+    }),
+  );
+
+  it.effect("resumes the shell with only the rows changed since, however many events ago", () =>
+    Effect.gen(function* () {
+      const other = ThreadId.make("thread-batching-other");
+      // Differs from the row the replay re-reads later, so both are sent.
+      const changed = { id: THREAD, title: "Before" } as unknown as OrchestrationThreadShell;
+      const { harness, helpers } = yield* makeHarnessWith({
+        getShellChangesSince: (sequence) =>
+          Effect.succeed(
+            Option.some({
+              snapshotSequence: 5_000,
+              threadCount: 2,
+              liveThreadCount: 10,
+              items: [
+                { kind: "thread-upserted" as const, sequence: 4_000, thread: changed },
+                { kind: "thread-removed" as const, sequence: 4_999, threadId: other },
+              ].filter((item) => item.sequence > sequence),
+            }),
+          ),
+      });
+      // Far beyond what the event log replays: the probe would refuse.
+      harness.probe.eventsAfter = 100_000;
+      harness.stored.push(messageEvent(5_001));
+
+      const chunks = yield* collectChunks(
+        helpers.makeReplayableShellStream(neverSnapshot, { resumeFromSequence: 10 }),
+        4,
+      );
+      assert.deepEqual(
+        chunks.flat().map((item) => [item.kind, "sequence" in item ? item.sequence : null]),
+        [
+          ["resumed", null],
+          ["thread-upserted", 4_000],
+          ["thread-removed", 4_999],
+          ["thread-upserted", 5_001],
+        ],
+      );
+      const resumedItem = chunks[0]![0]!;
+      assert.deepEqual(resumedItem, { kind: "resumed", fromSequence: 10 });
+      // The log is read only after the changes' sequence.
+      assert.equal(harness.pageReads.count, 1);
+    }),
+  );
+
+  it.effect("takes a snapshot when more threads changed than a snapshot would send", () =>
+    Effect.gen(function* () {
+      const { harness, helpers } = yield* makeHarnessWith({
+        getShellChangesSince: () =>
+          Effect.succeed(
+            Option.some({
+              snapshotSequence: 5_000,
+              threadCount: 900,
+              liveThreadCount: 1_000,
+              items: [],
+            }),
+          ),
+      });
+      harness.probe.eventsAfter = 100_000;
+      const snapshot = {
+        snapshotSequence: 5_000,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-10-01T00:00:00.000Z",
+      };
+      const chunks = yield* collectChunks(
+        helpers.makeReplayableShellStream(Effect.succeed(snapshot), {
+          resumeFromSequence: 10,
+        }),
+        1,
+      );
+      assert.equal(chunks.flat()[0]?.kind, "snapshot");
     }),
   );
 

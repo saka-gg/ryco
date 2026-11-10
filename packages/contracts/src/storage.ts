@@ -67,6 +67,22 @@ export const DatabaseCompactionReport = Schema.Struct({
 export type DatabaseCompactionReport = typeof DatabaseCompactionReport.Type;
 
 /** The node's state database: its size, free space inside it, and what could be returned. */
+/** One backup of the node's database, as Storage settings lists it. */
+export const DatabaseBackupSummary = Schema.Struct({
+  /** The file name in the backups folder; what `storage.removeDatabaseBackup` takes. */
+  name: TrimmedNonEmptyString,
+  /** `before`: taken before an upgrade's migrations; `manual`: `ryco db backup`. */
+  kind: Schema.Literals(["before", "manual"]),
+  /** Schema the backup holds, and the one the upgrade moved to (null for manual backups). */
+  fromSchema: NonNegativeInt,
+  toSchema: Schema.NullOr(NonNegativeInt),
+  createdAt: IsoDateTime,
+  bytes: NonNegativeInt,
+  /** The newest backup: the way back from the latest upgrade. */
+  newest: Schema.Boolean,
+});
+export type DatabaseBackupSummary = typeof DatabaseBackupSummary.Type;
+
 export const DatabaseStorageReport = Schema.Struct({
   fileBytes: NonNegativeInt,
   /**
@@ -94,8 +110,67 @@ export const DatabaseStorageReport = Schema.Struct({
       command: Schema.NullOr(Schema.String),
     }),
   ),
+  /**
+   * Backups of the database, newest first; each can be removed (`storage.removeDatabaseBackup`).
+   * Absent from nodes that predate it, which have no removal either.
+   */
+  backups: Schema.optionalKey(Schema.Array(DatabaseBackupSummary)),
+  /**
+   * The node answers `storage.databaseCompactionStatus` and `storage.startDatabaseCompaction`
+   * (one-click compaction). Absent from nodes that predate it.
+   */
+  oneClickCompaction: Schema.optionalKey(Schema.Boolean),
 });
 export type DatabaseStorageReport = typeof DatabaseStorageReport.Type;
+
+/**
+ * One run of the one-click compaction (the doctor's copy-and-swap while the server is stopped).
+ * `running` until the run's result is known; the server reads it after it starts again.
+ */
+export const DatabaseCompactionRun = Schema.Struct({
+  /** `desktop`: the desktop app stopped its server; `service`: the doctor stopped the service. */
+  runner: Schema.Literals(["desktop", "service"]),
+  startedAt: IsoDateTime,
+  finishedAt: Schema.NullOr(IsoDateTime),
+  status: Schema.Literals([
+    "running",
+    "repaired",
+    "compacted",
+    "already-compact",
+    "refused",
+    "failed",
+    "cancelled",
+  ]),
+  message: Schema.String,
+  /** Database file plus write-ahead log, before and after; null when unknown. */
+  beforeBytes: Schema.NullOr(NonNegativeInt),
+  afterBytes: Schema.NullOr(NonNegativeInt),
+  /** How long the server was stopped; null when unknown. */
+  downtimeMs: Schema.NullOr(NonNegativeInt),
+});
+export type DatabaseCompactionRun = typeof DatabaseCompactionRun.Type;
+
+export const DatabaseCompactionStatus = Schema.Struct({
+  /**
+   * Who can run it here: the desktop app (its own server), the doctor stopping this node's
+   * background service, or nobody (a foreground `ryco serve`: the doctor command it shows).
+   */
+  runner: Schema.Literals(["desktop", "service", "none"]),
+  /** What it would interrupt now (agents working, terminals, clones…); empty when idle. */
+  busy: Schema.Array(Schema.String),
+  lastRun: Schema.NullOr(DatabaseCompactionRun),
+});
+export type DatabaseCompactionStatus = typeof DatabaseCompactionStatus.Type;
+export const DatabaseCompactionStatusInput = Schema.Struct({});
+export const StartDatabaseCompactionResult = Schema.Struct({
+  started: Schema.Boolean,
+  detail: Schema.String,
+});
+export type StartDatabaseCompactionResult = typeof StartDatabaseCompactionResult.Type;
+
+export const StorageRemoveDatabaseBackupInput = Schema.Struct({ name: TrimmedNonEmptyString });
+export const StorageRemoveDatabaseBackupResult = Schema.Struct({ freedBytes: NonNegativeInt });
+export type StorageRemoveDatabaseBackupResult = typeof StorageRemoveDatabaseBackupResult.Type;
 
 export const StorageSnapshot = Schema.Struct({
   scannedAt: IsoDateTime,

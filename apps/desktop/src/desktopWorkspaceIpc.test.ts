@@ -50,6 +50,9 @@ describe("Desktop workspace IPC boundary", () => {
       "cancelVerification",
       "verifyApproval",
       "publishThreadContent",
+      "publishThreadContentChanges",
+      "publishTaskList",
+      "getTaskList",
       "getThreadContent",
       "getThreadContentCacheEnabled",
       "setThreadContentCacheEnabled",
@@ -82,6 +85,7 @@ describe("Desktop workspace IPC boundary", () => {
     const preload = source("preload.ts");
     for (const channel of [
       "publishThreadContent",
+      "publishThreadContentChanges",
       "getThreadContent",
       "getThreadContentCacheEnabled",
       "setThreadContentCacheEnabled",
@@ -376,6 +380,78 @@ describe("Desktop workspace state projections", () => {
           "thread content setting",
         );
       }
+    });
+
+    it("keeps a change to published content, and refuses one it cannot complete", async () => {
+      const { handlers, cache, scope } = setup();
+      await handlers.publishThreadContent(environmentId, threadsOf(["a", "b"]));
+      expect(
+        await handlers.publishThreadContentChanges(environmentId, {
+          order: ["a", "b"],
+          changed: { b: content("b", "new b") },
+        }),
+      ).toBe(true);
+      const kept = await cache.load(scope);
+      expect(Object.keys(kept)).toEqual(["a", "b"]);
+      expect(kept["b"]?.messages[0]?.text).toBe("new b");
+      expect(
+        await handlers.publishThreadContentChanges(environmentId, { order: ["z"], changed: {} }),
+      ).toBe(false);
+      for (const invalid of [
+        null,
+        [],
+        { order: "a", changed: {} },
+        { order: ["a"], changed: [] },
+        { order: [7], changed: {} },
+        { order: ["a", "a"], changed: {} },
+        { order: Array.from({ length: 1_025 }, (_, index) => `t${index}`), changed: {} },
+      ]) {
+        await expect(handlers.publishThreadContentChanges(environmentId, invalid)).rejects.toThrow(
+          "thread content",
+        );
+      }
+      await cache.dispose();
+    });
+
+    it("keeps a machine's task list beside its conversations and serves it back", async () => {
+      const { handlers, cache, scope } = setup();
+      const list = {
+        version: 1,
+        readAt: 5,
+        tasks: [
+          {
+            taskId: "task-1",
+            revision: 1,
+            title: "Saved task",
+            notes: "",
+            priority: "normal",
+            dueAt: null,
+            projectId: null,
+            links: [],
+            files: [],
+            state: "todo",
+            createdAt: "2026-10-10T00:00:00.000Z",
+            updatedAt: "2026-10-10T00:00:00.000Z",
+            status: "todo",
+            delegations: [],
+          },
+        ],
+      };
+      expect(await handlers.publishTaskList(environmentId, list)).toBe(true);
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      expect((await handlers.getTaskList(environmentId))?.tasks.map((task) => task.title)).toEqual([
+        "Saved task",
+      ]);
+      expect(Object.keys(await cache.load(scope))).toEqual([threadId]);
+      // Unreadable lists are refused; null removes the kept one.
+      expect(await handlers.publishTaskList(environmentId, { version: 9 })).toBe(false);
+      for (const invalid of [[], "list", 3]) {
+        await expect(handlers.publishTaskList(environmentId, invalid)).rejects.toThrow("task list");
+      }
+      expect(await handlers.publishTaskList(environmentId, null)).toBe(true);
+      expect(await handlers.getTaskList(environmentId)).toBeNull();
+      expect(Object.keys(await cache.load(scope))).toEqual([threadId]);
+      await cache.dispose();
     });
 
     it("bounds what it keeps to the shared thread and size limits", async () => {

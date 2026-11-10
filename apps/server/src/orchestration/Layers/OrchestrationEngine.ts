@@ -69,6 +69,7 @@ import {
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
+import { isProcessScopedCommandId, makeProcessScopedReceipts } from "../processScopedCommandIds.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
@@ -223,6 +224,7 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   );
 
   const sidebarUndo = createSidebarUndoReceipts();
+  const processScopedReceipts = makeProcessScopedReceipts();
   let commandReadModel = createEmptyReadModel(new Date().toISOString());
 
   let workspaceAuthorityHealthy = true;
@@ -248,6 +250,11 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   /** Highest sequence handed to the bus: the store head at boot until this process publishes. */
   let lastPublishedSequence = 0;
   /**
+   * The shared thread list's feed (shellSnapshotCopy.ts), set once projections caught up at boot.
+   * Every event is recorded before it is published, so a reader that saw it finds it recorded.
+   */
+  let recordShellChanges: ((events: ReadonlyArray<OrchestrationEvent>) => void) | undefined;
+  /**
    * Publishes committed events (ascending) in one batch, each at most once: the reconcile path
    * re-reads events that may already be published. Never waits for a subscriber: the sliding bus
    * drops its oldest event instead, and that subscriber replays it.
@@ -259,6 +266,7 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
           const unpublished = events.filter((event) => event.sequence > lastPublishedSequence);
           const last = unpublished.at(-1);
           if (last === undefined) return Effect.void;
+          recordShellChanges?.(unpublished);
           return PubSub.publishAll(eventPubSub, unpublished).pipe(
             Effect.andThen(
               Effect.sync(() => {
@@ -316,9 +324,11 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
           "orchestration.aggregate_id": aggregateRef.aggregateId,
         });
 
-        const existingReceipt = yield* commandReceiptRepository.getByCommandId({
-          commandId: envelope.command.commandId,
-        });
+        const commandId = envelope.command.commandId;
+        const processScoped = isProcessScopedCommandId(commandId);
+        const existingReceipt = processScoped
+          ? Option.fromUndefinedOr(processScopedReceipts.get(commandId))
+          : yield* commandReceiptRepository.getByCommandId({ commandId });
         if (Option.isSome(existingReceipt)) {
           if (existingReceipt.value.status === "accepted") {
             return {
@@ -604,15 +614,18 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                 const resultSequence =
                   lastSavedEvent?.sequence ?? commandReadModel.snapshotSequence;
 
-                yield* commandReceiptRepository.upsert({
-                  commandId: envelope.command.commandId,
-                  aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
-                  aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
-                  acceptedAt: lastSavedEvent?.occurredAt ?? new Date().toISOString(),
-                  resultSequence,
-                  status: "accepted",
-                  error: null,
-                });
+                // A process-scoped id's receipt is recorded in memory once this commits.
+                if (!processScoped) {
+                  yield* commandReceiptRepository.upsert({
+                    commandId: envelope.command.commandId,
+                    aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
+                    aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
+                    acceptedAt: lastSavedEvent?.occurredAt ?? new Date().toISOString(),
+                    resultSequence,
+                    status: "accepted",
+                    error: null,
+                  });
+                }
 
                 return {
                   committedEvents,
@@ -636,6 +649,12 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
           ? envelope.admission.admit(commit)
           : commit;
 
+        if (processScoped) {
+          processScopedReceipts.record(commandId, {
+            status: "accepted",
+            resultSequence: committedCommand.lastSequence,
+          });
+        }
         commandReadModel = committedCommand.nextCommandReadModel;
         sidebarUndo.record(envelope.command, beforeCommand, commandReadModel);
         if (envelope.command.type === "thread.sidebar.undo")
@@ -708,7 +727,15 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
               }),
             );
 
-            if (Schema.is(OrchestrationCommandInvariantError)(error)) {
+            if (
+              Schema.is(OrchestrationCommandInvariantError)(error) &&
+              isProcessScopedCommandId(envelope.command.commandId)
+            ) {
+              processScopedReceipts.record(envelope.command.commandId, {
+                status: "rejected",
+                error: error.message,
+              });
+            } else if (Schema.is(OrchestrationCommandInvariantError)(error)) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,
@@ -740,6 +767,8 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   const bootSequence = yield* eventStore.latestSequence;
   // Subscriptions start at the store head: events of earlier processes are never delivered live.
   lastPublishedSequence = bootSequence;
+  // Projections are caught up: the shared thread list may start from them.
+  recordShellChanges = projectionSnapshotQuery.trackShellChanges?.(bootSequence);
 
   const worker = Effect.forever(
     Queue.take(commandQueue).pipe(

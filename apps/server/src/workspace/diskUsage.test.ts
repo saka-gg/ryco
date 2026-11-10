@@ -87,6 +87,45 @@ describe("makeDiskUsageCache", () => {
     expect(peak).toBe(2);
   });
 
+  it("peeks at the last measurement at once and measures again in the background", async () => {
+    let clock = 0;
+    let calls = 0;
+    let finish: () => void = () => {};
+    const cache = makeDiskUsageCache({
+      measure: () =>
+        new Promise((resolve) => {
+          calls += 1;
+          const bytes = calls * 10;
+          finish = () => resolve(usage(bytes));
+        }),
+      ttlMs: 100,
+      now: () => clock,
+    });
+    // Never measured: nothing to show yet, one measurement starts.
+    expect(cache.peek("/a", false)).toEqual({ last: null, measuring: true });
+    expect(cache.peek("/a", false).measuring).toBe(true);
+    expect(calls).toBe(1);
+    finish();
+    await cache.read("/a", false);
+    expect(cache.peek("/a", false)).toEqual({
+      last: { usage: usage(10), measuredAtMs: 0 },
+      measuring: false,
+    });
+    // Older than the TTL: the old figure, with its time, while a new one runs.
+    clock = 500;
+    expect(cache.peek("/a", false)).toEqual({
+      last: { usage: usage(10), measuredAtMs: 0 },
+      measuring: true,
+    });
+    expect(calls).toBe(2);
+    finish();
+    await cache.read("/a", false);
+    expect(cache.peek("/a", false).last).toEqual({ usage: usage(20), measuredAtMs: 500 });
+    // A refresh asks again even within the TTL.
+    expect(cache.peek("/a", true).measuring).toBe(true);
+    expect(calls).toBe(3);
+  });
+
   it("reports a failed measurement as unmeasured", async () => {
     const cache = makeDiskUsageCache({
       measure: async () => {

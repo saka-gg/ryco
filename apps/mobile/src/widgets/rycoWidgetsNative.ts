@@ -24,11 +24,25 @@ export interface RycoWidgetsNativeModule {
   readonly installedWidgetKinds?: () => Promise<ReadonlyArray<string>>;
   /** Follows the update tokens of the cards still showing; absent from older binaries. */
   readonly observeAgentActivityPushTokens?: () => void;
-  /** `onAgentActivityPushToken`: a card's update token (hex), or "" once the card ended. */
-  readonly addListener?: (
-    event: "onAgentActivityPushToken",
-    listener: (event: { readonly id: string; readonly token: string }) => void,
-  ) => { readonly remove: () => void };
+  /**
+   * Push-to-start (iOS 17.2+): reports the push-to-start token and follows new cards' update
+   * tokens; answers whether this iOS can start a card by push. Absent from older binaries.
+   */
+  readonly observeAgentActivityPushToStart?: () => boolean;
+  /**
+   * `onAgentActivityPushToken`: a card's update token (hex), or "" once the card ended.
+   * `onAgentActivityPushToStartToken`: the app's push-to-start token (hex).
+   */
+  readonly addListener?: {
+    (
+      event: "onAgentActivityPushToken",
+      listener: (event: { readonly id: string; readonly token: string }) => void,
+    ): { readonly remove: () => void };
+    (
+      event: "onAgentActivityPushToStartToken",
+      listener: (event: { readonly token: string }) => void,
+    ): { readonly remove: () => void };
+  };
   readonly updateAgentActivity: (
     id: string,
     stateJson: string,

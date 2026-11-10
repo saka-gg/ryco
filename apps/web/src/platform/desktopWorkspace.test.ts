@@ -23,7 +23,10 @@ import {
   retainDesktopWorkspaceThreadScope,
   setDesktopThreadContentCacheEnabled,
   startDesktopWorkspaceBridge,
+  METADATA_PUBLISH_INTERVAL_MS,
 } from "./desktopWorkspace";
+// Loaded on demand by the bridge; imported here so that load settles within a test's ticks.
+import { THREAD_CONTENT_STREAMING_PUBLISH_INTERVAL_MS } from "./desktopThreadContentPublisher";
 import { selectEnvironmentState, useStore } from "../store";
 import * as runtime from "../environments/runtime";
 import * as metadata from "../workspaceMetadataProjection";
@@ -323,9 +326,48 @@ describe("desktop workspace metadata publication cost", () => {
         threads: [first!, { ...second!, title: "Renamed" }, third!],
       };
       read.mockImplementation(() => retitled);
+      // Within the interval of the last publication, the change waits for it.
       await f.tick();
+      expect(f.publish).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(METADATA_PUBLISH_INTERVAL_MS);
       expect(f.publish).toHaveBeenCalledTimes(2);
       expect(f.publish.mock.calls[1]![0].threads[1]?.title).toBe("Renamed");
+    } finally {
+      f.stop();
+    }
+  });
+
+  it("hands a list that keeps changing to main at most once per interval", async () => {
+    const base = metadataSnapshot(environmentId, 0, { threads: 200 });
+    let revision = 0;
+    // A running turn touches its thread row with every streamed token; pauses
+    // between tokens are often longer than a frame.
+    vi.spyOn(metadata, "readWorkspaceMetadataSnapshot").mockImplementation(() => ({
+      ...base,
+      threads: base.threads.map((thread, index) =>
+        index === 0 ? { ...thread, updatedAt: `2026-10-01T00:00:${revision}Z` } : thread,
+      ),
+    }));
+    const f = startPublishing();
+    try {
+      const seconds = 10;
+      for (let elapsed = 0; elapsed < seconds * 1_000; elapsed += 150) {
+        revision += 1;
+        useStore.setState({});
+        await vi.advanceTimersByTimeAsync(150);
+      }
+      const publications = f.publish.mock.calls.length;
+      const bytes = f.publish.mock.calls.reduce(
+        (total, [snapshot]) => total + JSON.stringify(snapshot).length,
+        0,
+      );
+      console.info(
+        `[desktop metadata] ${publications} publications, ${bytes} bytes in ${seconds} s of streaming`,
+      );
+      // Before: a 100 ms debounce sent the whole list after each pause (66 in 10 s).
+      expect(publications).toBeLessThanOrEqual(
+        seconds / (METADATA_PUBLISH_INTERVAL_MS / 1_000) + 1,
+      );
     } finally {
       f.stop();
     }
@@ -790,10 +832,13 @@ describe("desktop workspace thread content", () => {
       readonly stored?: Record<string, unknown>;
       /** Answers a read of cached content, instead of `stored`. */
       readonly read?: (environmentId: EnvironmentId) => Promise<Record<string, unknown>>;
+      /** Main confirms change-only publications with this answer. */
+      readonly changes?: (environmentId: EnvironmentId, changes: unknown) => Promise<boolean>;
     } = {},
   ) {
     vi.useFakeTimers();
     const publishContent = vi.fn();
+    const publishChanges = vi.fn(options.changes ?? (async () => true));
     const readContent = vi.fn(
       options.read ?? (async (_environmentId: EnvironmentId) => options.stored ?? {}),
     );
@@ -810,6 +855,7 @@ describe("desktop workspace thread content", () => {
           getDesktopThreadContentCacheEnabled: async () => options.enabled ?? true,
           setDesktopThreadContentCacheEnabled: async (enabled: boolean) => enabled,
           publishDesktopThreadContent: publishContent,
+          ...(options.changes ? { publishDesktopThreadContentChanges: publishChanges } : {}),
           getDesktopThreadContent: readContent,
         },
       },
@@ -818,6 +864,7 @@ describe("desktop workspace thread content", () => {
     await vi.advanceTimersByTimeAsync(0);
     return {
       publishContent,
+      publishChanges,
       readContent,
       push: (state: DesktopWorkspaceStatePush) => stateListener?.(state),
       /** A store update, then the time the publication throttle needs. */
@@ -881,6 +928,95 @@ describe("desktop workspace thread content", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       expect(f.publishContent).toHaveBeenCalledTimes(2);
       expect(f.publishContent.mock.calls[1]![1]["thread-a"].messages).toHaveLength(4);
+    } finally {
+      f.stop();
+    }
+  });
+
+  it("hands main only the threads that changed once it confirmed holding the rest", async () => {
+    setLiveEnvironment({ "thread-a": ["a1"], "thread-b": ["b1"] });
+    const f = await startKeeping({ changes: async () => true });
+    try {
+      await f.settle();
+      expect(f.publishContent).not.toHaveBeenCalled();
+      expect(f.publishChanges).toHaveBeenCalledTimes(1);
+      const first = f.publishChanges.mock.calls[0]![1] as {
+        order: string[];
+        changed: Record<string, unknown>;
+      };
+      expect(first.order).toEqual(["thread-a", "thread-b"]);
+      expect(Object.keys(first.changed)).toEqual(["thread-a", "thread-b"]);
+
+      updateConversation("thread-b", ["b1", "b2"]);
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(f.publishChanges).toHaveBeenCalledTimes(2);
+      const second = f.publishChanges.mock.calls[1]![1] as typeof first;
+      expect(second.order).toEqual(["thread-a", "thread-b"]);
+      expect(Object.keys(second.changed)).toEqual(["thread-b"]);
+    } finally {
+      f.stop();
+    }
+  });
+
+  it("sends every thread with the next change after main refused one, and nothing before it", async () => {
+    setLiveEnvironment({ "thread-a": ["a1"], "thread-b": ["b1"] });
+    const answers = [true, false, true];
+    const f = await startKeeping({ changes: async () => answers.shift() ?? true });
+    try {
+      await f.settle();
+      updateConversation("thread-b", ["b1", "b2"]);
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(f.publishChanges).toHaveBeenCalledTimes(2);
+      // Refused: a main that cannot store is not handed the same content again.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(f.publishChanges).toHaveBeenCalledTimes(2);
+      // The next change carries both threads.
+      updateConversation("thread-b", ["b1", "b2", "b3"]);
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(f.publishChanges).toHaveBeenCalledTimes(3);
+      const third = f.publishChanges.mock.calls[2]![1] as { changed: Record<string, unknown> };
+      expect(Object.keys(third.changed)).toEqual(["thread-a", "thread-b"]);
+    } finally {
+      f.stop();
+    }
+  });
+
+  it("publishes a streaming conversation on the long interval, and at once when its turn ends", async () => {
+    setLiveEnvironment({ "thread-a": ["a1"] });
+    const f = await startKeeping({ changes: async () => true });
+    const setTurn = (state: "running" | "completed") => {
+      const environment = useStore.getState().environmentStateById[environmentId]!;
+      useStore.setState({
+        environmentStateById: {
+          [environmentId]: {
+            ...environment,
+            // A running turn counts for a thread the shell lists.
+            threadShellById: { [ThreadId.make("thread-a")]: { id: "thread-a" } as never },
+            threadTurnStateById: {
+              [ThreadId.make("thread-a")]: { latestTurn: { state } as never },
+            },
+          },
+        },
+      });
+    };
+    try {
+      await f.settle();
+      expect(f.publishChanges).toHaveBeenCalledTimes(1);
+      setTurn("running");
+      // ~30 streamed deltas a second for 30 s.
+      for (let tick = 2; tick < 900; tick += 1) {
+        updateConversation("thread-a", ["a1", `a${tick}`]);
+        await vi.advanceTimersByTimeAsync(33);
+      }
+      const streamed = f.publishChanges.mock.calls.length - 1;
+      expect(streamed).toBeLessThanOrEqual(
+        Math.ceil(30_000 / THREAD_CONTENT_STREAMING_PUBLISH_INTERVAL_MS) + 1,
+      );
+      const before = f.publishChanges.mock.calls.length;
+      setTurn("completed");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.publishChanges.mock.calls.length).toBe(before + 1);
+      console.info(`[desktop thread content] ${streamed} publications in 30 s of streaming`);
     } finally {
       f.stop();
     }

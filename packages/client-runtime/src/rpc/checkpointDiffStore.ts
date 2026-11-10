@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Atom from "effect/reactivity/Atom";
 
+import type { CheckpointDiffChange } from "../state/orchestration/orchestrationEventEffects.ts";
 import { appAtomRegistry } from "./atomRegistry.ts";
 
 export interface CheckpointDiffInput {
@@ -24,6 +25,11 @@ export interface CheckpointDiffInput {
    * this because every completed turn produces a new full-range key.
    */
   readonly cacheSlot?: string | null;
+  /**
+   * Read the diff's file list only (D6): a node that can answers with
+   * `fileView.files` and an empty `diff`; an older one sends the whole diff.
+   */
+  readonly fileIndex?: boolean;
   readonly enabled?: boolean;
 }
 
@@ -50,17 +56,20 @@ export function checkpointDiffCacheKey(input: CheckpointDiffInput): string {
     input.toTurnCount,
     input.ignoreWhitespace,
     input.cacheScope ?? null,
+    ...(input.fileIndex ? ["file-index"] : []),
   ]);
 }
 
 export function decodeCheckpointDiffRequest(
   input: CheckpointDiffInput,
 ): Option.Option<DecodedCheckpointDiffRequest> {
+  const fileView = input.fileIndex ? { fileView: { kind: "index" } } : {};
   if (input.fromTurnCount === 0) {
     return Schema.decodeUnknownOption(OrchestrationGetFullThreadDiffInput)({
       threadId: input.threadId,
       toTurnCount: input.toTurnCount,
       ignoreWhitespace: input.ignoreWhitespace,
+      ...fileView,
     }).pipe(Option.map((fields) => ({ kind: "fullThreadDiff" as const, input: fields })));
   }
 
@@ -69,6 +78,7 @@ export function decodeCheckpointDiffRequest(
     fromTurnCount: input.fromTurnCount,
     toTurnCount: input.toTurnCount,
     ignoreWhitespace: input.ignoreWhitespace,
+    ...fileView,
   }).pipe(Option.map((fields) => ({ kind: "turnDiff" as const, input: fields })));
 }
 
@@ -190,6 +200,11 @@ export interface CheckpointDiffStore {
    */
   readonly evictCheckpointDiffsForThread: (threadId: ThreadId) => void;
   readonly invalidateCheckpointDiff: (threadId: ThreadId) => void;
+  /**
+   * Refetches only the diffs a change can have altered (see
+   * `CheckpointDiffChange`); a diff between two fixed checkpoints never changes.
+   */
+  readonly invalidateCheckpointDiffChanges: (changes: ReadonlyArray<CheckpointDiffChange>) => void;
   readonly invalidateAllCheckpointDiffs: () => void;
   /** Drops every unwatched diff of one environment; watched ones stay. */
   readonly clearUnwatchedCheckpointDiffsForEnvironment: (environmentId: EnvironmentId) => void;
@@ -521,6 +536,30 @@ export function createCheckpointDiffStore(
     }
   }
 
+  function isAffectedByCheckpointChange(
+    entry: CheckpointDiffEntry,
+    fromTurnCount: number | null,
+  ): boolean {
+    if (fromTurnCount === null || !entry.hasResolved) return true;
+    return (
+      (entry.input.fromTurnCount ?? 0) >= fromTurnCount ||
+      (entry.input.toTurnCount ?? 0) >= fromTurnCount
+    );
+  }
+
+  function invalidateCheckpointDiffChanges(changes: ReadonlyArray<CheckpointDiffChange>): void {
+    for (const change of changes) {
+      const keys = checkpointDiffKeysByThread.get(change.threadId);
+      if (!keys) continue;
+      for (const key of keys) {
+        const entry = checkpointDiffEntries.get(key);
+        if (entry && isAffectedByCheckpointChange(entry, change.fromTurnCount)) {
+          invalidateCheckpointDiffEntry(entry);
+        }
+      }
+    }
+  }
+
   function invalidateAllCheckpointDiffs(): void {
     for (const entry of checkpointDiffEntries.values()) {
       invalidateCheckpointDiffEntry(entry);
@@ -568,6 +607,7 @@ export function createCheckpointDiffStore(
     watchCheckpointDiff,
     evictCheckpointDiffsForThread,
     invalidateCheckpointDiff,
+    invalidateCheckpointDiffChanges,
     invalidateAllCheckpointDiffs,
     clearUnwatchedCheckpointDiffsForEnvironment,
     readUnwatchedCheckpointDiffResults,

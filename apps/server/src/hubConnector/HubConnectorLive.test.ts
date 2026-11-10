@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { dirname, join } from "node:path";
 
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, type OrchestrationThreadShell } from "@ryco/contracts";
 import type { RelayChannelId, RelayChannelOpenFrame, RelayLimits } from "@ryco/contracts/relay";
 import { decodeRelayFrame } from "@ryco/shared/relayCodec";
 import { Effect, Layer, Option, Tracer } from "effect";
@@ -18,6 +18,7 @@ import {
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import type { HubIdentityProcessLockResult } from "../hubIdentity/HubIdentityProcessLock.ts";
 import type { ProjectionStubbedShellSnapshot } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { HubIdentityInUseError } from "./HubConnector.ts";
 import {
   HubConnectorService,
@@ -25,6 +26,7 @@ import {
   instrumentRelayChannelOpens,
   makeHubConnectorLive,
   relayChannelShellWarmUp,
+  relayCompressionTurnState,
 } from "./HubConnectorLive.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
 import {
@@ -451,5 +453,40 @@ describe("relay channel opens", () => {
     expect([...open!.attributes.keys()]).toEqual(["relay.channel.open.durationMs"]);
     expect(open!.attributes.get("relay.channel.open.durationMs")).toBeTypeOf("number");
     expect(open!.status._tag).toBe("Ended");
+  });
+});
+
+describe("relayCompressionTurnState", () => {
+  const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect as Effect.Effect<A>);
+  const shell = (latestTurn: unknown) => ({ latestTurn }) as unknown as OrchestrationThreadShell;
+  const turn = (state: string) => ({
+    turnId: "turn-1",
+    state,
+    requestedAt: "2026-11-10T09:00:00.000Z",
+    startedAt: null,
+    completedAt: null,
+    assistantMessageId: null,
+  });
+
+  it("reads the running turn from the thread's shell row, and unknown as undefined", async () => {
+    const state = (result: Effect.Effect<Option.Option<OrchestrationThreadShell>, never>) =>
+      relayCompressionTurnState(Option.some({ getThreadShellById: () => result }), run)!;
+    expect(
+      await state(Effect.succeed(Option.some(shell(turn("running"))))).runningTurnOf("t"),
+    ).toEqual({ turnId: "turn-1", requestedAt: "2026-11-10T09:00:00.000Z" });
+    expect(
+      await state(Effect.succeed(Option.some(shell(turn("completed"))))).runningTurnOf("t"),
+    ).toBe(null);
+    expect(await state(Effect.succeed(Option.some(shell(null)))).runningTurnOf("t")).toBe(null);
+    expect(await state(Effect.succeed(Option.none())).runningTurnOf("t")).toBeUndefined();
+    const failing = relayCompressionTurnState(
+      Option.some({
+        getThreadShellById: () =>
+          Effect.fail(new PersistenceSqlError({ operation: "x", detail: "y" })),
+      }),
+      run,
+    )!;
+    expect(await failing.runningTurnOf("t")).toBeUndefined();
+    expect(relayCompressionTurnState(Option.none(), run)).toBeUndefined();
   });
 });

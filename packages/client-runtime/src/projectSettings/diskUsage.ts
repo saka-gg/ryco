@@ -3,7 +3,12 @@
  * it. The device measures; these only add figures up and put them in words,
  * so both surfaces state the same number the same way.
  */
-import type { WorkspaceDiskUsage } from "@ryco/contracts";
+import type {
+  ProjectId,
+  WorkspaceDiskUsage,
+  WorkspaceDiskUsageInput,
+  WorkspaceDiskUsageResult,
+} from "@ryco/contracts";
 import { formatBytes } from "@ryco/shared/byteSize";
 
 /** Space on a device's disk; `partial` makes `bytes` a lower bound. */
@@ -80,3 +85,56 @@ export function diskText(size: DiskSize | null, reading: DiskUsageReading): stri
 }
 
 export const LOWER_BOUND_NOTE = "At least: some checkouts could not be measured completely.";
+
+/** How soon to read again while the device is still measuring: quick first, then calmer. */
+const DISK_USAGE_POLL_DELAYS_MS = [1_000, 2_000, 4_000] as const;
+
+/** Whether the device is measuring any of these checkouts afresh (`allowStale` answers). */
+export const diskUsageStillMeasuring = (result: WorkspaceDiskUsageResult) =>
+  result.workspaces.some((workspace) => workspace.measuring === true);
+
+/**
+ * Reads a project's disk usage without waiting for the device to measure every checkout: the
+ * device answers at once from its last measurements (`allowStale`), marking checkouts it is
+ * measuring again, and this reads again until none is. A device that predates `allowStale`
+ * waits and answers once, as before. `onResult` gets each answer and whether it is the last.
+ * Returns a function that stops reading.
+ */
+export function readDiskUsageProgressively(input: {
+  readonly read: (request: WorkspaceDiskUsageInput) => Promise<WorkspaceDiskUsageResult>;
+  readonly projectId: ProjectId;
+  /** Measure everything afresh (only the first read asks). */
+  readonly refresh: boolean;
+  readonly onResult: (result: WorkspaceDiskUsageResult, final: boolean) => void;
+  readonly onError: (error: unknown) => void;
+}): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const readOnce = (attempt: number) => {
+    input
+      .read({
+        projectId: input.projectId,
+        allowStale: true,
+        ...(attempt === 0 && input.refresh ? { refresh: true } : {}),
+      })
+      .then(
+        (result) => {
+          if (stopped) return;
+          const final = !diskUsageStillMeasuring(result);
+          input.onResult(result, final);
+          if (final) return;
+          const delay =
+            DISK_USAGE_POLL_DELAYS_MS[Math.min(attempt, DISK_USAGE_POLL_DELAYS_MS.length - 1)]!;
+          timer = setTimeout(() => readOnce(attempt + 1), delay);
+        },
+        (error: unknown) => {
+          if (!stopped) input.onError(error);
+        },
+      );
+  };
+  readOnce(0);
+  return () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}

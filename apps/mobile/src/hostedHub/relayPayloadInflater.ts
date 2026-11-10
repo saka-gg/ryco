@@ -4,6 +4,8 @@ import {
 } from "@ryco/client-runtime/relay";
 import { Inflate } from "fflate";
 
+import type { RycoAppRuntimeNativeModule } from "../platform/appRuntimeNative";
+
 /**
  * The parts of fflate 0.8's `Inflate` state that say where the DEFLATE stream
  * ended: `s.f` is set once the final block has been read, `p` holds the input
@@ -80,3 +82,28 @@ export const fflateRelayPayloadInflater: RelayPayloadInflater = {
     return total === maxOutputBytes ? output : output.subarray(0, total);
   },
 };
+
+/**
+ * The inflater the relay uses: the native one where the binary has it (iOS,
+ * findings F8), which runs on a background queue instead of the JavaScript
+ * thread that also draws, and keeps the same cap and the same strict end of
+ * stream (`modules/ryco-app-runtime/ios/RelayInflate.swift`, held to fflate's
+ * answers by its test). fflate everywhere else.
+ */
+export function selectRelayPayloadInflater(
+  native: Pick<RycoAppRuntimeNativeModule, "inflateRaw"> | null,
+): RelayPayloadInflater {
+  if (native === null) return fflateRelayPayloadInflater;
+  return {
+    inflateRaw: async (body, maxOutputBytes) => {
+      const output = await native.inflateRaw(body, maxOutputBytes);
+      // The native side already refuses more than the cap; a binary that
+      // somehow returned more is refused here too.
+      if (output.byteLength > maxOutputBytes) {
+        output.fill(0);
+        throw new Error("Inflated relay payload exceeds its cap.");
+      }
+      return output;
+    },
+  };
+}

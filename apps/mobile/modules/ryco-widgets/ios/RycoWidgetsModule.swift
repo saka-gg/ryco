@@ -17,6 +17,8 @@ import WidgetKit
 public final class RycoWidgetsModule: Module {
   /// One observer per card: its update tokens, until it ends. Main actor only.
   @MainActor private var tokenObservers: [String: Task<Void, Never>] = [:]
+  /// The push-to-start token and new cards (one a push started), once JavaScript asked.
+  @MainActor private var pushToStartObserver: Task<Void, Never>?
 
   /// The extension the config plugin embeds; without it nothing would read a timeline.
   private static let extensionName = "RycoWidgets.appex"
@@ -26,7 +28,7 @@ public final class RycoWidgetsModule: Module {
   public func definition() -> ModuleDefinition {
     Name("RycoWidgets")
 
-    Events("onAgentActivityPushToken")
+    Events("onAgentActivityPushToken", "onAgentActivityPushToStartToken")
 
     /// The widget kinds on the person's Home and Lock Screens, so the app feeds only those.
     AsyncFunction("installedWidgetKinds") { () async -> [String] in
@@ -93,6 +95,33 @@ public final class RycoWidgetsModule: Module {
           self.observePushTokens(activity)
         }
       }
+    }
+
+    /// Push-to-start (iOS 17.2+, `docs/live-activity-push.md`): reports the app's push-to-start
+    /// token as `onAgentActivityPushToStartToken`, and follows the update tokens of every new
+    /// card, so one a push started hands its token over as soon as the app runs. Answers whether
+    /// this iOS can start a card by push at all.
+    Function("observeAgentActivityPushToStart") { () -> Bool in
+      guard #available(iOS 17.2, *), Self.extensionEmbedded() else { return false }
+      Task { @MainActor in
+        guard self.pushToStartObserver == nil else { return }
+        self.pushToStartObserver = Task { [weak self] in
+          await withTaskGroup(of: Void.self) { group in
+            group.addTask { [weak self] in
+              for await token in Activity<AgentActivityAttributes>.pushToStartTokenUpdates {
+                self?.sendEvent("onAgentActivityPushToStartToken", ["token": Self.hex(token)])
+              }
+            }
+            group.addTask { [weak self] in
+              for await activity in Activity<AgentActivityAttributes>.activityUpdates {
+                await MainActor.run { self?.observePushTokens(activity) }
+              }
+            }
+            await group.waitForAll()
+          }
+        }
+      }
+      return true
     }
 
     AsyncFunction("updateAgentActivity") {

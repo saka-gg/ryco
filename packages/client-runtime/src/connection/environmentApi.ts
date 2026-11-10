@@ -31,7 +31,11 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       createLocalTaskFileUpload: rpcClient.server.createLocalTaskFileUpload,
       addLocalTaskFile: rpcClient.server.addLocalTaskFile,
       removeLocalTaskFile: rpcClient.server.removeLocalTaskFile,
-      subscribeLocalTaskChanges: (listener) => rpcClient.server.subscribeLocalTaskChanges(listener),
+      subscribeLocalTaskChanges: (listener, options) =>
+        rpcClient.server.subscribeLocalTaskChanges(listener, {
+          ...(options?.onResubscribe ? { onResubscribe: options.onResubscribe } : {}),
+          ...(options?.onError ? { onError: () => options.onError?.() } : {}),
+        }),
       getDailyRecap: rpcClient.server.getDailyRecap,
       prewarmProviderSession: rpcClient.server.prewarmProviderSession,
       readProjectProviderCommands: rpcClient.server.readProjectProviderCommands,
@@ -68,6 +72,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
         rpcClient.terminal.onEvent((event) => {
           if (!isUnknownUnionMember(event)) callback(event);
         }),
+      attachOutput: (ref) => rpcClient.terminal.attachOutput(ref),
+      isOutputScoped: () => rpcClient.terminal.isOutputScoped(),
     },
     projects: {
       listEntries: rpcClient.projects.listEntries,
@@ -191,6 +197,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
         : {}),
       ...(rpcClient.orchestration.getActivityPayload
         ? { getActivityPayload: rpcClient.orchestration.getActivityPayload }
+        : {}),
+      ...(rpcClient.orchestration.getMessageText
+        ? { getMessageText: rpcClient.orchestration.getMessageText }
         : {}),
       subscribeShell: (callback, options) =>
         rpcClient.orchestration.subscribeShell(callback, options),

@@ -48,6 +48,54 @@
       "collapseSalt": "c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2",
       "threadId": "thread-1",
       "collapseId": "-YdpUtCCx5ISjSv_9SkYjQ"
+    },
+    {
+      "name": "approval-badge-count",
+      "recipientSecretKey": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
+      "recipientPublicKey": "c8feca81be196cdf2cadeabf13c4903d7632dce4955aa68b6e5d9adef54e2616",
+      "ephemeralSecretKey": "92ebb4ce361272322924691505a891556cabc24e368a6f1105ff9daf973fa32a",
+      "environmentId": "env_n0de-HubEnvironment00",
+      "sequence": 418,
+      "enrollmentId": "enr_Device0000000000000000",
+      "associatedData": "7279636f2d707573682d76310a656e765f6e3064652d487562456e7669726f6e6d656e7430300a3431380a656e725f44657669636530303030303030303030303030303030",
+      "plaintext": "{\"v\":1,\"k\":\"approval\",\"t\":\"Run the migration\",\"e\":\"env_n0de-HubEnvironment00\",\"th\":\"thread-1\",\"tu\":\"turn-8\",\"rq\":\"approval-request-42\",\"q\":418,\"at\":1793234112000,\"b\":2}",
+      "sealed": "AWdXFWrgiKy_qXoHDvC5siUckczOPgiy77jHTEc8XNc_9ihjr518-DPWU375MGM-gN3DJaRAj4WdmyZLI8vB0vQbOYK82aFoO_ajRqeZbEbgkhBDHLR7w5eGn3IH10IJXzHABeKsa-OzUCk3WUfYEGktyxFSGLvnWo2ctl1132iWBKl0cwfuMLERL631wBpaOrNTLzf1RraOalqUh6LSeMABFtW7zg6qvCFOnaI2CQ9JW9l2dWJvRylsUTBEfTKAlbEg5kOGRT1ONs6WsSDhUT_SOHkkEij9hg",
+      "keyId": "DEQhCHjLCTVmDnk--WkGOQ",
+      "collapseSalt": "c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2",
+      "threadId": "thread-1",
+      "collapseId": "-YdpUtCCx5ISjSv_9SkYjQ"
+    },
+    {
+      "name": "approval-excerpt-badge",
+      "recipientSecretKey": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
+      "recipientPublicKey": "c8feca81be196cdf2cadeabf13c4903d7632dce4955aa68b6e5d9adef54e2616",
+      "ephemeralSecretKey": "a3fcc5df472383433a35702616b9a2667dbcd35f477b7c2216fead0c084b4b3b",
+      "environmentId": "env_n0de-HubEnvironment00",
+      "sequence": 419,
+      "enrollmentId": "enr_Device0000000000000000",
+      "associatedData": "7279636f2d707573682d76310a656e765f6e3064652d487562456e7669726f6e6d656e7430300a3431390a656e725f44657669636530303030303030303030303030303030",
+      "plaintext": "{\"v\":1,\"t\":\"Run the migration\",\"e\":\"env_n0de-HubEnvironment00\",\"th\":\"thread-1\",\"tu\":\"turn-8\",\"k\":\"approval\",\"rq\":\"approval-request-43\",\"x\":{\"a\":{\"k\":\"command\",\"d\":\"bun run migrate --to 103\",\"r\":\"Applies the schema change\"}},\"q\":419,\"at\":1793234112000,\"b\":3}",
+      "sealed": "Ab1TnzMU6mmia6PZ_yMZxfAdB6Zd2PkBgKS-UWhyI8EaLddJR5YMFV6WukNKInzhdk30FgO940cW0djttckM4XzMEJ0SreCytdxs19NRkHj2hYPlQMSMdkpPRLLo9p67f-IK4gEJOO9vokaaj8LN4_8zSZ2J8BnIRruEadukRR0G2ypGr4gCMzfDjFtW2P9VjcYavC-QqtW2B9zDxTJnb1ef9yqlluoppuiu6TMuoVtc91AXAZm9P-1YAGbpEdNZ_stii--mlnWGQ6QRgrx-Esspi19mHh6sJHXWMKOT7UsRcV1i-XHIoZF7Max-kQnuxS2yNgm2PaKdGw6aOh24od9xFSWG_JU87R_J75r9YCegk47W8BSxSrCV6X96ladnuCh-TOn25wl01FrpL5l0Jfzm",
+      "keyId": "DEQhCHjLCTVmDnk--WkGOQ",
+      "collapseSalt": "c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2",
+      "threadId": "thread-1",
+      "collapseId": "-YdpUtCCx5ISjSv_9SkYjQ"
+    },
+    {
+      "name": "input-excerpt",
+      "recipientSecretKey": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
+      "recipientPublicKey": "c8feca81be196cdf2cadeabf13c4903d7632dce4955aa68b6e5d9adef54e2616",
+      "ephemeralSecretKey": "b40dd6e0583494544b46813727cab3778ecde46058c8d33227efbe1d195c5c4c",
+      "environmentId": "env_n0de-HubEnvironment00",
+      "sequence": 420,
+      "enrollmentId": "enr_Device0000000000000000",
+      "associatedData": "7279636f2d707573682d76310a656e765f6e3064652d487562456e7669726f6e6d656e7430300a3432300a656e725f44657669636530303030303030303030303030303030",
+      "plaintext": "{\"v\":1,\"t\":\"Run the migration\",\"e\":\"env_n0de-HubEnvironment00\",\"th\":\"thread-1\",\"tu\":\"turn-8\",\"k\":\"input\",\"x\":{\"u\":{\"rq\":\"question-7\",\"ev\":\"event-7\",\"qs\":[{\"id\":\"target\",\"h\":\"Target\",\"q\":\"Which database should it migrate?\",\"o\":[\"Staging\",\"Production\"]}]}},\"q\":420,\"at\":1793234112000}",
+      "sealed": "AVq3VQaSTZl-HSa38SGPmSku3PncVL-T8CIGuvaQ9HtjypmXQfoZYdwlMMU9xZV3Uj5sD48wkiI8JDPfCniROKF6KRLyLUcK0LEyjHbFHkF68j83-zQB6BVpubanzad0Du868xGilkXEz18BUPV0gBlzBkX5gYgpfWSp9QiMXF5f-OwrrTl-IJ5qVrn4TuD6TwpS2VZs0obWQ3zeVc1s2n-7jD_CFfr4inW64oeabN_s5dVPks1S9DILeQ_LBruQspE-L8IbP-_M_Wt7F8DVda24QqceCB3OqzNpxeSeWgTPFWW6B_U8EnGSYD7I0vwMfa-Y52e1eEFPDelrlR7x7UuMO0FG1RvVCIy5tCsoydCCp92HZWRFIMDs_1-h4pUy_vaKvms5LgrOQRN-t3_ZHisec9ghesUP8vPj8Svy4ZDDFQBqos56K1LAbw",
+      "keyId": "DEQhCHjLCTVmDnk--WkGOQ",
+      "collapseSalt": "c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2",
+      "threadId": "thread-1",
+      "collapseId": "-YdpUtCCx5ISjSv_9SkYjQ"
     }
   ]
 }

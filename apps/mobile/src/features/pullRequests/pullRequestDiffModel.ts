@@ -3,9 +3,8 @@ import {
   LARGE_FILE_CHANGED_LINES,
   orderChangeRequestFiles,
   reviewFileTreePaths,
-  type PullRequestFileStatus,
 } from "@ryco/client-runtime/state/pull-request-review";
-import { gitDiffPaths } from "@ryco/shared/gitDiffPaths";
+import { readGitPatchFiles, type GitPatchFile } from "@ryco/shared/gitPatchFiles";
 
 /**
  * The phone's reading of a pull request's patch: one entry per file (status,
@@ -16,18 +15,8 @@ import { gitDiffPaths } from "@ryco/shared/gitDiffPaths";
  * plain excerpt instead of being highlighted.
  */
 
-export interface PullRequestPatchFile {
-  /** The file's path after the change (its old path when it was deleted). */
-  readonly path: string;
-  /** The old path of a renamed or moved file. */
-  readonly previousPath: string | null;
-  readonly status: PullRequestFileStatus;
-  readonly binary: boolean;
-  readonly additions: number;
-  readonly deletions: number;
-  /** The file's own patch, from its `diff --git` line through its last hunk. */
-  readonly patch: string;
-}
+/** One file of a patch; the reading is shared with the node's turn diff file index. */
+export type PullRequestPatchFile = GitPatchFile;
 
 export type PullRequestDiffRowKind = "hunk" | "context" | "addition" | "deletion" | "notice";
 
@@ -61,70 +50,12 @@ export type PullRequestDiffPresentation =
 /** Rows an excerpt shows: enough to see what the change is, cheap to render. */
 export const PULL_REQUEST_DIFF_EXCERPT_ROWS = 400;
 
-const DIFF_GIT_HEADER = /^diff --git /mu;
-
-function segmentStarts(patch: string): number[] {
-  const starts: number[] = [];
-  const pattern = /^diff --git /gmu;
-  for (let match = pattern.exec(patch); match !== null; match = pattern.exec(patch)) {
-    starts.push(match.index);
-  }
-  return starts;
-}
-
-/** The `diff --git a/x b/y` remainder, shown as-is when the paths cannot be resolved. */
-function rawHeaderPath(segment: string): string {
-  const firstLine = segment.slice(
-    0,
-    segment.indexOf("\n") === -1 ? undefined : segment.indexOf("\n"),
-  );
-  return firstLine.replace(DIFF_GIT_HEADER, "").trim() || "(unknown file)";
-}
-
-function readPatchFile(segment: string): PullRequestPatchFile {
-  const paths = gitDiffPaths(segment);
-  const hunkStart = segment.search(/^@@ /mu);
-  const header = hunkStart === -1 ? segment : segment.slice(0, hunkStart);
-  const binary = /^(?:Binary files .* differ|GIT binary patch)$/mu.test(header);
-  let additions = 0;
-  let deletions = 0;
-  if (hunkStart !== -1) {
-    for (const line of segment.slice(hunkStart).split("\n")) {
-      if (line.startsWith("+")) additions += 1;
-      else if (line.startsWith("-")) deletions += 1;
-    }
-  }
-  const previousPath = paths?.prevName ?? null;
-  const status: PullRequestFileStatus = /^new file mode /mu.test(header)
-    ? "added"
-    : /^deleted file mode /mu.test(header)
-      ? "deleted"
-      : previousPath !== null
-        ? "renamed"
-        : "modified";
-  return {
-    path: paths?.name ?? rawHeaderPath(segment),
-    previousPath,
-    status,
-    binary,
-    additions,
-    deletions,
-    patch: segment,
-  };
-}
-
 /**
  * The patch's files exactly in the order the patch lists them. Git's own
  * listings (a checkout's staged and unstaged changes) pair their per-file
  * metadata with this order.
  */
-export function readPatchFilesInOrder(patch: string): ReadonlyArray<PullRequestPatchFile> {
-  const normalized = patch.replace(/\r\n/gu, "\n");
-  const starts = segmentStarts(normalized);
-  return starts.map((start, index) =>
-    readPatchFile(normalized.slice(start, starts[index + 1]).replace(/\n+$/u, "")),
-  );
-}
+export const readPatchFilesInOrder = readGitPatchFiles;
 
 /**
  * The patch's files in reading order: `orderChangeRequestFiles` decides what

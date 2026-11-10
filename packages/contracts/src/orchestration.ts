@@ -65,6 +65,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getThreadShells: "orchestration.getThreadShells",
   getThreadHistoryPage: "orchestration.getThreadHistoryPage",
   getActivityPayload: "orchestration.getActivityPayload",
+  getMessageText: "orchestration.getMessageText",
   setThreadHistoryRecovery: "orchestration.setThreadHistoryRecovery",
   replayEvents: "orchestration.replayEvents",
   replayEventsPage: "orchestration.replayEventsPage",
@@ -689,11 +690,23 @@ export const ChatFileAttachment = Schema.Struct({
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
 export const CHAT_ATTACHMENT_READ_CHUNK_BYTES = 256 * 1024;
+/**
+ * The longest edge, in pixels, of the smaller copies a server makes of an
+ * image attachment to show it in a thread. The original is for opening it.
+ */
+export const CHAT_ATTACHMENT_PREVIEW_SIZES = [512, 1024] as const;
+export const ChatAttachmentPreviewSize = Schema.Literals(CHAT_ATTACHMENT_PREVIEW_SIZES);
+export type ChatAttachmentPreviewSize = typeof ChatAttachmentPreviewSize.Type;
 export const ChatAttachmentReadChunkInput = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   attachmentId: ChatAttachmentId,
   offset: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  /**
+   * Read the image's preview of this size instead of the original. Older
+   * servers ignore it and serve the original, without `preview` in the result.
+   */
+  preview: Schema.optional(ChatAttachmentPreviewSize),
 });
 export type ChatAttachmentReadChunkInput = typeof ChatAttachmentReadChunkInput.Type;
 export const ChatAttachmentReadChunkResult = Schema.Struct({
@@ -702,6 +715,12 @@ export const ChatAttachmentReadChunkResult = Schema.Struct({
   ),
   offset: NonNegativeInt,
   totalBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  /**
+   * Answers a read that asked for a `preview`: true when these are the
+   * preview's bytes, false when the original is served instead (the image is
+   * small already, or no preview can be made of it). Absent otherwise.
+   */
+  preview: Schema.optional(Schema.Boolean),
 });
 export type ChatAttachmentReadChunkResult = typeof ChatAttachmentReadChunkResult.Type;
 export class ChatAttachmentReadError extends Schema.TaggedError<ChatAttachmentReadError>()(
@@ -906,6 +925,17 @@ export const OrchestrationMessage = Schema.Struct({
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /**
+   * Present when `text` is the head of a very long finished message: a window
+   * or history page served with `messageText: "preview"`.
+   * `orchestration.getMessageText` returns the whole text.
+   */
+  textPreview: Schema.optional(
+    Schema.Struct({
+      /** Length of the whole text, in UTF-16 code units. */
+      fullLength: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestrationMessage = typeof OrchestrationMessage.Type;
 
@@ -1757,10 +1787,20 @@ export type OrchestrationThreadHistoryState = typeof OrchestrationThreadHistoryS
 export const OrchestrationActivityPayloadMode = Schema.Literals(["full", "preview"]);
 export type OrchestrationActivityPayloadMode = typeof OrchestrationActivityPayloadMode.Type;
 
+/**
+ * How a window or history page sends very long finished messages.
+ * `"preview"` sends the head of each with `OrchestrationMessage.textPreview`
+ * set; absent means whole texts, all an older client understands. Older
+ * servers ignore the field and send whole texts.
+ */
+export const OrchestrationMessageTextMode = Schema.Literals(["full", "preview"]);
+export type OrchestrationMessageTextMode = typeof OrchestrationMessageTextMode.Type;
+
 export const OrchestrationGetThreadWindowInput = Schema.Struct({
   threadId: ThreadId,
   limits: OrchestrationThreadHistoryLimits,
   activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  messageText: Schema.optional(OrchestrationMessageTextMode),
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
 
@@ -1810,6 +1850,18 @@ export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
   resumeFromSequence: ThreadResumeFromSequence,
   historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
   activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  /**
+   * How the live and replayed `thread.activity-appended` events of this
+   * subscription carry their payloads. `"preview"` bounds each large payload
+   * as a window does (`OrchestrationThreadActivity.payloadPreview`), and the
+   * client reads the stored one through `orchestration.getActivityPayload`.
+   * Absent means full payloads, what an older client gets; an older server
+   * ignores the field and sends full payloads.
+   */
+  liveActivityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+  messageText: Schema.optional(OrchestrationMessageTextMode),
+  /** See `OrchestrationLiveEventForm`. */
+  liveEventForm: Schema.optional(Schema.Literals(["full", "slim"])),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;
@@ -1854,6 +1906,8 @@ export const OrchestrationGetThreadHistoryPageInput = Schema.Union([
     activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
     /** Only read for the `messages` collection. */
     messageFilter: Schema.optional(OrchestrationThreadHistoryMessageFilter),
+    /** Only read for the `messages` collection. */
+    messageText: Schema.optional(OrchestrationMessageTextMode),
   }),
   Schema.Struct({
     threadId: ThreadId,
@@ -1918,6 +1972,32 @@ export const OrchestrationGetActivityPayloadResult = Schema.Struct({
 });
 export type OrchestrationGetActivityPayloadResult =
   typeof OrchestrationGetActivityPayloadResult.Type;
+
+export const OrchestrationGetMessageTextInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type OrchestrationGetMessageTextInput = typeof OrchestrationGetMessageTextInput.Type;
+
+export const OrchestrationGetMessageTextResult = Schema.Struct({
+  messageId: MessageId,
+  /** The whole text, or its head when it exceeds what one response carries. */
+  text: Schema.String,
+  /** Length of the whole text, in UTF-16 code units. */
+  fullLength: NonNegativeInt,
+  /** Whether `text` is still cut short. */
+  truncated: Schema.Boolean,
+});
+export type OrchestrationGetMessageTextResult = typeof OrchestrationGetMessageTextResult.Type;
+
+export class OrchestrationGetMessageTextError extends Schema.TaggedError<OrchestrationGetMessageTextError>()(
+  "OrchestrationGetMessageTextError",
+  {
+    reason: Schema.Literals(["not-found", "unavailable"]),
+    threadId: ThreadId,
+    messageId: MessageId,
+  },
+) {}
 
 export class OrchestrationGetActivityPayloadError extends Schema.TaggedError<OrchestrationGetActivityPayloadError>()(
   "OrchestrationGetActivityPayloadError",
@@ -4336,6 +4416,39 @@ export type OrchestrationWireEvent = typeof OrchestrationWireEvent.Type;
 export type UnknownOrchestrationEvent = Extract<OrchestrationWireEvent, UnknownUnionMember>;
 
 /**
+ * A live or replayed event of one thread's subscription without the fields the
+ * client does not use: event, command, causation and correlation ids, metadata,
+ * and the aggregate (the subscription's thread). Every frame is compressed on
+ * its own, so those ids made up about half of a streamed delta's bytes. Sent
+ * only to a client that asked for it (`liveEventForm: "slim"`); the client
+ * restores the omitted fields (`expandSlimThreadEvent` in client-runtime).
+ * Forward-compatible like `OrchestrationWireEvent`.
+ */
+export const OrchestrationSlimThreadEvent = ForwardCompatibleUnion(
+  OrchestrationEvent.members.map((member) =>
+    Schema.Struct({
+      sequence: NonNegativeInt,
+      occurredAt: IsoDateTime,
+      type: member.fields.type,
+      payload: member.fields.payload,
+    }),
+  ),
+  "type",
+  { sequence: NonNegativeInt },
+);
+export type OrchestrationSlimThreadEvent = typeof OrchestrationSlimThreadEvent.Type;
+
+/**
+ * How a thread window subscription sends its live and replayed events.
+ * `"slim"` sends `slim-event` items (`OrchestrationSlimThreadEvent`); absent
+ * means full `event` items, all an older client understands. An older server
+ * ignores the field and sends full events, which a client asking for slim
+ * ones handles unchanged.
+ */
+export const OrchestrationLiveEventForm = Schema.Literals(["full", "slim"]);
+export type OrchestrationLiveEventForm = typeof OrchestrationLiveEventForm.Type;
+
+/**
  * Wire-only, so a client decodes it forward-compatibly: an item kind this
  * build does not know decodes to an `UnknownUnionMember` (new kinds are sent
  * only to clients that ask for them, so this is a backstop), and so does an
@@ -4368,6 +4481,11 @@ export type OrchestrationThreadStreamItem = typeof OrchestrationThreadStreamItem
 /** Wire-only and forward-compatible, like `OrchestrationThreadStreamItem`. */
 export const OrchestrationThreadWindowStreamItem = ForwardCompatibleUnion(
   [
+    /** Only sent to a client that asked for `liveEventForm: "slim"`. */
+    Schema.Struct({
+      kind: Schema.Literal("slim-event"),
+      event: OrchestrationSlimThreadEvent,
+    }),
     Schema.Struct({
       kind: Schema.Literal("snapshot"),
       snapshot: OrchestrationThreadWindowSnapshot,
@@ -4408,10 +4526,54 @@ export const TurnCountRange = Schema.Struct({
   ),
 );
 
+/**
+ * A turn diff read file by file (D6): `index` asks for the file list only,
+ * `files` for the patches of some files by their place in that list. A node
+ * that answers sends `fileView` and an empty `diff`; older nodes ignore the
+ * field and send the whole `diff`, which a client then splits itself.
+ */
+export const OrchestrationTurnDiffFileViewRequest = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("index") }),
+  Schema.Struct({
+    kind: Schema.Literal("files"),
+    indices: Schema.Array(NonNegativeInt).check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+  }),
+]);
+export type OrchestrationTurnDiffFileViewRequest = typeof OrchestrationTurnDiffFileViewRequest.Type;
+
+export const OrchestrationTurnDiffFile = Schema.Struct({
+  /** Place in the patch; how `files` requests name it. */
+  index: NonNegativeInt,
+  path: Schema.String,
+  previousPath: Schema.optional(Schema.String),
+  status: Schema.Literals(["added", "deleted", "modified", "renamed"]),
+  binary: Schema.optional(Schema.Boolean),
+  additions: NonNegativeInt,
+  deletions: NonNegativeInt,
+  /** Characters of the file's patch: what loading it costs. */
+  patchChars: NonNegativeInt,
+});
+export type OrchestrationTurnDiffFile = typeof OrchestrationTurnDiffFile.Type;
+
+export const OrchestrationTurnDiffFileView = Schema.Struct({
+  /** The checkpoint commits the diff is between; a file patch is immutable for the pair. */
+  fromCommitOid: Schema.String,
+  toCommitOid: Schema.String,
+  /** Every file of the diff, for an `index` request. */
+  files: Schema.optional(Schema.Array(OrchestrationTurnDiffFile)),
+  /** The requested files' patches, for a `files` request. */
+  patches: Schema.optional(
+    Schema.Array(Schema.Struct({ index: NonNegativeInt, patch: Schema.String })),
+  ),
+});
+export type OrchestrationTurnDiffFileView = typeof OrchestrationTurnDiffFileView.Type;
+
 export const ThreadTurnDiff = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
+    /** Empty when `fileView` answered a file view request. */
     diff: Schema.String,
+    fileView: Schema.optionalKey(OrchestrationTurnDiffFileView),
   }),
   { unsafePreserveChecks: true },
 );
@@ -4459,6 +4621,7 @@ export const OrchestrationGetTurnDiffInput = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
     ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
+    fileView: Schema.optionalKey(OrchestrationTurnDiffFileViewRequest),
   }),
   { unsafePreserveChecks: true },
 );
@@ -4471,6 +4634,7 @@ export const OrchestrationGetFullThreadDiffInput = Schema.Struct({
   threadId: ThreadId,
   toTurnCount: NonNegativeInt,
   ignoreWhitespace: Schema.optionalKey(Schema.Boolean),
+  fileView: Schema.optionalKey(OrchestrationTurnDiffFileViewRequest),
 });
 export type OrchestrationGetFullThreadDiffInput = typeof OrchestrationGetFullThreadDiffInput.Type;
 
@@ -4765,6 +4929,10 @@ export const OrchestrationRpcSchemas = {
   getActivityPayload: {
     input: OrchestrationGetActivityPayloadInput,
     output: OrchestrationGetActivityPayloadResult,
+  },
+  getMessageText: {
+    input: OrchestrationGetMessageTextInput,
+    output: OrchestrationGetMessageTextResult,
   },
   setThreadHistoryRecovery: {
     input: OrchestrationSetThreadHistoryRecoveryInput,

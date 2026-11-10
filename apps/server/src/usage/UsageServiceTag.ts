@@ -51,9 +51,6 @@ export const UsageServiceTest = UsageService.of({
   priceStatistics: (snapshot) => Effect.succeed(snapshot),
 });
 
-/** Refresh stale cached rates once shortly after boot, before a summary needs them. */
-export const USAGE_RATES_WARM_DELAY_MS = 30_000;
-
 /** The usage pipeline's own state (rates, scan cache) under the server state directory. */
 export const usageStateDirectory = (path: Path.Path, stateDir: string): string =>
   path.join(stateDir, "usage");

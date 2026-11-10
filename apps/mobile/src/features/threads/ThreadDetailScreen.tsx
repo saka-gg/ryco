@@ -200,6 +200,7 @@ import {
   selectAgentControlProposalsForThread,
   useAgentControlStore,
 } from "../../state/agentControlRuntime";
+import { useHasSavedThreadBody } from "../../persistence/savedThreadBodies";
 import { useAgentControlSync } from "../../state/agentControlSync";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
@@ -298,6 +299,7 @@ import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { useNotificationThreadAction } from "../../notifications/useNotificationThreadAction";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import { useAlertExcerptPrompts } from "../../notifications/push/useAlertExcerptPrompts";
 import {
   resolveOptionalAnswerRoute,
   sendOptionalAnswerAsMessage,
@@ -416,6 +418,8 @@ import { useForkSheetState } from "./useForkSheetState";
 import {
   nextThreadMessageAnchorStep,
   resolveOpenThreadNavigation,
+  THREAD_LIST_ESTIMATED_ROW_SIZE,
+  threadListRowType,
   type ThreadListRow,
 } from "./threadTimelineList";
 
@@ -783,6 +787,9 @@ export function ThreadDetailScreen(props: {
   const threadLiveDetailLoaded = useStore((state) =>
     selectThreadLiveDetailLoaded(state, scopeThreadRef(environmentId, threadId)),
   );
+  // A saved body (text, open cards) is read from the device when the thread opens: until it is
+  // in the store the list shows no empty state, rather than one that is wrong for a moment.
+  const savedBodyPending = useHasSavedThreadBody(environmentId, threadId) && !threadDetailLoaded;
   const queuesByThreadKey = useMessageQueueStore((state) => state.queuesByThreadKey);
   const outboxMessages = useSyncExternalStore(
     subscribeThreadOutbox,
@@ -960,8 +967,23 @@ export function ThreadDetailScreen(props: {
   const { worktrees } = useHomeWorkspaceData();
   const environments = useHomeEnvironments();
   const pendingApprovals = built?.viewModel.pendingApprovals ?? NO_PENDING_APPROVALS;
+  // Approvals a send may decline: only those the node's own window confirmed, never saved cards.
+  const answerableApprovals = threadLiveDetailLoaded ? pendingApprovals : NO_PENDING_APPROVALS;
   const pendingUserInputs = built?.viewModel.pendingUserInputs ?? [];
   const optionalUserInputs = built?.viewModel.optionalUserInputs ?? [];
+  // What a background alert described, until the live detail loads (`alertExcerpts.ts`).
+  const alertExcerpt = useAlertExcerptPrompts({
+    environmentId,
+    threadId,
+    liveLoaded: threadLiveDetailLoaded,
+  });
+  // A saved or live card for the same request wins: the alert's card never shows twice.
+  const alertApprovals = alertExcerpt.approvals.filter(
+    (approval) => !pendingApprovals.some((shown) => shown.requestId === approval.requestId),
+  );
+  const alertUserInputs = alertExcerpt.userInputs.filter(
+    (userInput) => !pendingUserInputs.some((shown) => shown.requestId === userInput.requestId),
+  );
   // When each pending approval was first on screen: a send declines only approvals shown long
   // enough to have been read.
   const approvalSightingsRef = useRef<ApprovalSightings>(new Map());
@@ -1096,6 +1118,8 @@ export function ThreadDetailScreen(props: {
       }),
     [built?.timeline.length, degradedReason, environmentRow?.staleDetail, hydratedFromCacheAt],
   );
+  // Cards from the saved body are shown, not answered: the node's own window confirms them.
+  const promptsDisabled = cachedView.promptsDisabled || !threadLiveDetailLoaded;
   const deliveryRecord = useMobileHostedConnectionsStore((state) =>
     selectThreadDeliveryRecord(state.selectedNodes, environmentId),
   );
@@ -2434,7 +2458,7 @@ export function ThreadDetailScreen(props: {
     // A message sent while approvals wait declines the ones on screen and steers the turn
     // (`resolveApprovalRedirect`, the decision the placeholder shows). Any other message queues
     // behind them as before.
-    const approvalsAtSend = pendingApprovals;
+    const approvalsAtSend = answerableApprovals;
     const redirectApprovals = async (message: QueuedThreadMessage) => {
       // A notification reply answers no approval: it queues behind them.
       if (notificationReply) return "queue" as const;
@@ -2943,6 +2967,8 @@ export function ThreadDetailScreen(props: {
   const errorBannerMessage =
     failedNotice !== null && visibleError === failedNotice.detail ? null : visibleError;
   const hasPrompts =
+    alertApprovals.length > 0 ||
+    alertUserInputs.length > 0 ||
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
@@ -2954,7 +2980,7 @@ export function ThreadDetailScreen(props: {
     thread !== undefined &&
     selectedModelSelection !== null &&
     resolveApprovalRedirect({
-      approvals: pendingApprovals,
+      approvals: answerableApprovals,
       runtimeSessionId: thread.session?.runtimeSessionId,
       activeTurnId: thread.session?.activeTurnId,
       steerAllowed: getSteerEligibility({
@@ -3737,6 +3763,9 @@ export function ThreadDetailScreen(props: {
               listProps={{
                 renderItem: renderItem,
                 keyExtractor: (row) => row.id,
+                // Size hints per row kind (threadTimelineList.ts).
+                getItemType: threadListRowType,
+                estimatedItemSize: THREAD_LIST_ESTIMATED_ROW_SIZE,
                 alignItemsAtEnd: true,
                 initialScrollAtEnd: true,
                 // Following keeps the end from any distance; reading back, the rows on screen stay put.
@@ -3809,7 +3838,7 @@ export function ThreadDetailScreen(props: {
                         navigation.goBack();
                     }}
                   />
-                ) : (
+                ) : savedBodyPending ? null : (
                   <View className="px-4 py-16">
                     <EmptyState
                       variant="plain"
@@ -3955,7 +3984,25 @@ export function ThreadDetailScreen(props: {
               environmentId={environmentId}
               threadId={threadId}
               approval={approval}
-              disabled={cachedView.promptsDisabled}
+              disabled={promptsDisabled}
+            />
+          ))}
+          {alertApprovals.map((approval) => (
+            <PendingApprovalCard
+              key={`alert:${approval.requestId}`}
+              environmentId={environmentId}
+              threadId={threadId}
+              approval={approval}
+              fromAlert
+            />
+          ))}
+          {alertUserInputs.map((userInput) => (
+            <PendingUserInputCard
+              key={`alert:${userInput.requestId}`}
+              environmentId={environmentId}
+              threadId={threadId}
+              userInput={userInput}
+              fromAlert={{ partial: alertExcerpt.partial }}
             />
           ))}
           {[...pendingUserInputs, ...optionalUserInputs].map((userInput) => (
@@ -3966,7 +4013,7 @@ export function ThreadDetailScreen(props: {
               userInput={userInput}
               route={resolveOptionalAnswerRoute({ userInput, session: thread?.session })}
               onSendAsMessage={sendOptionalAnswer}
-              disabled={cachedView.promptsDisabled}
+              disabled={promptsDisabled}
             />
           ))}
           {secretRequests.requests.map((request) => (

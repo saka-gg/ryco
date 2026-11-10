@@ -19,10 +19,16 @@ export interface ThreadsRuntimeConfiguration {
   readonly frameScheduler: FrameSchedulerService;
   readonly observability: ObservabilityService;
   readonly isHostedHubMode: () => boolean;
+  /**
+   * The URL a message attachment loads from, or undefined where no URL can
+   * reach it: then every client reads it through its environment's
+   * authorized attachment transport (the hosted web app, and the phone, whose
+   * paired and Hub machines each have their own connection).
+   */
   readonly resolveAttachmentPreviewUrl: (input: {
     readonly environmentId: EnvironmentId;
     readonly attachmentId: string;
-  }) => string;
+  }) => string | undefined;
 }
 
 const defaultConfiguration: ThreadsRuntimeConfiguration = {

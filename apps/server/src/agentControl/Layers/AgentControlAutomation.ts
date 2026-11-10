@@ -14,11 +14,12 @@ import {
   type AgentControlAutomationRunStatus,
   type AgentControlProposal,
 } from "@ryco/contracts";
-import { Duration, Effect, Layer, Option, Schedule, Stream } from "effect";
+import { Duration, Effect, Layer, Option, Queue, Stream } from "effect";
 
 import { isActiveAutomation } from "../../persistence/Layers/AgentControlAutomations.ts";
 import { AgentControlAutomationRepository } from "../../persistence/Services/AgentControlAutomations.ts";
 import { AutomationHookStore } from "../../automationHooks/Services/AutomationHookStore.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlPlanValidationError } from "../Errors.ts";
 import {
   AgentControlAutomationService,
@@ -34,7 +35,14 @@ import { AgentControlProposalStore } from "../Services/AgentControlProposalStore
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
 import { agentControlRiskTagsForPlan } from "../proposalPresentation.ts";
 
-const SCHEDULER_INTERVAL_MS = 30_000;
+/**
+ * The scheduler sleeps until the next schedule is due (`nextSchedulerSleepMs`) and wakes early on
+ * a lifecycle change, a run's proposal event or a settings change. This is its longest sleep: the
+ * safety net for runs recovery retries, and for anything else that changes what is due.
+ */
+const SCHEDULER_MAX_SLEEP_MS = 10 * 60_000;
+/** A schedule that stays due after a pass that claimed nothing is retried this often. */
+const SCHEDULER_RETRY_MS = 30_000;
 const SCHEDULER_BATCH_LIMIT = 25;
 const RECOVERY_BATCH_LIMIT = 100;
 
@@ -105,8 +113,33 @@ const runStatusForProposal = (
   }
 };
 
+/**
+ * How long the scheduler may sleep after a pass at `nowMs`: until `nextDueAt`, at once when the
+ * pass claimed a full batch and more is due, `SCHEDULER_RETRY_MS` when something stays due that
+ * the pass could not claim (or recovery has a run to retry), at most `maxMs`.
+ */
+export const nextSchedulerSleepMs = (input: {
+  readonly nowMs: number;
+  readonly nextDueAt: string | null;
+  readonly claimed: number;
+  readonly retry: boolean;
+  readonly maxMs: number;
+}): number => {
+  const retryMs = Math.min(SCHEDULER_RETRY_MS, input.maxMs);
+  const dueMs = input.nextDueAt === null ? Number.NaN : Date.parse(input.nextDueAt);
+  let sleepMs = input.retry ? retryMs : input.maxMs;
+  if (Number.isFinite(dueMs)) {
+    sleepMs = Math.min(
+      sleepMs,
+      dueMs > input.nowMs ? dueMs - input.nowMs : input.claimed > 0 ? 0 : retryMs,
+    );
+  }
+  return Math.max(0, sleepMs);
+};
+
 export interface AgentControlAutomationLiveOptions {
   readonly disableBackground?: boolean;
+  /** The scheduler's longest sleep (default 10 minutes). */
   readonly schedulerIntervalMs?: number;
 }
 
@@ -123,6 +156,10 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
       );
       // Webhook schedules' hooks follow their definitions; optional so tests without hooks run.
       const hookStore = yield* Effect.serviceOption(AutomationHookStore);
+      // Optional so tests without settings run; enabling Agent Control wakes the scheduler.
+      const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
+      const schedulerWake = yield* Queue.sliding<void>(1);
+      const wakeScheduler = Queue.offer(schedulerWake, undefined).pipe(Effect.asVoid);
       /**
        * Keeps the automation's hook in step after a lifecycle change. A failure leaves the change
        * applied: the owner's next read of the hook creates a missing one.
@@ -768,22 +805,49 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             ),
           ),
         );
-        yield* Effect.forkScoped(
-          policy.isEnabled.pipe(
-            // Disabled Agent Control is an idle scheduler state, not a failed
-            // scheduling attempt. Keep the lightweight gate check so enabling
-            // the feature at runtime takes effect without a server restart.
-            Effect.flatMap((enabled) => (enabled ? materializeDue : Effect.void)),
-            Effect.catch((error) =>
-              Effect.logWarning("agent-control.automation-scheduler-failed", { error }),
-            ),
-            Effect.repeat(
-              Schedule.spaced(
-                Duration.millis(options?.schedulerIntervalMs ?? SCHEDULER_INTERVAL_MS),
-              ),
+        const maxSleepMs = options?.schedulerIntervalMs ?? SCHEDULER_MAX_SLEEP_MS;
+        // One pass, then how long to sleep. Disabled Agent Control is an idle scheduler state,
+        // not a failed scheduling attempt: a settings change wakes it.
+        const schedulerPass = Effect.gen(function* () {
+          if (!(yield* policy.isEnabled)) return maxSleepMs;
+          const claimed = yield* materializeDue;
+          const nextDueAt =
+            repository.nextDueAt === undefined ? null : yield* repository.nextDueAt();
+          const retry =
+            repository.nextDueAt === undefined ||
+            (yield* repository.listRecoverableRuns({ limit: RECOVERY_BATCH_LIMIT })).some(
+              (run) => run.status === "materializing",
+            );
+          return nextSchedulerSleepMs({
+            nowMs: Date.now(),
+            nextDueAt,
+            claimed,
+            retry,
+            maxMs: maxSleepMs,
+          });
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("agent-control.automation-scheduler-failed", { error }).pipe(
+              Effect.as(Math.min(SCHEDULER_RETRY_MS, maxSleepMs)),
             ),
           ),
         );
+        yield* Effect.forkScoped(
+          Effect.forever(
+            Effect.gen(function* () {
+              const sleepMs = yield* schedulerPass;
+              yield* Effect.raceFirst(
+                Effect.sleep(Duration.millis(sleepMs)),
+                Queue.take(schedulerWake),
+              );
+            }),
+          ),
+        );
+        if (Option.isSome(serverSettings)) {
+          yield* Effect.forkScoped(
+            serverSettings.value.streamChanges.pipe(Stream.runForEach(() => wakeScheduler)),
+          );
+        }
         yield* Effect.forkScoped(
           proposalEvents.changes.pipe(
             Stream.runForEach((event) =>
@@ -791,6 +855,8 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
                 Effect.catch((error) =>
                   Effect.logWarning("agent-control.automation-run-sync-failed", { error }),
                 ),
+                // A schedule's definition or its run changed: what is due may have too.
+                Effect.andThen(wakeScheduler),
               ),
             ),
           ),
@@ -803,7 +869,7 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
         listRuns,
         validateDefinition,
         validateLifecyclePlan,
-        applyLifecycle,
+        applyLifecycle: (proposal) => applyLifecycle(proposal).pipe(Effect.ensuring(wakeScheduler)),
         validateRun,
         materializeDue,
         recover,

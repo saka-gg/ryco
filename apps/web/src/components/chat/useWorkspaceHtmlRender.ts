@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { selectThreadDetailLoaded } from "@ryco/client-runtime/state/threads";
+import { selectThreadLiveDetailLoaded } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
 
@@ -60,9 +60,11 @@ export function useWorkspaceHtmlRender(input: {
     () => (target && messages ? findThreadHtmlRender(messages, target) : undefined),
     [messages, target],
   );
+  // Live detail only: messages a reload restored from a display cache (local
+  // or the Hub's) carry no attachments, so the page is never "gone" from them.
   const detailLoaded = useStore((state) =>
     environmentId && threadId
-      ? selectThreadDetailLoaded(state, scopeThreadRef(environmentId, threadId))
+      ? selectThreadLiveDetailLoaded(state, scopeThreadRef(environmentId, threadId))
       : false,
   );
   const hasOlderMessages = useStore((state) =>
@@ -130,7 +132,7 @@ export function useWorkspaceHtmlRender(input: {
   if (target === null || !environmentId || !threadId) return { status: "unavailable" };
   if (loadedRender !== undefined) return { status: "found", render: loadedRender };
   // The thread is still arriving (a switch back restores the tab before its
-  // messages load): no verdict yet.
+  // messages load, a reload shows its cached text first): no verdict yet.
   if (!detailLoaded) return { status: "pending" };
   // The whole thread is loaded, and the page is not in it.
   if (!hasOlderMessages) return { status: "unavailable" };

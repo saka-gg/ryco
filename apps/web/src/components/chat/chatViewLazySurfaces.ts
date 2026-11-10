@@ -54,6 +54,11 @@ export const LazySecretRequestCards = preloadableLazy(() =>
   import("./SecretRequestCards").then((module) => module.SecretRequestCards),
 );
 
+/** The composer's stash list: loads on the first open of the stash badge. */
+export const LazyComposerStashPicker = preloadableLazy(() =>
+  import("./ComposerStashPicker").then((module) => module.ComposerStashPicker),
+);
+
 /**
  * The composer's delegation dock. Only threads that delegate, were delegated
  * or use Agent Control show it, so it loads right after the first frame.

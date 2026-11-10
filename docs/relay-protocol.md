@@ -320,7 +320,17 @@ frames declaring minor 0 or 1. Existing reasons retain their original meaning an
 A client treats `transfer_limit` according to who ended the channel. A `channel.close` or
 `channel.reject` carrying it from the relay means the channel used up its transfer budget; the
 client reconnects under its normal backoff on a fresh channel, with a new ticket or stream, a new
-handshake, and a current snapshot, and nothing resumes the old channel. A client that itself refuses
+handshake, and a current snapshot, and nothing resumes the old channel.
+
+The relay meters each channel as a byte rate with a burst allowance, counting data payloads in
+both directions. A node keeps its own conservative copy of that meter per channel
+(`apps/server/src/hubConnector/relayTransferMeter.ts`): bytes the client sends are counted as they
+arrive, and a large outbound message the meter cannot yet pay for waits as ordinary backpressure
+until it can, while small records (keepalives, acknowledgements, close records, streamed deltas)
+always pass. A long transfer, a flooding terminal or a device preview therefore slows to the
+sustained rate instead of ending the channel. Opening a replacement channel ahead of the limit was
+rejected: it costs a ticket, a handshake and a snapshot, and moving subscriptions is the client's
+lifecycle, while pacing keeps every other stream on the channel live. A client that itself refuses
 a message it cannot carry, such as one above the reassembly ceiling, fails the channel locally with
 the same reason and does not retry, because the same message would fail the same way.
 

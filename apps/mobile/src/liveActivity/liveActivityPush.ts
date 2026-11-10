@@ -1,6 +1,11 @@
 import { getPreferencesSnapshot, subscribePreferences } from "../state/preferencesStore";
 import { rycoWidgetsNative } from "../widgets/rycoWidgetsNative";
-import { clearLiveActivityPushTokens, setLiveActivityPushToken } from "./liveActivityTokenStore";
+import {
+  clearLiveActivityPushTokens,
+  setLiveActivityPushToken,
+  setLiveActivityPushToStartToken,
+  setLiveActivityStartOffered,
+} from "./liveActivityTokenStore";
 
 const loadBackgroundAlerts = () => import("../notifications/push/backgroundAlertsRuntime");
 
@@ -20,6 +25,12 @@ export function startMobileLiveActivityPush(input: {
   );
   // A card an earlier launch left with a token reports it again.
   native.observeAgentActivityPushTokens?.();
+  // Push-to-start (iOS 17.2+): the token is only handed to the Hub while the person turned
+  // starting by push on; a card a push started reports its update token like any other.
+  const startSubscription = native.addListener?.("onAgentActivityPushToStartToken", (event) =>
+    setLiveActivityPushToStartToken(event.token),
+  );
+  const pushToStartSupported = native.observeAgentActivityPushToStart?.() === true;
 
   let stopped = false;
   let unsubscribeAlerts: (() => void) | null = null;
@@ -30,7 +41,11 @@ export function startMobileLiveActivityPush(input: {
       .then(({ getMobileBackgroundAlerts }) => {
         if (stopped || unsubscribeAlerts !== null) return;
         const alerts = getMobileBackgroundAlerts();
-        const read = () => input.setAvailable(alerts.getSnapshot().liveActivityUpdates);
+        const read = () => {
+          const snapshot = alerts.getSnapshot();
+          input.setAvailable(snapshot.liveActivityUpdates);
+          setLiveActivityStartOffered(pushToStartSupported && snapshot.liveActivityStart);
+        };
         unsubscribeAlerts = alerts.subscribe(read);
         read();
       })
@@ -44,6 +59,7 @@ export function startMobileLiveActivityPush(input: {
     unsubscribePreferences();
     unsubscribeAlerts?.();
     subscription?.remove();
+    startSubscription?.remove();
     // No listener hears a card end from here on: a token kept now would go with a later sign-in.
     clearLiveActivityPushTokens();
     input.setAvailable(false);

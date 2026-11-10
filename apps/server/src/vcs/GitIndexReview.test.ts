@@ -59,6 +59,27 @@ const fixture = Effect.gen(function* () {
 });
 
 describe("Git index review", () => {
+  it.effect("answers unchanged to a client that holds the review (D5)", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.write("shared.txt", "edited\n");
+      const first = yield* f.read();
+      expect(first.unstaged.patch).toContain("+edited");
+      const again = yield* readGitLocalChanges(f.driver.execute, {
+        cwd: f.cwd,
+        knownRevision: first.revision,
+      });
+      const empty = { patch: "", files: [] };
+      expect(again).toEqual({ ...first, staged: empty, unstaged: empty, unchanged: true });
+      yield* f.write("shared.txt", "edited again\n");
+      const changed = yield* readGitLocalChanges(f.driver.execute, {
+        cwd: f.cwd,
+        knownRevision: first.revision,
+      });
+      expect(changed.unchanged).toBeUndefined();
+      expect(changed.unstaged.patch).toContain("+edited again");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
   it.effect("separates index from working copy and stages only the selected hunk", () =>
     Effect.gen(function* () {
       const f = yield* fixture;

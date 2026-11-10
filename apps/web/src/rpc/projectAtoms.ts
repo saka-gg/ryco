@@ -20,6 +20,7 @@ import {
   KEY_SEP,
   type RetainedKeyTracker,
 } from "@ryco/client-runtime/rpc";
+import { onCheckoutFilesChanged } from "./checkoutFileChanges";
 
 export const DEFAULT_PROJECT_SEARCH_ENTRIES_LIMIT = 80;
 export const DEFAULT_PROJECT_SEARCH_ENTRIES_STALE_TIME_MS = 15_000;
@@ -517,6 +518,12 @@ export function invalidateProjectSearchEntries(input?: {
     }
   }
 }
+
+// Files changed in a checkout (turn diffs, reverts): this cache is not on the
+// boot path, so it listens instead of being imported by the runtime service.
+onCheckoutFilesChanged((environmentId, cwd) =>
+  invalidateProjectSearchEntries(cwd === null ? { environmentId } : { environmentId, cwd }),
+);
 
 export function getProjectSearchEntriesSnapshot(
   input: ProjectSearchEntriesInput,

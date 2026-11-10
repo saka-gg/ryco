@@ -9,8 +9,10 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as RpcClient from "effect/rpc/RpcClient";
 
+import type { EnvironmentId } from "@ryco/contracts";
 import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
+import { jitterRetryDelayMs } from "./retryJitter.ts";
 import {
   createWsRpcProtocolLayer,
   hasErrorTag,
@@ -63,6 +65,13 @@ export class RpcRequestAbortedError extends Error {
 }
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
+/**
+ * Ceiling for resubscribing after a retryable failure (the socket is down, the
+ * thread does not exist yet). Each failure in a row doubles the wait from the
+ * base delay, so a socket held down does not cost every subscription four
+ * attempts a second; a socket that opens again wakes them at once.
+ */
+export const DISCONNECTED_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
 /**
  * Ceiling for re-checking a subscription its connection refused only for now
  * (`isAwaitingAdmission`). Nothing is sent while it waits, so the cost is a
@@ -140,6 +149,21 @@ function isTerminalResyncSubscriptionError(error: unknown): boolean {
     error !== null &&
     "_tag" in error &&
     error._tag === "TerminalSubscriptionResyncError"
+  );
+}
+
+/** Delay before the next resubscribe after `failures` retryable failures in a row. */
+export function disconnectedSubscriptionRetryDelayMs(
+  baseDelayMs: number,
+  failures: number,
+): number {
+  return jitterRetryDelayMs(
+    Math.min(
+      Math.max(baseDelayMs, 1) * 2 ** Math.min(Math.max(failures, 0), 16),
+      DISCONNECTED_SUBSCRIPTION_MAX_DELAY_MS,
+    ),
+    failures,
+    "subscription-retry",
   );
 }
 
@@ -222,6 +246,8 @@ class RpcTransport<Client> {
   private lastSocketOpenedAt = 0;
   private readonly makeClient: () => Effect.Effect<Client, never, RpcClient.Protocol | Scope.Scope>;
   private readonly subscriptionRetryWakeups = new Set<() => void>();
+  /** Ends the pending retry wait of each subscription; a socket opened. */
+  private readonly subscriptionSocketOpenWakeups = new Set<() => void>();
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
 
   constructor(
@@ -344,6 +370,7 @@ class RpcTransport<Client> {
     let active = true;
     let hasReceivedValue = false;
     let awaitingSessionRetries = 0;
+    let disconnectedRetries = 0;
     let consecutiveResyncs = 0;
     let lastResyncAt = Number.NEGATIVE_INFINITY;
     let resyncReportedSession: TransportSession<Client> | null = null;
@@ -360,6 +387,9 @@ class RpcTransport<Client> {
     const unsubscribeAdmission =
       this.lifecycleHandlers?.subscribeAdmissionChanges?.(admissionChanged) ?? NOOP;
     this.subscriptionRetryWakeups.add(admissionChanged);
+    // Only a wait under way ends: an attempt already out is not retried again.
+    const socketOpened = () => wakeRetry();
+    this.subscriptionSocketOpenWakeups.add(socketOpened);
     const waitForRetry = (delayMs: number, observedRevision: number) => {
       // Register before the stream starts and compare revisions afterwards:
       // readiness can change between refusal and the rejection reaching us.
@@ -411,6 +441,7 @@ class RpcTransport<Client> {
               this.hasReportedTransportDisconnect = false;
               hasReceivedValue = true;
               awaitingSessionRetries = 0;
+              disconnectedRetries = 0;
             },
           );
           cancelCurrentStream = runningStream.cancel;
@@ -489,12 +520,17 @@ class RpcTransport<Client> {
             });
           }
           this.hasReportedTransportDisconnect = true;
-          await waitForRetry(retryDelayMs, observedAdmissionRevision);
+          await waitForRetry(
+            disconnectedSubscriptionRetryDelayMs(retryDelayMs, disconnectedRetries),
+            observedAdmissionRevision,
+          );
+          disconnectedRetries += 1;
         }
       }
     })().finally(() => {
       unsubscribeAdmission();
       this.subscriptionRetryWakeups.delete(admissionChanged);
+      this.subscriptionSocketOpenWakeups.delete(socketOpened);
     });
 
     return () => {
@@ -529,6 +565,11 @@ class RpcTransport<Client> {
     } finally {
       this.reconnectOperation = null;
     }
+  }
+
+  /** The environment this transport connects, when its owner told it. */
+  environmentId(): EnvironmentId | null {
+    return this.lifecycleHandlers?.getEnvironmentId?.() ?? null;
   }
 
   isHeartbeatFresh(maxAgeMs = 15_000): boolean {
@@ -579,6 +620,8 @@ class RpcTransport<Client> {
           onOpen: () => {
             this.lastSocketOpenedAt = Date.now();
             this.lifecycleHandlers?.onOpen?.();
+            // Subscriptions waiting out a failure resubscribe on the new socket now.
+            for (const wake of this.subscriptionSocketOpenWakeups) wake();
           },
           onRequestStart: (info) => {
             this.lifecycleHandlers?.onRequestStart?.(info);

@@ -4,6 +4,7 @@ import type {
 } from "@ryco/client-runtime/connection";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
+import { isEnvironmentShellLive } from "@ryco/client-runtime/state/threads/threadBodyResidency";
 
 import {
   markPromotedDraftThreadByRef,
@@ -126,6 +127,8 @@ export function createWebEnvironmentStateSink(input: {
       ),
     applyLoadedThreadShells: (environmentId, threads) =>
       useStore.getState().applyLoadedThreadShells(threads, environmentId),
+    isEnvironmentShellLive: (environmentId) =>
+      isEnvironmentShellLive(useStore.getState(), environmentId),
     reconcileSnapshotDerivedState: () => {
       syncProjectUiFromStore();
       syncThreadUiFromStore();

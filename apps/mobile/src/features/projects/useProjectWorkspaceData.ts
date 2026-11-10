@@ -1,4 +1,7 @@
-import type { DiskUsageReading } from "@ryco/client-runtime/projectSettings/diskUsage";
+import {
+  type DiskUsageReading,
+  readDiskUsageProgressively,
+} from "@ryco/client-runtime/projectSettings/diskUsage";
 import type { EnvironmentId, ProjectId, WorkspaceLifecycleSummary } from "@ryco/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -108,26 +111,21 @@ export function useProjectWorkspaceData(input: {
 
   useEffect(() => {
     if (!diskUsage) return;
-    let cancelled = false;
     // Only the read a remeasure starts measures afresh; later reads use the machine's cache.
     const refresh = measureNonce !== sentMeasureNonce.current;
     sentMeasureNonce.current = measureNonce;
-    diskUsage({ projectId, refresh }).then(
-      (result) => {
-        if (!cancelled) {
-          setMeasured({
-            requestKey: diskKey,
-            value: { status: "ready", workspaces: result.workspaces, refreshing: false },
-          });
-        }
-      },
-      () => {
-        if (!cancelled) setMeasured({ requestKey: diskKey, value: { status: "unavailable" } });
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
+    // The machine's last figures at once, as refreshing while it measures afresh.
+    return readDiskUsageProgressively({
+      read: diskUsage,
+      projectId,
+      refresh,
+      onResult: (result, final) =>
+        setMeasured({
+          requestKey: diskKey,
+          value: { status: "ready", workspaces: result.workspaces, refreshing: !final },
+        }),
+      onError: () => setMeasured({ requestKey: diskKey, value: { status: "unavailable" } }),
+    });
   }, [diskKey, diskUsage, measureNonce, projectId]);
 
   const refresh = useCallback(() => setRevision((value) => value + 1), []);

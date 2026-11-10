@@ -12,8 +12,10 @@ import { EARLIER_INSTALL_PUSH_KEY } from "./pushKeyCustody";
 import {
   EARLIER_INSTALL_KEY_RETIRE_MS,
   HUB_REMOVAL_OWED_KEY,
+  NODE_REGISTRATIONS_KEY,
   createEarlierInstallKeyMemo,
   createHubRemovalMarker,
+  createNodeRegistrationsMemo,
 } from "./pushMemos";
 
 // A pinned vector: the node knows a key by this id.
@@ -54,6 +56,17 @@ describe("the owed Hub removal", () => {
 
   it("is gone after a reinstall, whose storage starts empty", async () => {
     expect(await createHubRemovalMarker(memoryKv()).read()).toBeNull();
+  });
+});
+
+describe("the registrations nodes confirmed", () => {
+  it("are kept across a restart and removed when cleared", async () => {
+    const storage = memoryKv();
+    await createNodeRegistrationsMemo(storage).write('[["env-a","r",1]]');
+    const restarted = createNodeRegistrationsMemo(storage);
+    expect(await restarted.read()).toBe('[["env-a","r",1]]');
+    await restarted.write(null);
+    expect(storage.items.has(NODE_REGISTRATIONS_KEY)).toBe(false);
   });
 });
 

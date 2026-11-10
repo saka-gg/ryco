@@ -12,11 +12,14 @@ import type {
   EventId,
   MessageId,
   OrchestrationCheckpointSummary,
+  OrchestrationEvent,
   OrchestrationMessage,
   OrchestrationProject,
+  OrchestrationProposedPlan,
   OrchestrationProjectShell,
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
+  OrchestrationShellStreamEvent,
   OrchestrationThread,
   OrchestrationSearchThreadMessagesInput,
   OrchestrationThreadMessageSearchResult,
@@ -268,6 +271,21 @@ export interface ThreadUserMessageCountBound {
   readonly excludingMessageId?: MessageId;
 }
 
+/**
+ * What changed in the shell after a sequence, as the shell stream sends it: the current row of
+ * every project, workspace and thread an event named since then, and the removal of each one
+ * gone, ascending by the sequence of the last event that named it.
+ */
+export interface ShellChangesSince {
+  /** The shell's sequence: every change up to it is in `items`, later ones are not. */
+  readonly snapshotSequence: number;
+  readonly items: ReadonlyArray<OrchestrationShellStreamEvent>;
+  /** Threads in `items` (upserted or removed). */
+  readonly threadCount: number;
+  /** Unarchived threads in the shell, which a snapshot sends in full. */
+  readonly liveThreadCount: number;
+}
+
 export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
@@ -402,6 +420,35 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
   /**
+   * A thread's shell row from the node's shared thread list (`shellSnapshotCopy.ts`), for readers
+   * that follow the event stream (shell subscriptions, push alerts): every reader of the same
+   * change gets one shared read and the same row object. Absent in test doubles: read through
+   * {@link readSharedThreadShell}.
+   */
+  readonly getSharedThreadShell?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * Turns on the shared thread list and returns its feed. The orchestration engine calls it once
+   * and hands it every committed event after `fromSequence`, ascending, before publishing it;
+   * until then shells are built from the database. Absent in test doubles.
+   */
+  readonly trackShellChanges?: (
+    fromSequence: number,
+  ) => (events: ReadonlyArray<OrchestrationEvent>) => void;
+
+  /**
+   * The shell's changes after `sequence`, from the shared thread list's in-memory change index
+   * (`shellSnapshotCopy.ts`): a resuming shell subscriber gets only those rows, however many
+   * events happened since. None when the index does not reach back that far (the server started,
+   * or a project was deleted or a workspace relocated, after it). Absent in test doubles.
+   */
+  readonly getShellChangesSince?: (
+    sequence: number,
+  ) => Effect.Effect<Option.Option<ShellChangesSince>, ProjectionRepositoryError>;
+
+  /**
    * Read a single worktree shell row by id.
    */
   readonly getWorktreeShellById?: (
@@ -448,6 +495,16 @@ export interface ProjectionSnapshotQueryShape {
     OrchestrationThreadHistoryPage,
     ProjectionRepositoryError | OrchestrationThreadHistoryError
   >;
+
+  /**
+   * Read the whole text of one message of an active thread, for a client
+   * showing a message a window or page sent as a preview. Optional so existing
+   * test doubles stay valid; the RPC reports it unavailable.
+   */
+  readonly getMessageText?: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<Option.Option<{ readonly text: string }>, ProjectionRepositoryError>;
 
   /**
    * Read one stored activity payload of an active thread, with its encoded
@@ -540,21 +597,44 @@ export interface ProjectionSnapshotQueryShape {
 
   /**
    * Read a single projected proposed plan by id. Plan finalization only needs
-   * the prior timestamps of the plan it replaces. Optional so existing test
-   * doubles stay valid; callers fall back to `getThreadDetailById`.
+   * the plan it replaces, and marking a source plan implemented re-upserts it.
+   * Optional so existing test doubles stay valid; callers fall back to
+   * `getThreadDetailById`.
    */
   readonly getThreadProposedPlanById?: (input: {
     readonly threadId: ThreadId;
     readonly planId: string;
-  }) => Effect.Effect<
-    Option.Option<{
-      readonly id: string;
-      readonly createdAt: string;
-      readonly implementedAt: string | null;
-      readonly implementationThreadId: ThreadId | null;
-    }>,
-    ProjectionRepositoryError
-  >;
+  }) => Effect.Effect<Option.Option<OrchestrationProposedPlan>, ProjectionRepositoryError>;
+
+  /**
+   * Whether one turn has an assistant message (only a streaming one with `streamingOnly`),
+   * without reading message bodies. Event intake asks this at message ends and approvals.
+   * Optional so existing test doubles stay valid; callers fall back to `getThreadDetailById`.
+   */
+  readonly hasThreadAssistantMessageForTurn?: (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly streamingOnly: boolean;
+  }) => Effect.Effect<boolean, ProjectionRepositoryError>;
+
+  /**
+   * The thread's pending-request lifecycle activities (`PENDING_REQUEST_ACTIVITY_KINDS`), in
+   * thread order. Turn boundaries derive the requests to invalidate from these alone.
+   * Optional so existing test doubles stay valid; callers fall back to `getThreadDetailById`.
+   */
+  readonly listThreadPendingRequestActivities?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * One task's `task.started`, `task.progress` and `task.updated` activities, in thread order,
+   * for recovering a task's title. Optional so existing test doubles stay valid; callers fall
+   * back to `getThreadDetailById`.
+   */
+  readonly listThreadTaskActivities?: (input: {
+    readonly threadId: ThreadId;
+    readonly taskId: string;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationThreadActivity>, ProjectionRepositoryError>;
 
   /**
    * Newest `checkpoint.revert` activity per live thread whose status is still
@@ -641,6 +721,16 @@ export const readThreadKeyPage = (
 ): Effect.Effect<ReadonlyArray<ProjectionThreadOrderKey>, ProjectionRepositoryError> =>
   query.listThreadKeyPage?.(input) ??
   Effect.map(query.getShellSnapshot(), (snapshot) => threadKeyPageOf(snapshot, input));
+
+/**
+ * A thread's shell row from the shared thread list; see
+ * {@link ProjectionSnapshotQueryShape.getSharedThreadShell}.
+ */
+export const readSharedThreadShell = (
+  query: Pick<ProjectionSnapshotQueryShape, "getThreadShellById" | "getSharedThreadShell">,
+  threadId: ThreadId,
+): Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError> =>
+  query.getSharedThreadShell?.(threadId) ?? query.getThreadShellById(threadId);
 
 /** Threads whose goal synchronization is pending; see {@link readProjectShells}. */
 export const readPendingGoalSyncThreads = (

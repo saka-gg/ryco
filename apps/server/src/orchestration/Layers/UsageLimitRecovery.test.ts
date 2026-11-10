@@ -37,6 +37,7 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import {
   makeUsageLimitRecovery,
+  nextUsageLimitSweepDelayMs,
   planUsageLimitRecovery,
   type UsageLimitRecoveryCandidate,
   type UsageLimitRecoveryDeps,
@@ -239,6 +240,58 @@ const runSweeps = (deps: UsageLimitRecoveryDeps<Error>, sweeps: number) =>
       for (let index = 0; index < sweeps; index += 1) yield* recovery.sweep();
     }),
   );
+
+describe("nextUsageLimitSweepDelayMs", () => {
+  const delay = (
+    candidates: ReadonlyArray<UsageLimitRecoveryCandidate>,
+    options: { readonly nowMs?: number; readonly autoResume?: boolean; retrying?: boolean } = {},
+  ) =>
+    nextUsageLimitSweepDelayMs({
+      candidates,
+      settings: { autoResumeLimitedThreads: options.autoResume ?? true },
+      enabledInstanceIds: new Set([claude]),
+      retrying: options.retrying ?? false,
+      nowMs: options.nowMs ?? NOW_MS,
+    });
+  const beforeReset = Date.parse(RESET_AT) - 3_600_000;
+
+  it("sleeps until the earliest reset plus the resume grace", () => {
+    const later = shell("thread-later", {
+      usageLimit: limitFor("thread-later", { resetAt: "2026-10-04T17:00:00.000Z" }),
+    });
+    expect(delay([candidate(shell("thread-a")), candidate(later)], { nowMs: beforeReset })).toBe(
+      3_600_000 + 30_000,
+    );
+  });
+
+  it("has nothing due by time when no limited thread can be resumed later", () => {
+    expect(delay([])).toBeNull();
+    expect(delay([candidate(shell("thread-off"))], { autoResume: false })).toBeNull();
+    expect(
+      delay([
+        candidate(
+          shell("thread-unknown", { usageLimit: limitFor("thread-unknown", { resetAt: null }) }),
+        ),
+      ]),
+    ).toBeNull();
+  });
+
+  it("re-checks every 30 s while a thread waits on something only polling sees", () => {
+    const busy = shell("thread-busy", {
+      session: {
+        threadId: ThreadId.make("thread-busy"),
+        status: "running",
+        providerName: "claudeAgent",
+        runtimeMode: "full-access",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: LIMITED_AT,
+      } as unknown as OrchestrationThreadShell["session"],
+    });
+    expect(delay([candidate(busy)])).toBe(30_000);
+    expect(delay([], { retrying: true })).toBe(30_000);
+  });
+});
 
 describe("makeUsageLimitRecovery", () => {
   it("retries a transient dispatch failure at most five times", async () => {

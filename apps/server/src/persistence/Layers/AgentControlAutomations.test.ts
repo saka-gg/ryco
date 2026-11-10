@@ -86,7 +86,26 @@ layer("AgentControlAutomationRepository", (it) => {
 
         const secondTick = yield* repository.claimDue({ now, limit: 10 });
         assert.deepStrictEqual(secondTick, []);
+        // The claimed run is in flight: nothing is due until it ends.
+        assert.strictEqual(yield* repository.nextDueAt!(), null);
       }),
+  );
+
+  it.effect("reports the earliest occurrence a claim could take", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlAutomationRepository;
+      for (const [id, start] of [
+        ["automation-next-late", "2026-09-02T12:00:00.000Z"],
+        ["automation-next-early", "2026-09-01T08:00:00.000Z"],
+      ] as const) {
+        assert.isTrue(
+          yield* repository.insertAutomation(
+            automationAt({ id, start, end: "2026-09-10T00:00:00.000Z" }),
+          ),
+        );
+      }
+      assert.strictEqual(yield* repository.nextDueAt!(), "2026-09-01T08:00:00.000Z");
+    }),
   );
 
   it.effect("cancellation wins before a future claim without deleting run history", () =>

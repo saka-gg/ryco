@@ -199,6 +199,7 @@ const undoRepairEffect: Record<string, string | ReadonlyArray<string>> = {
   "projection-thread-triage": "ALTER TABLE projection_threads DROP COLUMN settle_when_idle_at",
   "project-imports": "DROP TABLE project_imports",
   "automation-hooks": "DROP TABLE automation_hooks",
+  "event-log-turn-start-index": "DROP INDEX idx_orch_events_thread_turn_starts",
 };
 
 it.effect("finds exactly the repair whose effect a database from before the records lacks", () =>

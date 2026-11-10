@@ -49,16 +49,17 @@ import {
 } from "./linkedDirectAccessRuntime";
 import { capLinkedRole } from "./linkedDirectAccess";
 import { setMobileDirectRoute } from "./linkedDirectAccessState";
+import { bindMobileClientVisibility } from "../connection/clientVisibility";
 
 /**
  * The supervisor's stream handlers a hosted node connection feeds. The
  * connection driver hands them to its primary connection factory; the hosted
  * node lifecycle builds them from the supervisor that registers the connection.
  */
-export interface HostedPrimaryConnectionDeps extends Pick<
-  OrchestrationHandlers,
-  "applyShellEvent" | "applyTerminalEvent" | "resetShellProjection"
-> {
+export interface HostedPrimaryConnectionDeps
+  extends
+    Pick<OrchestrationHandlers, "applyShellEvent" | "applyTerminalEvent" | "resetShellProjection">,
+    Required<Pick<OrchestrationHandlers, "readShellResumeSequence" | "skipShellEvent">> {
   readonly syncShellSnapshot: EnvironmentConnectionSupervisor["syncShellSnapshot"];
   readonly pushSequenceMonitor: Parameters<
     typeof createEnvironmentConnection
@@ -165,6 +166,7 @@ export function createHostedEnvironmentConnection(
   });
   // Device previews and input borrow the relay socket; its lifecycle owner manages it.
   // Video and live input ride the relay channel's frame tunnel (`hostedDeviceFrameSources`).
+  bindMobileClientVisibility();
   const client = dispatchReplay.wrap(
     createWsRpcClient(
       transport,
@@ -228,6 +230,20 @@ export function createHostedEnvironmentConnection(
     applyShellEvent: (event, eventEnvironmentId) => {
       if (!acceptsEvent()) return;
       input.applyShellEvent(event, eventEnvironmentId);
+    },
+    // A reconnect of this generation resumes the thread list it already
+    // accepted; a new generation is a new connection and starts from a snapshot.
+    readShellResumeSequence: (eventEnvironmentId) =>
+      acceptsEvent() ? input.readShellResumeSequence(eventEnvironmentId) : null,
+    skipShellEvent: (sequence, eventEnvironmentId) => {
+      if (!acceptsEvent()) return;
+      input.skipShellEvent(sequence, eventEnvironmentId);
+    },
+    // A resume the node verified (it holds every event since the list this
+    // connection accepted, and replays them next) counts as the current list.
+    onShellResumed: (eventEnvironmentId) => {
+      if (!acceptsEvent()) return;
+      markHostedSessionReady(eventEnvironmentId, generation);
     },
     syncShellSnapshot: (snapshot, eventEnvironmentId) => {
       if (!acceptsEvent()) return;

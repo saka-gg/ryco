@@ -895,7 +895,16 @@ interface PendingNativeExternalIdentityConnection {
 /** How long a Hub's refusal of minor-3 relay tickets is remembered. */
 const RELAY_TICKET_MINOR_FALLBACK_TTL_MS = 15 * 60_000;
 
+/**
+ * Announced in `hubFeatures` by a Hub that accepts the account session socket
+ * (`/v1/relay/session`) from native apps, authenticated with the session token and a
+ * DPoP proof over the upgrade (docs/hub-session-protocol.md, "Native sessions").
+ */
+export const HUB_NATIVE_SESSION_FEATURE = "native-session-v1";
+
 export class HostedHubApi {
+  #hubFeatures: ReadonlyArray<string> = [];
+  readonly #hubFeatureListeners = new Set<() => void>();
   readonly #endpoint: EndpointService;
   readonly #httpClient: HttpClientService;
   readonly #passkeyCeremony: PasskeyCeremonyService;
@@ -2697,6 +2706,7 @@ export class HostedHubApi {
       ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
     });
     if (!Array.isArray(result.nodes)) throw new HostedHubApiError("invalid_response", 502);
+    this.#recordHubFeatures(result.hubFeatures);
     return result.nodes.map((value) => {
       const node = objectValue(value);
       const grant = objectValue(node.grant);
@@ -2760,6 +2770,35 @@ export class HostedHubApi {
           })
         : decodedNode;
     });
+  }
+
+  /**
+   * What the Hub announced in its last directory answer (`hubFeatures`), for example
+   * {@link HUB_NATIVE_SESSION_FEATURE}. Empty until a directory read, and from a Hub that
+   * announces nothing.
+   */
+  hubFeatures(): ReadonlyArray<string> {
+    return this.#hubFeatures;
+  }
+
+  /** Called whenever {@link hubFeatures} changes. */
+  subscribeHubFeatures(listener: () => void): () => void {
+    this.#hubFeatureListeners.add(listener);
+    return () => this.#hubFeatureListeners.delete(listener);
+  }
+
+  #recordHubFeatures(value: unknown): void {
+    const next = Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === "string").slice(0, 32)
+      : [];
+    if (
+      next.length === this.#hubFeatures.length &&
+      next.every((feature, index) => feature === this.#hubFeatures[index])
+    ) {
+      return;
+    }
+    this.#hubFeatures = next;
+    for (const listener of this.#hubFeatureListeners) listener();
   }
 
   async renameNode(nodeId: string, label: string, signal?: AbortSignal): Promise<void> {

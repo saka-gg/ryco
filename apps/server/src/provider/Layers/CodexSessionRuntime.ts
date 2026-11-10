@@ -43,7 +43,6 @@ import {
   Ref,
   Scope,
   Schema,
-  Schedule,
   Stream,
 } from "effect";
 import * as SchemaIssue from "effect/SchemaIssue";
@@ -1426,6 +1425,13 @@ export const makeCodexSessionRuntime = (
     // newer notifications, including a follow-up that starts while a read is pending.
     const childRevisions = new Map<string, number>();
     const unsettledChildren = new Set<string>();
+    /**
+     * The polling loop sleeps while no child is unsettled and wakes when one becomes so. A child
+     * whose notifications moved its revision since the last tick is still talking: only silent
+     * ones are read (a missed settlement is what the poll is for).
+     */
+    const unsettledChildWake = yield* Queue.sliding<void>(1);
+    const polledChildRevisions = new Map<string, number>();
     const reconciledChildStatuses = new Map<string, string>();
     const closedRef = yield* Ref.make(false);
 
@@ -1936,7 +1942,10 @@ export const makeCodexSessionRuntime = (
             (notification.method === "thread/status/changed" &&
               notification.params.status.type === "active")
           ) {
-            unsettledChildren.add(childId);
+            if (!unsettledChildren.has(childId)) {
+              unsettledChildren.add(childId);
+              yield* Queue.offer(unsettledChildWake, undefined);
+            }
           }
           if (
             notification.method === "thread/closed" ||
@@ -2454,16 +2463,26 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
-    yield* Effect.suspend(() =>
-      Effect.forEach(
-        Array.from(unsettledChildren),
-        (id) => reconcileChild(id).pipe(Effect.ignore),
-        { concurrency: 4, discard: true },
-      ),
-    ).pipe(
-      Effect.repeat(Schedule.spaced(options.collabReconcileInterval ?? "5 seconds")),
-      Effect.forkIn(runtimeScope),
-    );
+    const collabReconcileInterval = options.collabReconcileInterval ?? "5 seconds";
+    yield* Effect.forever(
+      Effect.gen(function* () {
+        if (unsettledChildren.size === 0) {
+          polledChildRevisions.clear();
+          yield* Queue.take(unsettledChildWake);
+        }
+        yield* Effect.sleep(collabReconcileInterval);
+        const silent = Array.from(unsettledChildren).filter((id) => {
+          const revision = childRevisions.get(id) ?? 0;
+          const quiet = polledChildRevisions.get(id) === revision;
+          polledChildRevisions.set(id, revision);
+          return quiet;
+        });
+        yield* Effect.forEach(silent, (id) => reconcileChild(id).pipe(Effect.ignore), {
+          concurrency: 4,
+          discard: true,
+        });
+      }),
+    ).pipe(Effect.forkIn(runtimeScope));
 
     const stderrRemainderRef = yield* Ref.make("");
     // A broken grant fails every refresh: one server-log line per server and app-server.

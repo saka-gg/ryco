@@ -618,51 +618,54 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "source-control",
         },
       ),
-    [WS_METHODS.sourceControlGetChangeRequestDetail]: ({ cwd, reference, fullContent, view }) =>
+    [WS_METHODS.sourceControlGetChangeRequestDetail]: ({
+      cwd,
+      reference,
+      fullContent,
+      view,
+      fresh,
+    }) =>
       observeRpcEffect(
         WS_METHODS.sourceControlGetChangeRequestDetail,
         ownerEffect(
           WS_METHODS.sourceControlGetChangeRequestDetail,
           Effect.suspend(() => {
-            const read = sourceControlRegistry.resolve({ cwd }).pipe(
-              Effect.flatMap((provider) =>
-                provider.getChangeRequestDetail({
+            const provider = sourceControlRegistry.resolve({ cwd });
+            const detail = loadRowRevalidation.pipe(
+              Effect.flatMap((reads) =>
+                reads.readDetail({
                   cwd,
                   reference,
-                  ...(fullContent !== undefined ? { fullContent } : {}),
-                }),
-              ),
-              Effect.tap(() => refreshStateForLinkedReference({ cwd, kind: "pr", reference })),
-            );
-            if (view !== "row") return read;
-            // Passive row glyphs: every visible row polls its change request,
-            // which is several forge children each. They queue in the
-            // background lane behind the focused surfaces, and rows of the
-            // same repository share one read for a few seconds. Past that, a
-            // row is read again only when the host's fingerprint moved (see
-            // `changeRequestRowRevalidation`). While the forge is rate
-            // limiting, a row keeps its last good detail.
-            const key = JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]);
-            return loadRowRevalidation.pipe(
-              Effect.flatMap((rows) =>
-                gitWorkflow.cachedRepositoryList({
-                  cwd,
-                  key,
-                  load: read,
-                  ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
-                  lastGood: fullContent !== true,
-                  revalidate: (changes) =>
-                    rows.read({
+                  fullContent,
+                  // Passive row glyphs: every visible row polls its change request, which is
+                  // several forge children each. They queue in the background lane behind
+                  // the focused surfaces, and keep their last good detail while the forge is
+                  // rate limiting.
+                  row: view === "row",
+                  fresh: fresh === true,
+                  rowTtlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
+                  cachedRepositoryList: gitWorkflow.cachedRepositoryList,
+                  load: provider.pipe(
+                    Effect.flatMap((loaded) =>
+                      loaded.getChangeRequestDetail({
+                        cwd,
+                        reference,
+                        ...(fullContent !== undefined ? { fullContent } : {}),
+                      }),
+                    ),
+                  ),
+                  refreshLinked: (reported) =>
+                    refreshStateForLinkedReference({
                       cwd,
-                      key,
-                      changes,
-                      load: read,
-                      provider: sourceControlRegistry.resolve({ cwd }),
+                      kind: "pr",
+                      reference,
+                      ...(reported === undefined ? {} : { reported }),
                     }),
+                  provider,
                 }),
               ),
-              inBackgroundProcessLane,
             );
+            return view === "row" ? detail.pipe(inBackgroundProcessLane) : detail;
           }),
         ),
         {

@@ -290,7 +290,14 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function relayFixture(options: { readonly now?: () => number } = {}) {
+function relayFixture(
+  options: {
+    readonly now?: () => number;
+    readonly sessionStream?: ConstructorParameters<
+      typeof DesktopWorkspaceRelayManager
+    >[0]["sessionStream"];
+  } = {},
+) {
   const environmentId = EnvironmentId.make("environment-1");
   const target = {
     accountId: "account",
@@ -329,6 +336,7 @@ function relayFixture(options: { readonly now?: () => number } = {}) {
     createUpgradeSocket,
     emit,
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.sessionStream === undefined ? {} : { sessionStream: options.sessionStream }),
   });
   return {
     environmentId,
@@ -346,6 +354,25 @@ function relayFixture(options: { readonly now?: () => number } = {}) {
     manager,
   };
 }
+
+describe("desktop relay attempts on the account session socket (H3)", () => {
+  it("rides a session stream: no upgrade socket and no upgrade proof of its own", async () => {
+    const stream = { marker: "stream" };
+    const f = relayFixture({ sessionStream: () => () => stream as never });
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.createUpgradeSocket).not.toHaveBeenCalled();
+    expect(f.authority.authorizeUpgrade).not.toHaveBeenCalled();
+    expect(f.socketFactory.mock.calls[0]![0].upgrade).toEqual({ stream });
+    expect(f.socketFactory.mock.calls[0]![0].ticket).toBe("ticket");
+  });
+
+  it("opens its own socket while the session is not online", async () => {
+    const f = relayFixture({ sessionStream: () => undefined });
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.createUpgradeSocket).toHaveBeenCalled();
+    expect("socket" in f.socketFactory.mock.calls[0]![0].upgrade).toBe(true);
+  });
+});
 
 describe("desktop relay attempt ownership", () => {
   it.each(["close", "dispose"] as const)(

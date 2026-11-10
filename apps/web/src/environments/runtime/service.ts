@@ -55,8 +55,7 @@ import { markPromotedDraftThreadByRef, useComposerDraftStore } from "~/composerD
 import { useMessageQueueStore } from "~/messageQueueStore";
 import { ensureLocalApi } from "~/localApi";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
-import { createProjectSearchInvalidationQueue } from "~/rpc/projectSearchInvalidation";
-import { invalidateAllCheckpointDiffs } from "~/rpc/providerAtoms";
+import { createWebWorkspaceChangeQueue } from "~/rpc/workspaceChangeInvalidation";
 import { getPrimaryKnownEnvironment } from "../primary";
 import { issuePrimaryWebSocketToken } from "../primary/auth";
 import {
@@ -97,6 +96,7 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import {
   hasUnsentThreadWork,
+  holdsLiveThreadBody,
   isThreadNonIdle,
   selectThreadBodyUsage,
 } from "@ryco/client-runtime/state/threads/threadBodyResidency";
@@ -123,7 +123,7 @@ import {
   markStartupPhase,
   measureStartupPhase,
 } from "~/perf/startupInstrumentation";
-import { isHostedHubMode } from "~/env";
+import { isElectron, isHostedHubMode } from "~/env";
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import { isHostedEnvironmentDemanded } from "~/hostedHub/hostedConnectionCoordinator";
 import { getHostedEnvironmentSessions } from "~/hostedHub/state";
@@ -133,7 +133,8 @@ import {
   hostedEnvironmentConnectionGeneration,
   type HostedConnectionFence,
 } from "./hostedEnvironmentConnection";
-import { webFrameScheduler, webSocket } from "../../platform";
+import { webSocket } from "../../platform";
+import { readStreamBatchFallbackDelayMs, scheduleStreamBatchFrame } from "./streamBatchTiming";
 import { directNodeBrowserFrames } from "./nodeBrowserFrames";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
 /** Desktop-only, and off the boot path: loaded by the first Hub machine connection. */
@@ -146,8 +147,8 @@ function isSavedEnvironmentConnectionCancelledError(
 }
 
 let needsProviderInvalidation = false;
-// `@` search caches are invalidated per changed checkout, not globally.
-const projectSearchInvalidations = createProjectSearchInvalidationQueue();
+// File caches are invalidated per changed checkout, and diffs per changed range, not globally.
+const workspaceChanges = createWebWorkspaceChangeQueue();
 const environmentStateSink = createWebEnvironmentStateSink({
   markProviderInvalidationNeeded: () => {
     needsProviderInvalidation = true;
@@ -155,8 +156,7 @@ const environmentStateSink = createWebEnvironmentStateSink({
   },
   flushProviderInvalidation: () => {
     needsProviderInvalidation = false;
-    invalidateAllCheckpointDiffs();
-    projectSearchInvalidations.flush();
+    workspaceChanges.flush();
   },
   supervisor: getEnvironmentSupervisor,
 });
@@ -194,7 +194,7 @@ function getEnvironmentSupervisor() {
       ),
     resetProviderInvalidation: () => {
       needsProviderInvalidation = false;
-      projectSearchInvalidations.reset();
+      workspaceChanges.reset();
     },
     // Hosted connections are opened only through the lifecycle owner's
     // connect port (`connectHostedEnvironment`); the primary path only ever
@@ -217,11 +217,20 @@ function getEnvironmentSupervisor() {
       ),
     disconnectSavedEnvironment,
     waitForPrimaryShellSnapshotApplied,
+    // The Mac app keeps more saved machines than a browser tab: a third slot
+    // keeps a reachable one from waiting behind two that are asleep.
+    ...(isElectron ? { savedEnvironmentConnectConcurrency: 3 } : {}),
+    readPriorityEnvironmentIds: () => {
+      const activeEnvironmentId = useStore.getState().activeEnvironmentId;
+      return activeEnvironmentId === null ? [] : [activeEnvironmentId];
+    },
     subscribeBrowserResume: subscribeBrowserResumeReconnects,
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
       isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
     listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),
     evictThreadBodies: (threadRefs) => useStore.getState().evictThreadBodies(threadRefs),
+    // A thread reopened while its body is still held resumes after its last event.
+    holdsThreadBody: (threadRef) => holdsLiveThreadBody(useStore.getState(), threadRef),
     isThreadBodyProtected: (threadRef) =>
       hasUnsentThreadWork(threadRef, {
         queuesByThreadKey: useMessageQueueStore.getState().queuesByThreadKey,
@@ -233,6 +242,17 @@ function getEnvironmentSupervisor() {
         .syncServerThreadDetail((snapshot as { readonly thread: never }).thread, environmentId),
     // The timeline fetches a previewed activity's full payload when its row expands.
     threadWindowActivityPayloads: "preview",
+    // A very long message arrives as its head; its row reads the whole text on
+    // demand (`orchestration.getMessageText`).
+    threadWindowMessageText: "preview",
+    // The first window of a thread fills a desktop screen; the rest of the usual
+    // window follows as history pages while the thread is shown.
+    threadWindowInitialLimits: {
+      messages: 60,
+      proposedPlans: 30,
+      activities: 100,
+      checkpoints: 30,
+    },
     syncThreadWindowSnapshot: (environmentId, snapshot) =>
       useStore.getState().syncServerThreadWindow(snapshot, environmentId),
     syncThreadHistoryPage: (environmentId, threadId, page) =>
@@ -250,6 +270,7 @@ function getEnvironmentSupervisor() {
       applyEnvironmentThreadDetailEvent(event as OrchestrationEvent, environmentId),
     stateSink: environmentStateSink,
     scheduleShellFrame: scheduleStreamBatchFrame,
+    shellBatchFallbackDelayMs: readStreamBatchFallbackDelayMs,
     onShellSnapshotReceived: (environmentId) => {
       if (environmentId === getPrimaryKnownEnvironment()?.environmentId) {
         markStartupPhase("primary-shell-snapshot-received");
@@ -656,7 +677,7 @@ function applyRecoveredEventBatch(
   );
 
   if (batchEffects.needsProviderInvalidation) {
-    projectSearchInvalidations.noteEvents(environmentId, events);
+    workspaceChanges.note(environmentId, batchEffects);
     environmentStateSink.markProviderInvalidationNeeded();
   }
 
@@ -700,19 +721,6 @@ function applyRecoveredEventBatch(
   getEnvironmentSupervisor().reconcileThreadDetailSubscriptionEvictionForEnvironment(environmentId);
 }
 
-/**
- * Schedules a stream batch's commit (thread-detail events, shell items). A
- * hidden document paints nothing and throttles frames and timers, so it only
- * coalesces the current task's burst instead of waiting for a frame.
- */
-function scheduleStreamBatchFrame(callback: () => void): void {
-  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-    queueMicrotask(callback);
-    return;
-  }
-  webFrameScheduler.scheduleFrame(callback);
-}
-
 // Thread-detail events arrive one WebSocket message each (a streaming delta
 // every ~32 ms per active thread, bursts on replay). Batch them per animation
 // frame so N messages become one store commit and one round of derived UI
@@ -722,6 +730,7 @@ function scheduleStreamBatchFrame(callback: () => void): void {
 const threadDetailEventBatcher = createEnvironmentEventBatcher<OrchestrationEvent>({
   apply: (environmentId, events) => applyRecoveredEventBatch(events, environmentId),
   scheduleFrame: scheduleStreamBatchFrame,
+  fallbackDelayMs: readStreamBatchFallbackDelayMs,
 });
 
 export function applyEnvironmentThreadDetailEvent(
@@ -747,8 +756,9 @@ function createEnvironmentConnectionHandlers(
   options: {
     /**
      * Resume the shell after a reconnect instead of taking a fresh snapshot.
-     * Direct connections only: a hosted session must accept a current snapshot
-     * before it regains mutation authority.
+     * A fenced (hosted) connection resumes only the list its own generation
+     * accepted, and a resume the node verified counts as its current list: the
+     * session regains mutation authority as it would from a snapshot.
      */
     readonly resumeShell?: boolean;
   } = {},
@@ -769,15 +779,20 @@ function createEnvironmentConnectionHandlers(
       .ready(environmentId, refreshGeneration, isAuthoritativelyReady)
       .catch(() => undefined);
   };
-  const resumeShell = options.resumeShell === true && fence === null;
   return {
-    ...(resumeShell
+    ...(options.resumeShell === true
       ? {
           readShellResumeSequence: (environmentId: EnvironmentId) =>
-            getEnvironmentSupervisor().readShellProjectionSequence(environmentId),
-          skipShellEvent: (sequence: number, environmentId: EnvironmentId) =>
-            getEnvironmentSupervisor().skipShellEvent(sequence, environmentId),
+            acceptsEvent()
+              ? getEnvironmentSupervisor().readShellProjectionSequence(environmentId)
+              : null,
+          skipShellEvent: (sequence: number, environmentId: EnvironmentId) => {
+            if (!acceptsEvent()) return;
+            getEnvironmentSupervisor().skipShellEvent(sequence, environmentId);
+          },
           onShellResumed: (environmentId: EnvironmentId) => {
+            if (!acceptsEvent()) return;
+            fence?.markReady(environmentId);
             completeQueryRefresh(environmentId);
           },
         }
@@ -1235,7 +1250,8 @@ export async function connectHostedEnvironment(
       node,
       generation,
       sessions,
-      handlersFor: (fence) => createEnvironmentConnectionHandlers(fence, environmentId),
+      handlersFor: (fence) =>
+        createEnvironmentConnectionHandlers(fence, environmentId, { resumeShell: true }),
       isDemanded: () => isHostedEnvironmentDemanded(environmentId),
     }),
   );
@@ -1360,7 +1376,8 @@ export async function connectDesktopWorkspaceEnvironment(input: {
           descriptor: payload.environment,
         });
       },
-      ...createEnvironmentConnectionHandlers(),
+      // A relay reconnect resumes the list this connection accepted.
+      ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
     }),
   );
   void loadDesktopHubLinkedRoutes()

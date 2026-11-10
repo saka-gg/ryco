@@ -99,6 +99,8 @@ interface PreparedTerminalOpen {
   readonly dimensions: TerminalDimensions;
   readonly promise: Promise<TerminalSessionSnapshot>;
   readonly createdAt: number;
+  /** Holds the terminal's output from before the open's snapshot until a surface takes over. */
+  readonly releaseOutput: () => void;
 }
 
 /**
@@ -146,6 +148,14 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
   const api = readEnvironmentApi(input.environmentId);
   if (!api) return;
   const dimensions = readLastTerminalDimensions(input.layout);
+  if (existing) {
+    preparedTerminalOpens.delete(key);
+    existing.releaseOutput();
+  }
+  // Held before the open, so the open attaches the output ahead of its snapshot.
+  const releaseOutput =
+    api.terminal.attachOutput?.({ threadId: input.threadId, terminalId: input.terminalId }) ??
+    (() => undefined);
   const promise = api.terminal.open({
     threadId: input.threadId,
     terminalId: input.terminalId,
@@ -155,11 +165,61 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
     rows: dimensions.rows,
     env: input.launch.runtimeEnv,
   });
-  const entry: PreparedTerminalOpen = { launchKey, dimensions, promise, createdAt: Date.now() };
+  registerPreparedTerminalOpen(key, {
+    launchKey,
+    dimensions,
+    promise,
+    createdAt: Date.now(),
+    releaseOutput,
+  });
+}
+
+function registerPreparedTerminalOpen(key: string, entry: PreparedTerminalOpen): void {
   preparedTerminalOpens.set(key, entry);
-  promise.catch(() => {
-    // A failed prepare must not be handed out; the terminal opens on its own.
-    if (preparedTerminalOpens.get(key) === entry) preparedTerminalOpens.delete(key);
+  const discard = () => {
+    if (preparedTerminalOpens.get(key) !== entry) return;
+    preparedTerminalOpens.delete(key);
+    entry.releaseOutput();
+  };
+  // A failed prepare must not be handed out; the terminal opens on its own.
+  entry.promise.catch(discard);
+  // Nobody took it in time: a later surface opens on its own and holds the output itself.
+  setTimeout(discard, Math.max(0, entry.createdAt + PREPARED_TERMINAL_OPEN_TTL_MS - Date.now()));
+}
+
+/**
+ * Hands a full open that is still in flight back to the next mount of the same terminal. A
+ * terminal that unmounts before its answer (a pane focus change, React's development double
+ * run) would otherwise make its successor download the whole history again. The output stays
+ * held from the original open's snapshot on, so the successor replays what arrived meanwhile.
+ */
+export function returnPreparedTerminalOpen(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly terminalId: string;
+  readonly launchKey: string;
+  readonly dimensions: TerminalDimensions;
+  readonly promise: Promise<TerminalSessionSnapshot>;
+  readonly createdAt: number;
+}): void {
+  if (Date.now() - input.createdAt >= PREPARED_TERMINAL_OPEN_TTL_MS) return;
+  const key = preparedTerminalKey(input.environmentId, input.threadId, input.terminalId);
+  const existing = preparedTerminalOpens.get(key);
+  if (existing) {
+    preparedTerminalOpens.delete(key);
+    existing.releaseOutput();
+  }
+  const releaseOutput =
+    readEnvironmentApi(input.environmentId)?.terminal.attachOutput?.({
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+    }) ?? (() => undefined);
+  registerPreparedTerminalOpen(key, {
+    launchKey: input.launchKey,
+    dimensions: input.dimensions,
+    promise: input.promise,
+    createdAt: input.createdAt,
+    releaseOutput,
   });
 }
 
@@ -172,21 +232,25 @@ export function takePreparedTerminalOpen(input: {
 }): {
   readonly promise: Promise<TerminalSessionSnapshot>;
   readonly dimensions: TerminalDimensions;
+  readonly createdAt: number;
 } | null {
   const key = preparedTerminalKey(input.environmentId, input.threadId, input.terminalId);
   const entry = preparedTerminalOpens.get(key);
   if (!entry) return null;
   preparedTerminalOpens.delete(key);
+  // The taking surface holds the output itself from before it takes this.
+  entry.releaseOutput();
   if (
     entry.launchKey !== input.launchKey ||
     Date.now() - entry.createdAt >= PREPARED_TERMINAL_OPEN_TTL_MS
   ) {
     return null;
   }
-  return { promise: entry.promise, dimensions: entry.dimensions };
+  return { promise: entry.promise, dimensions: entry.dimensions, createdAt: entry.createdAt };
 }
 
 export function resetPreparedTerminalOpensForTests(): void {
+  for (const entry of preparedTerminalOpens.values()) entry.releaseOutput();
   preparedTerminalOpens.clear();
   storedDimensions = null;
 }

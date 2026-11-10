@@ -58,6 +58,10 @@
       "types": "./src/htmlRender.ts",
       "import": "./src/htmlRender.ts"
     },
+    "./htmlRenderZoom": {
+      "types": "./src/htmlRenderZoom.ts",
+      "import": "./src/htmlRenderZoom.ts"
+    },
     "./htmlRenderToolPresentation": {
       "types": "./src/htmlRenderToolPresentation.ts",
       "import": "./src/htmlRenderToolPresentation.ts"
@@ -125,6 +129,10 @@
     "./relayMessageChunks": {
       "types": "./src/relayMessageChunks.ts",
       "import": "./src/relayMessageChunks.ts"
+    },
+    "./threadReadCachePatch": {
+      "types": "./src/threadReadCachePatch.ts",
+      "import": "./src/threadReadCachePatch.ts"
     },
     "./relayPayloadCompression": {
       "types": "./src/relayPayloadCompression.ts",
@@ -217,6 +225,10 @@
     "./gitDiffPaths": {
       "types": "./src/gitDiffPaths.ts",
       "import": "./src/gitDiffPaths.ts"
+    },
+    "./gitPatchFiles": {
+      "types": "./src/gitPatchFiles.ts",
+      "import": "./src/gitPatchFiles.ts"
     },
     "./gitPointer": {
       "types": "./src/gitPointer.ts",

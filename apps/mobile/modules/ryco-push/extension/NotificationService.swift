@@ -6,7 +6,8 @@ import UserNotifications
 /// The Hub sends every alert with the same generic text and a payload sealed
 /// to this device's push key. This opens it with the key the app keeps in the
 /// shared keychain group and shows the thread's title and what happened, the
-/// way the app's own alerts do. On any failure, or when time runs out, the
+/// way the app's own alerts do, with the question or the command when the node sent an excerpt,
+/// which it also leaves for the app (`AlertExcerptStore`). On any failure, or when time runs out, the
 /// generic text stays, without any data the Hub put beside it, and a tap just
 /// opens the app.
 final class NotificationService: UNNotificationServiceExtension {
@@ -57,12 +58,32 @@ final class NotificationService: UNNotificationServiceExtension {
       let mutable = content.mutableCopy() as? UNMutableNotificationContent
     else { return nil }
     mutable.title = alert.title
-    mutable.body = alert.body
+    if let line = alert.excerptLine {
+      // The question or the command, where iOS shows previews (Settings > Notifications).
+      mutable.subtitle = alert.body
+      mutable.body = line
+      // The app shows the thread's card from it before it reaches the machine.
+      if let record = PushAlertOpener.excerptRecord(alert) {
+        try? AlertExcerptStore.fromMainBundle()?.write(
+          record, environmentId: alert.environmentId, threadId: alert.threadId)
+      }
+    } else {
+      mutable.body = alert.body
+    }
     mutable.threadIdentifier = alert.threadIdentifier
     // Approve / Deny, or Reply / Open; the app registered the categories.
     mutable.categoryIdentifier = alert.categoryIdentifier
     if !record.sound { mutable.sound = nil }
     mutable.userInfo = PushAlertOpener.userInfo(content.userInfo, alert: alert)
+    if let count = alert.badgeCount { mutable.badge = badge(environmentId: alert.environmentId, count: count) }
     return mutable
+  }
+
+  /// The badge with this machine's new count beside every other machine's last known one.
+  private static func badge(environmentId: String, count: Int64) -> NSNumber? {
+    guard let store = PushBadgeStore.fromMainBundle() else { return nil }
+    let next = PushAlertOpener.badge(counts: store.read(), environmentId: environmentId, count: count)
+    try? store.write(next.counts)
+    return NSNumber(value: next.total)
   }
 }

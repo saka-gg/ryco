@@ -57,6 +57,8 @@ function supervisorHandlers(target: EnvironmentConnectionSupervisor): HostedPrim
   return {
     pushSequenceMonitor: noPushSequenceMonitor,
     resetShellProjection: (environmentId) => target.resetShellProjection(environmentId),
+    readShellResumeSequence: (environmentId) => target.readShellProjectionSequence(environmentId),
+    skipShellEvent: (sequence, environmentId) => target.skipShellEvent(sequence, environmentId),
     applyShellEvent: (event, environmentId) => target.applyShellEvent(event, environmentId),
     applyTerminalEvent: (event, environmentId) => applyMobileTerminalEvent(event, environmentId),
     syncShellSnapshot: (snapshot, environmentId, callbacks) =>
@@ -168,12 +170,16 @@ export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
     useStore.getState().setActiveEnvironmentId(environmentId);
   },
   connectEnvironment: (node, generation) => {
-    // Hosted connections wait for the cached roster and projections.
-    if (mobileRuntimeStartupBarrier.isHydrated()) {
+    // The relay handshake starts as soon as the saved-machine catalog is
+    // read (a machine the direct plane owns is never reached through the
+    // relay), alongside the launch read of the snapshot cache: the threads
+    // store lets live data win that race, as on the direct plane, and the
+    // session still needs its own accepted snapshot before it may mutate.
+    if (mobileRuntimeStartupBarrier.isDirectReady()) {
       openEnvironmentConnection(node, generation);
       return;
     }
-    mobileRuntimeStartupBarrier.runAfterHydration(
+    mobileRuntimeStartupBarrier.runAfterDirectReady(
       () => openEnvironmentConnection(node, generation),
       (error: unknown) => {
         console.warn("[connection] hosted startup failed", error);
@@ -194,4 +200,17 @@ export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
 /** Test seam: forget every environment's connection. */
 export function resetMobileHostedEnvironmentConnectionsForTests(): void {
   environmentConnections.clear();
+}
+
+/**
+ * Whether the hosted connection of `generation` answered a heartbeat recently,
+ * for a return inside a background stay (`createHostedBackgroundStayPolicy`).
+ */
+export function readHostedConnectionHeartbeat(
+  environmentId: EnvironmentId,
+  generation: number,
+): "fresh" | "stale" | "missing" {
+  const current = environmentConnections.get(environmentId);
+  if (current === undefined || current.generation !== generation) return "missing";
+  return current.connection.client.isHeartbeatFresh() ? "fresh" : "stale";
 }

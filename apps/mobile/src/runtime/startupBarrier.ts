@@ -17,7 +17,11 @@
  *   cache-provenance. Mutation authority is unaffected: a direct connection
  *   still grants it only after its own fresh shell snapshot.
  * - **hydrated**: the cached node roster and every environment projection
- *   have been read. Hosted work stays behind this stage.
+ *   have been read. The hosted primary connection and the launch surface wait
+ *   for it. Hub machines' own connections (`hostedHub/nodeLifecycle.ts`)
+ *   start at the direct stage instead, under the same live-wins rule: they
+ *   need only the catalog, so the relay never reaches a machine the direct
+ *   plane owns.
  *
  * The hydration callback marks direct-ready itself; if it never does (a
  * failure before the catalog step), settling hydration opens both stages.
@@ -55,6 +59,8 @@ export interface MobileRuntimeStartupBarrier {
     work: () => void | Promise<void>,
     onFailure: (error: unknown) => void,
   ) => void;
+  /** Whether the current generation's direct stage is open (or hydration has settled). */
+  readonly isDirectReady: () => boolean;
   /** Whether the current generation's hydration has settled. */
   readonly isHydrated: () => boolean;
   readonly reset: () => void;
@@ -65,6 +71,7 @@ export function createMobileRuntimeStartupBarrier(): MobileRuntimeStartupBarrier
   let directReady = createDeferred();
   let ready = createDeferred();
   let hydrated = false;
+  let directReadyOpen = false;
   let hydration: Promise<void> | null = null;
 
   const beginHydration = (
@@ -76,7 +83,9 @@ export function createMobileRuntimeStartupBarrier(): MobileRuntimeStartupBarrier
     const stageDirectReady = directReady;
     const stages: MobileRuntimeHydrationStages = {
       markDirectReady: () => {
-        if (generation === scheduledGeneration) stageDirectReady.resolve();
+        if (generation !== scheduledGeneration) return;
+        directReadyOpen = true;
+        stageDirectReady.resolve();
       },
     };
     const stageReady = ready;
@@ -88,6 +97,7 @@ export function createMobileRuntimeStartupBarrier(): MobileRuntimeStartupBarrier
       .then(() => {
         if (generation !== scheduledGeneration) return;
         hydrated = true;
+        directReadyOpen = true;
         stageDirectReady.resolve();
         stageReady.resolve();
       });
@@ -115,6 +125,7 @@ export function createMobileRuntimeStartupBarrier(): MobileRuntimeStartupBarrier
     directReady = createDeferred();
     ready = createDeferred();
     hydrated = false;
+    directReadyOpen = false;
     hydration = null;
   };
 
@@ -122,6 +133,7 @@ export function createMobileRuntimeStartupBarrier(): MobileRuntimeStartupBarrier
     beginHydration,
     runAfterDirectReady: runAfter(() => directReady),
     runAfterHydration: runAfter(() => ready),
+    isDirectReady: () => directReadyOpen,
     isHydrated: () => hydrated,
     reset,
   };

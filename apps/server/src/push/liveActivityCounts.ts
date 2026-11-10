@@ -136,6 +136,39 @@ export interface SentActivity {
   readonly held: boolean;
   /** Send again whatever the counts: the device was in front, or the Hub asked to wait. */
   readonly resend: boolean;
+  /**
+   * The Hub started a card for this run of work (it answered `started`): no second start is
+   * asked for until the counts reach zero.
+   */
+  readonly started?: boolean | undefined;
+}
+
+/** One device an activity pass signals. */
+export interface ActivityRecipient {
+  readonly enrollmentId: string;
+  /**
+   * Ask the Hub to start a card (`docs/live-activity-push.md`): a turn began here while, as far
+   * as this node knows, the device shows no card that takes pushes.
+   */
+  readonly start: boolean;
+}
+
+/**
+ * Whether a device's entry asks the Hub to start a card: more threads run than the device last
+ * heard of from this node, the Hub's last answer said it shows no card (`no-token`), and no start
+ * was granted for this run of work yet. A device this node has told nothing since it started is
+ * never asked for: a restart is not a turn beginning.
+ */
+export function wantsActivityStart(
+  previous: SentActivity | undefined,
+  counts: PushActivityCounts,
+): boolean {
+  return (
+    previous !== undefined &&
+    !previous.held &&
+    previous.started !== true &&
+    counts.running > previous.counts.running
+  );
 }
 
 /**
@@ -150,8 +183,8 @@ export function planActivityRecipients(input: {
   readonly sent: ReadonlyMap<string, SentActivity>;
   readonly counts: PushActivityCounts;
   readonly nowMs: number;
-}): ReadonlyArray<ReadonlyArray<string>> {
-  const recipients: string[] = [];
+}): ReadonlyArray<ReadonlyArray<ActivityRecipient>> {
+  const recipients: ActivityRecipient[] = [];
   for (const registration of input.registrations) {
     if (input.isForeground(registration.enrollmentId)) continue;
     const previous = input.sent.get(registration.enrollmentId);
@@ -163,7 +196,12 @@ export function planActivityRecipients(input: {
         !activityCountsZero(input.counts) &&
         // Passes run on their own timers: a pass a little early still refreshes.
         input.nowMs - previous.atMs >= ACTIVITY_REFRESH_MS - ACTIVITY_MIN_INTERVAL_MS);
-    if (due) recipients.push(registration.enrollmentId);
+    if (due) {
+      recipients.push({
+        enrollmentId: registration.enrollmentId,
+        start: wantsActivityStart(previous, input.counts),
+      });
+    }
   }
   return chunkForSignals(recipients);
 }

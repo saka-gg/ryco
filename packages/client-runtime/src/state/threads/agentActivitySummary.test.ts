@@ -5,6 +5,7 @@ import { EnvironmentId, ProjectId, ThreadId, TurnId } from "@ryco/contracts";
 import {
   AGENT_ACTIVITY_RECENT_RESULT_MS,
   agentActivityThreadFields,
+  countNeedsYouByEnvironment,
   liveThreadRowState,
   summarizeAgentActivity,
   type AgentActivityThread,
@@ -33,6 +34,26 @@ const thread = (overrides: Partial<AgentActivityThread> = {}): AgentActivityThre
     ...overrides,
   };
 };
+
+describe("countNeedsYouByEnvironment", () => {
+  it("counts what waits on the person per machine, by the summary's rule", () => {
+    const threads = [
+      thread({ state: "needs-input", attention: "approval" }),
+      thread({ state: "needs-input", attention: "input" }),
+      thread({ environmentId: "other", state: "needs-input", attention: "input" }),
+      thread({ environmentId: "other" }),
+      // A machine that is not live counts nothing.
+      thread({ environmentId: "gone", live: false, state: "needs-input", attention: "input" }),
+    ];
+    expect(countNeedsYouByEnvironment(threads, NOW)).toEqual(
+      new Map([
+        ["env", 2],
+        ["other", 1],
+      ]),
+    );
+    expect(summarizeAgentActivity(threads, NOW).counts.needsYou).toBe(3);
+  });
+});
 
 describe("summarizeAgentActivity", () => {
   it("puts what waits on you first, in the Inbox's order, then running work", () => {

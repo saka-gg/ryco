@@ -167,4 +167,36 @@ describe("local changes controller", () => {
     expect(c.getSnapshot()).toMatchObject({ data: null, isApplying: false });
     expect(apply).toHaveBeenCalledTimes(1);
   });
+  it("sends the held revision and keeps the held review on unchanged (D5)", async () => {
+    const held = snapshot("a".repeat(64));
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(held)
+      .mockResolvedValueOnce({
+        ...held,
+        staged: { patch: "", files: [] },
+        unstaged: { patch: "", files: [] },
+        unchanged: true,
+      });
+    const c = createLocalChangesController({ cwd: "/repo", read, apply: vi.fn() });
+    await c.refresh();
+    // Backgrounded: the review stays, only a read in flight is dropped.
+    c.invalidate(false);
+    expect(c.getSnapshot().data).toBe(held);
+    await c.refresh();
+    expect(read.mock.calls).toEqual([[undefined], ["a".repeat(64)]]);
+    expect(c.getSnapshot().data).toBe(held);
+  });
+  it("reads in full when unchanged names a review it does not hold", async () => {
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(snapshot("first"))
+      .mockResolvedValueOnce({ ...snapshot("other"), unchanged: true })
+      .mockResolvedValueOnce(snapshot("second"));
+    const c = createLocalChangesController({ cwd: "/repo", read, apply: vi.fn() });
+    await c.refresh();
+    await c.refresh();
+    expect(read.mock.calls).toEqual([[undefined], ["first"], []]);
+    expect(c.getSnapshot().data?.revision).toBe("second");
+  });
 });

@@ -16,6 +16,7 @@ vi.mock("~/environmentApi", () => ({
 }));
 
 import { hostedHubStore } from "~/hostedHub/state";
+import { notifyCheckoutFilesChanged } from "./checkoutFileChanges";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import {
   canResolveProjectSearchEntriesLocally,
@@ -349,6 +350,28 @@ describe("projectAtoms", () => {
 
     searchEntries.mockReturnValueOnce(createDeferred<ProjectSearchEntriesResult>().promise);
     invalidateProjectSearchEntries({ cwd: other });
+    await flush();
+
+    expect(searchEntries).toHaveBeenCalledTimes(3);
+    expect(searchEntries).toHaveBeenLastCalledWith({ cwd: other, query: "b", limit: 80 });
+  });
+
+  it("invalidates the changed checkout when the runtime reports changed files", async () => {
+    retainProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: CWD, limit: 80 });
+    const other = "/tmp/other";
+    retainProjectSearchEntriesScope({ environmentId: ENVIRONMENT_ID, cwd: other, limit: 80 });
+
+    searchEntries
+      .mockReturnValueOnce(Promise.resolve(result("a.ts")))
+      .mockReturnValueOnce(Promise.resolve(result("b.ts")));
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: CWD, query: "a" });
+    requestProjectSearchEntries({ environmentId: ENVIRONMENT_ID, cwd: other, query: "b" });
+    await flush();
+    expect(searchEntries).toHaveBeenCalledTimes(2);
+
+    searchEntries.mockReturnValueOnce(createDeferred<ProjectSearchEntriesResult>().promise);
+    notifyCheckoutFilesChanged(OTHER_ENVIRONMENT_ID, null);
+    notifyCheckoutFilesChanged(ENVIRONMENT_ID, other);
     await flush();
 
     expect(searchEntries).toHaveBeenCalledTimes(3);

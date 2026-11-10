@@ -8,8 +8,10 @@ import type { EnvironmentId } from "@ryco/contracts";
 
 import { evictCheckpointDiffsForThread } from "../rpc/checkpointDiffAtoms";
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "../state/composerDraftStore";
+import { terminalHistoryMirrors } from "../features/terminal/terminalHistoryMirrors";
 import { useTerminalStateStore } from "../state/terminalStateStore";
 import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
+import { isEnvironmentShellLive } from "@ryco/client-runtime/state/threads/threadBodyResidency";
 import {
   selectBootstrapCompleteForEnvironment,
   selectEnvironmentState,
@@ -45,6 +47,7 @@ export function reconcileMobileTerminalState(): void {
     }
   }
   terminals.removeOrphanedTerminalStates(active);
+  terminalHistoryMirrors.prune((key) => active.has(key.split("\u0000")[0] ?? key));
 }
 
 // The supervisor methods the sink drives from live shell events (§4). Threaded in
@@ -163,6 +166,8 @@ export function createMobileEnvironmentStateSink(
       projectionChanged(environmentId);
     },
     // No mobile UI store; terminal state follows the listed threads.
+    isEnvironmentShellLive: (environmentId) =>
+      isEnvironmentShellLive(useStore.getState(), environmentId),
     reconcileSnapshotDerivedState: () => reconcileMobileTerminalState(),
     syncProjects: () => undefined,
     syncThreads: () => undefined,

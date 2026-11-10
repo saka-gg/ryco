@@ -21,6 +21,9 @@ import { useStore } from "~/store";
 
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
+/** The task store, for the Desktop's saved task lists (loaded on demand). */
+export { useLocalTasksStore } from "@ryco/client-runtime/state/tasks";
+
 /**
  * The data side of the Tasks page and the sidebar badge: one environment's
  * tasks kept live in `useLocalTasksStore` (client-runtime `state/tasks`)

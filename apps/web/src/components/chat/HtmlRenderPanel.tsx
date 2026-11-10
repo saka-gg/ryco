@@ -6,7 +6,9 @@ import { useState, type ReactNode } from "react";
 import { parseWorkspaceRenderKey } from "../../workspaceRouteSearch";
 import { Button } from "../ui/button";
 import { useHtmlRenderMessageSend } from "./htmlRenderMessages";
-import { HtmlRenderFullView, HtmlRenderViewActions } from "./HtmlRenderView";
+import { HtmlRenderFullView, HtmlRenderViewActions } from "./HtmlRenderFullView";
+import { useHtmlRenderZoom } from "./HtmlRenderZoom";
+import { htmlRenderZoomKey } from "./htmlRenderZoomStore";
 import { useHtmlRenderSource } from "./useHtmlRenderSource";
 import type { WorkspaceHtmlRender } from "./useWorkspaceHtmlRender";
 
@@ -33,8 +35,21 @@ function HtmlRenderPanelPage(props: {
     title,
     enabled: props.canSendMessages,
   });
+  const zoom = useHtmlRenderZoom(
+    htmlRenderZoomKey({
+      environmentId: props.environmentId,
+      threadId: props.threadId,
+      messageId: props.messageId,
+      attachmentId: attachment.id,
+    }),
+  );
   return (
-    <div data-html-render-panel="" className="flex min-h-0 flex-1 flex-col">
+    // Zoom keys anywhere in the tab, outside the page itself (which reports its own).
+    <div
+      data-html-render-panel=""
+      className="flex min-h-0 flex-1 flex-col"
+      onKeyDown={zoom.onKeyDown}
+    >
       <div className="flex shrink-0 items-center gap-2 border-b border-border/60 py-2 ps-4 pe-3">
         {/* The tab already names the page; the heading is for assistive tech. */}
         <h2 className="sr-only">{title}</h2>
@@ -44,6 +59,7 @@ function HtmlRenderPanelPage(props: {
           title={title}
           showSource={showSource}
           onShowSourceChange={setShowSource}
+          zoom={zoom}
         />
       </div>
       {/* Escape inside the page stays with the page: this is a tab, not a dialog. */}
@@ -54,6 +70,7 @@ function HtmlRenderPanelPage(props: {
         showSource={showSource}
         className="px-4 pt-3"
         onSendMessage={onSendMessage}
+        zoom={zoom}
       />
     </div>
   );

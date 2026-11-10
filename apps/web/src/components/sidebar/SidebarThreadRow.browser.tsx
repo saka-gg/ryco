@@ -6,7 +6,10 @@ import { render } from "vitest-browser-react";
 
 import { DraftId } from "../../composerDraftStore";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
-import { resetGitStatusStateForTests } from "../../lib/gitStatusState";
+import {
+  GIT_STATUS_UNWATCH_LINGER_MS,
+  resetGitStatusStateForTests,
+} from "../../lib/gitStatusState";
 import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { SidebarThreadRow, type SidebarThreadRowProps } from "./SidebarThreadRow";
 import { SOURCE_CONTROL_VISIBILITY_HYSTERESIS } from "./hooks/useHasIntersectedViewport";
@@ -220,6 +223,9 @@ describe("SidebarThreadRow git status demand", () => {
       expect(rpc.unsubscribe).not.toHaveBeenCalled();
 
       await mounted.rerender(<Rows />);
+      // The status stream outlives its last watcher briefly before it closes.
+      await flushVisibilityUpdates();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
       await vi.waitFor(() => expect(rpc.unsubscribe).toHaveBeenCalledTimes(1));
 
       RowIntersectionObserver.emit("first", true);
@@ -227,6 +233,7 @@ describe("SidebarThreadRow git status demand", () => {
       await vi.waitFor(() => expect(rpc.onStatus).toHaveBeenCalledTimes(2));
     } finally {
       await mounted.unmount();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
     }
     expect(rpc.unsubscribe).toHaveBeenCalledTimes(2);
   });
@@ -258,9 +265,11 @@ describe("SidebarThreadRow git status demand", () => {
       expect(rpc.unsubscribe).not.toHaveBeenCalled();
       expect(rpc.onStatus).toHaveBeenCalledTimes(1);
 
-      // Out for the whole window: the stream is released.
+      // Out for the whole window: the stream is released (after the status linger).
       RowIntersectionObserver.emit("first", false);
       vi.advanceTimersByTime(SOURCE_CONTROL_VISIBILITY_HYSTERESIS.exitDelayMs);
+      await flushVisibilityUpdates();
+      vi.advanceTimersByTime(GIT_STATUS_UNWATCH_LINGER_MS);
       await vi.waitFor(() => expect(rpc.unsubscribe).toHaveBeenCalledTimes(1));
     } finally {
       await mounted.unmount();

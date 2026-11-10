@@ -14,6 +14,8 @@ import type {
   ThreadLocalServerList,
   ProviderSignInWireEvent,
   ServerSettingsPatch,
+  TerminalRef,
+  TerminalWireEvent,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
@@ -27,6 +29,7 @@ import {
 } from "@ryco/contracts/orchestration";
 import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import { WS_METHODS } from "@ryco/contracts/rpc";
+import { DEFAULT_TERMINAL_ID } from "@ryco/contracts/terminal";
 import {
   assertUsageContractVersion,
   isUsageContractRejection,
@@ -38,6 +41,8 @@ import * as Stream from "effect/Stream";
 
 import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
+import { readClientVisibility, subscribeClientVisibility } from "./clientVisibility.ts";
+import { createTerminalOutputScope } from "./terminalOutputScope.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
 import type { ProjectCopyRpcMethods } from "./projectCopyRpcClient.ts";
@@ -52,6 +57,11 @@ import {
   restoreSnapshotCatalogs,
   type ProviderCatalog,
 } from "./providerCatalogCache.ts";
+import {
+  type ConfigSectionValue,
+  configSectionCache,
+  restoreSnapshotSections,
+} from "./configSectionCache.ts";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -80,8 +90,18 @@ export interface ShellSubscriptionOptions extends ResumableSubscriptionOptions {
   readonly archivedThreads?: "stub";
 }
 
-/** Options for a thread subscription; see `OrchestrationThreadHistoryRecoveryMode`. */
-export interface ThreadSubscriptionOptions extends ResumableSubscriptionOptions {
+/**
+ * Options for a thread subscription; see `OrchestrationThreadHistoryRecoveryMode`.
+ * Its resume point may be a promise: the request then waits for it, read again
+ * at every (re)subscription. A connection whose resume must wait for its session
+ * to accept a fresh thread list (a Hub relay) answers that way; `signal` aborts
+ * when the attempt is given up, and the promise must not reject.
+ */
+export interface ThreadSubscriptionOptions extends Omit<
+  ResumableSubscriptionOptions,
+  "resumeFromSequence"
+> {
+  readonly resumeFromSequence?: (signal: AbortSignal) => number | null | PromiseLike<number | null>;
   /** Read at every (re)subscription: whether an open view needs the thread now. */
   readonly historyRecovery?: () => OrchestrationThreadHistoryRecoveryMode;
 }
@@ -95,17 +115,47 @@ export interface VcsStatusStreamMeta {
   readonly remoteKnown: boolean;
 }
 
-const resumeInput = (options: ResumableSubscriptionOptions | undefined) => {
-  const resumeFromSequence = options?.resumeFromSequence?.() ?? null;
-  return resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
-};
+const resumePointInput = (resumeFromSequence: number | null) =>
+  resumeFromSequence !== null && resumeFromSequence > 0 ? { resumeFromSequence } : {};
 
-const threadSubscriptionInput = (options: ThreadSubscriptionOptions | undefined) => {
-  const historyRecovery = options?.historyRecovery?.();
-  return {
-    ...resumeInput(options),
-    ...(historyRecovery === undefined ? {} : { historyRecovery }),
+const resumeInput = (options: ResumableSubscriptionOptions | undefined) =>
+  resumePointInput(options?.resumeFromSequence?.() ?? null);
+
+const isPromiseLike = <A>(value: A | PromiseLike<A>): value is PromiseLike<A> =>
+  typeof value === "object" && value !== null && "then" in value;
+
+/**
+ * Opens a thread stream once its resume point is known: at once for a plain
+ * value, after the promise settles otherwise. The history mode is read when
+ * the request goes out.
+ */
+const threadSubscriptionStream = <A>(
+  options: ThreadSubscriptionOptions | undefined,
+  open: (input: {
+    readonly resumeFromSequence?: number;
+    readonly historyRecovery?: OrchestrationThreadHistoryRecoveryMode;
+  }) => Stream.Stream<A, Error, never>,
+): Stream.Stream<A, Error, never> => {
+  const openFrom = (resumeFromSequence: number | null) => {
+    const historyRecovery = options?.historyRecovery?.();
+    return open({
+      ...resumePointInput(resumeFromSequence),
+      ...(historyRecovery === undefined ? {} : { historyRecovery }),
+    });
   };
+  const resumeFromSequence = options?.resumeFromSequence;
+  if (resumeFromSequence === undefined) return openFrom(null);
+  // A stream attempt that is given up interrupts the wait; the signal tells
+  // the caller to stop waiting too.
+  const controller = new AbortController();
+  const point = resumeFromSequence(controller.signal);
+  if (!isPromiseLike(point)) return openFrom(point);
+  return Stream.unwrap(
+    Effect.promise((signal) => {
+      signal.addEventListener("abort", () => controller.abort(), { once: true });
+      return point;
+    }).pipe(Effect.map(openFrom)),
+  );
 };
 
 const transportSubscribeOptions = (
@@ -178,7 +228,21 @@ export interface WsRpcClient {
     readonly clear: RpcUnaryMethod<typeof WS_METHODS.terminalClear>;
     readonly restart: RpcUnaryMethod<typeof WS_METHODS.terminalRestart>;
     readonly close: RpcUnaryMethod<typeof WS_METHODS.terminalClose>;
-    readonly onEvent: RpcStreamMethod<typeof WS_METHODS.subscribeTerminalEvents>;
+    readonly onEvent: (
+      listener: (event: TerminalWireEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    /**
+     * Shows `ref` on this connection until the returned release: `open` then attaches its output
+     * before the snapshot, and a node that scopes output keeps sending it. Without a hold a
+     * scoping node sends only the terminal's metadata.
+     */
+    readonly attachOutput: (ref: TerminalRef) => () => void;
+    /**
+     * Whether output of terminals nobody held may have stayed away: the node acknowledged scoped
+     * output on this or an earlier connection to the environment.
+     */
+    readonly isOutputScoped: () => boolean;
   };
   readonly projects: {
     readonly listEntries: RpcUnaryMethod<typeof WS_METHODS.projectsListEntries>;
@@ -431,6 +495,13 @@ export interface WsRpcClient {
     readonly scan: RpcUnaryMethod<typeof WS_METHODS.storageScan>;
     readonly preview: RpcUnaryMethod<typeof WS_METHODS.storagePreview>;
     readonly execute: RpcUnaryMethod<typeof WS_METHODS.storageExecute>;
+    readonly removeDatabaseBackup: RpcUnaryMethod<typeof WS_METHODS.storageRemoveDatabaseBackup>;
+    readonly databaseCompactionStatus: RpcUnaryMethod<
+      typeof WS_METHODS.storageDatabaseCompactionStatus
+    >;
+    readonly startDatabaseCompaction: RpcUnaryMethod<
+      typeof WS_METHODS.storageStartDatabaseCompaction
+    >;
   };
   readonly worktrees: {
     readonly setManualPosition: RpcUnaryMethod<typeof WS_METHODS.worktreesSetManualPosition>;
@@ -622,6 +693,8 @@ export interface WsRpcClient {
     readonly getActivityPayload?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getActivityPayload
     >;
+    /** Only meaningful for a message a server sent as a preview, which older servers never do. */
+    readonly getMessageText?: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getMessageText>;
     /** Absent on clients built without it; older servers answer "Unknown request tag". */
     readonly setThreadHistoryRecovery?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery
@@ -814,8 +887,20 @@ export function createWsRpcClient(
   },
 ): WsRpcClient {
   const projectCopy = lazyProjectCopyRpc(transport);
+  const terminalOutput = createTerminalOutputScope({
+    environmentId: () => transport.environmentId(),
+    detach: (ref) => transport.request((client) => client[WS_METHODS.terminalDetachOutput](ref)),
+    setVisibility: (visibility) =>
+      transport.request((client) =>
+        client[WS_METHODS.serverSetConnectionVisibility]({ visibility }),
+      ),
+    readVisibility: readClientVisibility,
+  });
+  const stopVisibility = subscribeClientVisibility(terminalOutput.visibilityChanged);
   return {
     dispose: async () => {
+      stopVisibility();
+      terminalOutput.dispose();
       await Promise.all([transport.dispose(), device?.dispose()]);
     },
     reconnect: async () => {
@@ -826,7 +911,18 @@ export function createWsRpcClient(
     hasReopenedSince: (sinceMs) => transport.hasReopenedSince(sinceMs),
     ...(device ? { device } : {}),
     terminal: {
-      open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),
+      open: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.terminalOpen](
+            !input.attachOutput &&
+              terminalOutput.isAttached({
+                threadId: input.threadId,
+                terminalId: input.terminalId ?? DEFAULT_TERMINAL_ID,
+              })
+              ? { ...input, attachOutput: true }
+              : input,
+          ),
+        ),
       write: (input) =>
         transport.request((client) => {
           const write = client[WS_METHODS.terminalWrite](input);
@@ -841,10 +937,19 @@ export function createWsRpcClient(
       onEvent: (listener, options) =>
         transport.subscribe(
           // History stays on `terminal.open`; catch-up events only carry session metadata.
-          (client) => client[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }),
-          listener,
+          // Output arrives only for terminals a surface holds (`attachOutput`).
+          (client) => client[WS_METHODS.subscribeTerminalEvents](terminalOutput.subscribeInput()),
+          (item) => {
+            if (!isUnknownUnionMember(item) && item.type === "outputScope") {
+              terminalOutput.acknowledge();
+              return;
+            }
+            listener(item);
+          },
           { ...options, tag: WS_METHODS.subscribeTerminalEvents },
         ),
+      attachOutput: (ref) => terminalOutput.attach(ref),
+      isOutputScoped: () => terminalOutput.mayHaveFilteredOutput(),
     },
     projects: {
       listEntries: (input) =>
@@ -1168,6 +1273,12 @@ export function createWsRpcClient(
       scan: (input) => transport.request((client) => client[WS_METHODS.storageScan](input)),
       preview: (input) => transport.request((client) => client[WS_METHODS.storagePreview](input)),
       execute: (input) => transport.request((client) => client[WS_METHODS.storageExecute](input)),
+      removeDatabaseBackup: (input) =>
+        transport.request((client) => client[WS_METHODS.storageRemoveDatabaseBackup](input)),
+      databaseCompactionStatus: (input) =>
+        transport.request((client) => client[WS_METHODS.storageDatabaseCompactionStatus](input)),
+      startDatabaseCompaction: (input) =>
+        transport.request((client) => client[WS_METHODS.storageStartDatabaseCompaction](input)),
     },
     worktrees: {
       setManualPosition: (input) =>
@@ -1312,15 +1423,19 @@ export function createWsRpcClient(
         let unsubscribeCurrent: () => void = () => undefined;
         const start = (claimCatalogs: boolean) => {
           let pinned: ReadonlyMap<string, ProviderCatalog> = new Map();
+          let pinnedSections: ReadonlyMap<string, ConfigSectionValue> = new Map();
           unsubscribeCurrent = transport.subscribe(
             (client) => {
-              // Name the catalogs this page holds so the snapshot leaves them
-              // out, and take provider changes as deltas. Older servers ignore
-              // both and send everything.
+              // Name the catalogs and config sections this page holds (possibly
+              // none: naming opts in to the digests that fill the caches) so the
+              // snapshot leaves them out, and take provider changes as deltas.
+              // Older servers ignore all three and send everything.
               pinned = claimCatalogs ? providerCatalogCache.pin() : new Map();
+              pinnedSections = claimCatalogs ? configSectionCache.pin() : new Map();
               return client[WS_METHODS.subscribeServerConfig]({
                 providerStatuses: "delta",
-                ...(pinned.size === 0 ? {} : { knownProviderCatalogs: [...pinned.keys()] }),
+                knownProviderCatalogs: [...pinned.keys()],
+                knownConfigSections: [...pinnedSections.keys()],
               });
             },
             (event) => {
@@ -1329,13 +1444,17 @@ export function createWsRpcClient(
                 listener(event);
                 return;
               }
-              const restored = restoreSnapshotCatalogs(event, pinned, providerCatalogCache);
+              const withCatalogs = restoreSnapshotCatalogs(event, pinned, providerCatalogCache);
+              const restored =
+                withCatalogs === null
+                  ? null
+                  : restoreSnapshotSections(withCatalogs, pinnedSections, configSectionCache);
               if (restored !== null) {
                 listener(restored);
                 return;
               }
-              // The server left out a catalog this subscription never named:
-              // start over without naming any.
+              // The server left out a catalog or section this subscription never
+              // named: start over without naming any.
               void Promise.resolve().then(() => {
                 if (disposed) return;
                 unsubscribeCurrent();
@@ -1444,6 +1563,8 @@ export function createWsRpcClient(
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadHistoryPage](input)),
       getActivityPayload: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getActivityPayload](input)),
+      getMessageText: (input) =>
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getMessageText](input)),
       setThreadHistoryRecovery: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery](input),
@@ -1474,20 +1595,18 @@ export function createWsRpcClient(
       subscribeThread: (input, listener, options) =>
         transport.subscribe(
           (client) =>
-            client[ORCHESTRATION_WS_METHODS.subscribeThread]({
-              ...input,
-              ...threadSubscriptionInput(options),
-            }),
+            threadSubscriptionStream(options, (resume) =>
+              client[ORCHESTRATION_WS_METHODS.subscribeThread]({ ...input, ...resume }),
+            ),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThread),
         ),
       subscribeThreadWindow: (input, listener, options) =>
         transport.subscribe(
           (client) =>
-            client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow]({
-              ...input,
-              ...threadSubscriptionInput(options),
-            }),
+            threadSubscriptionStream(options, (resume) =>
+              client[ORCHESTRATION_WS_METHODS.subscribeThreadWindow]({ ...input, ...resume }),
+            ),
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThreadWindow),
         ),

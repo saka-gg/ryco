@@ -40,16 +40,16 @@ connection cost and needs its own transfer-budget/product treatment; it does not
 
 The Hub defaults assessed here are:
 
-| Budget                          |                           Default | What Wave 3b consumes                                                  |
-| ------------------------------- | --------------------------------: | ---------------------------------------------------------------------- |
-| Relay upgrade burst             | 20 tokens, refilling at 1 token/s | one token per WebSocket upgrade                                        |
-| Client connections              |                               512 | one per active hosted environment                                      |
-| Node connections                |                               256 | no incremental connection; the enrolled node connection already exists |
-| Global channels                 |                               512 | one per active hosted environment                                      |
-| Channels per node               |                                 8 | one on each target node                                                |
-| Per-connection queue hard limit |                             8 MiB | actual queued/native-buffered bytes, not a reservation                 |
-| Aggregate queue budget          |                           256 MiB | actual queued/native-buffered bytes across the process                 |
-| Per-channel transfer budget     |                            50 MiB | data-payload bytes in both directions for the channel lifetime         |
+| Budget                          |                           Default | What Wave 3b consumes                                                                                                  |
+| ------------------------------- | --------------------------------: | ---------------------------------------------------------------------------------------------------------------------- |
+| Relay upgrade burst             | 20 tokens, refilling at 1 token/s | one token per WebSocket upgrade                                                                                        |
+| Client connections              |                               512 | one per active hosted environment                                                                                      |
+| Node connections                |                               256 | no incremental connection; the enrolled node connection already exists                                                 |
+| Global channels                 |                               512 | one per active hosted environment                                                                                      |
+| Channels per node               |                                 8 | one on each target node                                                                                                |
+| Per-connection queue hard limit |                             8 MiB | actual queued/native-buffered bytes, not a reservation                                                                 |
+| Aggregate queue budget          |                           256 MiB | actual queued/native-buffered bytes across the process                                                                 |
+| Per-channel transfer budget     |                            50 MiB | data-payload bytes in both directions; since this assessment a burst that refills at a byte rate, not a lifetime total |
 
 The upgrade bucket is keyed by the socket peer address. It is therefore **per external peer**, not
 one global 20-token bucket. Clients on separate networks do not compete for it; clients behind one

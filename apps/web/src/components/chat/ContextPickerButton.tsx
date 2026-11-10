@@ -8,7 +8,14 @@ import {
 import { Button } from "../ui/button";
 import { Popover, PopoverTrigger, PopoverPopup } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { ContextPickerPopup } from "./ContextPickerPopup";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
+import { preloadableLazy, useLazyComponentReady, usePreloadWhenIdle } from "~/lib/preloadableLazy";
+
+// The picker's lists and window capture load with the first open (pointing at
+// the button starts it), or in an idle slot, not with the chat route.
+const ContextPickerPopup = preloadableLazy(() =>
+  import("./ContextPickerPopup").then((module) => module.ContextPickerPopup),
+);
 
 export function ContextPickerButton(props: {
   environmentId: EnvironmentId | null;
@@ -27,6 +34,14 @@ export function ContextPickerButton(props: {
     enabled: open || wanted,
   });
   const markWanted = () => setWanted(true);
+  usePreloadWhenIdle(ContextPickerPopup, true);
+  // The popover opens once its body can render without suspending.
+  const popupReady = useLazyComponentReady(ContextPickerPopup, open || wanted, {
+    onLoadError: (error, retry) => {
+      setOpen(false);
+      notifySurfaceLoadFailure("context picker", error, retry);
+    },
+  });
   // Until the first discovery answers, the picker shows its (loading) lists
   // instead of claiming that there is no remote.
   const hasSourceControlRemote =
@@ -35,7 +50,7 @@ export function ContextPickerButton(props: {
       : hasUsableSourceControlRemote(sourceControlDiscovery.data);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open && popupReady} onOpenChange={setOpen}>
       <Tooltip>
         <TooltipTrigger
           render={

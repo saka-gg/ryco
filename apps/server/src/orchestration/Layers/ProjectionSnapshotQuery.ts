@@ -37,6 +37,7 @@ import {
   type OrchestrationThreadWindowSnapshot,
   type OrchestrationThreadActivity,
   type OrchestrationActivityPayloadMode,
+  type OrchestrationMessageTextMode,
   type ThreadFollowUpQueue,
   EventId,
   OrchestrationThreadShell,
@@ -85,6 +86,7 @@ import { decodePersistedRepositoryIdentity } from "../../project/repositoryIdent
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { makeShellSnapshotCopy } from "../shellSnapshotCopy.ts";
 import { readClientFor, SqliteReadClient } from "../../persistence/SqliteReadClient.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
 import { previewActivityPayload } from "../activityPayloadPreview.ts";
@@ -110,6 +112,8 @@ import {
   type ProjectionThreadCheckpointContext,
   type ProjectionThreadCheckpointHead,
   type ProjectionSnapshotQueryShape,
+  type ProjectionShellScope,
+  scopeShellSnapshot,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
@@ -246,6 +250,72 @@ const ProjectionThreadActivityWindowDbRowSchema = ProjectionThreadActivityDbRowS
  * cap. Older activities stay reachable through history pagination.
  */
 export const THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES = 1024 * 1024;
+
+/**
+ * Text budget for the messages of one thread window snapshot. Messages had no
+ * size limit: a few pasted logs or generated documents made a window several
+ * MB on their own. Older messages stay reachable through history pagination.
+ */
+export const THREAD_WINDOW_MESSAGE_MAX_TEXT_BYTES = 512 * 1024;
+/** A finished message longer than this (UTF-16 code units) is sent as a preview when asked. */
+export const MESSAGE_PREVIEW_MIN_LENGTH = 32_000;
+/** The head of a previewed message, in UTF-16 code units. */
+export const MESSAGE_PREVIEW_LENGTH = 12_000;
+
+/** The head of `text`, never splitting a surrogate pair. */
+export function messageTextHead(text: string, length: number): string {
+  if (text.length <= length) return text;
+  let end = length;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
+type ProjectionMessageDbRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
+type SentMessageRow = ProjectionMessageDbRow & {
+  readonly textPreview?: { readonly fullLength: number };
+};
+
+/**
+ * The message rows as a window or page sends them (order kept). With previews
+ * each very long finished message is cut to its head and marked; streaming
+ * messages are always sent whole, since the client appends their deltas.
+ */
+export function toSentMessageRows(
+  rows: ReadonlyArray<ProjectionMessageDbRow>,
+  mode: OrchestrationMessageTextMode | undefined,
+): ReadonlyArray<SentMessageRow> {
+  if (mode !== "preview") return rows;
+  return rows.map((row) => {
+    if (row.isStreaming !== 0) return row;
+    const text = resolveMessageText(row);
+    if (text.length <= MESSAGE_PREVIEW_MIN_LENGTH) return row;
+    return {
+      ...row,
+      text: messageTextHead(text, MESSAGE_PREVIEW_LENGTH),
+      assembledText: null,
+      textPreview: { fullLength: text.length },
+    };
+  });
+}
+
+/**
+ * Keeps the newest message rows (newest-first input) within the count limit
+ * and {@link THREAD_WINDOW_MESSAGE_MAX_TEXT_BYTES} of text; the newest is
+ * always kept. Anything older is reported through `hasMoreBefore`.
+ */
+export function takeNewestMessagesWithinTextBudget<Row extends ProjectionMessageDbRow>(
+  rows: ReadonlyArray<Row>,
+  limit: number,
+  maxBytes: number = THREAD_WINDOW_MESSAGE_MAX_TEXT_BYTES,
+): { readonly rows: ReadonlyArray<Row>; readonly hasMoreBefore: boolean } {
+  const bounded = takeNewestRowsWithinByteBudget(
+    rows.map((row) => ({ row, payloadBytes: Buffer.byteLength(resolveMessageText(row), "utf8") })),
+    limit,
+    maxBytes,
+  );
+  return { rows: bounded.rows.map((entry) => entry.row), hasMoreBefore: bounded.hasMoreBefore };
+}
 
 /**
  * Keeps the newest rows (newest-first input) within both the count limit and
@@ -615,7 +685,9 @@ function mapProposedPlanRow(
 }
 
 function mapMessageRow(
-  row: Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>,
+  row: Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema> & {
+    readonly textPreview?: { readonly fullLength: number };
+  },
 ): OrchestrationMessage {
   const message = {
     id: row.messageId,
@@ -630,6 +702,7 @@ function mapMessageRow(
     message,
     row.attachments === null ? {} : { attachments: row.attachments },
     row.dispatchMode === null ? {} : { dispatchMode: row.dispatchMode },
+    row.textPreview === undefined ? {} : { textPreview: row.textPreview },
   );
 }
 
@@ -2352,6 +2425,55 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
+  // Newest first over the thread's (thread_id, created_at, message_id) index, so the current
+  // turn's messages are met first; reads no message bodies.
+  const getThreadAssistantMessageForTurnRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      threadId: ThreadId,
+      turnId: TurnId,
+      streamingOnly: Schema.Number,
+    }),
+    Result: Schema.Struct({ messageId: MessageId }),
+    execute: ({ threadId, turnId, streamingOnly }) => sql`
+      SELECT message_id AS "messageId"
+      FROM projection_thread_messages
+      WHERE thread_id = ${threadId}
+        AND turn_id = ${turnId}
+        AND role = 'assistant'
+        AND (${streamingOnly} = 0 OR is_streaming = 1)
+      ORDER BY created_at DESC, message_id DESC
+      LIMIT 1
+    `,
+  });
+
+  // The kinds `findTaskTitleInActivities` (ProviderRuntimeIngestion) reads, served by the
+  // kind-leading activity index; the task id must be a string, as that reader compares it.
+  const listThreadTaskActivityRows = SqlSchema.findAll({
+    Request: Schema.Struct({ threadId: ThreadId, taskId: Schema.String }),
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, taskId }) => sql`
+      SELECT
+        activity_id AS "activityId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        tone,
+        kind,
+        summary,
+        payload_json AS "payload",
+        sequence,
+        created_at AS "createdAt"
+      FROM projection_thread_activities
+      WHERE kind IN ('task.started', 'task.progress', 'task.updated')
+        AND thread_id = ${threadId}
+        AND CASE
+          WHEN json_valid(payload_json) AND json_type(payload_json, '$.taskId') = 'text'
+            THEN json_extract(payload_json, '$.taskId')
+          ELSE NULL
+        END = ${taskId}
+      ORDER BY sequence ASC, created_at ASC, activity_id ASC
+    `,
+  });
+
   const countThreadUserMessageRows = SqlSchema.findOne({
     Request: ThreadIdLookupInput,
     Result: Schema.Struct({ userMessages: NonNegativeInt }),
@@ -2609,6 +2731,24 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         created_at DESC,
         activity_id DESC
       LIMIT ${limit}
+    `,
+  });
+
+  const getMessageTextRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({ threadId: ThreadId, messageId: MessageId }),
+    Result: Schema.Struct({
+      text: Schema.String,
+      assembledText: Schema.NullOr(MessageTextFromSql),
+    }),
+    execute: ({ threadId, messageId }) => sql`
+      SELECT ${messageTextColumns(sql, "message")}
+      FROM projection_thread_messages AS message
+      INNER JOIN projection_threads AS thread
+        ON thread.thread_id = message.thread_id
+      WHERE message.thread_id = ${threadId}
+        AND message.message_id = ${messageId}
+        AND thread.deleted_at IS NULL
+      LIMIT 1
     `,
   });
 
@@ -4476,7 +4616,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         });
       }
 
-      const messageRows = rawMessageRows.slice(0, limits.messages).toReversed();
+      const boundedMessages = takeNewestMessagesWithinTextBudget(
+        toSentMessageRows(rawMessageRows, input.messageText),
+        limits.messages,
+      );
+      const messageRows = boundedMessages.rows.toReversed();
       const proposedPlanRows = rawProposedPlanRows.slice(0, limits.proposedPlans).toReversed();
       const boundedActivities = takeNewestRowsWithinByteBudget(
         toSentActivityRows(rawActivityRows, input.activityPayloads),
@@ -4546,7 +4690,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               createdAt: row.createdAt,
               id: row.messageId,
             })),
-            hasMoreBefore: rawMessageRows.length > limits.messages,
+            hasMoreBefore: boundedMessages.hasMoreBefore,
           }),
           proposedPlans: createdAtHistoryPageInfo({
             threadId: input.threadId,
@@ -4570,6 +4714,17 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         },
       } satisfies OrchestrationThreadWindowSnapshot;
     });
+
+  const getMessageText: ProjectionSnapshotQueryShape["getMessageText"] = (input) =>
+    getMessageTextRow(input).pipe(
+      Effect.map(Option.map((row) => ({ text: resolveMessageText(row) }))),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getMessageText:query",
+          "ProjectionSnapshotQuery.getMessageText:decodeRow",
+        ),
+      ),
+    );
 
   const getActivityPayload: ProjectionSnapshotQueryShape["getActivityPayload"] = (input) =>
     getActivityPayloadRow(input).pipe(
@@ -4774,7 +4929,10 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         );
         yield* ensureThread(threadRow);
         yield* ensureBoundary(boundary);
-        const rows = rawRows.slice(0, pageLimit).toReversed();
+        const rows = toSentMessageRows(
+          rawRows.slice(0, pageLimit),
+          "messageText" in input ? input.messageText : undefined,
+        ).toReversed();
         return {
           collection: "messages",
           snapshotSequence: computeSnapshotSequence(stateRows),
@@ -5139,17 +5297,53 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           "ProjectionSnapshotQuery.getThreadProposedPlanById:decodeRow",
         ),
       ),
-      Effect.map(
-        Option.map((row) => ({
-          id: row.planId,
-          createdAt: row.createdAt,
-          implementedAt: row.implementedAt,
-          implementationThreadId: row.implementationThreadId,
-        })),
-      ),
+      Effect.map(Option.map(mapProposedPlanRow)),
     );
 
-  return {
+  const hasThreadAssistantMessageForTurn: NonNullable<
+    ProjectionSnapshotQueryShape["hasThreadAssistantMessageForTurn"]
+  > = (input) =>
+    getThreadAssistantMessageForTurnRow({
+      threadId: input.threadId,
+      turnId: input.turnId,
+      streamingOnly: input.streamingOnly ? 1 : 0,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.hasThreadAssistantMessageForTurn:query",
+          "ProjectionSnapshotQuery.hasThreadAssistantMessageForTurn:decodeRow",
+        ),
+      ),
+      Effect.map(Option.isSome),
+    );
+
+  const listThreadPendingRequestActivities: NonNullable<
+    ProjectionSnapshotQueryShape["listThreadPendingRequestActivities"]
+  > = (threadId) =>
+    listThreadPendingRequestActivityRows({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listThreadPendingRequestActivities:query",
+          "ProjectionSnapshotQuery.listThreadPendingRequestActivities:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map(mapActivityRow)),
+    );
+
+  const listThreadTaskActivities: NonNullable<
+    ProjectionSnapshotQueryShape["listThreadTaskActivities"]
+  > = (input) =>
+    listThreadTaskActivityRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listThreadTaskActivities:query",
+          "ProjectionSnapshotQuery.listThreadTaskActivities:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map(mapActivityRow)),
+    );
+
+  const query = {
     getScopedShellSnapshot,
     getStubbedShellSnapshot,
     getCommandReadModel,
@@ -5170,6 +5364,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     getProjectWorkspaceRows,
     getThreadDetailById,
     getThreadWindow,
+    getMessageText,
     getActivityPayload,
     getCompletedSideQuestionContext,
     getThreadHistoryPage,
@@ -5179,11 +5374,19 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     getThreadHistoryRepairContext,
     countThreadUserMessages,
     getThreadProposedPlanById,
+    hasThreadAssistantMessageForTurn,
+    listThreadPendingRequestActivities,
+    listThreadTaskActivities,
     listThreadTaskPathRefs,
     listPendingCheckpointReverts,
     getLatestCheckpointRevert,
     searchThreadMessages,
   } satisfies ProjectionSnapshotQueryShape;
+  return {
+    query,
+    /** A whole shell built now, without the memo: the shared thread list's builds. */
+    buildShell: () => buildVersionedShellSnapshot().pipe(Effect.map(({ snapshot }) => snapshot)),
+  };
 });
 
 /**
@@ -5215,16 +5418,85 @@ const READ_WORKER_METHODS = [
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const main = yield* makeProjectionSnapshotQueryOn(sql);
+  const { query: main, buildShell: buildShellOnMain } = yield* makeProjectionSnapshotQueryOn(sql);
   const reader = yield* Effect.serviceOption(SqliteReadClient);
-  if (Option.isNone(reader) || reader.value === sql) return main;
-  const onReader = yield* makeProjectionSnapshotQueryOn(reader.value);
+  const onReader =
+    Option.isNone(reader) || reader.value === sql
+      ? undefined
+      : yield* makeProjectionSnapshotQueryOn(reader.value);
+
+  // The node's one thread list, patched from committed events (shellSnapshotCopy.ts). Its builds
+  // and row reads go to the read worker when there is one: they never run inside a caller's
+  // transaction, and every row they read was committed before the event that names it was
+  // recorded, so the worker sees it.
+  const liveness = yield* ThreadBackgroundLivenessService;
+  const copySource = onReader?.query ?? main;
+  const copy = makeShellSnapshotCopy(
+    {
+      buildShell: onReader?.buildShell ?? buildShellOnMain,
+      getThreadShellById: copySource.getThreadShellById,
+      getProjectShellById: copySource.getProjectShellById,
+      getWorktreeShellById: copySource.getWorktreeShellById,
+    },
+    {
+      liveness: {
+        get: liveness.getThreadBackgroundLiveness,
+        liveThreadIds: liveness.listLiveThreadIds,
+      },
+    },
+  );
+  // Until the engine feeds it, nothing tells the copy what changed: shells are built as before.
+  let tracking = false;
+  /**
+   * The shared thread list for callers outside a transaction once the engine feeds it. A caller
+   * inside a transaction holds the single connection and may read its own uncommitted rows: it
+   * builds from that connection, as before.
+   */
+  const fromCopy = <A, E>(
+    copyRead: () => Effect.Effect<A, E>,
+    fallback: () => Effect.Effect<A, E>,
+    options: { readonly onlyWhileHeld?: boolean } = {},
+  ): Effect.Effect<A, E> =>
+    Effect.serviceOption(sql.transactionService).pipe(
+      Effect.flatMap((transaction) =>
+        Option.isNone(transaction) && tracking && (options.onlyWhileHeld !== true || copy.isHeld())
+          ? copyRead()
+          : fallback(),
+      ),
+    );
+
+  const shared = {
+    getShellSnapshot: () => fromCopy(copy.read, main.getShellSnapshot),
+    getStubbedShellSnapshot: () => fromCopy(copy.readStubbed, main.getStubbedShellSnapshot),
+    // A scoped read builds a few threads; only a copy already held answers it cheaper.
+    getScopedShellSnapshot: (scope: ProjectionShellScope) =>
+      fromCopy(
+        () => copy.read().pipe(Effect.map((snapshot) => scopeShellSnapshot(snapshot, scope))),
+        () => main.getScopedShellSnapshot(scope),
+        { onlyWhileHeld: true },
+      ),
+    getSharedThreadShell: (threadId: ThreadId) =>
+      fromCopy(
+        () => copy.readThread(threadId),
+        () => main.getThreadShellById(threadId),
+      ),
+    trackShellChanges: (fromSequence: number) => {
+      tracking = true;
+      copy.startChangeIndex(fromSequence);
+      return copy.record;
+    },
+    getShellChangesSince: (sequence: number) =>
+      tracking ? copy.changesSince(sequence) : Effect.succeed(Option.none()),
+  } satisfies Partial<ProjectionSnapshotQueryShape>;
+
+  if (onReader === undefined) return { ...main, ...shared } satisfies ProjectionSnapshotQueryShape;
+  const offMainQuery = onReader.query;
   type AnyRead = (...args: Array<never>) => Effect.Effect<unknown, ProjectionRepositoryError>;
   const routed = <K extends (typeof READ_WORKER_METHODS)[number]>(
     method: K,
   ): NonNullable<ProjectionSnapshotQueryShape[K]> => {
     const onMain = main[method] as AnyRead;
-    const offMain = onReader[method] as AnyRead;
+    const offMain = offMainQuery[method] as AnyRead;
     const read = (...args: Array<never>) =>
       Effect.flatMap(readClientFor(sql), (client) =>
         client === sql ? onMain(...args) : offMain(...args),
@@ -5233,6 +5505,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   };
   return {
     ...main,
+    ...shared,
     getSnapshot: routed("getSnapshot"),
     getThreadWindow: routed("getThreadWindow"),
     getThreadHistoryPage: routed("getThreadHistoryPage"),

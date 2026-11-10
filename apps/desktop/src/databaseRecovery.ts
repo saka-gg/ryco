@@ -74,6 +74,8 @@ export function runServerCli(
     readonly signal?: AbortSignal | undefined;
     readonly spawn?: typeof ChildProcess.spawn | undefined;
     readonly killGraceMs?: number | undefined;
+    /** Each complete stderr line as it arrives (progress of a long command). */
+    readonly onStderrLine?: ((line: string) => void) | undefined;
   } = {},
 ): Promise<ServerCliResult> {
   const spawn = options.spawn ?? ChildProcess.spawn;
@@ -126,8 +128,13 @@ export function runServerCli(
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
       stdout += chunk;
     });
+    let pendingLine = "";
     child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
       stderr += chunk;
+      if (options.onStderrLine === undefined) return;
+      const lines = (pendingLine + chunk).split("\n");
+      pendingLine = lines.pop() ?? "";
+      for (const line of lines) options.onStderrLine(line);
     });
     child.on("error", (error) => {
       stderr += error.message;

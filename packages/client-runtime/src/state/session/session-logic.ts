@@ -126,6 +126,12 @@ export interface WorkLogEntry {
    * stored payload (`orchestration.getActivityPayload`) for the full text.
    */
   outputPreviewActivityId?: string;
+  /**
+   * The stored size of that activity's payload when the preview was sent. A
+   * running tool rewrites its activity under the same id, so the full payload
+   * is fetched again once this grows.
+   */
+  outputPreviewBytes?: number;
   /** Process exit code when the activity reported one. */
   exitCode?: number;
   /**
@@ -1149,6 +1155,7 @@ function toDerivedWorkLogEntry(
   }
   if (activity.payloadPreview !== undefined) {
     entry.outputPreviewActivityId = activity.id;
+    entry.outputPreviewBytes = activity.payloadPreview.fullBytes;
   }
   if (exitCode !== null) {
     entry.exitCode = exitCode;
@@ -1386,9 +1393,9 @@ function mergeDerivedWorkLogEntries(
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const output = next.output ?? previous.output;
   // The preview marker follows the output it describes: a later full output clears it.
-  const outputPreviewActivityId = next.output
-    ? next.outputPreviewActivityId
-    : (previous.outputPreviewActivityId ?? next.outputPreviewActivityId);
+  const previewSource = next.output ? next : previous.outputPreviewActivityId ? previous : next;
+  const outputPreviewActivityId = previewSource.outputPreviewActivityId;
+  const outputPreviewBytes = previewSource.outputPreviewBytes;
   const exitCode = next.exitCode ?? previous.exitCode;
   // `previous` is the earlier lifecycle event, so its own timestamp stands in as
   // the start when no `tool.started` was recorded for this call.
@@ -1416,6 +1423,9 @@ function mergeDerivedWorkLogEntries(
   };
   if (outputPreviewActivityId) merged.outputPreviewActivityId = outputPreviewActivityId;
   else delete merged.outputPreviewActivityId;
+  if (outputPreviewActivityId && outputPreviewBytes !== undefined) {
+    merged.outputPreviewBytes = outputPreviewBytes;
+  } else delete merged.outputPreviewBytes;
   return merged;
 }
 

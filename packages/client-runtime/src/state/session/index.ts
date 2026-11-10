@@ -1,4 +1,5 @@
 export * from "./activityPayload.ts";
+export * from "./messageText.ts";
 export * from "./contextHandoff.ts";
 export * from "./fastModeNotice.ts";
 export * from "./forkOrigin.ts";
@@ -18,6 +19,7 @@ export * from "./approvalResponses.ts";
 export * from "./htmlRenderTimeline.ts";
 export * from "./htmlRenderMessages.ts";
 export * from "./threadArtifacts.ts";
+export * from "./earlierThreadArtifacts.ts";
 export * from "./checkpointRevert.ts";
 export * from "./commandLabel.ts";
 export * from "./userInputExchange.ts";

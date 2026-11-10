@@ -8,14 +8,8 @@ import { TestClock } from "effect/testing";
 import { ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import type { UsageServiceOptions } from "./UsageService.ts";
 import { makeUsageServiceDeferred, type UsageServiceModule } from "./UsageServiceDeferred.ts";
-import {
-  makeEmptyUsageSummary,
-  USAGE_RATES_WARM_DELAY_MS,
-  UsageService,
-  usageRatesCachePath,
-} from "./UsageServiceTag.ts";
+import { makeEmptyUsageSummary, UsageService, usageRatesCachePath } from "./UsageServiceTag.ts";
 
 const request = {
   contractVersion: USAGE_CONTRACT_VERSION,
@@ -33,16 +27,16 @@ const settle = Effect.gen(function* () {
  */
 function fakeLoader(options: { readonly held?: boolean; readonly failFirst?: boolean } = {}) {
   let imports = 0;
-  const builds: UsageServiceOptions[] = [];
+  let builds = 0;
   const imported = Deferred.makeUnsafe<void>();
   let release: () => void = () => {};
   const released = options.held
     ? new Promise<void>((resolve) => (release = resolve))
     : Promise.resolve();
   const module: UsageServiceModule = {
-    makeUsageService: (buildOptions) =>
+    makeUsageService: () =>
       Effect.sync(() => {
-        builds.push(buildOptions);
+        builds += 1;
         return UsageService.of({
           readSummary: (input) => Effect.succeed(makeEmptyUsageSummary(input)),
           priceStatistics: (snapshot) => Effect.succeed(snapshot),
@@ -111,9 +105,7 @@ describe("UsageServiceDeferredLive", () => {
       assert.deepStrictEqual(summary, makeEmptyUsageSummary(request));
       yield* usage.readSummary(request);
       assert.strictEqual(loader.imports(), 1);
-      // The summary refreshes stale rates itself, so the pipeline skips its own warm-up and the
-      // rates file is not read twice at once.
-      assert.deepStrictEqual(loader.builds(), [{ ratesWarmDelayMs: null }]);
+      assert.strictEqual(loader.builds(), 1);
     }).pipe(Effect.provide(usageLayer(loader.load)));
   });
 
@@ -129,7 +121,7 @@ describe("UsageServiceDeferredLive", () => {
       yield* Fiber.join(first);
       yield* Fiber.join(second);
       assert.strictEqual(loader.imports(), 1);
-      assert.strictEqual(loader.builds().length, 1);
+      assert.strictEqual(loader.builds(), 1);
     }).pipe(Effect.provide(usageLayer(loader.load)));
   });
 
@@ -147,7 +139,7 @@ describe("UsageServiceDeferredLive", () => {
       const summary = yield* Fiber.join(second);
       assert.strictEqual(summary.endDate, request.endDate);
       assert.strictEqual(loader.imports(), 1);
-      assert.strictEqual(loader.builds().length, 1);
+      assert.strictEqual(loader.builds(), 1);
     }).pipe(Effect.provide(usageLayer(loader.load)));
   });
 
@@ -162,51 +154,32 @@ describe("UsageServiceDeferredLive", () => {
       const summary = yield* usage.readSummary(request);
       assert.strictEqual(summary.endDate, request.endDate);
       assert.strictEqual(loader.imports(), 2);
-      assert.strictEqual(loader.builds().length, 1);
+      assert.strictEqual(loader.builds(), 1);
     }).pipe(Effect.provide(usageLayer(loader.load)));
   });
 
-  for (const downloaded of [false, true]) {
-    it.effect(
-      downloaded
-        ? "loads the pipeline shortly after boot on a node that has downloaded rates"
-        : "leaves the pipeline unloaded after boot on a node that never downloaded rates",
-      () => {
-        const loader = fakeLoader();
-        const checked = Deferred.makeUnsafe<{ readonly path: string; readonly exists: boolean }>();
-        return Effect.gen(function* () {
-          const config = yield* ServerConfig;
-          const path = yield* Path.Path;
-          const fileSystem = yield* FileSystem.FileSystem;
-          const ratesPath = usageRatesCachePath(path, config.stateDir);
-          if (downloaded) {
-            yield* fileSystem.makeDirectory(path.dirname(ratesPath), { recursive: true });
-            yield* fileSystem.writeFileString(ratesPath, "{}");
-          }
-          yield* TestClock.adjust(Duration.millis(USAGE_RATES_WARM_DELAY_MS - 1));
-          yield* settle;
-          assert.isFalse(Deferred.isDoneUnsafe(checked));
-
-          yield* TestClock.adjust(Duration.millis(1));
-          const check = yield* Deferred.await(checked);
-          assert.deepStrictEqual(check, { path: ratesPath, exists: downloaded });
-          if (downloaded) yield* Deferred.await(loader.imported);
-          else yield* settle;
-          assert.strictEqual(loader.imports(), downloaded ? 1 : 0);
-          if (downloaded) {
-            // A summary during the warm-up shares its build, which refreshes stale rates at once.
-            yield* (yield* UsageService).readSummary(request);
-            assert.strictEqual(loader.imports(), 1);
-            assert.deepStrictEqual(loader.builds(), [{ ratesWarmDelayMs: 0 }]);
-          }
-        }).pipe(
-          Effect.provide(
-            usageLayer(loader.load, (path, exists) =>
-              Deferred.doneUnsafe(checked, Exit.succeed({ path, exists })),
-            ),
-          ),
-        );
-      },
+  it.effect("loads nothing after boot, even on a node that has downloaded rates", () => {
+    const loader = fakeLoader();
+    let checks = 0;
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const path = yield* Path.Path;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const ratesPath = usageRatesCachePath(path, config.stateDir);
+      yield* fileSystem.makeDirectory(path.dirname(ratesPath), { recursive: true });
+      yield* fileSystem.writeFileString(ratesPath, "{}");
+      yield* UsageService;
+      // The price list is refreshed when Usage or Statistics is first read, never on a timer.
+      yield* TestClock.adjust(Duration.hours(1));
+      yield* settle;
+      assert.strictEqual(loader.imports(), 0);
+      assert.strictEqual(checks, 0);
+    }).pipe(
+      Effect.provide(
+        usageLayer(loader.load, () => {
+          checks += 1;
+        }),
+      ),
     );
-  }
+  });
 });

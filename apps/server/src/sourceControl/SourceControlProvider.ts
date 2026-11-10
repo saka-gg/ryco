@@ -364,6 +364,17 @@ export interface SourceControlProviderShape {
     readonly reuseSinceMs?: number | undefined;
   }) => Effect.Effect<ChangeRequestWatchFingerprint | null, SourceControlProviderError>;
   /**
+   * A token for the state of the repository's change requests as the change request index
+   * lists them: equal tokens mean none was opened or changed in between (GitHub: one
+   * conditional request, a 304 the host does not count while nothing changed). Null when the
+   * host cannot tell that cheaply; the index then lists again. Optional: hosts without it
+   * are listed whenever their index expires.
+   */
+  readonly getChangeRequestListVersion?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+  }) => Effect.Effect<string | null, SourceControlProviderError>;
+  /**
    * One review thread with every comment the host returns for it (GitHub: up to 100), for a
    * pull request watch whose activity read carried only the first page of a long thread. Null
    * when the host has no such read; the watch then treats that conversation as not read whole.

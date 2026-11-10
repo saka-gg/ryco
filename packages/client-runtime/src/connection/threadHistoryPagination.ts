@@ -73,6 +73,22 @@ export function createThreadHistoryPaginationController(deps: {
 }): ThreadHistoryPaginationController {
   const generationByScope = new Map<string, number>();
   const inflightByKey = new Map<string, Promise<OrchestrationThreadHistoryPage | null>>();
+  // The collections each thread has a load in flight for, so dropping the
+  // thread's loads also clears the loading state they set.
+  const loadingByScope = new Map<string, Map<OrchestrationThreadHistoryCollection, number>>();
+  const trackLoading = (scopeKey: string, collection: OrchestrationThreadHistoryCollection) => {
+    const loading = loadingByScope.get(scopeKey) ?? new Map();
+    loading.set(collection, (loading.get(collection) ?? 0) + 1);
+    loadingByScope.set(scopeKey, loading);
+  };
+  const untrackLoading = (scopeKey: string, collection: OrchestrationThreadHistoryCollection) => {
+    const loading = loadingByScope.get(scopeKey);
+    const count = loading?.get(collection);
+    if (loading === undefined || count === undefined) return;
+    if (count > 1) loading.set(collection, count - 1);
+    else loading.delete(collection);
+    if (loading.size === 0) loadingByScope.delete(scopeKey);
+  };
   const keyFor = (scope: ThreadHistoryScope) =>
     scopedThreadKey(scopeThreadRef(scope.environmentId, scope.threadId));
   const currentGeneration = (scope: ThreadHistoryScope) =>
@@ -80,10 +96,24 @@ export function createThreadHistoryPaginationController(deps: {
   const beginSnapshot = (scope: ThreadHistoryScope) => {
     const generation = currentGeneration(scope) + 1;
     generationByScope.set(keyFor(scope), generation);
+    // The snapshot replaces the load state of the loads it drops.
+    loadingByScope.delete(keyFor(scope));
     return generation;
   };
+  /**
+   * Drops the thread's loads in flight. A load it drops leaves no "loading"
+   * behind: the body it was for may stay and be resumed rather than reloaded,
+   * and nothing else would clear it.
+   */
   const invalidate = (scope: ThreadHistoryScope) => {
-    generationByScope.set(keyFor(scope), currentGeneration(scope) + 1);
+    const scopeKey = keyFor(scope);
+    generationByScope.set(scopeKey, currentGeneration(scope) + 1);
+    const loading = loadingByScope.get(scopeKey);
+    if (loading === undefined) return;
+    loadingByScope.delete(scopeKey);
+    for (const collection of loading.keys()) {
+      deps.setRequestState({ ...scope, collection, status: "idle", cursor: null, error: null });
+    }
   };
   const execute = (input: {
     readonly scope: ThreadHistoryScope;
@@ -107,6 +137,13 @@ export function createThreadHistoryPaginationController(deps: {
       cursor,
       error: null,
     });
+    const scopeKey = keyFor(input.scope);
+    trackLoading(scopeKey, input.collection);
+    // Only a load of the scope's current generation still counts; one an
+    // invalidation dropped was untracked with it.
+    const settleLoading = () => {
+      if (currentGeneration(input.scope) === generation) untrackLoading(scopeKey, input.collection);
+    };
     const request = deps
       .request(input.scope.environmentId, input.request)
       .then((page) => {
@@ -165,6 +202,7 @@ export function createThreadHistoryPaginationController(deps: {
         throw error;
       })
       .finally(() => {
+        settleLoading();
         if (inflightByKey.get(inflightKey) === request) inflightByKey.delete(inflightKey);
       });
     inflightByKey.set(inflightKey, request);
@@ -179,6 +217,9 @@ export function createThreadHistoryPaginationController(deps: {
         if (scopeKey.startsWith(`${environmentId}:`)) {
           generationByScope.delete(scopeKey);
         }
+      }
+      for (const scopeKey of loadingByScope.keys()) {
+        if (scopeKey.startsWith(`${environmentId}:`)) loadingByScope.delete(scopeKey);
       }
     },
     loadBefore: ({ scope, collection, page, limit }) => {

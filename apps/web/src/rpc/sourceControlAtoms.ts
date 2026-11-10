@@ -799,6 +799,18 @@ function readChangeRequestDetail(
     const shared = reusableChangeRequestDetail(environmentId, compositeKey);
     if (shared !== null) return Promise.resolve(shared);
   }
+  // A read of a detail already shown that `refresh` (zeroed `lastFetchedAt`) or an
+  // invalidation (cleared `hasData`: a refresh button, a retry, a change made here) asked for
+  // again wants the host's current answer: the server then reads it in full instead of
+  // standing on its fingerprint (older servers always do). Polls do not.
+  const controller = compositeKey === null ? undefined : controllers.get(compositeKey);
+  const fresh =
+    input.view !== "row" &&
+    controller !== undefined &&
+    compositeKey !== null &&
+    changeRequestDetailState(compositeKey).data !== null &&
+    // A new entry showing its sibling's detail has read nothing yet (`lastFetchedAt` 0).
+    (controller.hasData ? controller.lastFetchedAt === 0 : controller.lastFetchedAt > 0);
   const startedAt = Date.now();
   return sourceControlClient(environmentId)
     .getChangeRequestDetail({
@@ -806,6 +818,7 @@ function readChangeRequestDetail(
       reference: input.reference as string,
       ...(input.fullContent ? { fullContent: true } : {}),
       ...(input.view !== undefined ? { view: input.view } : {}),
+      ...(fresh ? { fresh: true } : {}),
     })
     .then((detail) => {
       // Only uncapped reads may stand in for other keys.

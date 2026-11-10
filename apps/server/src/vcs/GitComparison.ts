@@ -129,6 +129,7 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
       ...(workingTree ? { target: "workingTree" as const } : {}),
       revision,
     },
-    patch,
+    // The client holds this comparison: it is not sent again.
+    ...(input.knownRevision === revision ? { patch: "", unchanged: true as const } : { patch }),
   };
 });

@@ -404,6 +404,23 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("AgentControlAutomationRepository.replaceAutomation")),
     );
 
+  // The due filter of `dueAutomationRows` without its time bound.
+  const nextDueAt: NonNullable<AgentControlAutomationRepositoryShape["nextDueAt"]> = () =>
+    sql<{ readonly nextDueAt: string | null }>`
+      SELECT MIN(next_run_at) AS "nextDueAt"
+      FROM agent_control_automations AS automation
+      WHERE NOT EXISTS (SELECT 1 FROM agent_control_automation_quarantine q WHERE q.kind = 'automation' AND q.id = automation.automation_id)
+        AND enabled = 1 AND cancelled = 0 AND next_run_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_control_automation_runs AS run
+          WHERE run.automation_id = automation.automation_id
+            AND run.status IN ('materializing', 'pending-approval', 'approved', 'executing')
+        )
+    `.pipe(
+      Effect.map((rows) => (rows[0]?.nextDueAt ?? null) as IsoDateTime | null),
+      Effect.mapError(toPersistenceSqlError("AgentControlAutomationRepository.nextDueAt")),
+    );
+
   const claimDue: AgentControlAutomationRepositoryShape["claimDue"] = (input) =>
     sql
       .withTransaction(
@@ -706,6 +723,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
     listCentreAutomations,
     countActiveAutomations,
     replaceAutomation,
+    nextDueAt,
     claimDue,
     attachProposal,
     getRun,

@@ -170,6 +170,8 @@ let persistedProjectStateUsesLegacyShape = false;
 const currentProjectCwdById = new Map<string, string>();
 const currentProjectCwdsByLogicalKey = new Map<string, string[]>();
 const currentLogicalKeyByPhysicalKey = new Map<string, string>();
+/** Bumped whenever the project cwd maps that persistState reads change. */
+let projectCwdMappingRevision = 0;
 let legacyKeysCleanedUp = false;
 
 function nowIso(): string {
@@ -626,6 +628,28 @@ export function persistState(state: UiState): void {
 
 const debouncedPersistState = new Debouncer(persistState, { wait: 500 });
 
+/**
+ * Whether a store change touched anything persistState writes. Session-only
+ * fields (visit times, fold and work-log expansion) change constantly and must
+ * not rebuild and rewrite the saved state.
+ */
+function persistedUiStateChanged(previous: UiState, next: UiState): boolean {
+  if (previous.sidebarMode !== next.sidebarMode) return true;
+  if (isHostedHubMode()) return false;
+  return (
+    previous.projectExpandedById !== next.projectExpandedById ||
+    previous.projectOrder !== next.projectOrder ||
+    previous.projectFoldersById !== next.projectFoldersById ||
+    previous.projectFolderOrder !== next.projectFolderOrder ||
+    previous.projectTreeOrder !== next.projectTreeOrder ||
+    previous.defaultAdvertisedEndpointKey !== next.defaultAdvertisedEndpointKey ||
+    previous.pinnedThreadKeys !== next.pinnedThreadKeys ||
+    previous.threadChangedFilesExpandedById !== next.threadChangedFilesExpandedById ||
+    previous.wideComposerControlsAutoCollapse !== next.wideComposerControlsAutoCollapse ||
+    previous.alwaysUseBuildMode !== next.alwaysUseBuildMode
+  );
+}
+
 function recordsEqual<T>(left: Record<string, T>, right: Record<string, T>): boolean {
   const leftEntries = Object.entries(left);
   const rightEntries = Object.entries(right);
@@ -739,6 +763,14 @@ export function syncProjects(
   const cwdMappingChanged =
     previousProjectCwdById.size !== currentProjectCwdById.size ||
     projects.some((project) => previousProjectCwdById.get(project.key) !== project.cwd);
+  if (
+    cwdMappingChanged ||
+    projects.some(
+      (project) => previousLogicalKeyByPhysicalKey.get(project.key) !== project.logicalKey,
+    )
+  ) {
+    projectCwdMappingRevision += 1;
+  }
 
   const nextExpandedById: Record<string, boolean> = Object.fromEntries(
     [...previousLogicalKeyByPhysicalKey].flatMap(([key, logicalKey]) =>
@@ -1652,7 +1684,15 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => reorderProjectTreeItem(state, activeItemId, overItemId)),
 }));
 
-useUiStateStore.subscribe((state) => debouncedPersistState.maybeExecute(state));
+let persistedCwdMappingRevision = projectCwdMappingRevision;
+useUiStateStore.subscribe((state, previous) => {
+  // The project cwd maps live outside the store, so a sync that only changed
+  // them still has to write.
+  const cwdMappingChanged = persistedCwdMappingRevision !== projectCwdMappingRevision;
+  if (!cwdMappingChanged && !persistedUiStateChanged(previous, state)) return;
+  persistedCwdMappingRevision = projectCwdMappingRevision;
+  debouncedPersistState.maybeExecute(state);
+});
 
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("beforeunload", () => {

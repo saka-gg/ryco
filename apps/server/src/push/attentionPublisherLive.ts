@@ -9,17 +9,23 @@
  * @module push/attentionPublisherLive
  */
 import { mapThreadShellSummary, mapWorktreeShellSummary } from "@ryco/client-runtime/state/threads";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, OrchestrationThreadShell } from "@ryco/contracts";
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { Effect, Option, Stream } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import type { HubConnector } from "../hubConnector/HubConnector.ts";
 import type { HubIdentityRuntimeShape } from "../hubConnector/HubIdentityRuntime.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readSharedThreadShell,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { startAttentionPublisher } from "./attentionPublisher.ts";
 import { makeActivitySignalSender, makeAttentionSignalSender } from "./attentionSignalHttp.ts";
 import type { NodePushRegistryShape } from "./NodePushRegistry.ts";
+
+const loadAlertExcerptSource = () => import("./alertExcerptSource.ts");
 
 /** Runs in the connector's scope; does nothing without a shell or an engine. */
 export const startNodeAttentionPublisher = (input: {
@@ -32,11 +38,25 @@ export const startNodeAttentionPublisher = (input: {
     const query = yield* Effect.serviceOption(ProjectionSnapshotQuery);
     const engine = yield* Effect.serviceOption(OrchestrationEngineService);
     if (Option.isNone(query) || Option.isNone(engine)) return;
+    const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
     const push = input.registry;
     const shell = query.value;
     const abort = new AbortController();
     const run = <A, E>(effect: Effect.Effect<A, E>) =>
       Effect.runPromise(effect, { signal: abort.signal });
+    // The environment id is set by the publisher; rows only need their own fields.
+    const summaries = new WeakMap<
+      OrchestrationThreadShell,
+      ReturnType<typeof mapThreadShellSummary>
+    >();
+    const threadSummary = (thread: OrchestrationThreadShell) => {
+      let summary = summaries.get(thread);
+      if (summary === undefined) {
+        summary = mapThreadShellSummary(thread, "" as EnvironmentId);
+        summaries.set(thread, summary);
+      }
+      return summary;
+    };
     const sender = {
       hubOrigin: input.hubOrigin,
       identity: input.identity,
@@ -52,27 +72,38 @@ export const startNodeAttentionPublisher = (input: {
           },
           isConnectorOnline: () => input.connector.status().state === "online",
           readShell: async () => {
+            // The node's shared thread list: no rebuild, and rows it did not change since the
+            // last read keep their objects, so their summaries are reused.
             const snapshot = await run(shell.getShellSnapshot());
-            // The environment id is set by the publisher; rows only need their own fields.
-            const environmentId = "" as EnvironmentId;
             return {
               sequence: snapshot.snapshotSequence,
-              threads: snapshot.threads.map((thread) =>
-                mapThreadShellSummary(thread, environmentId),
-              ),
+              threads: snapshot.threads.map(threadSummary),
               worktrees: (snapshot.worktrees ?? []).map((worktree) =>
-                mapWorktreeShellSummary(worktree, environmentId),
+                mapWorktreeShellSummary(worktree, "" as EnvironmentId),
               ),
               autoSettleAfterDays: snapshot.settlementPolicy?.autoSettleAfterDays,
             };
           },
           readThread: async (environmentId, threadId) => {
-            const row = await run(shell.getThreadShellById(threadId).pipe(Effect.option));
+            // The same shared read the shell subscriptions make for this change.
+            const row = await run(readSharedThreadShell(shell, threadId).pipe(Effect.option));
             return Option.isSome(row) && Option.isSome(row.value)
               ? mapThreadShellSummary(row.value.value, environmentId)
               : null;
           },
           isSnoozed: isThreadSnoozed,
+          readExcerpt: Option.isNone(sql)
+            ? undefined
+            : async (excerpt) => {
+                // Loaded on the first approval or question alert: the reader derives requests
+                // with the clients' session rules, which no boot path needs.
+                const { readAlertExcerpt } = await loadAlertExcerptSource();
+                return run(
+                  readAlertExcerpt(excerpt).pipe(
+                    Effect.provideService(SqlClient.SqlClient, sql.value),
+                  ),
+                );
+              },
           registrations: () => run(push.list),
           foregroundEnrollments: (nowMs) => run(push.foregroundEnrollments(nowMs)),
           reserveSequence: () => run(push.reserveSequence),

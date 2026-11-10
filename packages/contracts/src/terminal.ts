@@ -28,6 +28,13 @@ const TerminalIdWithDefaultSchema = TerminalIdSchema.pipe(
   Schema.withDecodingDefault(Effect.succeed(DEFAULT_TERMINAL_ID)),
 );
 
+/** One terminal session of a thread. */
+export const TerminalRef = Schema.Struct({
+  threadId: TrimmedNonEmptyStringSchema,
+  terminalId: TerminalIdSchema,
+});
+export type TerminalRef = typeof TerminalRef.Type;
+
 export const TerminalThreadInput = Schema.Struct({
   threadId: TrimmedNonEmptyStringSchema,
 });
@@ -61,6 +68,12 @@ export const TerminalOpenInput = Schema.Struct({
    * the full history. Older servers ignore it.
    */
   sinceCursor: Schema.optional(TerminalCursor),
+  /**
+   * The caller shows this terminal: a node that scopes output (see
+   * `TerminalSubscribeEventsInput.output`) sends its output to this connection from before the
+   * answer's snapshot on, until `terminal.detachOutput`. Older nodes ignore it and send all output.
+   */
+  attachOutput: Schema.optional(Schema.Literal(true)),
 });
 export type TerminalOpenInput = Schema.Codec.Encoded<typeof TerminalOpenInput>;
 
@@ -110,6 +123,14 @@ export const TerminalCloseInput = Schema.Struct({
   deleteHistory: Schema.optional(Schema.Boolean),
 });
 export type TerminalCloseInput = typeof TerminalCloseInput.Type;
+
+/**
+ * Ends `attachOutput` for one terminal on this connection: its output stops reaching the
+ * connection's scoped event streams. Only for nodes whose event stream acknowledged scoped output
+ * (`outputScope`); older nodes do not know the method.
+ */
+export const TerminalDetachOutputInput = TerminalRef;
+export type TerminalDetachOutputInput = typeof TerminalDetachOutputInput.Type;
 
 export const TerminalSessionStatus = Schema.Literals(["starting", "running", "exited", "error"]);
 export type TerminalSessionStatus = typeof TerminalSessionStatus.Type;
@@ -207,12 +228,31 @@ export const TerminalEvent = Schema.Union([
 export type TerminalEvent = typeof TerminalEvent.Type;
 
 /**
+ * Not a session event: the first item of a `subscribeTerminalEvents` stream that asked for scoped
+ * output. It confirms that this node sends output only for terminals attached on this connection
+ * and answers `terminal.detachOutput` and `server.setConnectionVisibility`. Older nodes never send
+ * it; the RPC client consumes it and never hands it to event listeners.
+ */
+export const TerminalOutputScopeEvent = Schema.Struct({
+  type: Schema.Literal("outputScope"),
+  scope: Schema.Literal("attached"),
+});
+export type TerminalOutputScopeEvent = typeof TerminalOutputScopeEvent.Type;
+
+/**
  * A terminal event as a client decodes it: an event type a newer node adds
  * decodes to an `UnknownUnionMember` the client skips, instead of ending the
  * terminal event stream for every terminal.
  */
 export const TerminalWireEvent = ForwardCompatibleUnion(TerminalEvent.members, "type");
 export type TerminalWireEvent = typeof TerminalWireEvent.Type;
+
+/** What a `subscribeTerminalEvents` stream carries: session events and the scope acknowledgement. */
+export const TerminalStreamItem = ForwardCompatibleUnion(
+  [...TerminalEvent.members, TerminalOutputScopeEvent],
+  "type",
+);
+export type TerminalStreamItem = typeof TerminalStreamItem.Type;
 
 /**
  * `replay: "metadata"` asks for history-free catch-up events (`replay: true`) for running
@@ -221,6 +261,17 @@ export type TerminalWireEvent = typeof TerminalWireEvent.Type;
  */
 export const TerminalSubscribeEventsInput = Schema.Struct({
   replay: Schema.optional(Schema.Literal("metadata")),
+  /**
+   * Scoped output: the stream carries `output` events only for terminals attached on this
+   * connection (`attached` here, `terminal.open` with `attachOutput`), while session metadata
+   * (`started`, `exited`, `activity`, ...) still covers every terminal. A node that honours it
+   * acknowledges with an `outputScope` item first; older nodes ignore the field and send all output.
+   */
+  output: Schema.optional(
+    Schema.Struct({
+      attached: Schema.Array(TerminalRef).check(Schema.isMaxLength(64)),
+    }),
+  ),
 });
 export type TerminalSubscribeEventsInput = typeof TerminalSubscribeEventsInput.Type;
 

@@ -1,5 +1,7 @@
 import { createContext, use, useState, type ReactNode } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   Image,
   Modal,
   Pressable,
@@ -21,11 +23,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { appMotion } from "../../lib/motion";
+import { shareAttachment } from "./attachmentShare";
 import {
   galleryBackdropOpacity,
   shouldDismissGallery,
   type GalleryImage,
 } from "./messageImageGallery";
+import { useAttachmentFile } from "./useAttachmentFile";
 
 /**
  * A message's images full screen: swipe sideways between them, pinch to zoom
@@ -111,17 +115,7 @@ export function ImageGalleryModal(props: {
                   showsHorizontalScrollIndicator={false}
                   showsVerticalScrollIndicator={false}
                 >
-                  <Image
-                    source={{ uri: image.uri }}
-                    accessibilityLabel={image.name}
-                    resizeMode="contain"
-                    style={{
-                      width,
-                      height: image.aspectRatio
-                        ? Math.min(height, width / image.aspectRatio)
-                        : height,
-                    }}
-                  />
+                  <GalleryImagePage image={image} width={width} height={height} />
                 </ScrollView>
               ))}
             </ScrollView>
@@ -153,7 +147,17 @@ export function ImageGalleryModal(props: {
             accessibilityRole="button"
             accessibilityLabel={`Share ${current?.name ?? "image"}`}
             onPress={() => {
-              if (current) void Share.share({ url: current.uri }).catch(() => undefined);
+              if (current === undefined) return;
+              if (current.uri !== undefined) {
+                void Share.share({ url: current.uri }).catch(() => undefined);
+                return;
+              }
+              void shareAttachment(current.reference).catch(() =>
+                Alert.alert(
+                  "Could not share the image",
+                  "Ryco could not load it from the machine.",
+                ),
+              );
             }}
             hitSlop={8}
             className="h-11 w-11 items-center justify-center rounded-full bg-black/50 active:opacity-70"
@@ -166,11 +170,59 @@ export function ImageGalleryModal(props: {
   );
 }
 
+/** One image of the gallery: read over its machine's connection as it comes up. */
+function GalleryImagePage(props: {
+  readonly image: GalleryImage;
+  readonly width: number;
+  readonly height: number;
+}) {
+  const { image, width, height } = props;
+  const file = useAttachmentFile({ reference: image.reference, auto: true, uri: image.uri });
+  if (file.status !== "ready") {
+    return (
+      <View style={{ width, height }} className="items-center justify-center">
+        {file.status === "failed" || file.status === "idle" ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Load ${image.name}`}
+            onPress={file.status === "failed" ? file.retry : file.load}
+            className="rounded-full bg-white/15 px-4 py-2 active:opacity-70"
+          >
+            <Text className="font-ryco-medium text-sm text-white">
+              {file.status === "failed" ? "Could not load the image. Retry" : "Load image"}
+            </Text>
+          </Pressable>
+        ) : (
+          <ActivityIndicator color="#fff" accessibilityLabel={`Loading ${image.name}`} />
+        )}
+      </View>
+    );
+  }
+  return (
+    <Image
+      source={{ uri: file.uri }}
+      accessibilityLabel={image.name}
+      resizeMode="contain"
+      style={{
+        width,
+        height: image.aspectRatio ? Math.min(height, width / image.aspectRatio) : height,
+      }}
+    />
+  );
+}
+
 type OpenImageGallery = (images: ReadonlyArray<GalleryImage>, index: number) => void;
 
 const ImageGalleryContext = createContext<OpenImageGallery | null>(null);
 
-function useOwnImageGallery(): { readonly open: OpenImageGallery; readonly modal: ReactNode } {
+/**
+ * A gallery of the caller's own, whatever provider is above: for a sheet that
+ * is its own native modal and must present the gallery from inside itself.
+ */
+export function useImageGalleryModal(): {
+  readonly open: OpenImageGallery;
+  readonly modal: ReactNode;
+} {
   const [gallery, setGallery] = useState<{
     readonly images: ReadonlyArray<GalleryImage>;
     readonly index: number;
@@ -195,7 +247,7 @@ function useOwnImageGallery(): { readonly open: OpenImageGallery; readonly modal
  * that opened it: rows unmount and recycle as the feed scrolls and streams.
  */
 export function ImageGalleryProvider({ children }: { readonly children: ReactNode }) {
-  const { open, modal } = useOwnImageGallery();
+  const { open, modal } = useImageGalleryModal();
   return (
     <ImageGalleryContext value={open}>
       {children}
@@ -207,6 +259,6 @@ export function ImageGalleryProvider({ children }: { readonly children: ReactNod
 /** Opens images through the nearest provider, or a modal of the caller's own outside one. */
 export function useImageGallery(): { readonly open: OpenImageGallery; readonly modal: ReactNode } {
   const provided = use(ImageGalleryContext);
-  const own = useOwnImageGallery();
+  const own = useImageGalleryModal();
   return provided === null ? own : { open: provided, modal: null };
 }

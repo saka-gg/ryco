@@ -54,9 +54,17 @@
       "types": "./src/rpc/shellSnapshotAssembly.ts",
       "import": "./src/rpc/shellSnapshotAssembly.ts"
     },
+    "./rpc/attachmentPreviewRead": {
+      "types": "./src/rpc/attachmentPreviewRead.ts",
+      "import": "./src/rpc/attachmentPreviewRead.ts"
+    },
     "./rpc/workspaceFileRead": {
       "types": "./src/rpc/workspaceFileRead.ts",
       "import": "./src/rpc/workspaceFileRead.ts"
+    },
+    "./rpc/checkpointDiffFiles": {
+      "types": "./src/rpc/checkpointDiffFiles.ts",
+      "import": "./src/rpc/checkpointDiffFiles.ts"
     },
     "./rpc/projectFileWatch": {
       "types": "./src/rpc/projectFileWatch.ts",
@@ -105,6 +113,10 @@
     "./authorization": {
       "types": "./src/authorization/index.ts",
       "import": "./src/authorization/index.ts"
+    },
+    "./authorization/hostedBackgroundStay": {
+      "types": "./src/authorization/hostedBackgroundStay.ts",
+      "import": "./src/authorization/hostedBackgroundStay.ts"
     },
     "./authorization/capabilities": {
       "types": "./src/authorization/capabilities.ts",
@@ -186,6 +198,14 @@
       "types": "./src/relay/dpop.ts",
       "import": "./src/relay/dpop.ts"
     },
+    "./relay/deferredHubSessionSocket": {
+      "types": "./src/relay/deferredHubSessionSocket.ts",
+      "import": "./src/relay/deferredHubSessionSocket.ts"
+    },
+    "./relay/nativeHubSessionManager": {
+      "types": "./src/relay/nativeHubSessionManager.ts",
+      "import": "./src/relay/nativeHubSessionManager.ts"
+    },
     "./relay/earlyRelaySocket": {
       "types": "./src/relay/earlyRelaySocket.ts",
       "import": "./src/relay/earlyRelaySocket.ts"
@@ -245,6 +265,10 @@
     "./state/tasks": {
       "types": "./src/state/tasks/index.ts",
       "import": "./src/state/tasks/index.ts"
+    },
+    "./state/tasks/savedTaskList": {
+      "types": "./src/state/tasks/savedTaskList.ts",
+      "import": "./src/state/tasks/savedTaskList.ts"
     },
     "./state/dailyRecap": {
       "types": "./src/state/dailyRecap/index.ts",
@@ -361,6 +385,10 @@
     "./state/threads/threadBodyResidency": {
       "types": "./src/state/threads/threadBodyResidency.ts",
       "import": "./src/state/threads/threadBodyResidency.ts"
+    },
+    "./state/threads/threadBodyCache": {
+      "types": "./src/state/threads/threadBodyCache.ts",
+      "import": "./src/state/threads/threadBodyCache.ts"
     },
     "./state/threads/threadContentCachePolicy": {
       "types": "./src/state/threads/threadContentCachePolicy.ts",

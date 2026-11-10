@@ -20,6 +20,11 @@ import {
   StorageScanInput,
   StoragePreviewInput,
   StorageExecuteInput,
+  StorageRemoveDatabaseBackupInput,
+  DatabaseCompactionStatus,
+  DatabaseCompactionStatusInput,
+  StartDatabaseCompactionResult,
+  StorageRemoveDatabaseBackupResult,
   StorageSnapshot,
   StorageCleanupPreview,
   StorageCleanupResult,
@@ -301,6 +306,7 @@ import {
   OrchestrationSearchThreadMessagesInput,
   OrchestrationThreadHistoryError,
   OrchestrationGetActivityPayloadError,
+  OrchestrationGetMessageTextError,
   OrchestrationGetTurnDiffError,
   OrchestrationGetTurnDiffInput,
   OrchestrationReplayEventsError,
@@ -351,8 +357,9 @@ import {
 import {
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalDetachOutputInput,
+  TerminalStreamItem,
   TerminalError,
-  TerminalWireEvent,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -498,6 +505,9 @@ export const WS_METHODS = {
   storageScan: "storage.scan",
   storagePreview: "storage.preview",
   storageExecute: "storage.execute",
+  storageRemoveDatabaseBackup: "storage.removeDatabaseBackup",
+  storageDatabaseCompactionStatus: "storage.databaseCompactionStatus",
+  storageStartDatabaseCompaction: "storage.startDatabaseCompaction",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -590,6 +600,7 @@ export const WS_METHODS = {
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
+  terminalDetachOutput: "terminal.detachOutput",
 
   // Server meta
   serverGetConfig: "server.getConfig",
@@ -627,6 +638,7 @@ export const WS_METHODS = {
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
   serverNoteClientInteraction: "server.noteClientInteraction",
+  serverSetConnectionVisibility: "server.setConnectionVisibility",
   serverSubscribeNodeUpdate: "server.subscribeNodeUpdate",
   serverCheckNodeUpdate: "server.checkNodeUpdate",
   serverUpdateNode: "server.updateNode",
@@ -1165,6 +1177,21 @@ export const WsServerNoteClientInteractionRpc = Rpc.make(WS_METHODS.serverNoteCl
   error: AuthRpcError,
 });
 
+/**
+ * The client of this connection went to the background (a hidden tab, a minimized window, a phone
+ * about to suspend) or came back. In the background the node pauses scoped terminal output for the
+ * connection and may send the thread list less often; on return the client's resume paths catch
+ * up. Only for nodes whose terminal event stream acknowledged scoped output (`outputScope`).
+ */
+export const WsServerSetConnectionVisibilityRpc = Rpc.make(
+  WS_METHODS.serverSetConnectionVisibility,
+  {
+    payload: Schema.Struct({ visibility: Schema.Literals(["foreground", "background"]) }),
+    success: EmptyRpcResult,
+    error: AuthRpcError,
+  },
+);
+
 export const WsServerSubscribeNodeUpdateRpc = Rpc.make(WS_METHODS.serverSubscribeNodeUpdate, {
   payload: Schema.Struct({}),
   success: NodeUpdateState,
@@ -1450,6 +1477,12 @@ export const WsSourceControlGetChangeRequestDetailRpc = Rpc.make(
        * other row reads of the same repository. Older servers ignore it and read fresh.
        */
       view: Schema.optional(Schema.Literals(["row"])),
+      /**
+       * Read from the host now (an explicit refresh). Without it the server may answer a
+       * focused read from a detail a few seconds old that other surfaces and clients share,
+       * or one its fingerprint shows unchanged. Older servers ignore it and read fresh.
+       */
+      fresh: Schema.optional(Schema.Boolean),
     }),
     success: SourceControlChangeRequestDetail,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
@@ -2082,6 +2115,29 @@ export const WsStorageExecuteRpc = Rpc.make(WS_METHODS.storageExecute, {
   error: Schema.Union([StorageError, AuthRpcError]),
 });
 
+export const WsStorageRemoveDatabaseBackupRpc = Rpc.make(WS_METHODS.storageRemoveDatabaseBackup, {
+  payload: StorageRemoveDatabaseBackupInput,
+  success: StorageRemoveDatabaseBackupResult,
+  error: Schema.Union([StorageError, AuthRpcError]),
+});
+
+export const WsStorageDatabaseCompactionStatusRpc = Rpc.make(
+  WS_METHODS.storageDatabaseCompactionStatus,
+  {
+    payload: DatabaseCompactionStatusInput,
+    success: DatabaseCompactionStatus,
+    error: Schema.Union([StorageError, AuthRpcError]),
+  },
+);
+export const WsStorageStartDatabaseCompactionRpc = Rpc.make(
+  WS_METHODS.storageStartDatabaseCompaction,
+  {
+    payload: DatabaseCompactionStatusInput,
+    success: StartDatabaseCompactionResult,
+    error: Schema.Union([StorageError, AuthRpcError]),
+  },
+);
+
 export const WsGitCreateWorktreeForProjectRpc = Rpc.make(WS_METHODS.gitCreateWorktreeForProject, {
   payload: GitCreateWorktreeForProjectInput,
   success: GitCreateWorktreeForProjectOutput,
@@ -2356,6 +2412,12 @@ export const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, AuthRpcError]),
 });
 
+export const WsTerminalDetachOutputRpc = Rpc.make(WS_METHODS.terminalDetachOutput, {
+  payload: TerminalDetachOutputInput,
+  success: EmptyRpcResult,
+  error: AuthRpcError,
+});
+
 export const WsOrchestrationDispatchCommandRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.dispatchCommand,
   {
@@ -2458,6 +2520,12 @@ export const WsOrchestrationGetActivityPayloadRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetMessageTextRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getMessageText, {
+  payload: OrchestrationRpcSchemas.getMessageText.input,
+  success: OrchestrationRpcSchemas.getMessageText.output,
+  error: OrchestrationGetMessageTextError,
+});
+
 export const WsOrchestrationSetThreadHistoryRecoveryRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
   {
@@ -2546,7 +2614,7 @@ export const WsContextHandoffReadExportChunkRpc = Rpc.make(
 
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: TerminalSubscribeEventsInput,
-  success: TerminalWireEvent,
+  success: TerminalStreamItem,
   error: Schema.Union([AuthRpcError, TerminalSubscriptionResyncError]),
   stream: true,
 });
@@ -2796,6 +2864,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerNoteClientInteractionRpc
+  | typeof WsServerSetConnectionVisibilityRpc
   | typeof WsServerSubscribeNodeUpdateRpc
   | typeof WsServerCheckNodeUpdateRpc
   | typeof WsServerUpdateNodeRpc
@@ -2904,6 +2973,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsStorageScanRpc
   | typeof WsStoragePreviewRpc
   | typeof WsStorageExecuteRpc
+  | typeof WsStorageRemoveDatabaseBackupRpc
+  | typeof WsStorageDatabaseCompactionStatusRpc
+  | typeof WsStorageStartDatabaseCompactionRpc
   | typeof WsGitCreateWorktreeForProjectRpc
   | typeof WsGitFindWorktreeForOriginRpc
   | typeof WsGitArchiveWorktreeRpc
@@ -2949,6 +3021,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsTerminalClearRpc
   | typeof WsTerminalRestartRpc
   | typeof WsTerminalCloseRpc
+  | typeof WsTerminalDetachOutputRpc
   | typeof WsSubscribeTerminalEventsRpc
   | typeof WsSubscribeServerConfigRpc
   | typeof WsSubscribeServerLifecycleRpc
@@ -2987,6 +3060,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationGetThreadShellsRpc
   | typeof WsOrchestrationGetThreadHistoryPageRpc
   | typeof WsOrchestrationGetActivityPayloadRpc
+  | typeof WsOrchestrationGetMessageTextRpc
   | typeof WsOrchestrationSetThreadHistoryRecoveryRpc
   | typeof WsOrchestrationReplayEventsRpc
   | typeof WsOrchestrationReplayEventsPageRpc
@@ -3041,6 +3115,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
   WsServerNoteClientInteractionRpc,
+  WsServerSetConnectionVisibilityRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsServerCheckNodeUpdateRpc,
   WsServerUpdateNodeRpc,
@@ -3149,6 +3224,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsStorageScanRpc,
   WsStoragePreviewRpc,
   WsStorageExecuteRpc,
+  WsStorageRemoveDatabaseBackupRpc,
+  WsStorageDatabaseCompactionStatusRpc,
+  WsStorageStartDatabaseCompactionRpc,
   WsGitCreateWorktreeForProjectRpc,
   WsGitFindWorktreeForOriginRpc,
   WsGitArchiveWorktreeRpc,
@@ -3194,6 +3272,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsTerminalDetachOutputRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
@@ -3232,6 +3311,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationGetThreadShellsRpc,
   WsOrchestrationGetThreadHistoryPageRpc,
   WsOrchestrationGetActivityPayloadRpc,
+  WsOrchestrationGetMessageTextRpc,
   WsOrchestrationSetThreadHistoryRecoveryRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationReplayEventsPageRpc,

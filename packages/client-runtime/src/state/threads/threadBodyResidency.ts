@@ -196,6 +196,34 @@ function selectThreadIdsWithBodies(environmentState: EnvironmentState): Set<Thre
   return threadIds;
 }
 
+/**
+ * Whether the store holds a body of the thread that its own subscription
+ * delivered: a window applied, not messages a display cache filled in. A
+ * subscription may resume on top of such a body (`holdsThreadBody`).
+ */
+export function holdsLiveThreadBody(state: AppState, ref: ScopedThreadRef): boolean {
+  const environmentState = ownEntry(state.environmentStateById, ref.environmentId);
+  return (
+    environmentState !== undefined &&
+    ownEntry(environmentState.messageByThreadId, ref.threadId) !== undefined &&
+    ownEntry(environmentState.cachedMessageThreadIds ?? {}, ref.threadId) === undefined
+  );
+}
+
+/**
+ * Whether the environment's shell in the store is live: a snapshot applied
+ * and not demoted to last-known state or replaced from a cache since. A shell
+ * resume needs one (`isEnvironmentShellLive`).
+ */
+export function isEnvironmentShellLive(state: AppState, environmentId: EnvironmentId): boolean {
+  const environmentState = ownEntry(state.environmentStateById, environmentId);
+  return (
+    environmentState !== undefined &&
+    environmentState.bootstrapComplete &&
+    environmentState.hydratedFromCacheAt === undefined
+  );
+}
+
 /** Every thread the store holds a body for, across environments, with its estimated size. */
 export function selectThreadBodyUsage(state: AppState): ThreadBodyUsage[] {
   const usage: ThreadBodyUsage[] = [];

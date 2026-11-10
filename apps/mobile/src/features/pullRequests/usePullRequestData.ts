@@ -23,6 +23,7 @@ import { mobileHostedConnectionScopes } from "../../connection/hostedConnectionS
 import {
   pullRequestActivityQuery,
   pullRequestDetailQuery,
+  requestFreshPullRequestDetail,
   pullRequestDiffQuery,
   pullRequestListQuery,
 } from "../../rpc/pullRequestAtoms";
@@ -221,6 +222,8 @@ export function usePullRequest(input: PullRequestReadInput): PullRequestData {
     checks,
     nextAction,
     refresh: () => {
+      // Pull to refresh: the node reads the host now, not a shared or fingerprinted copy.
+      requestFreshPullRequestDetail({ environmentId, cwd, number });
       void detail.refetch();
       if (capabilities.activity) void activity.refetch();
     },

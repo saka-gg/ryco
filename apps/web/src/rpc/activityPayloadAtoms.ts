@@ -54,6 +54,8 @@ export interface ActivityPayloadInput {
   readonly environmentId: EnvironmentId | null;
   readonly threadId: ThreadId | null;
   readonly activityId: string | null;
+  /** The stored size the newest preview announced; a larger one than fetched is read again. */
+  readonly payloadBytes?: number | null | undefined;
 }
 
 /**

@@ -993,10 +993,10 @@ describe("MessagesTimeline", () => {
 
     const imageTags = markup.match(/<img\b[^>]*>/g) ?? [];
     expect(imageTags).toHaveLength(2);
-    expect(imageTags[0]).toContain('src="http://localhost:0/attachments/image-1"');
+    expect(imageTags[0]).toContain('src="http://localhost:0/attachments/image-1?preview=1024"');
     expect(imageTags[0]).toContain('width="640"');
     expect(imageTags[0]).toContain('height="480"');
-    expect(imageTags[1]).toContain('src="http://localhost:0/attachments/image-2"');
+    expect(imageTags[1]).toContain('src="http://localhost:0/attachments/image-2?preview=1024"');
     expect(imageTags[1]).not.toContain("width=");
     expect(markup).toContain('aria-label="Preview chart.png"');
     expect(markup).toContain('aria-label="Preview unknown-size.png"');

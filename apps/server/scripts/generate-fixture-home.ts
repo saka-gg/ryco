@@ -19,9 +19,9 @@
  * fixtures stay byte-identical: per turn, task progress ticks on 1-3 tasks (with usage ticks),
  * live reasoning writes ending in a final one, and streaming subagent message writes ending in a
  * final one. They are dispatched with `provider:<uuid>:…` command ids, like ingestion's, so the
- * receipt pruning rule applies to them; their content and timing come from a separate seeded
- * stream, so the rest of the history keeps its content (later timestamps of a thread move by the
- * time these writes take).
+ * engine keeps their receipts in memory and writes no receipt rows for them; their content and
+ * timing come from a separate seeded stream, so the rest of the history keeps its content (later
+ * timestamps of a thread move by the time these writes take).
  */
 import { mkdirSync, rmSync, statSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";

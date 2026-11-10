@@ -1,3 +1,4 @@
+import type { ChatAttachmentPreviewSize } from "@ryco/contracts";
 import type { ChatAttachment, ChatFileAttachment } from "@ryco/client-runtime/state/threads";
 
 /**
@@ -17,6 +18,21 @@ export interface AttachmentDimensions {
 
 /** Pixel width of a fixed-size image slot; matches the previous w-36 slot. */
 export const IMAGE_ATTACHMENT_SLOT_WIDTH = 144;
+
+/**
+ * The preview size (longest edge, pixels) that is sharp in an image slot on a
+ * 3x screen: a landscape image fills the slot's width; a portrait one, or one
+ * of unknown size (cropped into a square), needs more.
+ */
+export function imageAttachmentPreviewSize(
+  dimensions: { readonly width: number; readonly height: number } | null,
+): ChatAttachmentPreviewSize {
+  const needed =
+    dimensions === null
+      ? Infinity
+      : IMAGE_ATTACHMENT_SLOT_WIDTH * 3 * Math.max(1, dimensions.height / dimensions.width);
+  return needed <= 512 ? 512 : 1024;
+}
 
 /** Fallback aspect ratio for media whose dimensions were not probed. */
 export const DEFAULT_MEDIA_ASPECT_RATIO = 16 / 9;

@@ -2,6 +2,7 @@ import type { RelayEffectiveRole } from "@ryco/contracts";
 import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts/orchestration";
 import { RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
 import { WS_METHODS } from "@ryco/contracts/rpc";
+import { RELAY_RPC_KEEPALIVE_INTERVAL } from "@ryco/shared/relayE2eeConstants";
 import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
 import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
@@ -897,6 +898,8 @@ export class HostedRelayAttemptFactory {
     const subscribePresenceWake = this.#binding.subscribePresenceWake;
     return {
       webSocketConstructor: (url) => this.createSocket(url) as WebSocket,
+      // §3.2.2 L6: a relay channel pings less often than a direct socket.
+      keepaliveIntervalMs: RELAY_RPC_KEEPALIVE_INTERVAL,
       isSocketCurrent: (socket) => socket === this.#activeSocket,
       preserveSocketPath: true,
       retryTransientErrors: false,

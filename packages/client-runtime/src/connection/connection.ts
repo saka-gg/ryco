@@ -73,6 +73,17 @@ export interface EnvironmentConnection {
     readonly read: () => object | null;
     readonly subscribe: (listener: () => void) => () => void;
   };
+  /**
+   * Whether this connection's session is current: its socket attempt accepted
+   * its own thread list (a snapshot, or a resume the server verified), its
+   * hosted generation is still the owner's, and a hosted session is adoptable
+   * (`resumeReadiness`). Git action recovery and a Hub relay's thread resume
+   * wait for it.
+   */
+  readonly sessionReadiness: {
+    readonly read: () => boolean;
+    readonly subscribe: (listener: () => void) => () => void;
+  };
   readonly config: EnvironmentConnectionConfig;
   readonly reconnect: () => Promise<void>;
   readonly dispose: () => Promise<void>;
@@ -479,28 +490,29 @@ export function createEnvironmentConnection(
       };
     },
   };
+  const resumeReadiness = input.resumeReadiness;
+  const sessionReadiness: EnvironmentConnection["sessionReadiness"] = {
+    read: () =>
+      shellSnapshotReadiness.read() !== null &&
+      isCurrentGeneration() &&
+      (resumeReadiness?.read() ?? true),
+    subscribe: (listener) => {
+      const unsubscribeShell = shellSnapshotReadiness.subscribe(listener);
+      const unsubscribeResume = resumeReadiness?.subscribe(listener);
+      return () => {
+        unsubscribeShell();
+        unsubscribeResume?.();
+      };
+    },
+  };
   // Every git action of this connection goes through the recovery: a caller that asks for it
   // gets an action that outlives a drop and is followed again on whichever connection of the
   // environment is ready next.
-  const resumeReadiness = input.resumeReadiness;
   const gitRecovery = input.client.git
     ? getGitActionRecovery().attach({
         environmentId,
         git: input.client.git,
-        readiness: {
-          read: () =>
-            shellSnapshotReadiness.read() !== null &&
-            isCurrentGeneration() &&
-            (resumeReadiness?.read() ?? true),
-          subscribe: (listener) => {
-            const unsubscribeShell = shellSnapshotReadiness.subscribe(listener);
-            const unsubscribeResume = resumeReadiness?.subscribe(listener);
-            return () => {
-              unsubscribeShell();
-              unsubscribeResume?.();
-            };
-          },
-        },
+        readiness: sessionReadiness,
         isCurrent: () => !disposed && isCurrentGeneration(),
         supportsRecoverable: () =>
           config.read()?.environment.capabilities.recoverableGitActions === true,
@@ -542,6 +554,7 @@ export function createEnvironmentConnection(
     client,
     ensureBootstrapped: () => bootstrapGate.wait(),
     shellSnapshotReadiness,
+    sessionReadiness,
     config,
     reconnect: async () => {
       bootstrapGate.reset();
