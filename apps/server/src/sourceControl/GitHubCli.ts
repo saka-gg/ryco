@@ -522,6 +522,18 @@ export interface GitHubCliShape {
   }) => Effect.Effect<ReadonlyArray<GitHubPullRequestListItem>, GitHubCliError>;
 
   /**
+   * A token that changes whenever any pull request of `cwd`'s repository is opened or
+   * changes (title, state, draft, branches, a push): the most recently updated pull
+   * request's number and update time, read with one conditional REST request GitHub answers
+   * with a 304 it does not count while nothing changed. Null when the token cannot be read
+   * that cheaply (no API token for the host, a failure): the caller lists instead.
+   * Optional: test doubles leave it out.
+   */
+  readonly getPullRequestListVersion?: (input: {
+    readonly cwd: string;
+  }) => Effect.Effect<string | null, never>;
+
+  /**
    * Pull requests involving the viewer across every repository on a host, newest activity
    * first, archived repositories left out: one GraphQL search of up to 100 rows. `github.com`
    * is searched as is; for any other `host`, the one `gh` resolves for `cwd`'s repository (it
@@ -1651,6 +1663,27 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       }
       return { pullRequests, issues };
     });
+
+  const getPullRequestListVersion: NonNullable<GitHubCliShape["getPullRequestListVersion"]> = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const repository = yield* listRepository(input.cwd);
+      const outcome = yield* directApi.rest({
+        host: repository.host,
+        operation: "getPullRequestListVersion",
+        path: `repos/${repository.owner}/${repository.name}/pulls?state=all&sort=updated&direction=desc&per_page=1`,
+        apiVersion: GITHUB_API_VERSION,
+        revalidate: true,
+      });
+      // Without the API (no token, a proxy) the probe would cost a `gh` process and get no
+      // 304: listing is as cheap then.
+      if (outcome._tag === "Unavailable") return null;
+      const output = GitHubApi.ghEquivalentOutput(outcome.answer, "rest");
+      return output.exitCode === 0
+        ? GitHubRepositoryLists.decodeGitHubPullRequestListVersion(output.stdout)
+        : null;
+    }).pipe(Effect.orElseSucceed(() => null));
 
   const listPullRequests: GitHubCliShape["listPullRequests"] = (input) =>
     Effect.gen(function* () {
@@ -3191,6 +3224,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     updatePullRequest,
     getPullRequestFileContents,
     listPullRequests,
+    getPullRequestListVersion,
     searchInvolvedPullRequests,
     getLinkStates,
     listOpenPullRequests: (input) =>

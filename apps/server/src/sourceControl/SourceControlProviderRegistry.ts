@@ -323,6 +323,12 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
       (loaded) => loaded.getChangeRequestWatchFingerprint,
       () => Effect.succeed(null),
     ),
+    // Without a list version, the change request index lists again when it expires (null).
+    getChangeRequestListVersion: lazyOptionalMethod(
+      provider,
+      (loaded) => loaded.getChangeRequestListVersion,
+      () => Effect.succeed(null),
+    ),
     // Without a thread read, a long review thread stays unread past its first page (null).
     getChangeRequestReviewThread: lazyOptionalMethod(
       provider,
@@ -602,6 +608,14 @@ export function bindProviderContext(
       ? {
           getChangeRequestWatchFingerprint: withProviderContext(
             provider.getChangeRequestWatchFingerprint,
+            context,
+          ),
+        }
+      : {}),
+    ...(provider.getChangeRequestListVersion
+      ? {
+          getChangeRequestListVersion: withProviderContext(
+            provider.getChangeRequestListVersion,
             context,
           ),
         }

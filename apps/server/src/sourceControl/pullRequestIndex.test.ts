@@ -273,3 +273,100 @@ describe("pull request index during a rate-limit pause", () => {
     }).pipe(Effect.provideService(ForgeRateLimits, new ForgeRateLimitStore())),
   );
 });
+
+/** A provider with a list version (`getChangeRequestListVersion`); both reads are counted. */
+function versionedProvider(state: { version: string | null; lists: number; versions: number }) {
+  return {
+    kind: "github",
+    listChangeRequests: () =>
+      Effect.sync(() => {
+        state.lists += 1;
+        return [changeRequest(state.lists)];
+      }),
+    getChangeRequestListVersion: () =>
+      Effect.sync(() => {
+        state.versions += 1;
+        return state.version;
+      }),
+  } as unknown as SourceControlProviderShape;
+}
+
+describe("pull request index revalidation by list version", () => {
+  it.effect("keeps an expired listing while the host's list version has not moved", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const index = yield* makePullRequestIndex;
+      const state = { version: "7@2026-11-10T00:00:00Z" as string | null, lists: 0, versions: 0 };
+      const input = {
+        repository,
+        scope: "all" as const,
+        cwd: "/repo",
+        provider: versionedProvider(state),
+      };
+
+      const first = yield* index.read(input);
+      // Both scopes of a repository read back to back share one version read.
+      yield* index.read({ ...input, scope: "open" });
+      assert.deepStrictEqual([state.lists, state.versions], [2, 1]);
+
+      // Expired, unchanged: the same listing, no list read.
+      yield* TestClock.adjust("61 seconds");
+      assert.strictEqual(yield* index.read(input), first);
+      assert.deepStrictEqual([state.lists, state.versions], [2, 2]);
+
+      // A pull request opened or changed moves the version: listed again.
+      state.version = "8@2026-11-10T00:01:00Z";
+      yield* TestClock.adjust("61 seconds");
+      const next = yield* index.read(input);
+      assert.notStrictEqual(next, first);
+      assert.deepStrictEqual([state.lists, state.versions], [3, 3]);
+    }),
+  );
+
+  it.effect("lists again when the host cannot tell its list version", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const index = yield* makePullRequestIndex;
+      const state = { version: null as string | null, lists: 0, versions: 0 };
+      const input = {
+        repository,
+        scope: "all" as const,
+        cwd: "/repo",
+        provider: versionedProvider(state),
+      };
+      yield* index.read(input);
+      yield* TestClock.adjust("61 seconds");
+      yield* index.read(input);
+      assert.strictEqual(state.lists, 2);
+    }),
+  );
+
+  it.effect("a poll keeps the listing; a git action or turn asks for the version again", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const index = yield* makePullRequestIndex;
+      const state = { version: "7@2026-11-10T00:00:00Z" as string | null, lists: 0, versions: 0 };
+      const input = {
+        repository,
+        scope: "all" as const,
+        cwd: "/repo",
+        provider: versionedProvider(state),
+      };
+      yield* index.read(input);
+
+      yield* index.invalidate(repository, { periodic: true });
+      yield* index.read(input);
+      assert.deepStrictEqual([state.lists, state.versions], [1, 1]);
+
+      // Within the version's own short life, an invalidation still asks the host again.
+      yield* index.invalidate(repository);
+      yield* index.read(input);
+      assert.deepStrictEqual([state.lists, state.versions], [1, 2]);
+
+      state.version = "8@2026-11-10T00:01:00Z";
+      yield* index.invalidate(repository);
+      yield* index.read(input);
+      assert.deepStrictEqual([state.lists, state.versions], [2, 3]);
+    }),
+  );
+});

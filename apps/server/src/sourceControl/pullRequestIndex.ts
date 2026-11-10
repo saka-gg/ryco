@@ -10,6 +10,14 @@
  * per-branch query, cached here too: in a busy repository the same old or
  * PR-less branches miss the recent window on every read.
  *
+ * An expired or invalidated listing is not simply listed again: when the
+ * provider has a list version (`getChangeRequestListVersion`, on GitHub one
+ * conditional request answered with a free 304 while nothing changed), the
+ * version is compared with the one seen before the last listing, and the
+ * listing is kept while it has not moved. A periodic status poll does not drop
+ * the listing at all (its TTL already bounds its age); git actions and agent
+ * turns do, so the next read asks for the version again.
+ *
  * While the forge is rate limiting (see `lastGoodWhilePaused`), background
  * readers get the last good listing, marked, and the forge's rate-limited
  * answer is held until its pause ends, through invalidations while the pause
@@ -48,6 +56,11 @@ const failureTimeToLive = (exit: Exit.Exit<unknown, unknown>) =>
     ? Duration.zero
     : PULL_REQUEST_INDEX_FAILURE_TTL;
 const PULL_REQUEST_INDEX_CAPACITY = 256;
+/**
+ * One list version answers both scopes of a repository (read back to back) and every
+ * checkout reading it at the same moment.
+ */
+const LIST_VERSION_TTL = Duration.seconds(5);
 
 export const BRANCH_CHANGE_REQUEST_LIMIT = 20;
 /**
@@ -136,11 +149,16 @@ export interface PullRequestIndex {
   /**
    * Drops the repository's listings and branch answers. A held rate-limited
    * answer stays when `keepHeldWhile` (asked only when one is held) says the
-   * forge's pause still runs.
+   * forge's pause still runs. A `periodic` invalidation (a status poll, which
+   * knows of no change) keeps them: their TTL already bounds their age. A
+   * dropped listing whose list version has not moved is kept on the next read.
    */
   readonly invalidate: (
     repository: string,
-    options?: { readonly keepHeldWhile?: Effect.Effect<boolean> },
+    options?: {
+      readonly keepHeldWhile?: Effect.Effect<boolean>;
+      readonly periodic?: boolean;
+    },
   ) => Effect.Effect<void>;
 }
 
@@ -225,6 +243,27 @@ export const makePullRequestIndex = Effect.gen(function* () {
       ),
     );
 
+  // The last listing the forge returned per index key, with the list version read before
+  // it: kept through expiry and invalidation, so an unchanged version answers without a list.
+  const listed = new Map<
+    string,
+    { readonly listing: PullRequestIndexListing; readonly version: string | null }
+  >();
+
+  // The repository's list version, shared by both scopes and concurrent readers; never fails
+  // (a host that cannot tell, or a failure, answers null: list again).
+  const versions = yield* Cache.makeWith(
+    (repository: string) =>
+      Effect.suspend(() => {
+        const lookup = lookups.get(repository);
+        if (!lookup?.provider.getChangeRequestListVersion) return Effect.succeed(null);
+        return lookup.provider
+          .getChangeRequestListVersion({ cwd: lookup.cwd })
+          .pipe(Effect.orElseSucceed(() => null));
+      }),
+    { capacity: PULL_REQUEST_INDEX_CAPACITY, timeToLive: () => LIST_VERSION_TTL },
+  );
+
   const listIndex = (key: string) =>
     Effect.suspend(() => {
       const separator = key.indexOf("\u0000");
@@ -232,21 +271,33 @@ export const makePullRequestIndex = Effect.gen(function* () {
       const repository = key.slice(separator + 1);
       const lookup = lookups.get(repository);
       if (!lookup) return Effect.die(new Error("Change request index read without a checkout."));
-      const read = lookup.provider
-        .listChangeRequests({
+      const read = Effect.gen(function* () {
+        // Read before the list, so the listing is at least as new as the version kept with it.
+        const version = yield* Cache.get(versions, repository);
+        const previous = listed.get(key);
+        if (version !== null && previous !== undefined && previous.version === version) {
+          return previous.listing;
+        }
+        const items = yield* lookup.provider.listChangeRequests({
           cwd: lookup.cwd,
           headSelector: "",
           state: scope satisfies ChangeRequestState | "all",
           limit: PULL_REQUEST_INDEX_LIMIT,
           includeStackSummary: false,
           fields: "summary",
-        })
-        .pipe(
-          Effect.map((items): PullRequestIndexListing => ({
-            items,
-            complete: items.length < PULL_REQUEST_INDEX_LIMIT,
-          })),
-        );
+        });
+        const listing: PullRequestIndexListing = {
+          items,
+          complete: items.length < PULL_REQUEST_INDEX_LIMIT,
+        };
+        listed.delete(key);
+        listed.set(key, { listing, version });
+        for (const oldest of listed.keys()) {
+          if (listed.size <= PULL_REQUEST_INDEX_CAPACITY) break;
+          listed.delete(oldest);
+        }
+        return listing;
+      });
       return learn(read, lastGoodListings, key, `i${key}`, repository);
     });
 
@@ -336,6 +387,8 @@ export const makePullRequestIndex = Effect.gen(function* () {
       ),
     invalidate: (repository, options?) =>
       Effect.gen(function* () {
+        if (options?.periodic === true) return;
+        yield* Cache.invalidate(versions, repository);
         generations.delete(repository);
         generations.set(repository, ++nextGeneration);
         for (const oldest of generations.keys()) {

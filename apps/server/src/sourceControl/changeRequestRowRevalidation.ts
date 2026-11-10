@@ -43,10 +43,13 @@ export function changeRequestRowToken(
   return [fingerprint.status, fingerprint.remarks, fingerprint.revision].join("\n");
 }
 
-const rereadAfterMs = (detail: SourceControlChangeRequestDetail) =>
-  (detail.stack?.entries.length ?? 0) > 1
-    ? STACKED_CHANGE_REQUEST_ROW_REREAD_MS
-    : CHANGE_REQUEST_ROW_REREAD_MS;
+const rereadAfterMs = (detail: SourceControlChangeRequestDetail, overrideMs?: number) =>
+  Math.min(
+    overrideMs ?? Infinity,
+    (detail.stack?.entries.length ?? 0) > 1
+      ? STACKED_CHANGE_REQUEST_ROW_REREAD_MS
+      : CHANGE_REQUEST_ROW_REREAD_MS,
+  );
 
 interface RowRead {
   readonly detail: SourceControlChangeRequestDetail;
@@ -76,6 +79,11 @@ export function makeChangeRequestRowRevalidation() {
       readonly key: string;
       readonly changes: RepositoryChanges;
       readonly load: Effect.Effect<SourceControlChangeRequestDetail, E, R>;
+      /**
+       * Read in full at least this often (the default: 30 min, 5 min for a stack). Focused
+       * surfaces, which show more than a row, ask for less.
+       */
+      readonly rereadAfterMs?: number;
       /** The checkout's provider; one without a fingerprint reads in full. */
       readonly provider: Effect.Effect<
         Pick<SourceControlProviderShape, "getChangeRequestWatchFingerprint">,
@@ -114,7 +122,7 @@ export function makeChangeRequestRowRevalidation() {
           token !== null &&
           token === previous.token &&
           previous.mutations === mutations &&
-          readAtMs - previous.readAtMs < rereadAfterMs(previous.detail)
+          readAtMs - previous.readAtMs < rereadAfterMs(previous.detail, input.rereadAfterMs)
         ) {
           return previous.detail;
         }

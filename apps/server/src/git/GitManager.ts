@@ -1429,7 +1429,12 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
               Effect.flatMap((keepHeldWhile) =>
                 Effect.all(
                   [
-                    pullRequestIndex.invalidate(target.repository, { keepHeldWhile }),
+                    // A poll knows of no change: the listing's TTL bounds its age, and an
+                    // expired one is relisted only when the host's list version moved.
+                    pullRequestIndex.invalidate(target.repository, {
+                      keepHeldWhile,
+                      periodic: options?.periodic === true,
+                    }),
                     // A refresh follows git actions, agent turns and polls, not edits made
                     // through Ryco: a row detail may stand on a fingerprint, given since the
                     // refresh unless it is a poll's.

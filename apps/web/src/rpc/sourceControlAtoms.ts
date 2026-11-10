@@ -799,6 +799,15 @@ function readChangeRequestDetail(
     const shared = reusableChangeRequestDetail(environmentId, compositeKey);
     if (shared !== null) return Promise.resolve(shared);
   }
+  // `refresh` zeroes `lastFetchedAt` of an entry that has data: someone asked for the host's
+  // current answer, which the server then reads in full instead of standing on its
+  // fingerprint (older servers always do).
+  const controller = compositeKey === null ? undefined : controllers.get(compositeKey);
+  const fresh =
+    input.view !== "row" &&
+    controller !== undefined &&
+    controller.hasData &&
+    controller.lastFetchedAt === 0;
   const startedAt = Date.now();
   return sourceControlClient(environmentId)
     .getChangeRequestDetail({
@@ -806,6 +815,7 @@ function readChangeRequestDetail(
       reference: input.reference as string,
       ...(input.fullContent ? { fullContent: true } : {}),
       ...(input.view !== undefined ? { view: input.view } : {}),
+      ...(fresh ? { fresh: true } : {}),
     })
     .then((detail) => {
       // Only uncapped reads may stand in for other keys.

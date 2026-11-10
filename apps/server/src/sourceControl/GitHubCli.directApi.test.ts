@@ -471,6 +471,66 @@ describe("GitHubCli REST reads over the direct API", () => {
   );
 });
 
+describe("GitHubCli pull request list version", () => {
+  const newest = [{ number: 12, updated_at: "2026-11-10T09:00:00Z", title: "x" }];
+
+  it.effect("reads the newest updated pull request with its ETag, so unchanged is a 304", () =>
+    withDirectApi(
+      (request) =>
+        request.headers["if-none-match"] === '"pulls-1"'
+          ? { status: 304, headers: { etag: '"pulls-1"' } }
+          : { headers: { etag: '"pulls-1"' }, body: newest },
+      { GH_TOKEN: SENTINEL },
+      (gh, server) =>
+        Effect.gen(function* () {
+          scriptGh();
+          const read = gh.getPullRequestListVersion!({ cwd: "/repo" });
+          assert.strictEqual(yield* read, "12@2026-11-10T09:00:00Z");
+          assert.strictEqual(yield* read, "12@2026-11-10T09:00:00Z");
+          assert.lengthOf(server.requests, 2);
+          assert.strictEqual(
+            server.requests[0]!.url,
+            "/api/v3/repos/acme/web/pulls?state=all&sort=updated&direction=desc&per_page=1",
+          );
+          assert.strictEqual(server.requests[1]!.headers["if-none-match"], '"pulls-1"');
+          // Only gh's repository resolution, no list process.
+          assert.deepStrictEqual(ghCalls(), [REPO_VIEW]);
+        }),
+    ),
+  );
+
+  it.effect("answers null without a credential instead of starting gh", () =>
+    Effect.gen(function* () {
+      mockRun.mockImplementation((input) => {
+        const args = [...input.args];
+        if (args.join(" ") === REPO_VIEW.join(" ")) {
+          return Effect.succeed(
+            output(
+              JSON.stringify({ nameWithOwner: "acme/web", url: "https://github.com/acme/web" }),
+            ),
+          );
+        }
+        return args[0] === "auth"
+          ? Effect.succeed(output("", { exitCode: 1, stderr: "no oauth token found" }))
+          : Effect.die(`unexpected gh call: gh ${args.join(" ")}`);
+      });
+      const version = yield* withDirectApi(
+        () => ({ status: 500 }),
+        {},
+        (gh) => gh.getPullRequestListVersion!({ cwd: "/repo" }),
+      );
+      assert.isNull(version);
+    }),
+  );
+
+  it("decodes the version of an empty or unexpected list", () => {
+    assert.strictEqual(GitHubRepositoryLists.decodeGitHubPullRequestListVersion("[]"), "empty");
+    assert.isNull(GitHubRepositoryLists.decodeGitHubPullRequestListVersion("{}"));
+    assert.isNull(GitHubRepositoryLists.decodeGitHubPullRequestListVersion("not json"));
+    assert.isNull(GitHubRepositoryLists.decodeGitHubPullRequestListVersion('[{"number":1}]'));
+  });
+});
+
 describe("GitHubCli lists over the direct API", () => {
   it.effect("pages pull request lists over HTTPS without starting gh for the pages", () =>
     withDirectApi(

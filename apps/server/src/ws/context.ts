@@ -595,6 +595,16 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       readonly cwd: string;
       readonly kind: "pr" | "issue";
       readonly reference: string;
+      /**
+       * The pull request's state as the read that triggers this refresh just got it from the
+       * forge (a detail read): its links then need no forge call of their own, and the other
+       * links and the linked issue are re-read at most once a minute while it stays open.
+       */
+      readonly reported?: {
+        readonly state: KnownPullRequestState["state"];
+        readonly isDraft: boolean;
+        readonly terminalAt: string | null;
+      };
     }) =>
       Effect.gen(function* () {
         const parsed = Number.parseInt(input.reference, 10);
@@ -607,10 +617,31 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           number: parsed,
         });
         if (linked.length === 0) return;
+        const reported = input.kind === "pr" ? input.reported : undefined;
+        const known =
+          reported === undefined
+            ? {}
+            : {
+                knownPullRequestStates: (cwd: string) =>
+                  knownPullRequestStatesFor(undefined)(cwd).pipe(
+                    Effect.map((states) =>
+                      new Map(states).set(parsed, {
+                        state: reported.state,
+                        isDraft: reported.isDraft,
+                        reported: { terminalAt: reported.terminalAt },
+                      }),
+                    ),
+                  ),
+                // A state change lands at once; an open one the poll keeps reading does not
+                // re-read the workspace's other links each time.
+                ...(reported.state === "open"
+                  ? { linkRefreshIntervalMs: WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS }
+                  : {}),
+              };
         yield* Effect.forEach(
           linked,
           (worktreeId) =>
-            refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest }).pipe(
+            refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest, ...known }).pipe(
               ignoreCauseLogOnceEvery(sourceControlRefreshFailureLog(worktreeId)),
             ),
           { concurrency: LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY, discard: true },
