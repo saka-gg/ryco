@@ -965,6 +965,13 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             input.threadId,
             { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
+            // Slim events are only sent to window subscribers that ask; never here.
+            Stream.filter(
+              <Item extends { readonly kind: string }>(
+                item: Item,
+              ): item is Exclude<Item, { readonly kind: "slim-event" }> =>
+                item.kind !== "slim-event",
+            ),
             (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),
             observeArrays(isServerPerfProfileEnabled(), (items) =>
               recordServerPerfPayload("server.ws.orchestration.subscribeThread", items),
@@ -1002,6 +1009,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             {
               resumeFromSequence: input.resumeFromSequence,
               liveActivityPayloads: input.liveActivityPayloads,
+              liveEventForm: input.liveEventForm,
             },
           ).pipe(
             (stream) => withHistoryRecovery(input.threadId, stream, input.historyRecovery),

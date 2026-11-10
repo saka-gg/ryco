@@ -44,6 +44,7 @@ import {
   orderSavedEnvironmentConnectionQueue,
   runSavedEnvironmentConnectionQueue,
 } from "./savedEnvironmentConnectionScheduler.ts";
+import { expandSlimThreadEvent } from "./slimThreadEvent.ts";
 import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
 
 const NOOP = () => undefined;
@@ -673,10 +674,13 @@ export function createEnvironmentConnectionSupervisor<
     ...(messageText !== undefined ? { messageText } : {}),
   };
   // A client that reads previews on demand takes live tool output as previews too.
-  const windowSubscriptionPayloads =
-    activityPayloads === "preview"
-      ? { ...activityPayloadsRequest, liveActivityPayloads: activityPayloads }
-      : activityPayloadsRequest;
+  // Live events in the slim form (no ids or metadata the client never reads);
+  // an older server ignores the field and sends full events.
+  const windowSubscriptionPayloads = {
+    ...activityPayloadsRequest,
+    ...(activityPayloads === "preview" ? { liveActivityPayloads: activityPayloads } : {}),
+    liveEventForm: "slim" as const,
+  };
   const historyPagination = createThreadHistoryPaginationController({
     request: (environmentId, request) => {
       const query = require(environmentId).client.orchestration.getThreadHistoryPage;
@@ -909,7 +913,11 @@ export function createEnvironmentConnectionSupervisor<
             scheduleWindowBackfill(entry, item.snapshot);
             return;
           }
-          applyEvent(item.event);
+          applyEvent(
+            item.kind === "slim-event"
+              ? expandSlimThreadEvent(item.event, entry.threadId)
+              : item.event,
+          );
         },
         {
           ...subscriptionOptions,

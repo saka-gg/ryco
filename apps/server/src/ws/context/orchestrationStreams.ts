@@ -40,7 +40,7 @@ import {
   orchestrationProgressFrameKey,
   orchestrationShellFrameKey,
 } from "./orchestrationEventCoalescing.ts";
-import { rechunkByBudget, tapArray } from "../streamBatching.ts";
+import { makeCachedJsonBytes, rechunkByBudget, tapArray } from "../streamBatching.ts";
 import { dedupeBySequence } from "../../orchestration/sequenceOrderedStream.ts";
 import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
@@ -152,6 +152,35 @@ export const releaseQueuedEventsBytes = (
   for (const event of events) released += orchestrationEventBytes(event);
   return Ref.update(queuedBytesRef, (bytes) => Math.max(0, bytes - released));
 };
+
+/**
+ * The slim wire form of a thread event (`OrchestrationSlimThreadEvent`):
+ * only what the client applies. Memoized per event object, so every
+ * subscriber that asked for slim events shares one copy and one measurement.
+ */
+const slimThreadEvents = new WeakMap<OrchestrationEvent, SlimThreadEvent>();
+export type SlimThreadEvent = OrchestrationEvent extends infer E
+  ? E extends OrchestrationEvent
+    ? Pick<E, "sequence" | "occurredAt" | "type" | "payload">
+    : never
+  : never;
+export const toSlimThreadEvent = (event: OrchestrationEvent): SlimThreadEvent => {
+  let slim = slimThreadEvents.get(event);
+  if (slim === undefined) {
+    slim = {
+      sequence: event.sequence,
+      occurredAt: event.occurredAt,
+      type: event.type,
+      payload: event.payload,
+    } as SlimThreadEvent;
+    slimThreadEvents.set(event, slim);
+  }
+  return slim;
+};
+const slimThreadEventBytes = makeCachedJsonBytes<SlimThreadEvent>();
+type ThreadEventItem =
+  | { readonly kind: "event"; readonly event: OrchestrationEvent }
+  | { readonly kind: "slim-event"; readonly event: SlimThreadEvent };
 
 const lastSequenceOf = (events: Arr.NonEmptyReadonlyArray<{ readonly sequence: number }>) => {
   let sequence = events[0].sequence;
@@ -851,6 +880,8 @@ export const makeOrchestrationStreamHelpers = (deps: {
       readonly resumeFromSequence?: number | undefined;
       /** `"preview"`: live and replayed activity payloads are bounded like a window's. */
       readonly liveActivityPayloads?: OrchestrationActivityPayloadMode | undefined;
+      /** `"slim"`: events go out as `slim-event` items (`OrchestrationSlimThreadEvent`). */
+      readonly liveEventForm?: "full" | "slim" | undefined;
     } = {},
   ) =>
     Stream.unwrap(
@@ -890,13 +921,16 @@ export const makeOrchestrationStreamHelpers = (deps: {
           isThreadDetailEvent(event);
 
         const previewActivities = options.liveActivityPayloads === "preview";
+        const slimEvents = options.liveEventForm === "slim";
         const threadEvents = <E, R>(stream: Stream.Stream<OrchestrationEvent, E, R>) =>
           stream.pipe(
             Stream.filter(isMatchingThreadEvent),
-            Stream.map((event) => ({
-              kind: "event" as const,
-              event: previewActivities ? previewActivityAppendedEvent(event) : event,
-            })),
+            Stream.map((event): ThreadEventItem => {
+              const sent = previewActivities ? previewActivityAppendedEvent(event) : event;
+              return slimEvents
+                ? { kind: "slim-event", event: toSlimThreadEvent(sent) }
+                : { kind: "event", event: sent };
+            }),
           );
 
         const queuedBytesRef = yield* runLiveFeed({
@@ -951,7 +985,10 @@ export const makeOrchestrationStreamHelpers = (deps: {
           rechunkByBudget({
             maxItems: ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
             maxBytes: ORCHESTRATION_STREAM_CHUNK_MAX_BYTES,
-            sizeOf: (item) => orchestrationEventBytes(item.event),
+            sizeOf: (item) =>
+              item.kind === "event"
+                ? orchestrationEventBytes(item.event)
+                : slimThreadEventBytes(item.event),
           }),
         );
 

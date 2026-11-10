@@ -1842,6 +1842,8 @@ export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
    */
   liveActivityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
   messageText: Schema.optional(OrchestrationMessageTextMode),
+  /** See `OrchestrationLiveEventForm`. */
+  liveEventForm: Schema.optional(Schema.Literals(["full", "slim"])),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;
@@ -4396,6 +4398,39 @@ export type OrchestrationWireEvent = typeof OrchestrationWireEvent.Type;
 export type UnknownOrchestrationEvent = Extract<OrchestrationWireEvent, UnknownUnionMember>;
 
 /**
+ * A live or replayed event of one thread's subscription without the fields the
+ * client does not use: event, command, causation and correlation ids, metadata,
+ * and the aggregate (the subscription's thread). Every frame is compressed on
+ * its own, so those ids made up about half of a streamed delta's bytes. Sent
+ * only to a client that asked for it (`liveEventForm: "slim"`); the client
+ * restores the omitted fields (`expandSlimThreadEvent` in client-runtime).
+ * Forward-compatible like `OrchestrationWireEvent`.
+ */
+export const OrchestrationSlimThreadEvent = ForwardCompatibleUnion(
+  OrchestrationEvent.members.map((member) =>
+    Schema.Struct({
+      sequence: NonNegativeInt,
+      occurredAt: IsoDateTime,
+      type: member.fields.type,
+      payload: member.fields.payload,
+    }),
+  ),
+  "type",
+  { sequence: NonNegativeInt },
+);
+export type OrchestrationSlimThreadEvent = typeof OrchestrationSlimThreadEvent.Type;
+
+/**
+ * How a thread window subscription sends its live and replayed events.
+ * `"slim"` sends `slim-event` items (`OrchestrationSlimThreadEvent`); absent
+ * means full `event` items, all an older client understands. An older server
+ * ignores the field and sends full events, which a client asking for slim
+ * ones handles unchanged.
+ */
+export const OrchestrationLiveEventForm = Schema.Literals(["full", "slim"]);
+export type OrchestrationLiveEventForm = typeof OrchestrationLiveEventForm.Type;
+
+/**
  * Wire-only, so a client decodes it forward-compatibly: an item kind this
  * build does not know decodes to an `UnknownUnionMember` (new kinds are sent
  * only to clients that ask for them, so this is a backstop), and so does an
@@ -4428,6 +4463,11 @@ export type OrchestrationThreadStreamItem = typeof OrchestrationThreadStreamItem
 /** Wire-only and forward-compatible, like `OrchestrationThreadStreamItem`. */
 export const OrchestrationThreadWindowStreamItem = ForwardCompatibleUnion(
   [
+    /** Only sent to a client that asked for `liveEventForm: "slim"`. */
+    Schema.Struct({
+      kind: Schema.Literal("slim-event"),
+      event: OrchestrationSlimThreadEvent,
+    }),
     Schema.Struct({
       kind: Schema.Literal("snapshot"),
       snapshot: OrchestrationThreadWindowSnapshot,
