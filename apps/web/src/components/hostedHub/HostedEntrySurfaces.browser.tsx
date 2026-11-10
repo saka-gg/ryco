@@ -719,9 +719,13 @@ describe("hosted entry surfaces", () => {
     });
     await renderSurface("node-directory");
 
-    const signOut = document.querySelector<HTMLElement>('button[aria-label="Sign out"]');
-    expect(signOut, "desktop keeps the icon-only sign-out control").not.toBeNull();
-    expect(signOut!.textContent?.trim()).toBe("");
+    // The account and signing out live in one account menu, named for the
+    // account, rather than in two icon buttons.
+    const accountMenu = document.querySelector<HTMLElement>(
+      'button[aria-label^="Account menu for "]',
+    );
+    expect(accountMenu, "desktop has an account menu in the Hub bar").not.toBeNull();
+    expect(document.querySelector('button[aria-label="Sign out"]')).toBeNull();
 
     // The account controls belong to the Hub, not to the node list, so they
     // live in the Hub bar. The bar is a sibling of the scroll container rather
@@ -729,13 +733,13 @@ describe("hosted entry surfaces", () => {
     // `overscroll-contain` scroller clean.
     const bar = document.querySelector<HTMLElement>("header");
     expect(bar, "the desktop Hub renders its own top bar").not.toBeNull();
-    expect(bar!.contains(signOut!), "sign-out sits in the Hub bar").toBe(true);
+    expect(bar!.contains(accountMenu!), "the account menu sits in the Hub bar").toBe(true);
     const scroller = surfaceScroller();
     expect(bar!.contains(scroller), "the bar is not an ancestor of the scroller").toBe(false);
     expect(scroller.contains(bar!), "the bar does not scroll with the page").toBe(false);
     // Still top-right of the chrome, and above the page it labels.
-    expect(signOut!.getBoundingClientRect().right).toBeGreaterThan(window.innerWidth / 2);
-    expect(signOut!.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+    expect(accountMenu!.getBoundingClientRect().right).toBeGreaterThan(window.innerWidth / 2);
+    expect(accountMenu!.getBoundingClientRect().bottom).toBeLessThanOrEqual(
       scroller.getBoundingClientRect().top + 1,
     );
 

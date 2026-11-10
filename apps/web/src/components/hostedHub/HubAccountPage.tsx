@@ -1,15 +1,12 @@
-import {
-  ArrowLeftIcon,
-  LogOutIcon,
-  PaletteIcon,
-  ShieldCheckIcon,
-  UserRoundIcon,
-} from "lucide-react";
+import { MonitorSmartphoneIcon, PaletteIcon, ShieldCheckIcon, UserRoundIcon } from "lucide-react";
 import type { ComponentProps, ReactElement } from "react";
 
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { navigateHub, type HubAccountSection } from "../../hostedHub/hubRoutes";
-import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
+import {
+  HUB_ACCOUNT_SECTION_TITLES,
+  navigateHub,
+  type HubAccountSection,
+} from "../../hostedHub/hubRoutes";
 import {
   preloadableLazy,
   useLazyComponentReady,
@@ -19,6 +16,7 @@ import {
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { HubPage, HubPanel } from "./shell/HubPage";
+import { HubNavLinks, HubUserMenu } from "./shell/HubNav";
 import { HubShell } from "./shell/HubShell";
 import { setHostedReadCacheEnabled, useHostedReadCache } from "../../hostedHub/readCache";
 import { Checkbox } from "../ui/checkbox";
@@ -36,23 +34,38 @@ const AppearanceSettingsPanel = preloadableLazy<
   NonNullable<ComponentProps<typeof AppearanceSettingsModule.AppearanceSettingsPanel>>
 >(() => import("../settings/AppearanceSettings").then((module) => module.AppearanceSettingsPanel));
 
-const SECTION_PANELS: Partial<Record<HubAccountSection, PreloadableModule>> = {
+const SECTION_PANELS: Record<HubAccountSection, PreloadableModule> = {
+  overview: AccountSettingsPanel,
   security: AccountSettingsPanel,
+  devices: AccountSettingsPanel,
   appearance: AppearanceSettingsPanel,
 };
 
+const ACCOUNT_GROUPS = {
+  overview: "profile",
+  security: "security",
+  devices: "devices",
+} as const;
+
+const SECTION_DESCRIPTIONS: Record<HubAccountSection, string> = {
+  overview: "Your username and email on this Hub.",
+  security: "Passkeys, password, two-factor authentication and recovery.",
+  devices: "Browsers and apps signed in to your account.",
+  appearance: "Saved in this browser. Your other apps and devices keep their own appearance.",
+};
+
 function preloadSectionPanel(section: HubAccountSection): void {
-  void SECTION_PANELS[section]?.preload();
+  void SECTION_PANELS[section].preload();
 }
 
 const SECTIONS: readonly {
   readonly id: HubAccountSection;
-  readonly label: string;
   readonly icon: typeof UserRoundIcon;
 }[] = [
-  { id: "overview", label: "Overview", icon: UserRoundIcon },
-  { id: "security", label: "Security", icon: ShieldCheckIcon },
-  { id: "appearance", label: "Appearance", icon: PaletteIcon },
+  { id: "overview", icon: UserRoundIcon },
+  { id: "security", icon: ShieldCheckIcon },
+  { id: "devices", icon: MonitorSmartphoneIcon },
+  { id: "appearance", icon: PaletteIcon },
 ];
 
 /**
@@ -70,45 +83,22 @@ const SECTIONS: readonly {
  * instead of as a preferences dialog borrowed from another product.
  */
 export function HubAccountPage({ section }: { readonly section: HubAccountSection }) {
-  const account = useHostedHubStore((state) => state.account);
-  // The desktop workspace has no connection menu, so the account's own
-  // actions — signing out, installing or updating the app — live here, behind
-  // the sidebar's Account entry. The phone tier keeps them in its connection
-  // sheet and this page as it was.
-  const accountActions = usePresentationTier() !== "phone";
+  // The desktop workspace has no connection menu, so installing or updating the
+  // app lives here. The phone tier keeps it in its connection sheet.
+  const isPhoneTier = usePresentationTier() === "phone";
   usePreloadWhenIdle(AccountSettingsPanel, true);
   usePreloadWhenIdle(AppearanceSettingsPanel, true);
 
   return (
-    <HubShell
-      measure="page"
-      trailing={
-        <>
-          <Button variant="ghost" onClick={() => navigateHub({ kind: "nodes" })}>
-            <ArrowLeftIcon aria-hidden /> Nodes
-          </Button>
-          {accountActions ? (
-            <Button variant="ghost" onClick={() => void hostedHubController.signOut()}>
-              <LogOutIcon aria-hidden /> Sign out
-            </Button>
-          ) : null}
-        </>
-      }
-    >
+    <HubShell measure="page" nav={<HubNavLinks current="account" />} trailing={<HubUserMenu />}>
       <HubPage
-        title={section === "appearance" ? "Browser appearance" : "Account"}
-        description={
-          section === "appearance"
-            ? "Saved in this browser. Your other apps and devices keep their own appearance."
-            : account === null
-              ? undefined
-              : `${account.displayName} · ${account.role.charAt(0).toUpperCase()}${account.role.slice(1)}`
-        }
+        title={HUB_ACCOUNT_SECTION_TITLES[section]}
+        description={SECTION_DESCRIPTIONS[section]}
       >
-        <div className="flex flex-col gap-6 sm:flex-row sm:gap-8">
+        <div className="flex flex-col gap-6 sm:flex-row sm:gap-10">
           {/* An in-page rail of links, not a dialog's icon rail. */}
-          <nav aria-label="Account" className="shrink-0 sm:w-48">
-            <ul className="flex gap-1 overflow-x-auto sm:flex-col sm:overflow-visible">
+          <nav aria-label="Account" className="shrink-0 sm:w-52">
+            <ul className="flex gap-1 overflow-x-auto sm:sticky sm:top-0 sm:flex-col sm:overflow-visible">
               {SECTIONS.map((entry) => {
                 const current = entry.id === section;
                 return (
@@ -116,13 +106,13 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
                     <Button
                       variant={current ? "secondary" : "ghost"}
                       aria-current={current ? "page" : undefined}
-                      className="w-full justify-start"
+                      className="w-full justify-start whitespace-nowrap"
                       onClick={() => navigateHub({ kind: "account", section: entry.id })}
                       onPointerEnter={() => preloadSectionPanel(entry.id)}
                       onFocus={() => preloadSectionPanel(entry.id)}
                     >
                       <entry.icon aria-hidden />
-                      {entry.label}
+                      {HUB_ACCOUNT_SECTION_TITLES[entry.id]}
                     </Button>
                   </li>
                 );
@@ -131,17 +121,7 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
           </nav>
 
           <div className="min-w-0 flex-1">
-            {section === "overview" ? (
-              <div className="space-y-6">
-                <HubAccountOverview />
-                <RememberBrowserPanel />
-                {accountActions ? <HostedPwaControls /> : null}
-              </div>
-            ) : section === "security" ? (
-              <LoadedSectionPanel panel={AccountSettingsPanel}>
-                {() => <AccountSettingsPanel />}
-              </LoadedSectionPanel>
-            ) : (
+            {section === "appearance" ? (
               <LoadedSectionPanel panel={AppearanceSettingsPanel}>
                 {/* The Hub-relevant subset. Composer controls and panel layout
                     are node-workspace concepts with no meaning on a site that
@@ -149,6 +129,18 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
                     settings, reachable from inside a node session. */}
                 {() => <AppearanceSettingsPanel surface="hub" />}
               </LoadedSectionPanel>
+            ) : (
+              <div className="space-y-6">
+                <LoadedSectionPanel panel={AccountSettingsPanel}>
+                  {() => <AccountSettingsPanel group={ACCOUNT_GROUPS[section]} />}
+                </LoadedSectionPanel>
+                {section === "devices" ? (
+                  <>
+                    <RememberBrowserPanel />
+                    {isPhoneTier ? null : <HostedPwaControls />}
+                  </>
+                ) : null}
+              </div>
             )}
           </div>
         </div>
@@ -194,36 +186,6 @@ function RememberBrowserPanel() {
         browser profile can read the saved copy, including offline. Sending work still requires a
         fresh connection. Turning this off or signing out removes the browser copy.
       </p>
-    </HubPanel>
-  );
-}
-
-function HubAccountOverview() {
-  const account = useHostedHubStore((state) => state.account);
-
-  return (
-    <HubPanel title="Your account" description="Identity this Hub knows you by.">
-      <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
-        <div>
-          <dt className="text-muted-foreground text-xs">Display name</dt>
-          <dd className="mt-0.5 text-sm">{account?.displayName ?? "—"}</dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground text-xs">Role</dt>
-          <dd className="mt-0.5 text-sm">
-            {account === null
-              ? "—"
-              : `${account.role.charAt(0).toUpperCase()}${account.role.slice(1)}`}
-          </dd>
-        </div>
-      </dl>
-      {/*
-       * Deliberately not shown: username, active space, and the list of spaces
-       * this account belongs to. `GET /api/auth/session` projects only
-       * `{ id, displayName, role, createdAt, disabledAt }`, so the client cannot
-       * render them after a reload without the Hub extending that projection.
-       * Inventing placeholders here would be worse than the gap.
-       */}
     </HubPanel>
   );
 }

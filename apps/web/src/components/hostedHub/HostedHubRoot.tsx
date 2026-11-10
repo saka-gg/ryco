@@ -105,8 +105,15 @@ import {
   peekHubNodeDetailRequest,
 } from "../../hostedHub/hubNodeDetailRequest";
 import { HubAccountPage } from "./HubAccountPage";
+import { HubNavLinks, HubUserMenu } from "./shell/HubNav";
+import {
+  normalizeUsernameInput,
+  useAccountIdentity,
+  USERNAME_MAX_LENGTH,
+  USERNAME_MIN_LENGTH,
+} from "../../hostedHub/accountProfile";
 import { HubGateway } from "./shell/HubGateway";
-import { HubPage } from "./shell/HubPage";
+import { HubPage, HubPanel } from "./shell/HubPage";
 import { HubShell } from "./shell/HubShell";
 import {
   directoryCountLine,
@@ -218,6 +225,16 @@ export function HostedHubRoot() {
   );
 }
 
+/** Hub pages that only mean something without a session. */
+const SIGNED_OUT_ROUTE_KINDS: ReadonlySet<string> = new Set([
+  "sign-in",
+  "sign-in-password",
+  "sign-in-recovery-code",
+  "sign-up",
+  "invitation",
+  "setup",
+]);
+
 function HostedHubSurface() {
   const readCache = useHostedReadCache();
   const directoryNodes = useHostedHubStore((state) => state.nodes);
@@ -275,7 +292,15 @@ function HostedHubSurface() {
     // GitHub authentication returns to account completion so an unlinked
     // identity can continue without another click. A linked identity establishes
     // a session instead, so replace that transient destination with the unified workspace.
-    if (accountStatus === "authenticated" && hubRoute?.kind === "sign-up") {
+    //
+    // The same holds for every other signed-out page: once there is a session,
+    // a sign-in or registration address names nothing, and leaving it in the
+    // address bar makes a reload land on a form for an account already in use.
+    if (
+      accountStatus === "authenticated" &&
+      hubRoute &&
+      SIGNED_OUT_ROUTE_KINDS.has(hubRoute.kind)
+    ) {
       navigateHubPathname("/", { replace: true });
     }
   }, [accountStatus, hubRoute]);
@@ -379,6 +404,16 @@ function HostedHubSurface() {
   // administration remains the explicit `/nodes` route handled above.
   if (routedNode.nodeId === null) {
     if (routeNotice || routedNode.malformed) return <HostedNodeDirectory />;
+    // An account with no machine has no workspace to open: home is the page
+    // that says how to add the first one, not an empty project list.
+    if (
+      hubRoute === null &&
+      routedNode.logicalPathname === "/" &&
+      directoryStatus === "ready" &&
+      directoryNodes.length === 0
+    ) {
+      return <HostedNodeDirectory />;
+    }
     if (selectedNode && sessionEstablished) {
       return <RootAppShell authGateState={{ status: "hosted-hub" }} />;
     }
@@ -1269,15 +1304,18 @@ function RegistrationForm({
   readonly credentialRef: RefObject<HTMLInputElement | null>;
 }) {
   const [credential, setCredential] = useState("");
-  const [displayName, setDisplayName] = useState("");
+  const [username, setUsername] = useState("");
   const [passkeyLabel, setPasskeyLabel] = useState("");
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const registrationCredential = credential;
     setCredential("");
+    // The username is the account's name. `displayName` still travels for a Hub
+    // that predates usernames at registration and names the account by it.
     const registrationInput = {
-      displayName: displayName.trim(),
+      username,
+      displayName: username,
       passkeyLabel: passkeyLabel.trim() || null,
     };
     if (mode === "invitation") {
@@ -1316,15 +1354,23 @@ function RegistrationForm({
         />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="hub-display-name">Display name</Label>
+        <Label htmlFor="hub-username">Username</Label>
         <Input
-          id="hub-display-name"
+          id="hub-username"
           required
-          maxLength={200}
-          value={displayName}
+          minLength={USERNAME_MIN_LENGTH}
+          maxLength={USERNAME_MAX_LENGTH}
+          value={username}
+          autoComplete="username"
+          autoCapitalize="none"
+          spellCheck={false}
+          aria-describedby="hub-username-hint"
           className={TOUCH_INPUT_CLASS_NAME}
-          onChange={(event) => setDisplayName(event.currentTarget.value)}
+          onChange={(event) => setUsername(normalizeUsernameInput(event.currentTarget.value))}
         />
+        <p id="hub-username-hint" className="text-muted-foreground text-xs">
+          Lowercase letters, numbers and underscores.
+        </p>
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="hub-passkey-label">
@@ -1493,6 +1539,7 @@ function HostedNodeDirectory() {
   const browserStatus = useHostedHubStore((state) => state.browserStatus);
   const error = useHostedHubStore((state) => state.errorMessage);
   const account = useHostedHubStore((state) => state.account);
+  const identity = useAccountIdentity();
   const selection = useHostedHubStore((state) => state.selectionStatus);
   const routeNotice = useHostedNodeRouteNotice();
   const navigate = useNavigate();
@@ -1542,7 +1589,7 @@ function HostedNodeDirectory() {
 
   if (enrolling) {
     return (
-      <HubShell measure="content">
+      <HubShell measure="content" nav={<HubNavLinks current="nodes" />} trailing={<HubUserMenu />}>
         <HostedNodeEnrollmentFlow onClose={() => setEnrolling(false)} />
       </HubShell>
     );
@@ -1612,42 +1659,25 @@ function HostedNodeDirectory() {
   );
 
   return (
-    <HubShell
-      trailing={
-        // The account and sign-out controls belong to the Hub, not to the node
-        // list, so on desktop they move out of the page and into the Hub bar.
-        // On the phone tier they stay in the anchored action group below — see
-        // the note there.
-        <>
-          <Button
-            size="icon"
-            variant="ghost"
-            aria-label="Account settings"
-            onClick={() => {
-              navigateHub({ kind: "account", section: "security" });
-            }}
-          >
-            <UserRoundIcon aria-hidden />
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            aria-label="Sign out"
-            onClick={() => void hostedHubController.signOut()}
-          >
-            <LogOutIcon aria-hidden />
-          </Button>
-        </>
-      }
-    >
+    // The account and signing out belong to the Hub, not to the node list, so on
+    // desktop they live in the Hub bar's account menu. The phone tier has no bar
+    // and keeps them in the anchored action group below.
+    <HubShell nav={<HubNavLinks current="nodes" />} trailing={<HubUserMenu />}>
       <HubPage
         titleRef={headingRef}
         title={nodes.length === 1 ? "Your node" : "Your nodes"}
         description={
           <>
+            {/* The Hub bar names the account on desktop; the phone tier has no
+                bar, so the page says it. */}
             <p className="truncate">
-              Signed in as {account?.displayName ?? "Hub account"}
-              {account ? ` · ${account.role.charAt(0).toUpperCase()}${account.role.slice(1)}` : ""}
+              {isPhoneTier
+                ? `Signed in as ${identity.handle}${
+                    account
+                      ? ` · ${account.role.charAt(0).toUpperCase()}${account.role.slice(1)}`
+                      : ""
+                  }`
+                : "The machines linked to your account."}
             </p>
             {nodes.length > 1 ? (
               <p className="mt-0.5 truncate text-xs">{directoryCountLine(nodes)}</p>
@@ -1847,6 +1877,21 @@ function DirectoryError({
   );
 }
 
+const FIRST_NODE_STEPS: readonly { readonly title: string; readonly detail: string }[] = [
+  {
+    title: "Install Ryco on a machine",
+    detail: "The desktop app, or the CLI on a server you reach over SSH.",
+  },
+  {
+    title: "Link it to this account",
+    detail: "It shows a short code. Enter the code here and confirm the machine is yours.",
+  },
+  {
+    title: "Open it from any browser",
+    detail: "Its projects and agents appear here, wherever you sign in.",
+  },
+];
+
 function DirectoryEmptyState({
   isOwner,
   onEnroll,
@@ -1854,29 +1899,59 @@ function DirectoryEmptyState({
   readonly isOwner: boolean;
   readonly onEnroll: () => void;
 }) {
+  if (!isOwner) {
+    return (
+      <Empty className="min-h-64">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <ShieldCheckIcon aria-hidden />
+          </EmptyMedia>
+          <EmptyTitle>No nodes yet</EmptyTitle>
+          <EmptyDescription>
+            A node appears here once an owner of this Hub authorizes your account for it.
+          </EmptyDescription>
+        </EmptyHeader>
+        {/* No disabled Enroll button for a non-owner: a greyed control implies
+            the capability is coming. */}
+      </Empty>
+    );
+  }
   return (
-    <Empty className="min-h-64">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          {isOwner ? <ServerIcon aria-hidden /> : <ShieldCheckIcon aria-hidden />}
-        </EmptyMedia>
-        <EmptyTitle>No nodes yet</EmptyTitle>
-        <EmptyDescription>
-          {isOwner
-            ? "A node appears here once the Ryco client on that machine has been enrolled. Start enrollment on the node, then enter the short device code it shows — codes expire after ten minutes."
-            : "A node appears here once an owner of this Hub authorizes your account for it."}
-        </EmptyDescription>
-      </EmptyHeader>
-      {/* No disabled Enroll button for a non-owner: a greyed control implies
-          the capability is coming. */}
-      {isOwner ? (
-        <EmptyContent>
-          <Button className="phone:min-h-11" onClick={onEnroll}>
+    <HubPanel className="mt-2">
+      <div className="flex flex-col gap-6 py-2 sm:flex-row sm:items-center sm:gap-10">
+        <div className="min-w-0 flex-1">
+          <span className="flex size-10 items-center justify-center rounded-xl bg-primary/12 text-primary">
+            <ServerIcon aria-hidden className="size-5" />
+          </span>
+          <h2 className="mt-4 font-semibold text-lg tracking-tight">Add your first machine</h2>
+          <p className="mt-1.5 max-w-md text-muted-foreground text-sm">
+            A node is a computer running Ryco. Link one and its projects and coding agents are
+            reachable from here.
+          </p>
+          <Button className="mt-5 phone:min-h-11" onClick={onEnroll}>
             <ServerIcon aria-hidden /> Enroll node
           </Button>
-        </EmptyContent>
-      ) : null}
-    </Empty>
+        </div>
+        <ol className="min-w-0 flex-1 space-y-4">
+          {FIRST_NODE_STEPS.map((step, index) => (
+            <li key={step.title} className="flex gap-3">
+              <span
+                aria-hidden
+                className="flex size-6 shrink-0 items-center justify-center rounded-full border border-border font-medium text-muted-foreground text-xs"
+              >
+                {index + 1}
+              </span>
+              <div className="min-w-0">
+                <p className="font-medium text-sm">{step.title}</p>
+                <p className="mt-0.5 text-muted-foreground text-xs leading-relaxed">
+                  {step.detail}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </HubPanel>
   );
 }
 

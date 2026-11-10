@@ -75,7 +75,9 @@ import type {
 } from "../platform/index.ts";
 
 import type {
+  HostedAccountProfile,
   HostedAccountSecurity,
+  HostedAccountSession,
   HostedAddPasskeyResult,
   HostedHubNode,
   HostedHubPasskey,
@@ -693,6 +695,69 @@ function accountSecurityValue(value: unknown): HostedAccountSecurity | null {
   } catch {
     return null;
   }
+}
+
+function nullableEpoch(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isSafeInteger(value));
+}
+
+/**
+ * Decode an account profile. Lenient about members this client does not know,
+ * so the Hub can extend the profile without breaking a released client.
+ */
+function accountProfileValue(value: unknown): HostedAccountProfile | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.username !== "string" ||
+    record.username.length === 0 ||
+    record.username.length > 64 ||
+    typeof record.usernameNeedsChange !== "boolean" ||
+    !nullableEpoch(record.usernameChangedAt) ||
+    !nullableEpoch(record.usernameChangeAvailableAt) ||
+    typeof record.displayName !== "string" ||
+    record.displayName.length > 200 ||
+    !Number.isSafeInteger(record.createdAt)
+  ) {
+    return null;
+  }
+  return {
+    username: record.username,
+    usernameNeedsChange: record.usernameNeedsChange,
+    usernameChangedAt: record.usernameChangedAt,
+    usernameChangeAvailableAt: record.usernameChangeAvailableAt,
+    displayName: record.displayName,
+    createdAt: record.createdAt as number,
+  };
+}
+
+function accountSessionValue(value: unknown): HostedAccountSession | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== "string" ||
+    record.id.length === 0 ||
+    record.id.length > 128 ||
+    (record.kind !== "browser" && record.kind !== "native") ||
+    (record.clientLabel !== null && typeof record.clientLabel !== "string") ||
+    (record.method !== null && typeof record.method !== "string") ||
+    !Number.isSafeInteger(record.createdAt) ||
+    !Number.isSafeInteger(record.lastSeenAt) ||
+    !Number.isSafeInteger(record.expiresAt) ||
+    typeof record.current !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    id: record.id,
+    kind: record.kind,
+    clientLabel: record.clientLabel === null ? null : record.clientLabel.slice(0, 80),
+    method: record.method === null ? null : record.method.slice(0, 40),
+    createdAt: record.createdAt as number,
+    lastSeenAt: record.lastSeenAt as number,
+    expiresAt: record.expiresAt as number,
+    current: record.current,
+  };
 }
 
 /**
@@ -1940,6 +2005,8 @@ export class HostedHubApi {
     input: {
       readonly secret: string;
       readonly displayName: string;
+      /** The account's public handle; a Hub that knows it names the account by it. */
+      readonly username?: string;
       readonly passkeyLabel: string | null;
     },
     signal?: AbortSignal,
@@ -1958,6 +2025,8 @@ export class HostedHubApi {
     input: {
       readonly credential: string;
       readonly displayName: string;
+      /** The account's public handle; a Hub that knows it names the account by it. */
+      readonly username?: string;
       readonly passkeyLabel: string | null;
     },
     signal?: AbortSignal,
@@ -2249,6 +2318,111 @@ export class HostedHubApi {
       signal,
       "request-email-verification",
     );
+  }
+
+  /**
+   * Read the account's profile. `GET /api/account/profile`.
+   *
+   * Resolves `null` when the Hub does not serve the route (a Hub older than the
+   * profile surface), so a caller can fall back to the session's account
+   * projection instead of reporting a failure that is not one.
+   */
+  async getAccountProfile(signal?: AbortSignal): Promise<HostedAccountProfile | null> {
+    try {
+      const profile = accountProfileValue(
+        await this.#request("/api/account/profile", signal ? { signal } : {}),
+      );
+      if (!profile) throw new HostedHubApiError("invalid_response", 502);
+      return profile;
+    } catch (error) {
+      if (error instanceof HostedHubApiError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Rename the account. `POST /api/account/username` → `{ profile }`.
+   *
+   * The Hub answers `conflict` when the name is taken, `rate_limited` while the
+   * rename cooldown is running, and `invalid_request` for a malformed or
+   * reserved name.
+   */
+  async changeUsername(username: string, signal?: AbortSignal): Promise<HostedAccountProfile> {
+    const result = await this.#request("/api/account/username", {
+      method: "POST",
+      body: { username },
+      csrf: true,
+      ...(signal ? { signal } : {}),
+    });
+    const profile = accountProfileValue(result.profile);
+    if (!profile) throw new HostedHubApiError("invalid_response", 502);
+    return profile;
+  }
+
+  /**
+   * List the account's live sign-ins. `GET /api/account/sessions`.
+   * Resolves `null` when the Hub does not serve the route.
+   */
+  async listAccountSessions(
+    signal?: AbortSignal,
+  ): Promise<ReadonlyArray<HostedAccountSession> | null> {
+    try {
+      const result = await this.#request("/api/account/sessions", signal ? { signal } : {});
+      if (!Array.isArray(result.sessions)) throw new HostedHubApiError("invalid_response", 502);
+      const sessions = result.sessions.map(accountSessionValue);
+      if (sessions.some((session) => session === null)) {
+        throw new HostedHubApiError("invalid_response", 502);
+      }
+      return sessions as ReadonlyArray<HostedAccountSession>;
+    } catch (error) {
+      if (error instanceof HostedHubApiError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  /** End one other sign-in. `POST /api/account/sessions/revoke` → `{ revoked: true }`. */
+  async revokeAccountSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    const result = await this.#request("/api/account/sessions/revoke", {
+      method: "POST",
+      body: { sessionId: boundedAuthString(sessionId, 128) },
+      csrf: true,
+      ...(signal ? { signal } : {}),
+    });
+    if (result.revoked !== true) throw new HostedHubApiError("invalid_response", 502);
+  }
+
+  /**
+   * End every sign-in except this one.
+   * `POST /api/account/sessions/revoke-others` → `{ revokedCount }`.
+   */
+  async revokeOtherAccountSessions(signal?: AbortSignal): Promise<number> {
+    const result = await this.#request("/api/account/sessions/revoke-others", {
+      method: "POST",
+      body: {},
+      csrf: true,
+      ...(signal ? { signal } : {}),
+    });
+    if (!Number.isSafeInteger(result.revokedCount) || (result.revokedCount as number) < 0) {
+      throw new HostedHubApiError("invalid_response", 502);
+    }
+    return result.revokedCount as number;
+  }
+
+  /**
+   * Confirm a pending email address with the mailed six-digit code.
+   * `POST /api/account/email/verification/confirm` → `{ email }`.
+   */
+  async confirmEmailVerificationCode(code: string, signal?: AbortSignal): Promise<void> {
+    const result = await this.#request("/api/account/email/verification/confirm", {
+      method: "POST",
+      body: { code },
+      csrf: true,
+      ...(signal ? { signal } : {}),
+    });
+    const email = result.email as { readonly verified?: unknown } | null | undefined;
+    if (typeof email !== "object" || email === null || email.verified !== true) {
+      throw new HostedHubApiError("invalid_response", 502);
+    }
   }
 
   /**

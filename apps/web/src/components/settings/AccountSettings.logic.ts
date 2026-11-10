@@ -158,7 +158,7 @@ export function syncedPasskeyCount(passkeys: ReadonlyArray<HostedHubPasskey>): n
  * rendering of "nothing is wrong that I can detect".
  */
 export interface AccountPosture {
-  readonly variant: "error" | "warning";
+  readonly variant: "info" | "warning";
   readonly title: string;
   readonly description: string;
   /**
@@ -179,25 +179,21 @@ export function accountPosture(
   const usable = activePasskeys(passkeys).length;
   if (usable === 0) {
     return {
-      variant: "error",
-      title: "No usable passkey on this account",
+      variant: "warning",
+      title: "Add a passkey",
       description:
-        "Without one you can only get back in through a fallback credential. Adding a passkey is the only action on this page that makes the account stronger.",
-      actionLabel: "Add your first passkey",
+        "Passkeys are the fastest and most phishing-resistant way to sign in. Without one you rely on your password or a recovery code.",
+      actionLabel: "Add a passkey",
     };
   }
   if (usable === 1) {
     return {
-      variant: "warning",
-      title: "One passkey on this account",
-      // No emailed link. Fourteen rows below, this same panel says this Hub has
-      // no mail transport configured, that verification messages are generated
-      // and discarded, and not to rely on email as the way back into the
-      // account. Naming it here — in the alert a user reads first, at the exact
-      // moment they are deciding whether they have a way back in — offers a
-      // recovery path that provably does not work.
+      variant: "info",
+      title: "Add a second passkey",
+      // No emailed link: a Hub without a mail transport cannot deliver one, so
+      // this must not name a way back in that may not exist.
       description:
-        "If you lose this device you fall back to a password or a recovery code. Add a second passkey on another device.",
+        "With only one, losing that device leaves you with your password or a recovery code.",
       actionLabel: "Add another passkey",
     };
   }

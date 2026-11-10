@@ -44,7 +44,7 @@ import {
  * a search parameter or a history entry.
  */
 
-export type HubAccountSection = "overview" | "security" | "appearance";
+export type HubAccountSection = "overview" | "security" | "devices" | "appearance";
 
 export type HubRoute =
   | { readonly kind: "sign-in" }
@@ -60,12 +60,22 @@ export type HubRoute =
   | { readonly kind: "nodes-enroll" }
   | { readonly kind: "account"; readonly section: HubAccountSection };
 
+/** The name of each account page, shared by the rail, the menu and the tab title. */
+export const HUB_ACCOUNT_SECTION_TITLES: Readonly<Record<HubAccountSection, string>> =
+  Object.freeze({
+    overview: "Profile",
+    security: "Sign-in & security",
+    devices: "Sessions & devices",
+    appearance: "Appearance",
+  });
+
 /** The Hub home. Resolves to the unified workspace when signed in, sign-in when not. */
 export const HUB_ROOT_PATHNAME = "/";
 
 const ACCOUNT_SECTION_BY_SUFFIX: Readonly<Record<string, HubAccountSection>> = Object.freeze({
   "": "overview",
   security: "security",
+  devices: "devices",
   appearance: "appearance",
 });
 
@@ -167,11 +177,7 @@ export function hubRouteTitle(route: HubRoute): string {
     case "nodes-enroll":
       return "Enroll a node";
     case "account":
-      return route.section === "overview"
-        ? "Account"
-        : route.section === "security"
-          ? "Security"
-          : "Appearance";
+      return HUB_ACCOUNT_SECTION_TITLES[route.section];
   }
 }
 

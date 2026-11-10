@@ -4,13 +4,13 @@ import {
   InboxIcon,
   PanelLeftCloseIcon,
   SettingsIcon,
-  UserRoundIcon,
 } from "lucide-react";
-import React, { memo, useCallback } from "react";
+import React, { memo, useCallback, useEffect } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
 import { WS_METHODS } from "@ryco/contracts";
 import { APP_BASE_NAME, APP_STAGE_LABEL, APP_VERSION } from "../../branding";
 import { isHostedHubMode } from "../../env";
+import { loadAccountProfile, useAccountIdentity } from "../../hostedHub/accountIdentity";
 import { navigateHub } from "../../hostedHub/hubRoutes";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { preloadSettingsPage, SETTINGS_ROUTE_PATH } from "../../settingsRoute";
@@ -196,19 +196,27 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
  */
 function SidebarHubAccountEntry() {
   const { isMobile, setOpenMobile } = useSidebar();
+  const identity = useAccountIdentity();
+  useEffect(() => loadAccountProfile(), []);
   return (
     <SidebarMenu>
       <SidebarMenuItem>
         <SidebarMenuButton
           size="sm"
+          aria-label={`Account: ${identity.handle}`}
           className="text-muted-foreground"
           onClick={() => {
             if (isMobile) setOpenMobile(false);
             navigateHub({ kind: "account", section: "overview" });
           }}
         >
-          <UserRoundIcon className="size-3.5" />
-          <span>Account</span>
+          <span
+            aria-hidden
+            className="flex size-4.5 shrink-0 items-center justify-center rounded-full bg-primary/12 font-semibold text-[10px] text-primary"
+          >
+            {identity.initial}
+          </span>
+          <span className="truncate">{identity.handle}</span>
         </SidebarMenuButton>
       </SidebarMenuItem>
     </SidebarMenu>

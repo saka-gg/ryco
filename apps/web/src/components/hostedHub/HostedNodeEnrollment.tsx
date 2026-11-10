@@ -1,5 +1,7 @@
-import { AlertTriangleIcon, CheckCircle2Icon, ServerIcon } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { AlertTriangleIcon, CheckCircle2Icon, CheckIcon, CopyIcon } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
 import { hostedHubController } from "../../hostedHub/state";
@@ -8,6 +10,8 @@ import { Button } from "../ui/button";
 import { DataList, DataListItem } from "../ui/data-list";
 import { Input, TOUCH_INPUT_CLASS_NAME } from "../ui/input";
 import { Label } from "../ui/label";
+import { SlidingTabs, type SlidingTab } from "../ui/sliding-tabs";
+import { HubStepIndicator } from "./shell/HubStepIndicator";
 
 export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => void }) {
   const [input, setInput] = useState("");
@@ -17,6 +21,8 @@ export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => 
   >("input");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [source, setSource] = useState<EnrollmentSource>("desktop");
+  const hubOrigin = typeof window === "undefined" ? "" : window.location.origin;
   const codeRef = useRef("");
   const operationRef = useRef<AbortController | null>(null);
 
@@ -132,11 +138,11 @@ export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => 
       <div>
         <CheckCircle2Icon aria-hidden className="size-8 text-primary" />
         <h1 className="mt-4 text-2xl font-semibold">
-          {status === "approved" ? "Node approved" : "Enrollment denied"}
+          {status === "approved" ? "Machine added" : "Enrollment denied"}
         </h1>
         <p role="status" className="mt-2 text-sm text-muted-foreground">
           {status === "approved"
-            ? "The node can now finish enrollment and connect. Online presence may take a few seconds."
+            ? "It finishes linking on its own and shows up in your nodes within a few seconds."
             : "This ceremony cannot be reused. Start a new enrollment on the node if needed."}
         </p>
         <Button className="mt-5" onClick={close}>
@@ -149,11 +155,11 @@ export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => 
   if (enrollment) {
     return (
       <div>
-        <ServerIcon aria-hidden className="size-8 text-primary" />
-        <h1 className="mt-4 text-2xl font-semibold">Review node enrollment</h1>
+        <HubStepIndicator step={2} total={2} label="Review and approve" />
+        <h1 className="text-2xl font-semibold tracking-tight">Is this your machine?</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Compare every field, especially the fingerprint, with the node or a trusted operator
-          channel before approving.
+          Compare these details with what the machine shows, the fingerprint above all. Approve only
+          if every field matches.
         </p>
         {/* The same primitive the node detail sheet uses. The fingerprint is
             the security-critical comparison, and one shared identifier
@@ -220,39 +226,155 @@ export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => 
 
   return (
     <div>
-      <ServerIcon aria-hidden className="size-8 text-primary" />
-      <h1 className="mt-4 text-2xl font-semibold">Enroll a Ryco node</h1>
+      <HubStepIndicator step={1} total={2} label="Enter the device code" />
+      <h1 className="text-2xl font-semibold tracking-tight">Add a machine</h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        Start enrollment on the node, then enter the short device code shown there. Codes expire
-        after ten minutes.
+        A node is a computer running Ryco. Link it to your account and you can reach its projects
+        and agents from any browser.
       </p>
-      {message ? (
-        <p role="alert" className="mt-4 text-sm text-destructive">
-          {message}
-        </p>
-      ) : null}
-      <form className="mt-5 space-y-4" autoComplete="off" onSubmit={(event) => void lookup(event)}>
-        <div className="space-y-1.5">
-          <Label htmlFor="hub-node-device-code">Device code</Label>
-          <Input
-            id="hub-node-device-code"
-            required
-            autoFocus
-            maxLength={16}
-            value={input}
-            className={`font-mono uppercase ${TOUCH_INPUT_CLASS_NAME}`}
-            onChange={(event) => setInput(event.currentTarget.value)}
+
+      <ol className="mt-6 space-y-3">
+        <EnrollmentStep index={1} title="Start linking on that machine">
+          <SlidingTabs
+            tabs={ENROLLMENT_SOURCES}
+            activeId={source}
+            onSelect={(id) => setSource(id as EnrollmentSource)}
+            density="compact"
+            aria-label="Where Ryco runs"
           />
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="submit" disabled={pending}>
-            {pending ? "Looking up…" : "Review node"}
-          </Button>
-          <Button type="button" variant="outline" onClick={close}>
-            Cancel
-          </Button>
-        </div>
-      </form>
+          {source === "desktop" ? (
+            <div className="mt-3 space-y-2 text-sm text-muted-foreground">
+              <p>
+                In Ryco Desktop open <span className="text-foreground">Settings → Hub</span> and
+                choose <span className="text-foreground">Connect account</span>. Signing in there
+                links the computer on its own, with no code.
+              </p>
+              <p>
+                Using a Hub other than the default? Set its address to{" "}
+                <code className="rounded bg-muted px-1 py-0.5 font-mono text-foreground text-xs">
+                  {hubOrigin}
+                </code>{" "}
+                first. If Desktop shows a device code, enter it below.
+              </p>
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              <CommandLine
+                command={
+                  hubOrigin === DEFAULT_HUB_ORIGIN
+                    ? "ryco serve --hub"
+                    : `ryco serve --hub --hub-origin ${hubOrigin}`
+                }
+              />
+              <CommandLine command="ryco hub enroll" />
+              <p className="text-muted-foreground text-xs">
+                No Ryco there yet? Install it first with{" "}
+                <code className="font-mono text-foreground">npm install -g ryco-cli</code>.
+              </p>
+            </div>
+          )}
+        </EnrollmentStep>
+
+        <EnrollmentStep index={2} title="Enter the code it shows">
+          {message ? (
+            <p role="alert" className="mb-3 text-sm text-destructive">
+              {message}
+            </p>
+          ) : null}
+          <form autoComplete="off" onSubmit={(event) => void lookup(event)}>
+            <Label htmlFor="hub-node-device-code">Device code</Label>
+            <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
+              <Input
+                id="hub-node-device-code"
+                required
+                autoFocus
+                maxLength={16}
+                value={input}
+                placeholder="XXXX-XXXX"
+                className={`font-mono text-base tracking-[0.2em] uppercase sm:max-w-64 ${TOUCH_INPUT_CLASS_NAME}`}
+                onChange={(event) => setInput(event.currentTarget.value)}
+              />
+              <div className="flex shrink-0 gap-2">
+                <Button type="submit" disabled={pending}>
+                  {pending ? "Looking up…" : "Review node"}
+                </Button>
+                <Button type="button" variant="outline" onClick={close}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+            <p className="mt-2 text-muted-foreground text-xs">
+              Codes expire after ten minutes. You compare the machine's details before anything is
+              approved.
+            </p>
+          </form>
+        </EnrollmentStep>
+      </ol>
+
+      <p className="mt-5 text-muted-foreground text-xs">
+        Signing in with a password and two-factor authentication? Run{" "}
+        <code className="font-mono text-foreground">ryco hub login</code> on the machine instead and
+        skip the code.
+      </p>
+    </div>
+  );
+}
+
+type EnrollmentSource = "desktop" | "terminal";
+
+const ENROLLMENT_SOURCES: readonly SlidingTab[] = [
+  { id: "desktop" satisfies EnrollmentSource, label: "Desktop app" },
+  { id: "terminal" satisfies EnrollmentSource, label: "Terminal" },
+];
+
+/** The Hub a bare `--hub` already points at, so the command needs no origin. */
+const DEFAULT_HUB_ORIGIN = "https://app.ryco.space";
+
+function EnrollmentStep({
+  index,
+  title,
+  children,
+}: {
+  readonly index: number;
+  readonly title: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <li className="app-surface rounded-2xl border p-4 sm:p-5">
+      <h2 className="flex items-center gap-2.5 font-medium text-sm">
+        <span
+          aria-hidden
+          className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/12 font-semibold text-primary text-xs"
+        >
+          {index}
+        </span>
+        {title}
+      </h2>
+      <div className="mt-3 sm:pl-8.5">{children}</div>
+    </li>
+  );
+}
+
+/** One shell command with a copy button; the text is selectable either way. */
+function CommandLine({ command }: { readonly command: string }) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard();
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-border bg-background py-1.5 pr-1.5 pl-3">
+      <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs">
+        <span aria-hidden className="select-none text-muted-foreground">
+          ${" "}
+        </span>
+        {command}
+      </code>
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        aria-label={`Copy command: ${command}`}
+        onClick={() => copyToClipboard(command, undefined)}
+      >
+        {isCopied ? <CheckIcon aria-hidden /> : <CopyIcon aria-hidden />}
+      </Button>
     </div>
   );
 }

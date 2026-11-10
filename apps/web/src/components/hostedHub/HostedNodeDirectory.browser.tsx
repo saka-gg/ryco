@@ -56,6 +56,7 @@ vi.mock("../../env", async (importOriginal) => ({
 
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
+import { useAccountProfileStore } from "../../hostedHub/accountIdentity";
 import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
 import { navigateHub, resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
@@ -188,6 +189,11 @@ beforeEach(async () => {
   resetDirectoryRouteForTests();
   useSettingsDialogStore.setState({ open: false, section: "general" });
   navigate.mockClear();
+  // The account chrome reads the profile and the account pages read sessions;
+  // this Hub predates both, so the account is named by its display name.
+  useAccountProfileStore.setState(useAccountProfileStore.getInitialState(), true);
+  vi.spyOn(hostedHubApi, "getAccountProfile").mockResolvedValue(null);
+  vi.spyOn(hostedHubApi, "listAccountSessions").mockResolvedValue(null);
 });
 
 afterEach(async () => {
@@ -607,7 +613,19 @@ describe("hosted node directory", () => {
     seedDirectory([]);
     mounted = await render(<HostedHubRoot />);
 
-    await expect.element(page.getByText("No nodes yet")).toBeVisible();
+    await expect
+      .element(page.getByRole("heading", { name: "Add your first machine" }))
+      .toBeVisible();
+    // The owner's empty state says how to add one, step by step.
+    for (const step of [
+      "Install Ryco on a machine",
+      "Link it to this account",
+      "Open it from any browser",
+    ]) {
+      await expect.element(page.getByText(step)).toBeVisible();
+    }
+    // That panel is an owner's: it is not the non-owner's "No nodes yet".
+    await expect.element(page.getByText("No nodes yet")).not.toBeInTheDocument();
     const enroll = [...document.querySelectorAll<HTMLElement>("button")].filter(
       (button) => button.textContent?.trim() === "Enroll node",
     );
@@ -678,7 +696,8 @@ describe("hosted node directory", () => {
     seedDirectory([node()]);
     mounted = await render(<HostedHubRoot />);
 
-    const row = document.querySelector<HTMLElement>("li");
+    // The node list's row, not an item of the Hub bar's navigation.
+    const row = document.querySelector<HTMLElement>('ul[role="list"] > li');
     expect(row, "no row to clip").not.toBeNull();
     // The clip is real, so the assertions below are about something.
     expect(getComputedStyle(row!).overflow).toBe("hidden");
@@ -1144,9 +1163,12 @@ describe("account settings reachability", () => {
     seedDirectory([]);
     mounted = await render(<HostedHubRoot />);
 
-    await page.getByRole("button", { name: "Account settings" }).click();
+    await page.getByRole("button", { name: `Account menu for ${account.displayName}` }).click();
+    await page.getByRole("menuitem", { name: "Sign-in & security" }).click();
 
-    await expect.element(page.getByRole("heading", { name: "Account", level: 1 })).toBeVisible();
+    await expect
+      .element(page.getByRole("heading", { name: "Sign-in & security", level: 1 }))
+      .toBeVisible();
     expect(window.location.pathname).toBe("/account/security");
     // The node app's settings dialog is not what opened.
     expect(useSettingsDialogStore.getState().open).toBe(false);
@@ -1182,9 +1204,12 @@ describe("account settings reachability", () => {
       .element(page.getByRole("heading", { name: /Unable to connect/ }))
       .not.toBeInTheDocument();
 
-    await page.getByRole("button", { name: "Account settings" }).click();
+    await page.getByRole("button", { name: `Account menu for ${account.displayName}` }).click();
+    await page.getByRole("menuitem", { name: "Sign-in & security" }).click();
 
-    await expect.element(page.getByRole("heading", { name: "Account", level: 1 })).toBeVisible();
+    await expect
+      .element(page.getByRole("heading", { name: "Sign-in & security", level: 1 }))
+      .toBeVisible();
     expect(window.location.pathname).toBe("/account/security");
   });
 });

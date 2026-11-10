@@ -176,6 +176,9 @@ export function HubSection({
     null,
   );
   const [hostedGitHubTotpCode, setHostedGitHubTotpCode] = useState("");
+  // The Hub's account pages: username, email, passkeys, sessions. `/account` is
+  // a documented Hub address (docs/hosted-hub-client.md).
+  const accountPagesUrl = config?.origin ? new URL("/account", config.origin).toString() : null;
   const mountedRef = useRef(true);
   const pollerRef = useRef<VisibilityAwarePoller | null>(null);
   const { guardRelaunch, dialog: relaunchGuardDialog } = useDesktopRelaunchGuard();
@@ -890,14 +893,25 @@ export function HubSection({
                 {hostedIdentityPending ? "Finishing setup…" : "Finish setup"}
               </Button>
             ) : hostedIdentity.status === "ready" ? (
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={hostedIdentityPending || !desktopBridge.disconnectHostedIdentity}
-                onClick={() => void runHostedIdentityAction("disconnect")}
-              >
-                {hostedIdentityPending ? "Working…" : "Sign out"}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                {accountPagesUrl === null ? null : (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => window.open(accountPagesUrl, "_blank", "noopener,noreferrer")}
+                  >
+                    Manage account
+                  </Button>
+                )}
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={hostedIdentityPending || !desktopBridge.disconnectHostedIdentity}
+                  onClick={() => void runHostedIdentityAction("disconnect")}
+                >
+                  {hostedIdentityPending ? "Working…" : "Sign out"}
+                </Button>
+              </div>
             ) : (
               <Button
                 size="xs"
