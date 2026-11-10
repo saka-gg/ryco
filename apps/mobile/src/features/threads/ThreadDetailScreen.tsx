@@ -116,7 +116,6 @@ import {
   selectServerFollowUpQueueSupported,
   selectThreadFollowUpQueue,
   shouldQueueFollowUpOnServer,
-  readQueueThreadView,
   followUpQueueEditAttachments,
   followUpQueueEditOf,
   withoutFollowUpQueueEditAttachment,
@@ -234,7 +233,6 @@ import {
   endThreadOutboxSteer,
   enqueueThreadOutboxMessage,
   getThreadOutboxHold,
-  beginThreadOutboxForegroundDispatch,
   getThreadOutboxMovingMessageId,
   holdThreadOutboxForInterrupt,
   isThreadOutboxDispatchPending,
@@ -308,21 +306,14 @@ import { SecretRequestCard } from "./SecretRequestCard";
 import { mobileSecretRequestCards } from "./secretRequestCardModel";
 import { resolveThreadSendAction, sendThreadTurn } from "./sendThreadTurn";
 import { startOptimisticDispatch } from "./optimisticSend";
+import { useFailedSendRestore } from "./useFailedSendRestore";
 import {
   displayedThreadTitle,
-  renameSettled,
   threadStopping,
   type PendingRename,
   type PendingStop,
 } from "./optimisticThreadActionsModel";
-import {
-  mergeRestoredDraft,
-  removeOptimisticUserMessage,
-  failOptimisticUserMessage,
-  takeFailedOptimisticUserMessages,
-  useIsOptimisticUserMessage,
-  type OptimisticUserMessage,
-} from "../../state/optimisticUserMessages";
+import { useIsOptimisticUserMessage } from "../../state/optimisticUserMessages";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
   clearThreadGoal,
@@ -435,6 +426,8 @@ const NO_PENDING_FOLLOW_UPS: ReadonlyArray<PendingFollowUpAdd> = [];
 const NO_FIND_MESSAGES: ReadonlyArray<ThreadFindMessage> = [];
 const NO_ARTIFACT_MESSAGES: ReadonlyArray<ChatMessage> = [];
 const SERVER_QUEUE_EDIT_IN_PROGRESS = "Save or cancel the message you are editing first.";
+/** How long a rename's new title is shown before the node's own title, whatever it says. */
+const RENAME_ECHO_WAIT_MS = 15_000;
 /** The clock the anchor's rows are built with: their positions do not depend on it. */
 const ANCHOR_ROWS_CLOCK = new Date(0).toISOString();
 /** How long the message a link opened the thread at stays highlighted. */
@@ -804,42 +797,13 @@ export function ThreadDetailScreen(props: {
     [environmentId, outboxMessages, threadId],
   );
   const outboxThreadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
-  // A failed optimistic send gives its draft back: into the composer while this screen shows,
-  // otherwise kept until it shows again (the composer's text is this screen's own).
-  const screenMountedRef = useRef(false);
-  const restoreDrafts = (drafts: ReadonlyArray<OptimisticUserMessage["draft"]>) => {
-    const composer = composerRef.current;
-    const merged = mergeRestoredDraft(drafts, {
-      prompt: composer?.getText() ?? "",
-      attachments: attachmentsRef.current,
-    });
-    composer?.setText(merged.prompt);
-    setAttachments(merged.attachments);
-  };
-  const restoreFailedSend = (entry: OptimisticUserMessage, error: string) => {
-    // After the composer's own clear of the send, which lands a few microtasks after it.
-    setTimeout(() => {
-      if (!screenMountedRef.current) {
-        failOptimisticUserMessage(outboxThreadKey, entry.message.id, error);
-        return;
-      }
-      removeOptimisticUserMessage(outboxThreadKey, entry.message.id);
-      restoreDrafts([entry.draft]);
-      setSendError(error);
-    }, 0);
-  };
-  useEffect(() => {
-    screenMountedRef.current = true;
-    const failed = takeFailedOptimisticUserMessages(outboxThreadKey);
-    if (failed.length > 0) {
-      restoreDrafts(failed.map((entry) => entry.draft));
-      setSendError(failed.at(-1)?.error ?? "Failed to send message.");
-    }
-    return () => {
-      screenMountedRef.current = false;
-    };
-    // oxlint-disable-next-line react-hooks/exhaustive-deps -- once per thread shown; the restore reads refs and stable setters.
-  }, [outboxThreadKey]);
+  const restoreFailedSend = useFailedSendRestore({
+    threadKey: outboxThreadKey,
+    composer: composerRef,
+    attachments: attachmentsRef,
+    setAttachments,
+    setSendError,
+  });
   // "Edit from here" of this thread, from the question until the node's verdict. Kept per
   // thread outside this screen, so leaving and coming back neither forgets nor ends it.
   const revertPhase = useSyncExternalStore(
@@ -1200,10 +1164,6 @@ export function ThreadDetailScreen(props: {
   >(null);
   const activePendingRename = pendingRename?.key === outboxThreadKey ? pendingRename : null;
   const headerTitle = displayedThreadTitle(headerModel?.title, activePendingRename);
-  const renameDone = renameSettled(headerModel?.title, activePendingRename);
-  useEffect(() => {
-    if (renameDone) setPendingRename(null);
-  }, [renameDone]);
 
   // The capability gates key off the DRIVER, not the instance id, so resolve the
   // thread's provider instance through the server config first. A null/lagging
@@ -2590,24 +2550,13 @@ export function ThreadDetailScreen(props: {
       serverQueueWaiting,
     });
     if (route === "dispatch" && !notificationReply) {
-      const messageId = newMessageId();
-      const createdAt = new Date().toISOString();
       setSendBusyCount((count) => count + 1);
       void startOptimisticDispatch({
-        threadKey: outboxThreadKey,
-        messageId,
-        createdAt,
+        threadRef: scopeThreadRef(environmentId, threadId),
         outgoingText: composeOutgoingPrompt({ prompt: text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
         prompt: text,
         attachments,
-        beginForegroundDispatch: () =>
-          beginThreadOutboxForegroundDispatch({
-            threadKey: outboxThreadKey,
-            messageId,
-            readView: () =>
-              readQueueThreadView(useStore.getState(), scopeThreadRef(environmentId, threadId)),
-          }),
-        dispatch: ({ onBeforeTurnStart, reportError }) =>
+        dispatch: ({ messageId, createdAt, onBeforeTurnStart, reportError }) =>
           dispatchTurn({
             messageId,
             createdAt,
@@ -2742,9 +2691,6 @@ export function ThreadDetailScreen(props: {
     running: agentRunning,
     activeTurnId: runningTurnKey,
   });
-  useEffect(() => {
-    if (pendingStop !== null && !stopping) setPendingStop(null);
-  }, [pendingStop, stopping]);
   const runningSince =
     agentRunning && !stopping
       ? (thread?.latestTurn?.startedAt ?? thread?.latestTurn?.requestedAt ?? "")
@@ -3287,6 +3233,15 @@ export function ThreadDetailScreen(props: {
     void (async () => {
       try {
         await renameThread(ensureEnvironmentApi(environmentId), threadId, title);
+        // The overlay ends with the node's echo (or after a while; the header shows any other
+        // title the node sets meanwhile, `displayedThreadTitle`).
+        await waitForStoreCondition({
+          ready: (state) =>
+            selectThreadByRef(state, scopeThreadRef(environmentId, threadId))?.title.trim() ===
+            pending.to,
+          timeoutMs: RENAME_ECHO_WAIT_MS,
+        });
+        setPendingRename((current) => (current === pending ? null : current));
       } catch (error) {
         setPendingRename((current) => (current === pending ? null : current));
         Alert.alert("Could not rename", actionFailureMessage(error));

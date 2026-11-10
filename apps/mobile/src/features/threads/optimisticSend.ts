@@ -1,13 +1,20 @@
-import type { MessageId } from "@ryco/contracts";
+import { scopedThreadKey } from "@ryco/client-runtime/scoped";
+import { readQueueThreadView } from "@ryco/client-runtime/state/message-queue";
+import { useStore } from "@ryco/client-runtime/state/threads";
+import type { MessageId, ScopedThreadRef } from "@ryco/contracts";
 
 import type { DraftComposerAttachment } from "../../lib/composerFiles";
+import { newMessageId } from "../../lib/ids";
 import {
   addOptimisticUserMessage,
   buildOptimisticUserMessage,
   markOptimisticUserMessageDispatched,
   type OptimisticUserMessage,
 } from "../../state/optimisticUserMessages";
-import type { ThreadOutboxForegroundDispatch } from "../../state/threadOutbox";
+import {
+  beginThreadOutboxForegroundDispatch,
+  type ThreadOutboxForegroundDispatch,
+} from "../../state/threadOutbox";
 
 // The thread screen's optimistic send (web's `setOptimisticUserMessages` in
 // executeChatSendTurn): the message shows in the timeline and the composer is
@@ -17,17 +24,24 @@ import type { ThreadOutboxForegroundDispatch } from "../../state/threadOutbox";
 // The send's readiness checks are the dispatch's own, unchanged.
 
 export interface OptimisticDispatchInput {
-  readonly threadKey: string;
-  readonly messageId: MessageId;
-  readonly createdAt: string;
+  readonly threadRef: ScopedThreadRef;
+  /** The send's message id and time; new ones by default (test seams). */
+  readonly messageId?: MessageId;
+  readonly createdAt?: string;
   /** The text the node will echo (`composeOutgoingPrompt`), so the swap does not flicker. */
   readonly outgoingText: string;
   readonly prompt: string;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
-  /** Marks the thread busy for the outbox until the send ends. */
-  readonly beginForegroundDispatch: () => ThreadOutboxForegroundDispatch;
+  /**
+   * Marks the thread busy for the outbox until the send ends; defaults to the outbox's own
+   * (`beginThreadOutboxForegroundDispatch`). A test seam.
+   */
+  readonly beginForegroundDispatch?: () => ThreadOutboxForegroundDispatch;
   /** Sends the turn; resolves false with the error it reported when it failed. */
   readonly dispatch: (hooks: {
+    /** The id and time the bubble shows: the turn goes out under them, so the echo replaces it. */
+    readonly messageId: MessageId;
+    readonly createdAt: string;
     readonly onBeforeTurnStart: () => void;
     readonly reportError: (error: string | null) => void;
   }) => Promise<boolean>;
@@ -38,20 +52,31 @@ export interface OptimisticDispatchInput {
 
 /** Shows the message now and dispatches it in the background; resolves when the send ends. */
 export function startOptimisticDispatch(input: OptimisticDispatchInput): Promise<boolean> {
+  const threadKey = scopedThreadKey(input.threadRef);
+  const messageId = input.messageId ?? newMessageId();
+  const createdAt = input.createdAt ?? new Date().toISOString();
   const entry = buildOptimisticUserMessage({
-    messageId: input.messageId,
+    messageId,
     text: input.outgoingText,
-    createdAt: input.createdAt,
+    createdAt,
     prompt: input.prompt,
     attachments: input.attachments,
   });
-  addOptimisticUserMessage(input.threadKey, entry);
-  const foreground = input.beginForegroundDispatch();
+  addOptimisticUserMessage(threadKey, entry);
+  const foreground = (
+    input.beginForegroundDispatch ??
+    (() =>
+      beginThreadOutboxForegroundDispatch({
+        threadKey,
+        messageId,
+        readView: () => readQueueThreadView(useStore.getState(), input.threadRef),
+      }))
+  )();
   let reported: string | null = null;
   const settle = (dispatched: boolean, error: string | null) => {
     foreground.end(dispatched);
     if (dispatched) {
-      markOptimisticUserMessageDispatched(input.threadKey, input.messageId);
+      markOptimisticUserMessageDispatched(threadKey, messageId);
     } else {
       input.onFailed(entry, error ?? reported ?? "Failed to send message.");
     }
@@ -60,6 +85,8 @@ export function startOptimisticDispatch(input: OptimisticDispatchInput): Promise
   };
   return input
     .dispatch({
+      messageId,
+      createdAt,
       onBeforeTurnStart: foreground.onBeforeTurnStart,
       reportError: (error) => {
         reported = error;

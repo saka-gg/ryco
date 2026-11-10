@@ -18,15 +18,7 @@ export function displayedThreadTitle(
   return pending !== null && serverTitle === pending.from ? pending.to : serverTitle;
 }
 
-/** Whether the pending rename is over: the node's title is no longer the one it replaced. */
-export function renameSettled(
-  serverTitle: string | null | undefined,
-  pending: PendingRename | null,
-): boolean {
-  return pending !== null && serverTitle !== undefined && serverTitle !== pending.from;
-}
-
-/** A Stop on its way, for the turn it stops (null: no turn id was known, the session's run). */
+/** A Stop on its way, for the turn it stops (null: the session ran without a known turn). */
 export interface PendingStop {
   readonly turnId: string | null;
 }
@@ -41,5 +33,6 @@ export function threadStopping(input: {
   readonly activeTurnId: string | null;
 }): boolean {
   if (input.pending === null || !input.running) return false;
-  return input.pending.turnId === null || input.pending.turnId === input.activeTurnId;
+  // Only the turn it was for: a Stop never carries over to a turn that started after it.
+  return input.pending.turnId === input.activeTurnId;
 }

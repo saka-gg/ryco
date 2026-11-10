@@ -1,5 +1,17 @@
-import type { MessageId } from "@ryco/contracts";
+import type { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+vi.mock("expo-crypto", () => ({
+  randomUUID: () => "00000000-0000-4000-8000-000000000000",
+  getRandomBytes: (length: number) => new Uint8Array(length),
+}));
+vi.mock("expo-sqlite/kv-store", () => ({
+  default: {
+    getItem: async () => null,
+    setItem: async () => undefined,
+    removeItem: async () => undefined,
+  },
+}));
 
 import {
   resetOptimisticUserMessagesForTests,
@@ -7,6 +19,7 @@ import {
 } from "../../state/optimisticUserMessages";
 import { startOptimisticDispatch, type OptimisticDispatchInput } from "./optimisticSend";
 
+const REF = { environmentId: "env" as EnvironmentId, threadId: "thread" as ThreadId };
 const KEY = "env:thread";
 
 function deferred<T>() {
@@ -21,7 +34,7 @@ function deferred<T>() {
 
 function input(overrides: Partial<OptimisticDispatchInput> = {}): OptimisticDispatchInput {
   return {
-    threadKey: KEY,
+    threadRef: REF,
     messageId: "m1" as MessageId,
     createdAt: "2026-11-10T10:00:00.000Z",
     outgoingText: "hello",
