@@ -36,13 +36,18 @@ export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
     date: "November 10, 2026",
     dateTime: "2026-11-10",
     summary:
-      "Claude Fable 5.2, Statistics costs from the same price list as Usage, a What's new dialog, and the coming iPhone app gains a desktop-style composer and conversation import.",
+      "Claude Fable 5.2, automations that start on a webhook, Statistics costs from the same price list as Usage, and the coming iPhone app gains a desktop-style composer.",
     releaseUrl: `${RELEASE_BASE}/v0.1.45`,
     highlights: [
       {
         title: "Claude Fable 5.2",
         summary:
           "Fable 5.2 joins the model picker with Fast mode and a choice of 200k or 1M context, and choosing plain “fable” now means Fable 5.2. It shows up once Claude Code is v2.1.321 or newer.",
+      },
+      {
+        title: "Automations that start on a webhook",
+        summary:
+          "An automation can now run when its webhook is called, so a GitHub webhook, a GitHub Actions step or a curl request starts it. Its editor shows the URL, the secret and ready-made snippets. The Ryco Cloud URL follows once Cloud supports it.",
       },
       {
         title: "Statistics costs you can trust",
@@ -53,10 +58,6 @@ export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
         title: "What's new, in the app",
         summary:
           "Settings → About and the command palette open a What's new dialog, which also appears once after an update. Each GitHub release opens with the same notes.",
-      },
-      {
-        title: "A simpler app icon",
-        summary: "The app icon shows only the R mark.",
       },
       {
         title: "A desktop-style composer on the phone",
