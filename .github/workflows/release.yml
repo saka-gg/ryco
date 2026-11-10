@@ -36,9 +36,8 @@ permissions:
 # bun-cache: none and restore-turbo-cache: "false", and this default makes the
 # cache service enforce it. Only `verify` overrides it (job-level cache-mode
 # wins) with `read`: it ships nothing, so it may restore caches but not save
-# them. Main-scope cache entries can be written by validation runs of unmerged
-# code on backends that do not enforce the read cap (Blacksmith), so nothing
-# restored from a cache may end up in a shipped artifact.
+# them. Nothing restored from a cache may end up in a shipped artifact, so a
+# release does not depend on the read cap of every validation caller holding.
 cache-mode: none
 
 jobs:

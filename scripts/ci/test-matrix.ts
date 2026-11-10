@@ -71,16 +71,11 @@ export function testJobs(packages: readonly string[]): TestJob[] {
       runner: "ubuntu-24.04",
     });
   }
-  // Blacksmith runners send actions/cache to Blacksmith's own backend, which
-  // Static writes, so one GitHub-hosted leg writes GitHub's backend for the
-  // others; more writers per backend would only race for the same key. The
-  // rest and web legs end before the server shards, so their save adds no
-  // wall time.
-  const hosted = jobs.filter((job) => !job.runner.startsWith("blacksmith-"));
+  // One leg writes the Bun install cache for every job of the run; more
+  // writers would only race for the same key. The rest and web legs end
+  // before the server shards, so their save adds no wall time.
   const writer =
-    hosted.find((job) => job.name === "rest") ??
-    hosted.find((job) => job.name === "web") ??
-    hosted[0];
+    jobs.find((job) => job.name === "rest") ?? jobs.find((job) => job.name === "web") ?? jobs[0];
   return jobs.map((job) => {
     const bunCache: TestJob["bunCache"] = job === writer ? "write" : "read";
     return Object.assign(job, { bunCache });

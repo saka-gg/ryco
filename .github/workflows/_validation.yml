@@ -61,23 +61,20 @@ env:
 #   post-job save is skipped when the job fails, exactly the runs where the
 #   retry would benefit most from a warm cache; a cancelled (superseded) run,
 #   though, should free its runners for the new run instead of uploading.
-# - Each cache backend has exactly one Bun install cache writer
-#   (`bun-cache: write`). Blacksmith runners send actions/cache to Blacksmith's
-#   own backend, where Static writes; GitHub-hosted jobs use GitHub's, where the
-#   test leg test-matrix.ts marks writes. A backend lets one job reserve a key,
-#   so any other writer would compress a GB-sized cache only to have the save
+# - Exactly one job writes the Bun install cache (`bun-cache: write`): the test
+#   leg test-matrix.ts marks. The cache service lets one job reserve a key, so
+#   any other writer would compress a GB-sized cache only to have the save
 #   rejected.
 # - Callers that validate arbitrary refs cap this workflow at `cache-mode: read`,
 #   so actions/cache restores main's caches there but skips every save with a
-#   notice. GitHub's cache service also enforces the cap; Blacksmith documents
-#   no such enforcement, so on its runners the cap is only as strong as the
-#   action honoring it.
+#   notice, and GitHub's cache service enforces the cap.
+# - Every job runs on GitHub-hosted `ubuntu-24.04`: 4 vCPU, and free for a
+#   public repository. None of the short jobs is on the critical path (the
+#   browser shards are), so a paid runner would only buy idle time.
 jobs:
   static:
     name: Static
-    # Typecheck is CPU-bound: 4 vCPU roughly halve the job at twice the price
-    # per minute, so it reports sooner for about the same cost.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -95,7 +92,6 @@ jobs:
         with:
           cache-scope: static
           install-resource-monitor-toolchain: "false"
-          bun-cache: write
 
       # Every check reports on its own: a format failure must not hide lint or
       # type errors behind skipped steps.
@@ -126,7 +122,7 @@ jobs:
   # fetches the lockfile's exact Turbo itself when nothing is installed.
   test-matrix:
     name: Test matrix
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       include: ${{ steps.pick.outputs.include }}
@@ -209,7 +205,7 @@ jobs:
   # below, so the job builds them once.
   build:
     name: Build
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       # Unreferenced sourcemaps let the bundle budget check below name the
@@ -390,8 +386,8 @@ jobs:
   # These shards are the wall-clock long pole, so they do not wait for the
   # test-matrix job. Each shard resolves the same validation scope itself right
   # after setup and skips its remaining steps when browser tests are not
-  # required. A skipped shard costs about 40 seconds of runner time; waiting on
-  # the matrix would cost that on every run where the suite is needed.
+  # required. A skipped shard costs about 10 seconds of runner time; waiting on
+  # the matrix would cost more than that on every run where the suite is needed.
   browser:
     name: Browser tests ${{ matrix.shard }}
     if: ${{ inputs['run-browser-tests'] }}
@@ -411,15 +407,24 @@ jobs:
           fetch-depth: ${{ inputs['affected-base'] == '' && 1 || 0 }}
           persist-credentials: false
 
-      - name: Setup project
-        uses: ./.github/actions/setup-ryco
+      # Resolved before the project setup, like the Test matrix job does:
+      # Turbo's dry plan needs no node_modules, and a shard that has nothing
+      # to run then stops after about 10 seconds instead of 45.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          restore-turbo-cache: "false"
-          install-resource-monitor-toolchain: "false"
+          bun-version-file: package.json
 
       - id: scope
         name: Resolve validation scope
         run: bun scripts/ci/test-matrix.ts
+
+      - name: Setup project
+        if: ${{ steps.scope.outputs.browser == 'true' }}
+        uses: ./.github/actions/setup-ryco
+        with:
+          restore-turbo-cache: "false"
+          install-resource-monitor-toolchain: "false"
 
       # No build step and no Turbo cache: browser tests run Vitest directly,
       # which serves the app through the Vite dev server, and every `@ryco/*`
@@ -571,7 +576,7 @@ jobs:
     name: Release Smoke
     needs: test-matrix
     if: ${{ inputs['run-release-smoke'] && needs.test-matrix.outputs.release == 'true' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

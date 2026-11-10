@@ -30,12 +30,12 @@ describe("CI test selection", () => {
     expect(testJobs([])).toEqual([]);
   });
 
-  it("gives GitHub's cache backend exactly one Bun cache writer, on a leg that ends early", () => {
+  it("marks exactly one Bun cache writer, on a leg that ends early", () => {
     const writers = (packages: string[]) =>
       testJobs(packages)
         .filter((job) => job.bunCache === "write")
         .map((job) => job.name);
-    // Every leg is GitHub-hosted; Static alone writes Blacksmith's backend.
+    // Every leg is GitHub-hosted, free for a public repository.
     expect(
       new Set(testJobs(["ryco-cli", "@ryco/web", "@ryco/shared"]).map((job) => job.runner)),
     ).toEqual(new Set(["ubuntu-24.04"]));
