@@ -752,9 +752,18 @@ foreground or online signal, or Refresh, re-checks it. Only the Hub's own `401` 
 `session_invalid` answer ends the session.
 
 On reconnect, the existing shell and thread subscriptions resubscribe. Ryco marks the session
-`replaying`, accepts the authoritative shell snapshot, discards duplicate/older projection versions,
-reconciles thread subscriptions, and then marks it ready. Conversations, running tasks, approvals,
-and terminal projections recover from the node, never from Hub.
+`replaying`. A reconnect within one generation asks the node to resume the shell after the last
+sequence this connection applied: a node that still holds every event since answers `resumed` and
+replays them, and that server-verified resume counts as the session's current shell snapshot.
+Otherwise — a new generation (every suspension and recovery makes one), a shell the client demoted
+to last-known state or filled from a cache, a node that cannot resume that far or predates resume —
+Ryco accepts the authoritative shell snapshot and discards duplicate/older projection versions.
+Either way it reconciles thread subscriptions and then marks the session ready. A thread whose body
+the client still holds resumes after that body's last event, and only once the session has accepted
+that fresh thread list on its own current attempt and generation; if that does not happen within
+20 seconds, the thread loads a fresh window instead. A connection of a replaced generation
+publishes nothing, resumed or not. Conversations, running tasks, approvals, and terminal
+projections recover from the node, never from Hub.
 
 Every RPC method carries an explicit delivery-effect classification beside its access tier
 (`RPC_DELIVERY_EFFECT_POLICY` in `packages/shared/src/rpcAccessPolicy.ts`). The tier is not an

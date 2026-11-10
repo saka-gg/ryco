@@ -185,6 +185,8 @@ function deps() {
   return {
     pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
     resetShellProjection: vi.fn(),
+    readShellResumeSequence: vi.fn((): number | null => 40),
+    skipShellEvent: vi.fn(),
     applyShellEvent: vi.fn(),
     applyTerminalEvent: vi.fn(),
     syncShellSnapshot: vi.fn(),
@@ -395,6 +397,35 @@ describe("hosted environment connection", () => {
     });
     // The selected node's session is untouched.
     expect(getHostedEnvironmentSessions().read(laptop.environmentId)).toBeUndefined();
+  });
+
+  it("resumes the list its generation accepted, and a verified resume makes its record current", () => {
+    const { input, generation } = connect(studio);
+    const sessions = getHostedEnvironmentSessions();
+    const connectionInput = connectionFactory.input as {
+      readShellResumeSequence: (environmentId: string) => number | null;
+      skipShellEvent: (sequence: number, environmentId: string) => void;
+      onResubscribe: (environmentId: string) => void;
+      onShellResumed: (environmentId: string) => void;
+    };
+    sessions.transportStatus(studio.environmentId, generation, "online");
+    expect(connectionInput.readShellResumeSequence(studio.environmentId)).toBe(40);
+    connectionInput.onResubscribe(studio.environmentId);
+    expect(sessions.read(studio.environmentId)?.sessionStatus).toBe("replaying");
+    connectionInput.onShellResumed(studio.environmentId);
+    expect(sessions.read(studio.environmentId)).toMatchObject({
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+
+    // A replaced generation neither resumes nor publishes readiness.
+    sessions.renew(studio.environmentId);
+    const renewed = sessions.read(studio.environmentId)!;
+    expect(connectionInput.readShellResumeSequence(studio.environmentId)).toBeNull();
+    connectionInput.skipShellEvent(41, studio.environmentId);
+    expect(input.skipShellEvent).not.toHaveBeenCalled();
+    connectionInput.onShellResumed(studio.environmentId);
+    expect(sessions.read(studio.environmentId)).toEqual(renewed);
   });
 
   it("lets its own record generation follow a dropped Git action only once it is adoptable", () => {

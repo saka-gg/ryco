@@ -26,6 +26,7 @@ import { createDeviceRpcClient, createWsRpcClient, type WsRpcClient } from "../r
 import { WsTransport } from "../rpc/wsTransport";
 import {
   hasUnsentThreadWork,
+  holdsLiveThreadBody,
   isThreadNonIdle,
   selectThreadBodyUsage,
 } from "@ryco/client-runtime/state/threads/threadBodyResidency";
@@ -486,8 +487,8 @@ export function createMobileEnvironmentDriver(
       },
       pushSequenceMonitor: noopPushSequenceMonitor,
       resetShellProjection: (environmentId) => getSupervisor().resetShellProjection(environmentId),
-      // A direct connection may resume its shell after a reconnect; the hosted
-      // primary below always takes a fresh snapshot.
+      // The shell resumes after a reconnect; so does the hosted primary below,
+      // where a resume the node verified counts as the session's current list.
       readShellResumeSequence: (environmentId) =>
         getSupervisor().readShellProjectionSequence(environmentId),
       skipShellEvent: (sequence, environmentId) =>
@@ -592,6 +593,10 @@ export function createMobileEnvironmentDriver(
         pushSequenceMonitor: noopPushSequenceMonitor,
         resetShellProjection: (environmentId) =>
           getSupervisor().resetShellProjection(environmentId),
+        readShellResumeSequence: (environmentId) =>
+          getSupervisor().readShellProjectionSequence(environmentId),
+        skipShellEvent: (sequence, environmentId) =>
+          getSupervisor().skipShellEvent(sequence, environmentId),
         applyShellEvent: (event, environmentId) =>
           getSupervisor().applyShellEvent(event, environmentId),
         applyTerminalEvent: (event, environmentId) =>
@@ -621,6 +626,8 @@ export function createMobileEnvironmentDriver(
       isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
     listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),
     evictThreadBodies: (threadRefs) => useStore.getState().evictThreadBodies(threadRefs),
+    // A thread reopened while its body is still held resumes after its last event.
+    holdsThreadBody: (threadRef) => holdsLiveThreadBody(useStore.getState(), threadRef),
     isThreadBodyProtected: (threadRef) =>
       hasUnsentThreadWork(threadRef, {
         queuesByThreadKey: useMessageQueueStore.getState().queuesByThreadKey,

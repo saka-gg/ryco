@@ -157,6 +157,92 @@ describe("shell resume", () => {
   });
 });
 
+describe("session readiness", () => {
+  const readinessEnvironmentId = EnvironmentId.make("env-session-readiness");
+
+  beforeEach(() => resetWsConnectionStateForTests());
+  afterEach(() => resetWsConnectionStateForTests());
+
+  function openSocketAttempt() {
+    recordWsConnectionAttempt("ws://node.test/ws", {
+      environmentId: readinessEnvironmentId,
+      recordGlobal: false,
+    });
+    recordWsConnectionOpened({ environmentId: readinessEnvironmentId, recordGlobal: false });
+  }
+
+  function readinessConnection(
+    options: {
+      readonly lifecycleGeneration?: ConnectionLifecycleGeneration;
+      readonly adoptable?: () => boolean;
+    } = {},
+  ) {
+    const harness = shellHarness();
+    const resumed: string[] = [];
+    const connection = createEnvironmentConnection({
+      kind: "primary",
+      knownEnvironment: {
+        environmentId: readinessEnvironmentId,
+        label: "Hub node",
+        source: "hub-hosted",
+      } as unknown as KnownEnvironment,
+      client: harness.client,
+      pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: () => undefined,
+      applyTerminalEvent: () => undefined,
+      readShellResumeSequence: () => 40,
+      onShellResumed: () => resumed.push("resumed"),
+      ...(options.lifecycleGeneration ? { lifecycleGeneration: options.lifecycleGeneration } : {}),
+      ...(options.adoptable
+        ? { resumeReadiness: { read: options.adoptable, subscribe: () => () => undefined } }
+        : {}),
+    });
+    return { harness, connection, resumed };
+  }
+
+  it("is current once this socket attempt accepted a snapshot, and not after a reconnect", () => {
+    openSocketAttempt();
+    const { harness, connection } = readinessConnection();
+    const changes: boolean[] = [];
+    connection.sessionReadiness.subscribe(() => changes.push(connection.sessionReadiness.read()));
+    expect(connection.sessionReadiness.read()).toBe(false);
+    harness.emit(snapshot(40));
+    expect(connection.sessionReadiness.read()).toBe(true);
+
+    // The relay drops and a new attempt opens: the old attempt's list no longer counts.
+    recordWsConnectionClosed(undefined, {
+      environmentId: readinessEnvironmentId,
+      recordGlobal: false,
+    });
+    expect(connection.sessionReadiness.read()).toBe(false);
+    openSocketAttempt();
+    harness.resubscribe();
+    expect(connection.sessionReadiness.read()).toBe(false);
+    // A resume the node verified on the new attempt counts as its current list.
+    harness.emit({ kind: "resumed", fromSequence: 40 });
+    expect(connection.sessionReadiness.read()).toBe(true);
+    expect(changes.at(-1)).toBe(true);
+  });
+
+  it("is never current for a replaced generation or a session the owner does not adopt", () => {
+    openSocketAttempt();
+    let generation = 3;
+    let adoptable = false;
+    const { harness, connection } = readinessConnection({
+      lifecycleGeneration: { generation: 3, readCurrent: () => generation },
+      adoptable: () => adoptable,
+    });
+    harness.emit(snapshot(40));
+    expect(connection.sessionReadiness.read()).toBe(false);
+    adoptable = true;
+    expect(connection.sessionReadiness.read()).toBe(true);
+    generation = 4;
+    expect(connection.sessionReadiness.read()).toBe(false);
+  });
+});
+
 describe("reconnect metadata refresh", () => {
   it("hands refreshMetadata the replacement subscription's config snapshot", async () => {
     let configListener:

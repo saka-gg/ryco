@@ -47,6 +47,47 @@ describe("thread history pagination", () => {
     expect(apply).toHaveBeenCalledTimes(1);
   });
 
+  it("clears the loading state of loads an invalidation drops, and of no others", async () => {
+    let resolveRequest: ((value: OrchestrationThreadHistoryPage) => void) | undefined;
+    const request = vi.fn(
+      () =>
+        new Promise<OrchestrationThreadHistoryPage>((resolve) => {
+          resolveRequest = resolve;
+        }),
+    );
+    const setRequestState = vi.fn();
+    const controller = createThreadHistoryPaginationController({
+      request,
+      apply: vi.fn(),
+      setRequestState,
+    });
+    controller.beginSnapshot(scope);
+    const pending = controller.loadBefore({
+      scope,
+      collection: "messages",
+      page: { oldestCursor: cursor, newestCursor: cursor, hasMoreBefore: true },
+      limit: 50,
+    });
+    expect(setRequestState).toHaveBeenLastCalledWith(
+      expect.objectContaining({ collection: "messages", status: "loading" }),
+    );
+    // The thread's subscription goes while the page loads; its body stays and
+    // a later subscription may resume it, which resends no window to clear this.
+    controller.invalidate(scope);
+    expect(setRequestState).toHaveBeenLastCalledWith({
+      ...scope,
+      collection: "messages",
+      status: "idle",
+      cursor: null,
+      error: null,
+    });
+    resolveRequest?.(page);
+    await pending;
+    setRequestState.mockClear();
+    controller.invalidate(scope);
+    expect(setRequestState).not.toHaveBeenCalled();
+  });
+
   it("ignores a page that resolves after a newer snapshot generation", async () => {
     let resolveRequest: ((value: OrchestrationThreadHistoryPage) => void) | undefined;
     const request = vi.fn(

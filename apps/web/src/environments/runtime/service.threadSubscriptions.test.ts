@@ -512,6 +512,20 @@ describe("retainThreadDetailSubscription", () => {
     );
     expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
 
+    // A reconnect of this generation resumes the list it accepted, and the
+    // node's verified resume makes the session current again.
+    sessions.transportStatus(environmentId, generation, "online");
+    expect(connectionInput.readShellResumeSequence(environmentId)).toBe(
+      makeThreadShellSnapshot({ threadId: ThreadId.make("thread-current") }).snapshotSequence,
+    );
+    connectionInput.onResubscribe(environmentId);
+    expect(sessions.read(environmentId)?.sessionStatus).toBe("replaying");
+    connectionInput.onShellResumed(environmentId);
+    expect(sessions.read(environmentId)).toMatchObject({
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+
     sessions.renew(environmentId);
     expect(connectionInput.lifecycleGeneration.readCurrent()).not.toBe(generation);
     connectionInput.syncShellSnapshot(
@@ -519,6 +533,11 @@ describe("retainThreadDetailSubscription", () => {
       environmentId,
     );
     expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
+    // Nor does a replaced generation resume or publish readiness.
+    expect(connectionInput.readShellResumeSequence(environmentId)).toBeNull();
+    const renewed = sessions.read(environmentId);
+    connectionInput.onShellResumed(environmentId);
+    expect(sessions.read(environmentId)).toEqual(renewed);
 
     stop();
     await resetEnvironmentServiceForTests();

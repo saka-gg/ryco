@@ -57,6 +57,8 @@ function supervisorHandlers(target: EnvironmentConnectionSupervisor): HostedPrim
   return {
     pushSequenceMonitor: noPushSequenceMonitor,
     resetShellProjection: (environmentId) => target.resetShellProjection(environmentId),
+    readShellResumeSequence: (environmentId) => target.readShellProjectionSequence(environmentId),
+    skipShellEvent: (sequence, environmentId) => target.skipShellEvent(sequence, environmentId),
     applyShellEvent: (event, environmentId) => target.applyShellEvent(event, environmentId),
     applyTerminalEvent: (event, environmentId) => applyMobileTerminalEvent(event, environmentId),
     syncShellSnapshot: (snapshot, environmentId, callbacks) =>

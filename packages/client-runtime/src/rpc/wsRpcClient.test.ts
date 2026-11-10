@@ -580,3 +580,93 @@ it("routes provider sign-in through the shared transport, re-subscribing like an
     action: { type: "cancel" },
   });
 });
+
+describe("thread subscription resume points", () => {
+  const ORCHESTRATION_SUBSCRIBE_THREAD_WINDOW = "orchestration.subscribeThreadWindow";
+
+  /** Runs each subscription's stream on the wire until interrupted, like the transport. */
+  function subscribingTransport(wire: Record<string, (input: unknown) => unknown>) {
+    return {
+      subscribe: (
+        connect: (client: unknown) => Stream.Stream<unknown, Error>,
+        listener: (value: unknown) => void,
+      ) => {
+        const controller = new AbortController();
+        void Effect.runPromise(
+          Stream.runForEach(connect(wire), (value) => Effect.sync(() => listener(value))),
+          { signal: controller.signal },
+        ).catch(() => undefined);
+        return () => controller.abort();
+      },
+    } as unknown as WsTransport;
+  }
+
+  it("sends the request once a promised resume point settles, with the history mode then", async () => {
+    const requests: unknown[] = [];
+    const client = createWsRpcClient(
+      subscribingTransport({
+        [ORCHESTRATION_SUBSCRIBE_THREAD_WINDOW]: (input) => {
+          requests.push(input);
+          return Stream.never;
+        },
+      }),
+    );
+    let resolvePoint: (value: number | null) => void = () => undefined;
+    let mode: "active" | "passive" = "passive";
+    const unsubscribe = client.orchestration.subscribeThreadWindow!(
+      { threadId: "thread-1" as never, limits: {} as never },
+      () => undefined,
+      {
+        resumeFromSequence: () =>
+          new Promise<number | null>((resolve) => {
+            resolvePoint = resolve;
+          }),
+        historyRecovery: () => mode,
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toEqual([]);
+    mode = "active";
+    resolvePoint(17);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toEqual([
+      { threadId: "thread-1", limits: {}, resumeFromSequence: 17, historyRecovery: "active" },
+    ]);
+    unsubscribe();
+  });
+
+  it("asks for a snapshot when the point settles empty, and aborts a wait it gives up", async () => {
+    const requests: unknown[] = [];
+    const client = createWsRpcClient(
+      subscribingTransport({
+        [ORCHESTRATION_SUBSCRIBE_THREAD_WINDOW]: (input) => {
+          requests.push(input);
+          return Stream.never;
+        },
+      }),
+    );
+    const signals: AbortSignal[] = [];
+    const subscribe = (point: (signal: AbortSignal) => Promise<number | null>) =>
+      client.orchestration.subscribeThreadWindow!(
+        { threadId: "thread-1" as never, limits: {} as never },
+        () => undefined,
+        {
+          resumeFromSequence: (signal) => {
+            signals.push(signal);
+            return point(signal);
+          },
+        },
+      );
+    subscribe(async () => null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toEqual([{ threadId: "thread-1", limits: {} }]);
+
+    const unsubscribe = subscribe(() => new Promise<number | null>(() => undefined));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(signals[1]?.aborted).toBe(false);
+    unsubscribe();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(signals[1]?.aborted).toBe(true);
+    expect(requests).toHaveLength(1);
+  });
+});
