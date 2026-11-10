@@ -1,5 +1,6 @@
 import { canHtmlRenderSendFromMessage } from "@ryco/client-runtime/state/session";
-import { memo, useState, type ReactNode } from "react";
+import { memo, Suspense, useState, type ReactNode } from "react";
+import { preloadableLazy } from "../../lib/preloadableLazy";
 import { useAttachmentSource, type AttachmentContext } from "./useAttachmentSource";
 import {
   isChatFileAttachment,
@@ -20,6 +21,14 @@ import { useTheme } from "../../hooks/useTheme";
 import { HtmlRenderCards } from "./HtmlRenderCards";
 import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { readHtmlRenderAttachment } from "./htmlRender.logic";
+
+/** Renders an attachment, given a URL to read it from when it has one. */
+export type AttachmentRender = (
+  attachment: ChatAttachment,
+  loaded: boolean,
+  /** What shows is a preview read over a connection: reads the original. */
+  loadOriginal?: () => Promise<string | undefined>,
+) => ReactNode;
 
 const USER_IMAGE_MAX_WIDTH_PX = 360;
 const USER_IMAGE_MAX_HEIGHT_PX = 260;
@@ -64,10 +73,34 @@ const AttachmentAudio = memo(function AttachmentAudio({
   );
 });
 
+/**
+ * A thread image's preview address on its node (`?preview=`): a smaller copy
+ * the node makes once, sharp at a thread's image size on a 2x screen. Its own
+ * and in-memory URLs (a message still sending) stay as they are; an older node
+ * ignores the parameter and sends the original.
+ */
+function previewSource(url: string): string {
+  return /^(?:blob|data):/.test(url) || !url.includes("/attachments/")
+    ? url
+    : `${url}${url.includes("?") ? "&" : "?"}preview=1024`;
+}
+
+/** The click-to-read card of an attachment the thread holds no URL for. */
+export type AttachmentLoadButton = (state: {
+  loading: boolean | undefined;
+  failed: boolean | undefined;
+  load: () => void;
+}) => ReactNode;
+
+/** Every image read over a connection: its preview, the original once opened, kept for the session. */
+const HostedImageAttachment = preloadableLazy(() =>
+  import("./HostedImageAttachment").then((module) => module.default),
+);
+
 const LoadableAttachment = memo(function LoadableAttachment(
   props: AttachmentContext & {
     attachment: ChatAttachment;
-    children: (attachment: ChatAttachment, loaded: boolean) => ReactNode;
+    children: AttachmentRender;
   },
 ) {
   const attachment = props.attachment;
@@ -92,22 +125,42 @@ const LoadableAttachment = memo(function LoadableAttachment(
       Boolean(source),
     );
   }
-  return (
+  const button: AttachmentLoadButton = (state) => (
     <button
       type="button"
-      disabled={loading}
-      onClick={() => void load()}
+      disabled={state.loading}
+      onClick={state.load}
       className="flex min-h-[72px] w-full flex-col items-start justify-center gap-1 px-3 py-3 text-left text-xs"
     >
       <span className="font-medium">{attachment.name}</span>
-      <span className="text-muted-foreground" role={failed ? "status" : undefined}>
-        {loading
+      <span className="text-muted-foreground" role={state.failed ? "status" : undefined}>
+        {state.loading
           ? "Loading…"
-          : failed
+          : state.failed
             ? "Could not load file. Click to retry."
             : `Open file · ${formatAttachmentBytes(attachment.sizeBytes)}`}
       </span>
     </button>
+  );
+  return isChatImageAttachment(attachment) ? (
+    <Suspense fallback={button({ loading, failed, load: () => undefined })}>
+      <HostedImageAttachment
+        reference={{
+          environmentId: props.environmentId,
+          threadId: props.threadId,
+          messageId: props.messageId,
+          attachmentId: attachment.id,
+          sizeBytes: attachment.sizeBytes,
+          mimeType: attachment.mimeType,
+        }}
+        attachment={attachment}
+        button={button}
+      >
+        {props.children}
+      </HostedImageAttachment>
+    </Suspense>
+  ) : (
+    button({ loading, failed, load: () => void load() })
   );
 });
 
@@ -198,25 +251,32 @@ function AttachmentCards(
           className="max-w-full overflow-hidden rounded-lg border border-border/80 bg-background/70"
         >
           <LoadableAttachment {...props} attachment={attachment}>
-            {(attachment, loaded) =>
+            {(attachment, loaded, loadOriginal) =>
               isChatImageAttachment(attachment) && attachment.previewUrl ? (
                 <div>
                   <button
                     type="button"
                     className="block w-full cursor-zoom-in"
                     aria-label={`Preview ${attachment.name}`}
-                    onClick={() => {
+                    onClick={async () => {
+                      // Opened, an image shows its original.
+                      const previewUrl = loadOriginal
+                        ? await loadOriginal()
+                        : attachment.previewUrl;
+                      if (!previewUrl) return;
                       const preview = buildExpandedImagePreview(
                         props.attachments
                           .filter(isChatImageAttachment)
-                          .map((image) => (image.id === attachment.id ? attachment : image)),
+                          .map((image) =>
+                            image.id === attachment.id ? { ...attachment, previewUrl } : image,
+                          ),
                         attachment.id,
                       );
                       if (preview) props.onImageExpand(preview);
                     }}
                   >
                     <img
-                      src={attachment.previewUrl}
+                      src={previewSource(attachment.previewUrl)}
                       alt={attachment.name}
                       {...(attachment.width !== undefined && attachment.height !== undefined
                         ? { width: attachment.width, height: attachment.height }
@@ -241,6 +301,19 @@ function AttachmentCards(
                       download={attachment.name}
                       aria-label={`Download ${attachment.name}`}
                       className="block truncate border-t border-border/60 px-3 py-2 text-xs text-muted-foreground"
+                      // What shows is a preview: the download is the original.
+                      onClick={
+                        loadOriginal &&
+                        (async (event) => {
+                          event.preventDefault();
+                          const href = await loadOriginal();
+                          if (href)
+                            Object.assign(document.createElement("a"), {
+                              href,
+                              download: attachment.name,
+                            }).click();
+                        })
+                      }
                     >
                       {attachment.name}
                     </a>

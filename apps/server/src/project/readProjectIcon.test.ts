@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import { Effect, Option } from "effect";
 import { PROJECT_ICON_MAX_BYTES, ProjectId, WS_METHODS } from "@ryco/contracts";
-import { readProjectIcon } from "./readProjectIcon.ts";
+import { projectIconContentHash, readProjectIcon } from "./readProjectIcon.ts";
 import { ProjectFaviconUnavailable } from "./Services/ProjectFaviconResolver.ts";
 import { makeProjectHandlers } from "../ws/projectRpc.ts";
 import type { WsRpcContext } from "../ws/context.ts";
@@ -18,8 +18,27 @@ describe("project artwork over RPC", () => {
     const readIcon = vi.fn(() => Effect.succeed({ path: "/workspace/project/favicon.svg", bytes }));
     expect(
       await Effect.runPromise(readProjectIcon(project, { favicon: { readIcon }, avatar: null })),
-    ).toEqual({ mimeType: "image/svg+xml", dataBase64: bytes.toString("base64") });
+    ).toEqual({
+      mimeType: "image/svg+xml",
+      dataBase64: bytes.toString("base64"),
+      hash: projectIconContentHash(bytes),
+    });
     expect(readIcon).toHaveBeenCalledWith(project.workspaceRoot);
+    // A client holding that artwork hears it is unchanged, without the bytes.
+    expect(
+      await Effect.runPromise(
+        readProjectIcon(
+          project,
+          { favicon: { readIcon }, avatar: null },
+          projectIconContentHash(bytes),
+        ),
+      ),
+    ).toEqual({ unchanged: true });
+    expect(
+      await Effect.runPromise(
+        readProjectIcon(project, { favicon: { readIcon }, avatar: null }, "stale"),
+      ),
+    ).toMatchObject({ mimeType: "image/svg+xml" });
   });
   it("prefers custom avatars and falls back when they are missing", async () => {
     const readIcon = vi.fn(() => Effect.succeed({ path: "favicon.svg", bytes }));
