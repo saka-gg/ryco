@@ -12,6 +12,12 @@ import {
 import { readRpcClient } from "../../../connection/environmentApi";
 import { mobileCliProxyHubReads } from "../../../state/cliProxyHubReads";
 import type { InboxEnvironment } from "../../inbox/inboxModel";
+import {
+  loadSavedNodeStatistics,
+  saveNodeStatistics,
+  savedStatisticsOf,
+  savedStatisticsScope,
+} from "./savedStatistics";
 import { statisticsUnavailableReason } from "./statisticsAccess";
 import type { StatisticsTab } from "./statisticsRoute";
 
@@ -151,10 +157,18 @@ function nodeRequestKey(scope: string, revision: number): string {
   return `${scope}:${revision}`;
 }
 
+/** A device's answer saved on this phone, tagged with what it answered (`savedStatisticsScope`). */
+export interface SavedNodeAnswer {
+  readonly scope: string;
+  readonly node: NodeStatistics;
+}
+
 /**
  * What the screen shows for the selected devices: every device that answered
  * this request (or an earlier refresh of it, while it reloads), and for usage
- * the last usable summary of the devices that have not answered yet.
+ * the last usable summary of the devices that have not answered yet. A device
+ * with nothing in memory shows its answer saved on this phone while it is
+ * asked again; one that answers with an error keeps showing it, with the error.
  */
 export function deriveStatisticsView(
   selected: readonly InboxEnvironment[],
@@ -162,6 +176,7 @@ export function deriveStatisticsView(
   tab: StatisticsTab,
   range: StatRange,
   revision: number,
+  saved: ReadonlyMap<EnvironmentId, SavedNodeAnswer> = new Map(),
 ) {
   const nodes: NodeStatistics[] = [];
   const usageResults: UsageEnvironmentResult[] = [];
@@ -171,7 +186,16 @@ export function deriveStatisticsView(
     const scope = nodeScope(environment, tab, range);
     const answer = answers.get(environment.environmentId);
     // An earlier refresh of the same request stays on screen while it reloads.
-    const visible = answer?.scope === scope ? answer.node : undefined;
+    const live = answer?.scope === scope ? answer.node : undefined;
+    const savedAnswer = saved.get(environment.environmentId);
+    const savedNode =
+      savedAnswer?.scope === savedStatisticsScope(tab, range) ? savedAnswer.node : undefined;
+    const visible =
+      live === undefined
+        ? savedNode
+        : savedNode !== undefined && live.error !== undefined && savedStatisticsOf(live) === null
+          ? { ...savedNode, error: live.error }
+          : live;
     const answered = answer?.requestKey === nodeRequestKey(scope, revision);
     if (!answered) pending++;
     if (!answered && visible !== undefined) refreshing = true;
@@ -229,7 +253,16 @@ export function useStatisticsData(
           answeredRequests.current.get(environment.environmentId) !==
           nodeRequestKey(nodeScope(environment, tab, range), revision),
       ),
-      (environment, signal) => loadNodeStatistics(environment, tab, range, { signal, fresh }),
+      (environment, signal) =>
+        // Saved under the view and range this load was for, which an answer
+        // that lands after a switch no longer matches.
+        loadNodeStatistics(environment, tab, range, { signal, fresh }).then((node) => {
+          const kept = savedStatisticsOf(node);
+          if (kept !== null) {
+            saveNodeStatistics(environment.environmentId, savedStatisticsScope(tab, range), kept);
+          }
+          return node;
+        }),
       (environment, node) => {
         const answer = nodeAnswer(environment, tab, range, revision, node);
         answeredRequests.current.set(environment.environmentId, answer.requestKey);
@@ -238,9 +271,25 @@ export function useStatisticsData(
     );
   }, [range, request.fresh, revision, selected, tab]);
 
+  // Each device's answer saved on this phone, looked up once per device and view.
+  const [saved, setSaved] = useState<ReadonlyMap<EnvironmentId, SavedNodeAnswer>>(() => new Map());
+  useEffect(() => {
+    const scope = savedStatisticsScope(tab, range);
+    let cancelled = false;
+    for (const environment of selected) {
+      void loadSavedNodeStatistics(environment, scope).then((node) => {
+        if (cancelled || node === null) return;
+        setSaved((previous) => new Map(previous).set(environment.environmentId, { scope, node }));
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [range, selected, tab]);
+
   const view = useMemo(
-    () => deriveStatisticsView(selected, answers, tab, range, revision),
-    [answers, range, revision, selected, tab],
+    () => deriveStatisticsView(selected, answers, tab, range, revision, saved),
+    [answers, range, revision, saved, selected, tab],
   );
   return {
     nodes: view.nodes,

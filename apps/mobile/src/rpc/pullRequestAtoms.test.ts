@@ -25,9 +25,9 @@ import {
   PullRequestNodeOfflineError,
   refreshPullRequestReads,
   resetPullRequestAtomsForTests,
-  setPullRequestReadStore,
-  type PullRequestReadStore,
 } from "./pullRequestAtoms";
+import { resetSavedQueryStoreForTests, setSavedQueryStore } from "./savedQueries";
+import { createMemorySavedQueryStore } from "./savedQueries.testSupport";
 
 const ENV = "env-a" as EnvironmentId;
 const OTHER_ENV = "env-b" as EnvironmentId;
@@ -67,7 +67,7 @@ const PATCH = [
 
 beforeEach(() => {
   resetPullRequestAtomsForTests();
-  setPullRequestReadStore(null);
+  resetSavedQueryStoreForTests();
   mocks.clients.clear();
 });
 
@@ -152,14 +152,9 @@ describe("pull request reads", () => {
     release();
   });
 
-  it("keeps each live read and answers from it while the node is offline", async () => {
-    const saved = new Map<string, unknown>();
-    const store: PullRequestReadStore = {
-      save: (kind, environmentId, key, data) => saved.set(`${kind}|${environmentId}|${key}`, data),
-      load: async (kind, environmentId, key) =>
-        saved.get(`${kind}|${environmentId}|${key}`) ?? null,
-    };
-    setPullRequestReadStore(store);
+  it("keeps each live read and shows it first the next time, while the node reads again", async () => {
+    const store = createMemorySavedQueryStore();
+    setSavedQueryStore(store);
     const input = {
       environmentId: ENV,
       cwd: CWD,
@@ -170,35 +165,51 @@ describe("pull request reads", () => {
     const live = pullRequestListQuery.watch(input);
     await flush();
     live();
-    expect(saved.size).toBe(1);
+    await store.flush();
+    expect(store.rows.size).toBe(1);
 
-    // The node goes away; a fresh cache reads again and gets the kept copy.
+    // The node goes away; a fresh cache shows the kept copy with the offline error.
     resetPullRequestAtomsForTests();
     mocks.clients.clear();
     const offline = pullRequestListQuery.watch(input);
     await flush();
-    const state = pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input));
+    let state = pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input));
     expect(state.data).toEqual([row(1)]);
-    expect(state.error).toBeNull();
+    expect(state.savedAt).toBe(1);
+    expect(state.error).toBeInstanceOf(PullRequestNodeOfflineError);
     offline();
 
-    // An error the node answered with is shown, not covered by the kept copy.
+    // Back online: the kept copy shows at once, and the live answer replaces it.
     resetPullRequestAtomsForTests();
-    const refused = Object.assign(new Error("Bad credentials"), {
-      _tag: "SourceControlProviderError",
+    let answer: (rows: ChangeRequest[]) => void = () => {};
+    setSourceControl(ENV, {
+      listChangeRequests: vi.fn(
+        () =>
+          new Promise<ChangeRequest[]>((resolve) => {
+            answer = resolve;
+          }),
+      ),
     });
-    setSourceControl(ENV, { listChangeRequests: vi.fn(async () => Promise.reject(refused)) });
-    const answered = pullRequestListQuery.watch(input);
+    const online = pullRequestListQuery.watch(input);
     await flush();
+    state = pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input));
+    expect(state).toMatchObject({ data: [row(1)], isLoading: false, isFetching: true });
+    answer([row(2)]);
     await flush();
-    expect(pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input)).error).toBe(refused);
-    answered();
-    mocks.clients.clear();
+    state = pullRequestListQuery.getSnapshot(pullRequestListQuery.keyOf(input));
+    expect(state).toMatchObject({ data: [row(2)], savedAt: null, isFetching: false });
+    online();
+    await store.flush();
+    expect([...store.rows.values()][0]?.payload).toContain('"number":2');
 
     // Nothing kept for a pull request: the offline error stays.
+    mocks.clients.clear();
     const detail = { environmentId: ENV, cwd: CWD, number: 9 };
     const releaseDetail = pullRequestDetailQuery.watch(detail);
     await flush();
+    expect(pullRequestDetailQuery.getSnapshot(pullRequestDetailQuery.keyOf(detail))).toMatchObject({
+      data: null,
+    });
     expect(
       pullRequestDetailQuery.getSnapshot(pullRequestDetailQuery.keyOf(detail)).error,
     ).toBeInstanceOf(PullRequestNodeOfflineError);

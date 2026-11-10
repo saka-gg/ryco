@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { clearProjectIconCache, projectIconCacheBytes } from "@ryco/client-runtime/connection";
+import { cachedPayloadBytes } from "./cacheSize";
 import { clearProjectFileCache, projectFilesCacheStats } from "../rpc/projectFilesAtoms";
 import {
   checkpointDiffCacheBytes,
@@ -7,11 +8,12 @@ import {
 } from "../rpc/checkpointDiffAtoms";
 import { clearProjectExplorerCache, projectExplorerCacheBytes } from "../rpc/projectExplorerAtoms";
 import { clearPullRequestCache, pullRequestCacheBytes } from "../rpc/pullRequestAtoms";
+import { clearScreenCaches, screenCachesBytes } from "../rpc/mobileQueryCache";
 import { readTaskCacheBytes } from "../features/tasks/taskCacheKeys";
 import {
   clearEnvironmentSnapshotCache,
   listEnvironmentCacheStorage,
-  savedPullRequestBytes,
+  savedScreenAnswerBytes,
 } from "./environmentSnapshotPersistence";
 
 export interface DeviceCacheUsage {
@@ -32,11 +34,11 @@ export async function readDeviceCacheUsage(
   for (const snapshot of snapshots)
     if (!byId.has(snapshot.environmentId as EnvironmentId))
       byId.set(snapshot.environmentId as EnvironmentId, "Cached device");
-  const savedPullRequests = new Map(
+  const savedAnswers = new Map(
     await Promise.all(
       [...byId.keys()].map(
         async (environmentId) =>
-          [environmentId, await savedPullRequestBytes(environmentId)] as const,
+          [environmentId, await savedScreenAnswerBytes(environmentId)] as const,
       ),
     ),
   );
@@ -56,12 +58,13 @@ export async function readDeviceCacheUsage(
         previews.files +
         checkpointDiffCacheBytes(environmentId) +
         pullRequestCacheBytes(environmentId) +
+        screenCachesBytes(environmentId, cachedPayloadBytes) +
         projectExplorerCacheBytes(environmentId);
-      // Saved pull requests and the machine's task list copy live beside the
+      // Saved screen answers and the machine's task list copy live beside the
       // snapshot and are cleared with it.
       const snapshotBytes =
         (snapshot?.payloadBytes ?? 0) +
-        (savedPullRequests.get(environmentId) ?? 0) +
+        (savedAnswers.get(environmentId) ?? 0) +
         (taskBytes.get(environmentId) ?? 0);
       return {
         environmentId,
@@ -82,6 +85,7 @@ export async function clearDeviceCache(environmentId: EnvironmentId): Promise<vo
   clearProjectFileCache(environmentId);
   clearCheckpointDiffCacheForEnvironment(environmentId);
   clearPullRequestCache(environmentId);
+  clearScreenCaches(environmentId);
   clearProjectExplorerCache(environmentId);
   clearProjectIconCache(environmentId);
 }

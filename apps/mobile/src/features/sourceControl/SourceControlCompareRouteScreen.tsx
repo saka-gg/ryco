@@ -15,7 +15,8 @@ import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SegmentedControl } from "../../components/SegmentedControl";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
-import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
+import { vcsRefsQuery } from "../../rpc/sourceControlAtoms";
+import { useMobileQuery } from "../../rpc/useMobileQuery";
 import { mobileKV } from "../../platform/kv";
 import {
   formatPullRequestDiffStat,
@@ -57,6 +58,8 @@ function nextComparisonSelection(
   const workingTree = next.workingTree ?? (current ? comparesWorkingTree(current) : false);
   return { ref, mode, ...(workingTree ? { target: "workingTree" as const } : {}) };
 }
+
+const NO_REFS: ReadonlyArray<VcsRef> = [];
 
 function useComparison(environmentId: EnvironmentId | null, cwd: string | null) {
   const controller = useMemo(() => {
@@ -149,9 +152,7 @@ export function SourceControlCompareRouteScreen(props: CompareRouteProps) {
   const target = useSourceControlTarget(props.route.params);
   const { environmentId, cwd } = target;
   const { controller, state, hydrated } = useComparison(environmentId, cwd);
-  const api = useEnvironmentApi(environmentId);
   const [refText, setRefText] = useState("");
-  const [refs, setRefs] = useState<ReadonlyArray<VcsRef>>([]);
   const [blame, setBlame] = useState<{
     readonly path: string;
     readonly row: PullRequestDiffRow;
@@ -160,19 +161,8 @@ export function SourceControlCompareRouteScreen(props: CompareRouteProps) {
   const selection = state ? state.selection : null;
   const data = state ? state.data : null;
 
-  useEffect(() => {
-    if (!api || !cwd) return;
-    let cancelled = false;
-    void api.vcs.listRefs({ cwd, limit: 100 }).then(
-      (result) => {
-        if (!cancelled) setRefs(result.refs);
-      },
-      () => {},
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [api, cwd]);
+  const refsRead = useMobileQuery(vcsRefsQuery, { environmentId, cwd }, environmentId);
+  const refs = refsRead.data?.refs ?? NO_REFS;
 
   // Start from the default branch, but only once the saved choice had its chance.
   useEffect(() => {

@@ -6,6 +6,12 @@ import type {
   ServerConfigStreamEvent,
 } from "@ryco/contracts";
 import type { ServerSettingsPatch, SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
+import {
+  PROVIDER_SECRET_CONFIG_KEYS,
+  PROVIDER_URL_CONFIG_KEYS,
+  redactSettingSecret,
+  redactUrlCredentials,
+} from "@ryco/shared/settingsSecrets";
 import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
 
 import {
@@ -278,6 +284,7 @@ export function writeEnvironmentServerConfig(
   type: ServerConfigStreamEvent["type"] = "snapshot",
 ): void {
   if (configs.get(environmentId) === config) return;
+  savedConfigs.delete(config);
   updateSources.set(config, toServerConfigUpdateSource(type));
   const next = new Map(configs);
   next.set(environmentId, config);
@@ -289,6 +296,137 @@ export function writeEnvironmentServerConfig(
     recordReportedThreadCapabilities(environmentId, capabilities, configAutoSettleRule(config));
   emit();
   if (capabilitiesChanged) emitThreadCapabilities();
+}
+
+// ---------------------------------------------------------------------------
+// Saved configs: a config kept on the device from an earlier session, shown
+// until the node's own arrives (the model and provider pickers, settings and
+// capabilities render at cold start instead of waiting for the node). A saved
+// config never states thread capabilities (only a live answer does) and any
+// live write replaces it.
+// ---------------------------------------------------------------------------
+
+const savedConfigs = new WeakSet<ServerConfig>();
+
+/**
+ * Shows a config saved on the device for an environment with no config yet.
+ * Returns whether it was shown (a live config always wins).
+ */
+export function writeSavedEnvironmentServerConfig(
+  environmentId: EnvironmentId,
+  config: ServerConfig,
+): boolean {
+  if (configs.has(environmentId)) return false;
+  savedConfigs.add(config);
+  updateSources.set(config, "snapshot");
+  const next = new Map(configs);
+  next.set(environmentId, config);
+  configs = next;
+  emit();
+  return true;
+}
+
+/** Whether the environment's current config is a saved one, not yet replaced by the node's. */
+export function isEnvironmentServerConfigSaved(environmentId: EnvironmentId): boolean {
+  const config = configs.get(environmentId);
+  return config !== undefined && savedConfigs.has(config);
+}
+
+function redactConfigRecord<T>(config: T): T {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) return config;
+  const record = config as Record<string, unknown>;
+  let redacted: Record<string, unknown> | undefined;
+  const put = (key: string, value: string) => {
+    if (record[key] === value) return;
+    redacted ??= { ...record };
+    redacted[key] = value;
+  };
+  for (const key of PROVIDER_SECRET_CONFIG_KEYS) {
+    const value = record[key];
+    if (typeof value === "string") put(key, redactSettingSecret(value));
+  }
+  for (const key of PROVIDER_URL_CONFIG_KEYS) {
+    const value = record[key];
+    if (typeof value === "string") put(key, redactUrlCredentials(value));
+  }
+  return (redacted ?? record) as T;
+}
+
+/**
+ * The config as it may be kept on a device. Nodes already send every client a
+ * redacted copy (no secret leaves the node); this applies the same rules once
+ * more, so a node from before that redaction can never leave a secret in a
+ * device cache: sensitive provider variables, provider passwords, credentials
+ * in URLs, and CLIProxyAPI hub keys are blanked.
+ */
+export function serverConfigForDevice(config: ServerConfig): ServerConfig {
+  const settings = config.settings;
+  const providerInstances = Object.fromEntries(
+    Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
+      instanceId,
+      {
+        ...instance,
+        ...(instance.environment
+          ? {
+              environment: instance.environment.map((variable) =>
+                variable.sensitive
+                  ? {
+                      ...variable,
+                      value: "",
+                      ...(variable.value.length > 0 || variable.valueRedacted
+                        ? { valueRedacted: true }
+                        : {}),
+                    }
+                  : variable,
+              ),
+            }
+          : {}),
+        ...(instance.config !== undefined ? { config: redactConfigRecord(instance.config) } : {}),
+      },
+    ]),
+  ) as typeof settings.providerInstances;
+  const providers = Object.fromEntries(
+    Object.entries(settings.providers).map(([driver, providerConfig]) => [
+      driver,
+      redactConfigRecord(providerConfig),
+    ]),
+  ) as typeof settings.providers;
+  const cliProxyHubs = Object.fromEntries(
+    Object.entries(settings.cliProxyHubs).map(([hubId, hub]) => [
+      hubId,
+      {
+        ...hub,
+        url: redactUrlCredentials(hub.url),
+        managementKey: "",
+        ...(hub.managementKey.length > 0 || hub.managementKeyRedacted
+          ? { managementKeyRedacted: true }
+          : {}),
+        ...(hub.cloudflareAccessClientSecret !== undefined
+          ? {
+              cloudflareAccessClientSecret: "",
+              ...(hub.cloudflareAccessClientSecret.length > 0 ||
+              hub.cloudflareAccessClientSecretRedacted
+                ? { cloudflareAccessClientSecretRedacted: true }
+                : {}),
+            }
+          : {}),
+      },
+    ]),
+  ) as typeof settings.cliProxyHubs;
+  return {
+    ...config,
+    settings: {
+      ...settings,
+      providers,
+      providerInstances,
+      cliProxyHubs,
+      observability: {
+        ...settings.observability,
+        otlpTracesUrl: redactUrlCredentials(settings.observability.otlpTracesUrl),
+        otlpMetricsUrl: redactUrlCredentials(settings.observability.otlpMetricsUrl),
+      },
+    },
+  };
 }
 
 export function patchEnvironmentServerSettings(

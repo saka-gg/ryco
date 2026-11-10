@@ -74,6 +74,32 @@ export function useMobileQuery<TInput, TData>(
     isLoading: state.isLoading,
     isFetching: state.isFetching,
     error: state.error,
+    savedAt: state.savedAt,
     refetch,
   };
+}
+
+/**
+ * A screen's own live answer, mirrored on the device (`defineSavedMirror`):
+ * every non-null `live` value is written as the node's answer, and until the
+ * first one arrives the saved copy is returned (null when there is none).
+ * The screen keeps its own reads and write rules; actions must still wait for
+ * live data.
+ */
+export function useSavedMirror<TInput, TData>(
+  mirror: MobileQuery<TInput, TData>,
+  input: TInput,
+  live: TData | null,
+): { readonly data: TData | null; readonly savedAt: number | null } {
+  const cacheKey = mirror.keyOf(input);
+  const inputRef = useRef(input);
+  inputRef.current = input;
+  useEffect(() => mirror.watch(inputRef.current), [mirror, cacheKey]);
+  useEffect(() => {
+    if (live === null) return;
+    mirror.writeData(cacheKey, () => live, { live: true });
+  }, [mirror, cacheKey, live]);
+  const state = useAtomValue(mirror.getAtom(cacheKey));
+  if (live !== null) return { data: live, savedAt: null };
+  return { data: state.data, savedAt: state.savedAt };
 }

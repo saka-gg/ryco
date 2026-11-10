@@ -9,10 +9,13 @@ import { Pressable, RefreshControl, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
+import { LoadingStrip } from "../../components/LoadingStrip";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SegmentedControl } from "../../components/SegmentedControl";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { uuidv4 } from "../../lib/uuid";
+import { localChangesMirror } from "../../rpc/sourceControlAtoms";
+import { useSavedMirror } from "../../rpc/useMobileQuery";
 import { formatPullRequestDiffStat } from "../pullRequests/pullRequestDiffModel";
 import {
   buildChangeFiles,
@@ -174,10 +177,17 @@ export function SourceControlChangesRouteScreen(props: ChangesRouteProps) {
   const { controller, state } = useLocalChangesController(environmentId, cwd);
   const [scope, setScope] = useState<GitLocalChangesScope>("unstaged");
   const [message, setMessage] = useState("");
-  const data = state ? state.data : null;
+  const liveData = state ? state.data : null;
+  // The last review kept on this device shows while the controller reads; every
+  // write still waits for (and is bound to) the controller's own live read.
+  const saved = useSavedMirror(localChangesMirror, { environmentId, cwd }, liveData);
+  // Beside a read error too (offline): the banner says why, and nothing can be staged.
+  const data = liveData ?? saved.data;
   const files = useMemo(() => buildChangeFiles(data, scope), [data, scope]);
   const counts = useMemo(() => changeCounts(data), [data]);
-  const busy = state ? state.isApplying || state.isCommitting || state.isLoading : true;
+  const busy = state
+    ? state.isApplying || state.isCommitting || state.isLoading || liveData === null
+    : true;
   const stagedOnly = target.capabilities?.stagedOnlyCommit === true;
 
   if (!environmentId || !cwd || !controller) {
@@ -199,79 +209,82 @@ export function SourceControlChangesRouteScreen(props: ChangesRouteProps) {
       });
 
   return (
-    <ScrollView
-      contentInsetAdjustmentBehavior="automatic"
-      keyboardShouldPersistTaps="handled"
-      refreshControl={
-        <RefreshControl refreshing={false} onRefresh={() => void controller.refresh()} />
-      }
-      className="flex-1 bg-screen"
-      contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 64 }}
-    >
-      <SegmentedControl
-        value={scope}
-        onChange={setScope}
-        options={[
-          { value: "unstaged", label: "Unstaged", count: counts.unstaged },
-          { value: "staged", label: "Staged", count: counts.staged },
-        ]}
-      />
-      {state?.error ? <ErrorBanner message={state.error} /> : null}
-      {!mutable ? (
-        <ErrorBanner message={`${target.environmentLabel} is not ready for Git changes.`} />
-      ) : null}
-
-      {scope === "staged" && stagedOnly && counts.staged > 0 ? (
-        <View className="gap-2 rounded-[18px] bg-card p-3">
-          <ToolTextField
-            multiline
-            autoCapitalize="sentences"
-            autoCorrect
-            value={message}
-            onChangeText={setMessage}
-            editable={!state?.isCommitting}
-            placeholder="Commit message (blank: generate)"
-            accessibilityLabel="Commit message"
-            className="min-h-[72px] bg-screen"
-            style={{ textAlignVertical: "top" }}
-          />
-          {state?.commitError ? <ErrorBanner message={state.commitError} /> : null}
-          <PillButton
-            label="Commit staged"
-            symbol="checkmark"
-            busy={state?.isCommitting === true}
-            disabled={!mutable || busy || !data?.stagedRevision}
-            onPress={commit}
-          />
-          <Text className="px-1 text-[11px] leading-4 text-foreground-muted">
-            Records exactly these staged changes; unstaged edits stay in your working files.
-          </Text>
-        </View>
-      ) : null}
-
-      {!data && state?.isLoading !== false ? <LoadingRow label="Reading changes…" /> : null}
-      {data && files.length === 0 ? (
-        <EmptyState
-          variant="plain"
-          title={scope === "staged" ? "Nothing staged" : "No unstaged changes"}
-          detail={
-            scope === "staged"
-              ? "Stage files or hunks from Unstaged to commit only those."
-              : "Every change in this checkout is staged."
-          }
+    <View className="flex-1 bg-screen">
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl refreshing={false} onRefresh={() => void controller.refresh()} />
+        }
+        className="flex-1 bg-screen"
+        contentContainerStyle={{ padding: 16, gap: 12, paddingBottom: 64 }}
+      >
+        <SegmentedControl
+          value={scope}
+          onChange={setScope}
+          options={[
+            { value: "unstaged", label: "Unstaged", count: counts.unstaged },
+            { value: "staged", label: "Staged", count: counts.staged },
+          ]}
         />
-      ) : null}
-      {files.map((change, index) => (
-        <ChangeFileCard
-          // Files are keyed by position: a path can appear twice in a rename pair.
-          key={`${scope}:${index}:${change.file.path}`}
-          change={change}
-          startsCollapsed={changeFileStartsCollapsed(index, change.file)}
-          scope={scope}
-          busy={busy || !mutable}
-          onApply={apply}
-        />
-      ))}
-    </ScrollView>
+        {state?.error ? <ErrorBanner message={state.error} /> : null}
+        {!mutable ? (
+          <ErrorBanner message={`${target.environmentLabel} is not ready for Git changes.`} />
+        ) : null}
+
+        {scope === "staged" && stagedOnly && counts.staged > 0 ? (
+          <View className="gap-2 rounded-[18px] bg-card p-3">
+            <ToolTextField
+              multiline
+              autoCapitalize="sentences"
+              autoCorrect
+              value={message}
+              onChangeText={setMessage}
+              editable={!state?.isCommitting}
+              placeholder="Commit message (blank: generate)"
+              accessibilityLabel="Commit message"
+              className="min-h-[72px] bg-screen"
+              style={{ textAlignVertical: "top" }}
+            />
+            {state?.commitError ? <ErrorBanner message={state.commitError} /> : null}
+            <PillButton
+              label="Commit staged"
+              symbol="checkmark"
+              busy={state?.isCommitting === true}
+              disabled={!mutable || busy || !data?.stagedRevision}
+              onPress={commit}
+            />
+            <Text className="px-1 text-[11px] leading-4 text-foreground-muted">
+              Records exactly these staged changes; unstaged edits stay in your working files.
+            </Text>
+          </View>
+        ) : null}
+
+        {!data && state?.isLoading !== false ? <LoadingRow label="Reading changes…" /> : null}
+        {data && files.length === 0 ? (
+          <EmptyState
+            variant="plain"
+            title={scope === "staged" ? "Nothing staged" : "No unstaged changes"}
+            detail={
+              scope === "staged"
+                ? "Stage files or hunks from Unstaged to commit only those."
+                : "Every change in this checkout is staged."
+            }
+          />
+        ) : null}
+        {files.map((change, index) => (
+          <ChangeFileCard
+            // Files are keyed by position: a path can appear twice in a rename pair.
+            key={`${scope}:${index}:${change.file.path}`}
+            change={change}
+            startsCollapsed={changeFileStartsCollapsed(index, change.file)}
+            scope={scope}
+            busy={busy || !mutable}
+            onApply={apply}
+          />
+        ))}
+      </ScrollView>
+      {state?.isLoading && data !== null ? <LoadingStrip /> : null}
+    </View>
   );
 }

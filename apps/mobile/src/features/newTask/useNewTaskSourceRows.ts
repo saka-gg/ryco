@@ -1,7 +1,14 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
-import { useEffect, useState } from "react";
+import { PULL_REQUESTS_LIST_LIMIT } from "@ryco/client-runtime/state/pull-request-review";
+import { useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi, readRpcClient } from "../../connection/environmentApi";
+import { issueListQuery, workItemListQuery } from "../../rpc/projectExplorerAtoms";
+import { pullRequestListQuery } from "../../rpc/pullRequestAtoms";
+import { vcsRefsQuery } from "../../rpc/sourceControlAtoms";
+import { useMobileQuery } from "../../rpc/useMobileQuery";
+import { ISSUE_LIST_LIMIT } from "../projectExplorer/issuesModel";
+import { WORK_ITEM_LIST_LIMIT } from "../projectExplorer/workItemsModel";
 import {
   branchSourceRows,
   filterSourceRows,
@@ -21,43 +28,6 @@ export interface NewTaskSourceRowsState {
   readonly rows: ReadonlyArray<NewTaskSourceRow>;
   readonly loading: boolean;
   readonly error: string | null;
-}
-
-/** One kind's first page from the node (open items, or every branch). */
-async function loadSourceRows(input: {
-  readonly environmentId: EnvironmentId;
-  readonly projectId: ProjectId;
-  readonly cwd: string;
-  readonly kind: NewTaskSourceKind;
-}): Promise<NewTaskSourceRow[]> {
-  const { environmentId, cwd } = input;
-  if (input.kind === "branch") {
-    const api = readEnvironmentApi(environmentId);
-    if (!api) throw new Error("The machine is not connected.");
-    const result = await api.vcs.listRefs({ cwd, limit: LIST_LIMIT });
-    return branchSourceRows(result.refs);
-  }
-  const client = readRpcClient(environmentId);
-  if (client === null) throw new Error("The machine is not connected.");
-  switch (input.kind) {
-    case "pr":
-      return pullRequestSourceRows(
-        await client.sourceControl.listChangeRequests({ cwd, state: "open", limit: LIST_LIMIT }),
-      );
-    case "issue":
-      return issueSourceRows(
-        await client.sourceControl.listIssues({ cwd, state: "open", limit: LIST_LIMIT }),
-      );
-    case "workItem":
-      return workItemSourceRows(
-        await client.workItems.list({
-          projectId: input.projectId,
-          cwd,
-          state: "open",
-          limit: LIST_LIMIT,
-        }),
-      );
-  }
 }
 
 /** What the node finds for `query` beyond the first page. */
@@ -115,11 +85,6 @@ export function useNewTaskSourceRows(input: {
   readonly query: string;
 }): NewTaskSourceRowsState {
   const { environmentId, projectId, cwd, kind, query } = input;
-  const [page, setPage] = useState<{
-    readonly key: string;
-    readonly rows: ReadonlyArray<NewTaskSourceRow>;
-    readonly error: string | null;
-  } | null>(null);
   const [search, setSearch] = useState<{
     readonly key: string;
     readonly rows: ReadonlyArray<NewTaskSourceRow>;
@@ -127,23 +92,78 @@ export function useNewTaskSourceRows(input: {
   const pageKey =
     environmentId && projectId && cwd && kind ? `${environmentId}|${cwd}|${kind}` : null;
 
-  useEffect(() => {
-    if (pageKey === null || !environmentId || !projectId || !cwd || !kind) return;
-    let current = true;
-    void loadSourceRows({ environmentId, projectId, cwd, kind }).then(
-      (rows) => {
-        if (current) setPage({ key: pageKey, rows, error: null });
-      },
-      (cause: unknown) => {
-        if (current) setPage({ key: pageKey, rows: [], error: failureText(cause) });
-      },
-    );
-    return () => {
-      current = false;
-    };
-  }, [cwd, environmentId, kind, pageKey, projectId]);
+  // Each kind's first page is the same saved read its own screen shows (branch
+  // picker, pull requests, issues, Jira): the last one shows at once, and is
+  // read again behind it.
+  const branchPage = useMobileQuery(
+    vcsRefsQuery,
+    { environmentId, cwd, enabled: kind === "branch" },
+    environmentId,
+  );
+  const pullRequestPage = useMobileQuery(
+    pullRequestListQuery,
+    {
+      environmentId,
+      cwd,
+      state: "open",
+      limit: PULL_REQUESTS_LIST_LIMIT,
+      enabled: kind === "pr",
+    },
+    environmentId,
+  );
+  const issuePage = useMobileQuery(
+    issueListQuery,
+    { environmentId, cwd, state: "open", limit: ISSUE_LIST_LIMIT, enabled: kind === "issue" },
+    environmentId,
+  );
+  const workItemPage = useMobileQuery(
+    workItemListQuery,
+    {
+      environmentId,
+      projectId,
+      state: "open",
+      limit: WORK_ITEM_LIST_LIMIT,
+      enabled: kind === "workItem",
+    },
+    environmentId,
+  );
+  const branchRefs = branchPage.data?.refs;
+  const pullRequests = pullRequestPage.data;
+  const issues = issuePage.data;
+  const workItems = workItemPage.data;
+  const pageRows = useMemo(() => {
+    switch (kind) {
+      case "branch":
+        return branchRefs ? branchSourceRows(branchRefs) : null;
+      case "pr":
+        return pullRequests ? pullRequestSourceRows(pullRequests) : null;
+      case "issue":
+        return issues ? issueSourceRows(issues) : null;
+      case "workItem":
+        return workItems ? workItemSourceRows(workItems) : null;
+      default:
+        return null;
+    }
+  }, [branchRefs, issues, kind, pullRequests, workItems]);
+  const pageRead =
+    kind === "branch"
+      ? branchPage
+      : kind === "pr"
+        ? pullRequestPage
+        : kind === "issue"
+          ? issuePage
+          : workItemPage;
+  const pageError = pageRead.error ? failureText(pageRead.error) : null;
+  const page =
+    pageKey === null
+      ? null
+      : pageRows !== null
+        ? { rows: pageRows, error: pageError }
+        : pageError !== null
+          ? { rows: [] as ReadonlyArray<NewTaskSourceRow>, error: pageError }
+          : null;
 
-  const loadedPage = page !== null && page.key === pageKey ? page : null;
+  const loadedPage = page;
   const filtered = loadedPage ? filterSourceRows(loadedPage.rows, query) : [];
   const trimmed = query.trim();
   const searchKey =

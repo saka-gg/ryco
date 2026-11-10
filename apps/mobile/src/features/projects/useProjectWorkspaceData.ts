@@ -3,6 +3,8 @@ import type { EnvironmentId, ProjectId, WorkspaceLifecycleSummary } from "@ryco/
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
+import { projectDiskUsageMirror, projectWorkspacesMirror } from "../../rpc/projectSettingsAtoms";
+import { useSavedMirror } from "../../rpc/useMobileQuery";
 
 export type ProjectWorkspaceInspection =
   | { readonly status: "unavailable" }
@@ -133,11 +135,33 @@ export function useProjectWorkspaceData(input: {
 
   const ownInspection = inspected && inspected.requestKey.startsWith(scope) ? inspected : null;
   const ownDisk = measured && measured.requestKey.startsWith(scope) ? measured : null;
+  // The last answers kept on this device stand in, as refreshing, until the machine answers.
+  const mirrorInput = { environmentId: input.environmentId, projectId };
+  const savedWorkspaces = useSavedMirror(
+    projectWorkspacesMirror,
+    mirrorInput,
+    ownInspection?.value.status === "ready" ? ownInspection.value.summaries : null,
+  ).data;
+  const savedDisk = useSavedMirror(
+    projectDiskUsageMirror,
+    mirrorInput,
+    ownDisk?.value.status === "ready" ? ownDisk.value.workspaces : null,
+  ).data;
+  const inspection: ProjectWorkspaceInspection = lifecycle
+    ? currentInspection(ownInspection, requestKey)
+    : { status: "unavailable" };
+  const disk: DiskUsageReading = diskUsage
+    ? currentDisk(ownDisk, diskKey)
+    : { status: "unavailable" };
   return {
-    inspection: lifecycle
-      ? currentInspection(ownInspection, requestKey)
-      : { status: "unavailable" },
-    disk: diskUsage ? currentDisk(ownDisk, diskKey) : { status: "unavailable" },
+    inspection:
+      inspection.status === "loading" && savedWorkspaces !== null
+        ? { status: "ready", summaries: savedWorkspaces, refreshing: true }
+        : inspection,
+    disk:
+      disk.status === "loading" && savedDisk !== null
+        ? { status: "ready", workspaces: savedDisk, refreshing: true }
+        : disk,
     refresh,
     remeasure,
   };

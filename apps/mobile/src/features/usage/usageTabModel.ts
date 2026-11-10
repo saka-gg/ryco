@@ -71,7 +71,11 @@ export function scopeUsageEnvironments(
 ): UsageScope {
   const named = environments.filter((environment) => environment.environmentId === device);
   const applied = named.length > 0 ? device : ALL_DEVICES;
-  const selected = named.length > 0 ? named : environments.filter(isReadable);
+  const readable = environments.filter(isReadable);
+  // With none readable (a cold start before any device connects, or every one
+  // offline) every device is asked: each shows its answer saved on this phone
+  // beside why it cannot answer now, instead of an empty screen.
+  const selected = named.length > 0 ? named : readable.length > 0 ? readable : environments;
   const activityDevice = selected.find(
     (environment) => environment.connectionState === "connected",
   );

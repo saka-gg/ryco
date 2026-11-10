@@ -43,6 +43,15 @@ describe("scopeUsageEnvironments", () => {
     expect(scope.scoped).toEqual([readOnly]);
   });
 
+  it("asks every device when none is readable, so their saved answers show", () => {
+    const scope = scopeUsageEnvironments(
+      [offline, device("gone", "offline")],
+      ALL_DEVICES,
+      "usage",
+    );
+    expect(scope.scoped.map((environment) => environment.environmentId)).toEqual(["old", "gone"]);
+  });
+
   it("asks a picked device even while it is offline, so its error shows", () => {
     const scope = scopeUsageEnvironments([mac, offline], "old", "usage");
     expect(scope.scoped).toEqual([offline]);
