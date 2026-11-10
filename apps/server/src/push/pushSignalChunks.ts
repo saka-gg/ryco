@@ -29,6 +29,9 @@ const DELIVERY_OVERHEAD_BYTES = 160;
 export function deliveriesPerSignal(sealedMaxLength: number): number {
   return Math.min(
     PUSH_ATTENTION_MAX_DELIVERIES,
-    Math.max(1, Math.floor(PUSH_SIGNAL_BODY_TARGET_BYTES / (sealedMaxLength + DELIVERY_OVERHEAD_BYTES))),
+    Math.max(
+      1,
+      Math.floor(PUSH_SIGNAL_BODY_TARGET_BYTES / (sealedMaxLength + DELIVERY_OVERHEAD_BYTES)),
+    ),
   );
 }

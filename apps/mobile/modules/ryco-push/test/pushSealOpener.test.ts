@@ -78,7 +78,15 @@ const EXCERPT_CASES = [
       u: {
         rq: "question-1",
         ev: "event-1",
-        qs: [{ id: "target", h: "Target", q: "Where should it deploy?", o: ["Staging", "Prod"], m: true }],
+        qs: [
+          {
+            id: "target",
+            h: "Target",
+            q: "Where should it deploy?",
+            o: ["Staging", "Prod"],
+            m: true,
+          },
+        ],
         c: true,
       },
     },
@@ -196,12 +204,24 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         u: {
           rq: "question-1",
           ev: "event-1",
-          qs: [{ id: "target", h: "Target", q: "Where should it deploy?", o: ["Staging", "Prod"], m: true }],
+          qs: [
+            {
+              id: "target",
+              h: "Target",
+              q: "Where should it deploy?",
+              o: ["Staging", "Prod"],
+              m: true,
+            },
+          ],
           c: true,
         },
       });
       for (const name of ["mismatched", "malformed", "none"]) {
-        expect(excerpts[name], name).toMatchObject({ excerptLine: null, excerpt: null, record: null });
+        expect(excerpts[name], name).toMatchObject({
+          excerptLine: null,
+          excerpt: null,
+          record: null,
+        });
       }
 
       expect(output.kindTitles).toEqual(expectedKindTitles);

@@ -98,7 +98,10 @@ describe("alert excerpts", () => {
 
   for (const sealedMaxLength of [PUSH_SEALED_LEGACY_MAX_LENGTH, PUSH_SEALED_MAX_LENGTH]) {
     for (const [name, excerpt] of [
-      ["approval", approvalExcerpt({ requestKind: "command", detail: longCommand, reason: "x".repeat(400) })],
+      [
+        "approval",
+        approvalExcerpt({ requestKind: "command", detail: longCommand, reason: "x".repeat(400) }),
+      ],
       ["question", bigQuestion],
     ] as const) {
       it(`fits a worst-case ${name} into ${sealedMaxLength} sealed characters`, () => {
@@ -119,7 +122,11 @@ describe("alert excerpts", () => {
     const excerpt = approvalExcerpt({ requestKind: "command", detail: longCommand });
     const legacy = JSON.parse(
       new TextDecoder().decode(
-        fitAlertPlaintext({ base, excerpt, maxBytes: maxPlaintextBytes(PUSH_SEALED_LEGACY_MAX_LENGTH) }),
+        fitAlertPlaintext({
+          base,
+          excerpt,
+          maxBytes: maxPlaintextBytes(PUSH_SEALED_LEGACY_MAX_LENGTH),
+        }),
       ),
     );
     const larger = JSON.parse(

@@ -115,22 +115,22 @@ describe("alert excerpt source", () => {
           questions: [{ id: "x", header: "X", question: "Optional?", options: [] }],
         },
       });
-      expect(
-        yield* readAlertExcerpt({ threadId, kind: "input", approvalRequestId: null }),
-      ).toEqual({
-        u: {
-          rq: "question-1",
-          ev: "q1",
-          qs: [
-            {
-              id: "target",
-              h: "Target",
-              q: "Where should it deploy?",
-              o: ["Staging", "Production"],
-            },
-          ],
+      expect(yield* readAlertExcerpt({ threadId, kind: "input", approvalRequestId: null })).toEqual(
+        {
+          u: {
+            rq: "question-1",
+            ev: "q1",
+            qs: [
+              {
+                id: "target",
+                h: "Target",
+                q: "Where should it deploy?",
+                o: ["Staging", "Production"],
+              },
+            ],
+          },
         },
-      });
+      );
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
 });

@@ -36,12 +36,13 @@ pushed state, also not hashed or truncated.
 
 | Part   | Does                                                                                                    | Never                                  |
 | ------ | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| Device | Requests the card with `pushType: .token`, hands its update token to the Hub with its push registration | Starts a card from a push              |
+| Device | Requests the card with `pushType: .token`, hands its update token to the Hub with its push registration | Hands a start token unless turned on   |
 | Node   | Counts its threads per registered device and signals the Hub (below)                                    | Sends titles or thread ids to the Hub  |
 | Hub    | Keeps the token, sums the counts across the account's nodes, sends `liveactivity` update and end pushes | Stores or forwards anything but counts |
 
-There is no push-to-start: a card only ever starts while Ryco is in front, so it never appears
-unannounced, and the token always belongs to a card the person saw start.
+A card starts while Ryco is in front, or, only when the person turned it on, by push when a task
+begins while Ryco is closed (push-to-start, below). Off by default: without it a card never
+appears unannounced.
 
 ## Capability
 
@@ -74,6 +75,46 @@ The token rides on the device's own push registration, `PUT /api/native/push/reg
 - One card per device: a device has at most one Live Activity token.
 - Keep it with the device registration's lifetime: sign-out, a revoked enrollment, or an account
   that lost access to its nodes drops it, exactly like the device token.
+
+## Push-to-start (iOS 17.2+, optional)
+
+Settings → Lock Screen → **Start when a task begins**, under the Live Activity switch: off by
+default, offered only on iOS 17.2 and later, in a build with the widget extension, when the Hub's
+capability says `liveActivityStart: true` (it says so only with `liveActivities`).
+
+- **Token.** The app reads its push-to-start token (`Activity.pushToStartTokenUpdates`) and, only
+  while the setting is on, sends it as `liveActivityStartToken` with its registration. Latest wins
+  like the update token: a registration without it drops it, so turning the setting off stops all
+  starts. While it is on the device also registers with the nodes with `liveActivity: true`, so
+  they count for it even without a card.
+- **The node asks.** An activity entry carries `start: true` when a turn began (more threads run
+  than the device last heard of from this node), the Hub's last answer for the device was
+  `no-token` (no card that takes pushes shows), and no start was granted for this run of work yet.
+  A node that told a device nothing since it started never asks: a restart is not a turn
+  beginning. Once the counts reach zero, the next turn may ask again.
+- **The Hub decides.** It starts a card only when the device registered a start token, has no
+  update token, its summed counts are not all zero, and it started none for the device in the last
+  8 hours unless an update token came (and went) since: a card it started may still show, and
+  without an update token it cannot be ended, so it never starts a second one. Two nodes asking at
+  once start one card. It answers such an entry `started` (the node treats it like `accepted`);
+  older nodes never send `start`, and older Hubs ignore it.
+- **The push.** `apns-push-type: liveactivity`, priority 10 (a start is rare: at most one per
+  device per run of work, and the 8-hour rule above), expiration 10 minutes:
+
+  ```json
+  { "aps": { "timestamp": 1793234112, "event": "start",
+    "content-state": { "v": 1, "origin": "remote", "counts": { … }, "updatedAt": 1793234112000 },
+    "attributes-type": "AgentActivityAttributes", "attributes": { "v": 1 },
+    "stale-date": 1793234712, "alert": { "title": "Ryco", "body": "An agent started working" } } }
+  ```
+
+  Counts only, like every pushed state; the alert text is fixed.
+
+- **After the start.** The app follows `Activity.activityUpdates`, so when iOS lets it run (it
+  may wake it briefly for the new card, or at the next launch) the started card hands over its
+  update token like any other and from then on takes updates and its end. Until then it shows the
+  start's counts and reads "Out of date" at its stale date. At launch the app adopts it like a card
+  an earlier launch left.
 
 ## The node's half
 
@@ -193,6 +234,8 @@ Updates are perishable like alerts: no backlog; only the latest counts matter.
 | Hub with it, node without counts   | The token is registered; nothing is sent until a node signals                |
 | Node with counts, older Hub        | The activity route answers 404; the node asks again after an hour            |
 | Older app, newer Hub               | Never sends a token; nothing changes                                         |
+| Hub without `liveActivityStart`    | The start setting is not offered; nodes' `start` is ignored                  |
+| Node without `start`, newer Hub    | No card starts by push; updates work as before                               |
 | Build without push (Personal Team) | No token; the card is local                                                  |
 
 ## Testing
@@ -202,3 +245,5 @@ Live Activity, so push updates need a real iPhone on a build signed by a paid te
 entitlement, and a Hub that advertises `liveActivities`. With such a build, a card started while
 the Hub is registered logs its token registration; a `liveactivity` push sent to that token with
 the counts above must change the card while Ryco is suspended, and an `end` must remove it.
+Push-to-start needs the same: a real iPhone on iOS 17.2 or later (the simulator has no
+push-to-start token), the setting on, Ryco closed, and a turn started on a machine.

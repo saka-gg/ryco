@@ -12,13 +12,8 @@
  * from it.
  */
 import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
-import {
-  ApprovalRequestId,
-  EventId,
-  type EnvironmentId,
-  type ThreadId,
-  TurnId,
-} from "@ryco/contracts";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { ApprovalRequestId, EventId, TurnId } from "@ryco/contracts/base-schemas";
 import { PushAlertExcerpt } from "@ryco/contracts/push-hub";
 import * as Schema from "effect/Schema";
 

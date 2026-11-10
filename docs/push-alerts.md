@@ -74,7 +74,7 @@ replays old transitions.
 
 ## Sealing: `ryco-push-seal-v1`
 
-The payload is compact JSON, at most a few hundred bytes:
+The payload is compact JSON, a few hundred bytes, or up to about two kilobytes with an excerpt:
 
 ```json
 {
@@ -95,6 +95,34 @@ and `tu` the thread and turn, `q` the signal's sequence and `at` when it was sea
 carries `rq`, the request id of the newest approval waiting (the shell's `pendingApprovalRequestId`,
 at most 160 characters; left out when longer, and by older nodes). A newer approval in the same turn
 seals a new alert with its own `rq`, which replaces the older one on the lock screen.
+
+### The excerpt `x`
+
+An approval or question alert also carries what the person is asked, so the Lock Screen can show it
+and the thread opens with its card already there. Older phones ignore it; older nodes never send it.
+
+```json
+{ "x": { "a": { "k": "command", "d": "npm run deploy -- --prod", "r": "Ships the fix" } } }
+{ "x": { "u": { "rq": "…", "ev": "…", "qs": [{ "id": "target", "h": "Target",
+  "q": "Where should it deploy?", "o": ["Staging", "Production"], "m": true }], "c": true } } }
+```
+
+- `a`, an approval: the request kind, the command or path (`d`) and the provider's reason (`r`),
+  exactly the open request the thread's card shows (the node derives it with the clients'
+  `derivePendingApprovals` over the thread's request activities, one indexed read per alert).
+- `u`, a question: its request id, its request event id (`ev`, the key of the app's answer draft),
+  and its questions with header, text, option labels (descriptions left out) and multi-select.
+  `c` says questions or options were left out to fit.
+- At most 1 KB of JSON (`PUSH_ALERT_EXCERPT_MAX_BYTES`), and the whole plaintext must fit the seal
+  the Hub takes: the reason goes first, then questions and options, then text is cut, ending with
+  "…". When nothing fits, the alert goes without one. A failed read never holds the alert up.
+
+**Size.** Every Hub takes a sealed blob of 1,024 bytes (`PUSH_SEALED_LEGACY_MAX_LENGTH`, 1,366
+base64url characters). A Hub that takes 2,048 bytes says so in its answer (`sealedMaxLength`, at most
+`PUSH_SEALED_MAX_LENGTH`, 2,731 characters); the node seals to the legacy size until an answer says
+more, so an older Hub keeps working and its alerts carry a shorter excerpt. With the Hub's own
+fields the APNs payload stays near 3 KB, under its 4 KB limit, and a node splits a pass into
+signals of at most about 56 KB (19 deliveries at the larger size).
 
 To seal to the device key `R`:
 
@@ -154,10 +182,31 @@ The Hub sends an `alert` push (`apns-priority: 10`, `apns-collapse-id` from the 
 
 The extension reads `ryco`, opens `s` with the push key and the associated data from `e`, `q` and
 `n`, and checks that the payload's `e` and `q` match. It then shows the thread title, a line for the
-kind, stacks alerts per thread (`threadIdentifier` `<environment>/<thread>`), and sets the kind's
-category, so the alert offers the same actions as the app's own (below). On any failure, or
+kind, with an excerpt the command ("Run command: npm test") or the first question as the body and
+the thread title as the subtitle, stacks alerts per thread (`threadIdentifier` `<environment>/<thread>`), and sets the kind's
+category, so the alert offers the same actions as the app's own (below). iOS's own Show Previews
+setting decides whether the title, subtitle and body show on a locked phone. On any failure, or
 past its time limit, the generic text stays and a tap opens the app: the extension also drops the
 Hub's own `body` and `url`, so only an opened payload can name the thread a tap opens.
+
+### The excerpt in the app
+
+The extension leaves an opened excerpt for the app in the App Group they share, one small file per
+thread (`AlertExcerptStore`, named by a hash of the ids, readable after the first unlock): the
+thread, kind, turn, request, when it was sealed, and the excerpt with only the keys above. A newer
+alert for the thread replaces it; it counts for two hours, like the alert; the app removes it once
+the thread's live detail loaded, and all of them go with the push key.
+
+When a thread opens, by a tap on the alert or any other way, before its live detail loaded, the
+app reads that file and shows the card it describes. It is provisional and never bypasses the
+connection:
+
+- **Allow / Deny** on an approval become the same pending action as the alert's own buttons
+  (below): carried out for that request id once the thread is live, refused there when it was
+  answered meanwhile, given up after two minutes without a ready connection.
+- A **question**'s choices go into the same draft the live card reads (keyed by `ev`), so nothing
+  picked is lost; Submit works on the live card.
+- The live detail replaces the card as soon as it loads.
 
 ## The iPhone app
 
@@ -232,11 +281,12 @@ The agent Live Activity can take push updates through the same Hub registration:
 
 ## Versions
 
-| Combination                            | What happens                                                                                                                    |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Older app                              | Never registers; local alerts as before                                                                                         |
-| New app, older node                    | `push.registerDevice` is unknown; the app asks to update the machine                                                            |
-| New app, node without presence answers | Presence answers `{}`; the app registers again until delivery is confirmed; the earlier installation's key is not retired there |
-| Older app, newer node                  | The presence answer's registration and the public key are ignored                                                               |
-| New node, Hub without the signal route | Registrations are kept; nothing is sent; status `hub-unsupported`                                                               |
-| Build without the extension            | Push stays off (Personal Team builds cannot sign one)                                                                           |
+| Combination                             | What happens                                                                                                                    |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Older app                               | Never registers; local alerts as before                                                                                         |
+| New app, older node                     | `push.registerDevice` is unknown; the app asks to update the machine                                                            |
+| New app, node without presence answers  | Presence answers `{}`; the app registers again until delivery is confirmed; the earlier installation's key is not retired there |
+| Older app, newer node                   | The presence answer's registration and the public key are ignored; the excerpt is never read                                    |
+| New node, Hub without `sealedMaxLength` | Alerts are sealed to 1,024 bytes; the excerpt is cut to fit                                                                     |
+| New node, Hub without the signal route  | Registrations are kept; nothing is sent; status `hub-unsupported`                                                               |
+| Build without the extension             | Push stays off (Personal Team builds cannot sign one)                                                                           |

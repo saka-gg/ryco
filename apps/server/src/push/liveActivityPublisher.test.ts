@@ -190,9 +190,7 @@ describe("planActivityRecipients", () => {
     // Already started for this run of work.
     expect(starts({ sent: sent({ started: true }) })).toEqual([false]);
     // Nothing more runs than before (a question, a result): no start.
-    expect(
-      starts({ sent: sent({ counts }), counts: { ...counts, needsYou: 1 } }),
-    ).toEqual([false]);
+    expect(starts({ sent: sent({ counts }), counts: { ...counts, needsYou: 1 } })).toEqual([false]);
     // A node that told the device nothing since it started does not know a turn just began.
     expect(starts({})).toEqual([false]);
   });
