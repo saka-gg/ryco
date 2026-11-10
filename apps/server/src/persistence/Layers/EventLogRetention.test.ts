@@ -589,29 +589,31 @@ describe("EventLogRetention", () => {
   );
 
   retentionTest("selects candidates on the reader it is given", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* deletedThread(sql, "thread-main-only", 10);
-      yield* markProjected(sql);
-      // An empty database as the reader: it sees no candidate, so nothing is removed.
-      const emptyReader = Context.get(
-        yield* Layer.build(Layer.fresh(SqlitePersistenceMemory)),
-        SqlClient.SqlClient,
-      );
-      const pass = (reader: SqlClient.SqlClient | undefined) =>
-        runRetentionPass({
-          options: PASS.retention!,
-          mode: "delete",
-          nowMs: NOW_MS,
-          compactedThroughSequence: Number.MAX_SAFE_INTEGER,
-          overTime: () => false,
-          afterBatch: () => Effect.void,
-          readThreadUsage: readStatisticsThreadPartial,
-          ...(reader === undefined ? {} : { reader }),
-        });
-      assert.equal((yield* pass(emptyReader)).deletedEvents, 0);
-      assert.equal((yield* pass(undefined)).deletedEvents, 5);
-    }),
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* deletedThread(sql, "thread-main-only", 10);
+        yield* markProjected(sql);
+        // An empty database as the reader: it sees no candidate, so nothing is removed.
+        const emptyReader = Context.get(
+          yield* Layer.build(Layer.fresh(SqlitePersistenceMemory)),
+          SqlClient.SqlClient,
+        );
+        const pass = (reader: SqlClient.SqlClient | undefined) =>
+          runRetentionPass({
+            options: PASS.retention!,
+            mode: "delete",
+            nowMs: NOW_MS,
+            compactedThroughSequence: Number.MAX_SAFE_INTEGER,
+            overTime: () => false,
+            afterBatch: () => Effect.void,
+            readThreadUsage: readStatisticsThreadPartial,
+            ...(reader === undefined ? {} : { reader }),
+          });
+        assert.equal((yield* pass(emptyReader)).deletedEvents, 0);
+        assert.equal((yield* pass(undefined)).deletedEvents, 5);
+      }),
+    ),
   );
 
   retentionTest("pages through more threads than one selection statement reads", () =>

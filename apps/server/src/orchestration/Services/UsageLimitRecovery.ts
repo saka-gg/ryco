@@ -12,8 +12,11 @@ import { Context } from "effect";
 import type { Effect } from "effect";
 
 export interface UsageLimitRecoveryShape {
-  /** One pass over the persisted limits. Never fails; errors are logged. */
-  readonly sweep: () => Effect.Effect<void>;
+  /**
+   * One pass over the persisted limits. Never fails; errors are logged. Returns how long until
+   * another pass can change anything, or null when only a new limit or a settings change can.
+   */
+  readonly sweep: () => Effect.Effect<number | null>;
 }
 
 export class UsageLimitRecovery extends Context.Service<

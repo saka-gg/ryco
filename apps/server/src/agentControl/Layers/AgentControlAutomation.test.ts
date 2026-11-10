@@ -36,7 +36,7 @@ import {
 import { AgentControlPolicyLive } from "./AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./AgentControlProposalEvents.ts";
 import { AgentControlProposalStoreLive } from "./AgentControlProposalStore.ts";
-import { makeAgentControlAutomationLive } from "./AgentControlAutomation.ts";
+import { makeAgentControlAutomationLive, nextSchedulerSleepMs } from "./AgentControlAutomation.ts";
 
 const projectId = ProjectId.make("project-automation-lifecycle");
 const otherProjectId = ProjectId.make("project-automation-other");
@@ -683,3 +683,60 @@ it.effect("keeps the background scheduler idle while Agent Control is disabled",
     ),
   );
 });
+
+it("sleeps until the next due schedule and retries one it could not claim", () => {
+  const nowMs = Date.parse("2026-08-18T00:00:00.000Z");
+  const sleep = (input: Partial<Parameters<typeof nextSchedulerSleepMs>[0]>) =>
+    nextSchedulerSleepMs({
+      nowMs,
+      nextDueAt: null,
+      claimed: 0,
+      retry: false,
+      maxMs: 600_000,
+      ...input,
+    });
+  assert.strictEqual(sleep({}), 600_000, "nothing due: the longest sleep");
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-18T00:02:00.000Z" }), 120_000);
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-19T00:00:00.000Z" }), 600_000);
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-17T23:00:00.000Z", claimed: 25 }), 0);
+  assert.strictEqual(sleep({ nextDueAt: "2026-08-17T23:00:00.000Z" }), 30_000);
+  assert.strictEqual(sleep({ retry: true }), 30_000, "a run recovery retries");
+});
+
+it.live("wakes for a new schedule and runs it when due, without a fixed tick", () =>
+  Effect.gen(function* () {
+    const repository = yield* AgentControlAutomationRepository;
+    const automations = yield* AgentControlAutomationService;
+    // Due in 400 ms; the scheduler's longest sleep is an hour, so only the wake on the lifecycle
+    // change and the sleep until the due time can run it.
+    const runAt = new Date(Date.now() + 400).toISOString();
+    const automationId = AgentControlAutomationId.make("automation-wakes-when-due");
+    yield* automations.applyLifecycle({
+      proposalId: AgentControlProposalId.make("proposal-wakes-when-due"),
+      requestId: AgentControlRequestId.make("request-wakes-when-due"),
+      principal,
+      planVersion: 1,
+      plan: {
+        kind: "createAutomation",
+        automationId,
+        definition: makeAutomation("wakes-when-due", runAt).definition,
+      },
+      planDigest: "f".repeat(64),
+      riskTags: [AGENT_CONTROL_RISK_TAGS.createsAutomation],
+      promptSummary: "Create schedule definition",
+      status: "executing",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      decidedAt: new Date().toISOString(),
+      result: null,
+    });
+    assert.deepStrictEqual(yield* repository.listRuns({ automationId, limit: 10 }), []);
+    let runs = 0;
+    for (let attempt = 0; attempt < 40 && runs === 0; attempt += 1) {
+      yield* Effect.sleep(Duration.millis(50));
+      runs = (yield* repository.listRuns({ automationId, limit: 10 })).length;
+    }
+    assert.strictEqual(runs, 1);
+  }).pipe(Effect.provide(makeAutomationLayer(true, { schedulerIntervalMs: 3_600_000 }))),
+);
