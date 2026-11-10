@@ -43,6 +43,8 @@ import {
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";
 import { cn } from "~/lib/utils";
+import { createVisibilityAwarePoller } from "~/lib/visibilityPolling";
+import { webAppLifecycle } from "~/platform/appLifecycle";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { DevicePicker } from "./DevicePicker";
@@ -193,10 +195,17 @@ export default function SimulatorPanel(props: {
 
   const needsSetupPoll = devicesNeedSetupPoll(environmentState?.availability);
   useEffect(() => {
-    void refresh().catch(() => undefined);
-    if (!needsSetupPoll) return;
-    const timer = setInterval(() => void refresh().catch(() => undefined), DEVICE_SETUP_POLL_MS);
-    return () => clearInterval(timer);
+    if (!needsSetupPoll) {
+      void refresh().catch(() => undefined);
+      return;
+    }
+    // Paused while the window is hidden; reads at once when it shows again.
+    const poller = createVisibilityAwarePoller({
+      lifecycle: webAppLifecycle,
+      run: refresh,
+      resolveDelayMs: () => DEVICE_SETUP_POLL_MS,
+    });
+    return () => poller.stop();
   }, [needsSetupPoll, refresh]);
 
   const devices = environmentState?.devices ?? threadState?.devices ?? [];
