@@ -252,7 +252,7 @@ export function startThreadReadCacheSync(deps: {
     });
   };
   /** Something the cloud cache shows may have changed: publish again soon. */
-  const notifyChanged = (_event?: OrchestrationEvent) => {
+  const notifyChanged = (event?: OrchestrationEvent) => {
     if (stopped) return;
     changed = true;
     if (event !== undefined && isThreadReadCacheTurnEnd(event)) urgent = true;

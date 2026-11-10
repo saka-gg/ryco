@@ -11,6 +11,7 @@ export * from "./deviceRpcClient.ts";
 export * from "./environmentServerConfigs.ts";
 export * from "./gitActionRecovery.ts";
 export * from "./requestLatencyState.ts";
+export * from "./retryJitter.ts";
 export * from "./serverState.ts";
 export * from "./wsConnectionState.ts";
 export * from "./wsRpcClient.ts";
