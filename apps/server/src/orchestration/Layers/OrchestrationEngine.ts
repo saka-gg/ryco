@@ -69,6 +69,7 @@ import {
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
+import { isProcessScopedCommandId, makeProcessScopedReceipts } from "../processScopedCommandIds.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
@@ -223,6 +224,7 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   );
 
   const sidebarUndo = createSidebarUndoReceipts();
+  const processScopedReceipts = makeProcessScopedReceipts();
   let commandReadModel = createEmptyReadModel(new Date().toISOString());
 
   let workspaceAuthorityHealthy = true;
@@ -316,9 +318,11 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
           "orchestration.aggregate_id": aggregateRef.aggregateId,
         });
 
-        const existingReceipt = yield* commandReceiptRepository.getByCommandId({
-          commandId: envelope.command.commandId,
-        });
+        const commandId = envelope.command.commandId;
+        const processScoped = isProcessScopedCommandId(commandId);
+        const existingReceipt = processScoped
+          ? Option.fromUndefinedOr(processScopedReceipts.get(commandId))
+          : yield* commandReceiptRepository.getByCommandId({ commandId });
         if (Option.isSome(existingReceipt)) {
           if (existingReceipt.value.status === "accepted") {
             return {
@@ -604,15 +608,18 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                 const resultSequence =
                   lastSavedEvent?.sequence ?? commandReadModel.snapshotSequence;
 
-                yield* commandReceiptRepository.upsert({
-                  commandId: envelope.command.commandId,
-                  aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
-                  aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
-                  acceptedAt: lastSavedEvent?.occurredAt ?? new Date().toISOString(),
-                  resultSequence,
-                  status: "accepted",
-                  error: null,
-                });
+                // A process-scoped id's receipt is recorded in memory once this commits.
+                if (!processScoped) {
+                  yield* commandReceiptRepository.upsert({
+                    commandId: envelope.command.commandId,
+                    aggregateKind: lastSavedEvent?.aggregateKind ?? aggregateRef.aggregateKind,
+                    aggregateId: lastSavedEvent?.aggregateId ?? aggregateRef.aggregateId,
+                    acceptedAt: lastSavedEvent?.occurredAt ?? new Date().toISOString(),
+                    resultSequence,
+                    status: "accepted",
+                    error: null,
+                  });
+                }
 
                 return {
                   committedEvents,
@@ -636,6 +643,12 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
           ? envelope.admission.admit(commit)
           : commit;
 
+        if (processScoped) {
+          processScopedReceipts.record(commandId, {
+            status: "accepted",
+            resultSequence: committedCommand.lastSequence,
+          });
+        }
         commandReadModel = committedCommand.nextCommandReadModel;
         sidebarUndo.record(envelope.command, beforeCommand, commandReadModel);
         if (envelope.command.type === "thread.sidebar.undo")
@@ -708,7 +721,15 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
               }),
             );
 
-            if (Schema.is(OrchestrationCommandInvariantError)(error)) {
+            if (
+              Schema.is(OrchestrationCommandInvariantError)(error) &&
+              isProcessScopedCommandId(envelope.command.commandId)
+            ) {
+              processScopedReceipts.record(envelope.command.commandId, {
+                status: "rejected",
+                error: error.message,
+              });
+            } else if (Schema.is(OrchestrationCommandInvariantError)(error)) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,
