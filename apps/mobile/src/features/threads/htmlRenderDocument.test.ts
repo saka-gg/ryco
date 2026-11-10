@@ -113,8 +113,16 @@ describe("buildHtmlRenderDocument", () => {
     expect(document).toContain("window.__rycoPost=function(m)");
     expect(document).toContain("e.source!==w");
     expect(document).toContain(
-      '"ui/notifications/size-changed":1,"ui/open-link":1,"ui/message":1};',
+      '"ui/notifications/size-changed":1,"ui/open-link":1,"ui/message":1},',
     );
+  });
+
+  it("fits a page wider than the screen only full screen", () => {
+    // Inline the frame never fits (fw stays -1); full screen it fits once, on the first overflow.
+    expect(document).toContain("fw=-1;");
+    const fullScreen = build("", { zoomable: true });
+    expect(fullScreen).toContain("fw=0;");
+    expect(fullScreen).toContain("p.width>p.viewportWidth+1");
   });
 
   it("lets only the full-screen page zoom", () => {

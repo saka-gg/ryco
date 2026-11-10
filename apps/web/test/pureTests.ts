@@ -39,7 +39,6 @@ export const WEB_PURE_TEST_FILES = [
   "src/components/ThreadWorkspacePanel.logic.test.ts",
   "src/components/agent-control/AgentControlProposalCard.test.tsx",
   "src/components/agent-control/agentControlSyncGate.test.ts",
-  "src/components/artifacts/earlierThreadArtifacts.test.ts",
   "src/components/automations/data/automationsDialogProject.logic.test.ts",
   "src/components/chat/ChangedFilesTree.test.tsx",
   "src/components/chat/ChatHeader.test.ts",

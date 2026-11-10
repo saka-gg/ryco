@@ -26,12 +26,13 @@ import {
   type ChatMessage,
   type ChatUnknownAttachment,
 } from "@ryco/client-runtime/state/threads";
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { formatAttachmentBytes } from "@ryco/shared/attachmentPreview";
 import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { useEvent } from "expo";
-import { useMemo, useState } from "react";
-import { Image, Pressable, ScrollView, Share, View } from "react-native";
+import { useMemo, useState, type ReactNode } from "react";
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
@@ -44,6 +45,11 @@ import {
   SelectableMarkdownText,
 } from "../../native/SelectableMarkdownText";
 import { useNativeMarkdownTextStyle } from "../../native/useNativeMarkdownTextStyle";
+import {
+  ATTACHMENT_FILE_AUTO_LOAD_MAX_BYTES,
+  type AttachmentFileReference,
+} from "./attachmentFiles";
+import { shareAttachment } from "./attachmentShare";
 import { HtmlRenderCards } from "./HtmlRenderCards";
 import { ThreadHtmlRender } from "./ThreadHtmlRender";
 import type { TurnHtmlRender } from "./threadActivityFold";
@@ -56,6 +62,7 @@ import {
 import { useImageGallery } from "./ImageGalleryModal";
 import { messageImageGallery } from "./messageImageGallery";
 import { threadMessagePresentation } from "./threadPresentation";
+import { useAttachmentFile } from "./useAttachmentFile";
 import {
   AttachmentPreviewModal,
   canPreviewAttachment,
@@ -73,20 +80,77 @@ function isChatFileAttachment(
   return attachment.type === "file";
 }
 
-async function shareAttachmentFile(previewUrl: string): Promise<void> {
-  try {
-    await Share.share({ url: previewUrl });
-  } catch {
-    // The user dismissed the share sheet; nothing to report.
-  }
+/** Where an attachment of this message is read from: its machine's own connection. */
+function attachmentReference(
+  context: AttachmentMessageContext,
+  attachment: ChatFileAttachment | ChatImageAttachment,
+): AttachmentFileReference {
+  return {
+    environmentId: context.environmentId,
+    threadId: context.threadId,
+    messageId: context.messageId,
+    attachmentId: attachment.id,
+    name: attachment.name,
+    sizeBytes: attachment.sizeBytes,
+  };
+}
+
+interface AttachmentMessageContext {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+}
+
+function shareAttachmentFile(reference: AttachmentFileReference): void {
+  void shareAttachment(reference).catch(() =>
+    Alert.alert("Could not share the file", "Ryco could not load it from the machine."),
+  );
 }
 
 function ImageAttachment(props: {
   readonly attachment: ChatImageAttachment;
-  readonly previewUrl: string;
+  readonly reference: AttachmentFileReference;
   readonly onOpen: () => void;
 }) {
   const dimensions = readAttachmentDimensions(props.attachment);
+  const file = useAttachmentFile({
+    reference: props.reference,
+    auto: props.attachment.sizeBytes <= ATTACHMENT_FILE_AUTO_LOAD_MAX_BYTES,
+    // A message this device is still sending shows its own copy.
+    uri: props.attachment.previewUrl,
+  });
+  const slotStyle = dimensions
+    ? { width: IMAGE_ATTACHMENT_SLOT_WIDTH, aspectRatio: dimensions.width / dimensions.height }
+    : undefined;
+  const slotClassName = dimensions ? "rounded-2xl bg-subtle" : "h-36 w-36 rounded-2xl bg-subtle";
+  if (file.status !== "ready") {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={
+          file.status === "failed"
+            ? `${props.attachment.name} could not be loaded. Try again`
+            : file.status === "idle"
+              ? `Load ${props.attachment.name}`
+              : `Loading ${props.attachment.name}`
+        }
+        disabled={file.status === "loading"}
+        onPress={
+          file.status === "failed" ? file.retry : file.status === "idle" ? file.load : undefined
+        }
+        style={slotStyle}
+        className={`${slotClassName} items-center justify-center px-2 active:opacity-80`}
+      >
+        {file.status === "loading" ? (
+          <ActivityIndicator />
+        ) : (
+          <Text className="text-center text-xs text-foreground-muted" numberOfLines={3}>
+            {file.status === "failed" ? "Tap to retry" : `${props.attachment.name} · Tap to load`}
+          </Text>
+        )}
+      </Pressable>
+    );
+  }
   return (
     <Pressable
       accessibilityRole="imagebutton"
@@ -95,16 +159,9 @@ function ImageAttachment(props: {
       className="active:opacity-80"
     >
       <Image
-        source={{ uri: props.previewUrl }}
-        style={
-          dimensions
-            ? {
-                width: IMAGE_ATTACHMENT_SLOT_WIDTH,
-                aspectRatio: dimensions.width / dimensions.height,
-              }
-            : undefined
-        }
-        className={dimensions ? "rounded-2xl bg-subtle" : "h-36 w-36 rounded-2xl bg-subtle"}
+        source={{ uri: file.uri }}
+        style={slotStyle}
+        className={slotClassName}
         resizeMode="cover"
         accessibilityLabel={props.attachment.name}
       />
@@ -112,12 +169,64 @@ function ImageAttachment(props: {
   );
 }
 
-function VideoAttachmentRow(props: { readonly attachment: ChatFileAttachment }) {
+/**
+ * A video or audio file of a message: played from its local copy, read over the
+ * machine's connection by itself when small, on a tap when large.
+ */
+function MediaAttachmentGate(props: {
+  readonly attachment: ChatFileAttachment;
+  readonly reference: AttachmentFileReference;
+  readonly kind: "video" | "audio";
+  readonly children: (uri: string) => ReactNode;
+}) {
+  const file = useAttachmentFile({
+    reference: props.reference,
+    auto: props.attachment.sizeBytes <= ATTACHMENT_FILE_AUTO_LOAD_MAX_BYTES,
+    uri: props.attachment.previewUrl,
+  });
+  if (file.status === "ready") return props.children(file.uri);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={
+        file.status === "failed"
+          ? `${props.attachment.name} could not be loaded. Try again`
+          : `Load ${props.attachment.name}`
+      }
+      disabled={file.status === "loading"}
+      onPress={
+        file.status === "failed" ? file.retry : file.status === "idle" ? file.load : undefined
+      }
+      className="min-h-16 w-full flex-row items-center justify-between gap-3 rounded-2xl bg-subtle px-3 py-2 active:opacity-80"
+    >
+      <View className="min-w-0 flex-1">
+        <Text className="font-ryco-bold text-sm text-foreground" numberOfLines={1}>
+          {props.attachment.name}
+        </Text>
+        <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+          {formatAttachmentBytes(props.attachment.sizeBytes)} ·{" "}
+          {file.status === "failed"
+            ? "Tap to retry"
+            : file.status === "loading"
+              ? "Loading…"
+              : `Tap to load the ${props.kind}`}
+        </Text>
+      </View>
+      {file.status === "loading" ? <ActivityIndicator /> : null}
+    </Pressable>
+  );
+}
+
+function VideoAttachmentRow(props: {
+  readonly attachment: ChatFileAttachment;
+  readonly reference: AttachmentFileReference;
+  readonly uri: string;
+}) {
   const dimensions = readAttachmentDimensions(props.attachment);
   const aspectRatio = dimensions
     ? dimensions.width / dimensions.height
     : DEFAULT_MEDIA_ASPECT_RATIO;
-  const player = useVideoPlayer({ uri: props.attachment.previewUrl });
+  const player = useVideoPlayer({ uri: props.uri });
   return (
     <View className="w-full rounded-2xl bg-subtle">
       <View style={{ aspectRatio }} className="overflow-hidden rounded-2xl">
@@ -132,7 +241,7 @@ function VideoAttachmentRow(props: { readonly attachment: ChatFileAttachment }) 
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Open ${props.attachment.name}`}
-        onPress={() => void shareAttachmentFile(props.attachment.previewUrl!)}
+        onPress={() => shareAttachmentFile(props.reference)}
         className="flex-row items-center justify-between px-3 py-2"
       >
         <Text className="text-xs text-foreground-muted" numberOfLines={1}>
@@ -144,8 +253,16 @@ function VideoAttachmentRow(props: { readonly attachment: ChatFileAttachment }) 
   );
 }
 
-function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttachment }) {
-  const player = useVideoPlayer({ uri: attachment.previewUrl }, (player) => {
+function AudioAttachmentRow({
+  attachment,
+  reference,
+  uri,
+}: {
+  readonly attachment: ChatFileAttachment;
+  readonly reference: AttachmentFileReference;
+  readonly uri: string;
+}) {
+  const player = useVideoPlayer({ uri }, (player) => {
     player.timeUpdateEventInterval = 0.5;
   });
   const playing = useEvent(player, "playingChange");
@@ -197,7 +314,7 @@ function AudioAttachmentRow({ attachment }: { readonly attachment: ChatFileAttac
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Share ${attachment.name}`}
-        onPress={() => void shareAttachmentFile(attachment.previewUrl!)}
+        onPress={() => shareAttachmentFile(reference)}
         className="min-h-11 justify-center"
       >
         <Text className="text-xs text-foreground-muted">Share audio</Text>
@@ -325,21 +442,23 @@ export function ThreadMessage(props: {
     (sentContexts ? quoteCitationsToPlainText(sentContexts.visibleText) : props.message.text) ||
     (props.message.streaming ? "…" : "");
   const attachments = props.message.attachments ?? [];
-  const galleryImages = messageImageGallery(props.message.attachments);
+  const attachmentContext: AttachmentMessageContext = {
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    messageId: props.message.id,
+  };
+  const galleryImages = messageImageGallery(attachmentContext, props.message.attachments);
   const gallery = useImageGallery();
   // A PDF, Markdown or text file opens in place; anything else goes to the share sheet.
   const [previewing, setPreviewing] = useState<PreviewableAttachment | null>(null);
   const hasVideoPlaybackSource = (
     attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
-  ): attachment is ChatFileAttachment =>
-    isVideoFileAttachment(attachment) && attachment.previewUrl !== undefined;
+  ): attachment is ChatFileAttachment => isVideoFileAttachment(attachment);
   const videoAttachments = attachments.filter(hasVideoPlaybackSource);
   const hasAudioPlaybackSource = (
     attachment: ChatFileAttachment | ChatImageAttachment | ChatUnknownAttachment,
   ): attachment is ChatFileAttachment =>
-    isChatFileAttachment(attachment) &&
-    attachment.mimeType.toLowerCase().startsWith("audio/") &&
-    attachment.previewUrl !== undefined;
+    isChatFileAttachment(attachment) && attachment.mimeType.toLowerCase().startsWith("audio/");
   const audioAttachments = attachments.filter(hasAudioPlaybackSource);
   // An agent's HTML render shows as the page itself. Only assistant messages
   // carry them; on any other message the file keeps its ordinary row. The
@@ -476,16 +595,40 @@ export function ThreadMessage(props: {
         ) : null}
         {audioAttachments.length > 0 ? (
           <View className="mt-2 w-full gap-2">
-            {audioAttachments.map((attachment) => (
-              <AudioAttachmentRow key={attachment.id} attachment={attachment} />
-            ))}
+            {audioAttachments.map((attachment) => {
+              const reference = attachmentReference(attachmentContext, attachment);
+              return (
+                <MediaAttachmentGate
+                  key={attachment.id}
+                  attachment={attachment}
+                  reference={reference}
+                  kind="audio"
+                >
+                  {(uri) => (
+                    <AudioAttachmentRow attachment={attachment} reference={reference} uri={uri} />
+                  )}
+                </MediaAttachmentGate>
+              );
+            })}
           </View>
         ) : null}
         {videoAttachments.length > 0 ? (
           <View className="mt-2 w-full gap-2">
-            {videoAttachments.map((attachment) => (
-              <VideoAttachmentRow key={attachment.id} attachment={attachment} />
-            ))}
+            {videoAttachments.map((attachment) => {
+              const reference = attachmentReference(attachmentContext, attachment);
+              return (
+                <MediaAttachmentGate
+                  key={attachment.id}
+                  attachment={attachment}
+                  reference={reference}
+                  kind="video"
+                >
+                  {(uri) => (
+                    <VideoAttachmentRow attachment={attachment} reference={reference} uri={uri} />
+                  )}
+                </MediaAttachmentGate>
+              );
+            })}
           </View>
         ) : null}
         {gallery.modal}
@@ -493,11 +636,11 @@ export function ThreadMessage(props: {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} className="mt-2 grow-0">
             <View className="flex-row gap-2">
               {stripAttachments.map((attachment) =>
-                isChatImageAttachment(attachment) && attachment.previewUrl ? (
+                isChatImageAttachment(attachment) ? (
                   <ImageAttachment
                     key={attachment.id}
                     attachment={attachment}
-                    previewUrl={attachment.previewUrl}
+                    reference={attachmentReference(attachmentContext, attachment)}
                     onOpen={() =>
                       gallery.open(
                         galleryImages,
@@ -505,7 +648,7 @@ export function ThreadMessage(props: {
                       )
                     }
                   />
-                ) : isChatFileAttachment(attachment) && attachment.previewUrl ? (
+                ) : isChatFileAttachment(attachment) ? (
                   <Pressable
                     key={attachment.id}
                     accessibilityRole="button"
@@ -520,9 +663,8 @@ export function ThreadMessage(props: {
                             name: attachment.name,
                             mimeType: attachment.mimeType,
                             sizeBytes: attachment.sizeBytes,
-                            previewUrl: attachment.previewUrl!,
                           })
-                        : void shareAttachmentFile(attachment.previewUrl!)
+                        : shareAttachmentFile(attachmentReference(attachmentContext, attachment))
                     }
                     className="min-h-20 w-44 justify-center rounded-2xl bg-subtle px-3 py-2"
                   >

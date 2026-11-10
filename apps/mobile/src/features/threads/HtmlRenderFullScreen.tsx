@@ -304,7 +304,11 @@ export interface HtmlRenderFullScreenHandle {
   readonly modal: ReactNode;
 }
 
-function useOwnHtmlRenderFullScreen(): HtmlRenderFullScreenHandle {
+/**
+ * Full screen of the caller's own, whatever provider is above: for a sheet that
+ * is its own native modal and must present the page from inside itself.
+ */
+export function useHtmlRenderFullScreenModal(): HtmlRenderFullScreenHandle {
   const [state, setState] = useState<{
     readonly request: HtmlRenderFullScreenRequest | null;
     readonly open: boolean;
@@ -363,7 +367,7 @@ function useOwnHtmlRenderFullScreen(): HtmlRenderFullScreenHandle {
  * streams, and the inline page and the reply's card open the same view.
  */
 export function HtmlRenderFullScreenProvider({ children }: { readonly children: ReactNode }) {
-  const { open, modal } = useOwnHtmlRenderFullScreen();
+  const { open, modal } = useHtmlRenderFullScreenModal();
   return (
     <HtmlRenderFullScreenContext value={open}>
       {children}
@@ -378,6 +382,6 @@ export function HtmlRenderFullScreenProvider({ children }: { readonly children: 
  */
 export function useHtmlRenderFullScreen(): HtmlRenderFullScreenHandle {
   const provided = use(HtmlRenderFullScreenContext);
-  const own = useOwnHtmlRenderFullScreen();
+  const own = useHtmlRenderFullScreenModal();
   return provided === null ? own : { open: provided, modal: null };
 }

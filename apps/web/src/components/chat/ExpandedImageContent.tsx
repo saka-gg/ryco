@@ -1,13 +1,16 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import type { ExpandedImageItem } from "./ExpandedImagePreview";
 
 /** Image presentation for expanded message attachments. */
 export function ExpandedImageContent({
   image,
   className = "max-h-[86vh] max-w-[92vw]",
+  style,
 }: {
   image: ExpandedImageItem;
   className?: string;
+  /** The zoom and pan of a zoomable viewer. */
+  style?: CSSProperties | undefined;
 }) {
   const [failedSource, setFailedSource] = useState<string>();
   return failedSource === image.src ? (
@@ -22,6 +25,7 @@ export function ExpandedImageContent({
         ? { width: image.width, height: image.height }
         : {})}
       onError={() => setFailedSource(image.src)}
+      style={style}
       className={`h-auto w-auto select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl ${className}`}
       draggable={false}
     />

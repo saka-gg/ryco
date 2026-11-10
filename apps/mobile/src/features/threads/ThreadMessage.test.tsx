@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 // The thread message renderer, invoked as a plain function with react-native
 // mocked (same shape as SettingsHubRouteScreen.test.tsx — no React renderer
 // exists in this suite). What it proves: file attachments render a tappable
-// row that hands the preview URL to the platform share sheet, video file
+// row that hands the file, read over its machine's connection, to the share sheet, video file
 // attachments render an inline native video row that keeps a share affordance,
 // image attachments reserve an aspect-ratio slot only when the server probed
 // dimensions, while unknown attachments stay inert. An assistant's HTML render
@@ -16,6 +16,9 @@ const hoisted = vi.hoisted(() => ({
   /** The one `useMemo` slot ThreadMessage has, kept across renders like React keeps it. */
   memo: null as null | { deps: ReadonlyArray<unknown>; value: unknown },
   share: vi.fn(async (_input: unknown) => undefined),
+  shareAttachment: vi.fn(async (_reference: unknown) => undefined),
+  /** What `useAttachmentFile` answers; null: ready, from the read the hook would make. */
+  file: null as null | { status: string; uri?: string },
   openURL: vi.fn(async (_url: string) => true),
   nativeMarkdown: false,
   readWholeMessageText: vi.fn(async (_input: unknown) => "the whole text"),
@@ -56,6 +59,8 @@ vi.mock("@ryco/shared/htmlRender", async (importOriginal) => {
   return { ...actual, htmlRenderOfAttachment: vi.fn(actual.htmlRenderOfAttachment) };
 });
 vi.mock("react-native", () => ({
+  ActivityIndicator: "ActivityIndicator",
+  Alert: { alert: vi.fn() },
   Image: "Image",
   Pressable: "Pressable",
   ScrollView: "ScrollView",
@@ -96,6 +101,17 @@ vi.mock("./MessageTextPreview", () => ({
   readWholeMessageText: hoisted.readWholeMessageText,
 }));
 vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
+// Attachments are read over the machine's own connection into a local file
+// (attachmentFiles.ts); here the read is already done unless a test says so.
+vi.mock("./attachmentFiles", () => ({ ATTACHMENT_FILE_AUTO_LOAD_MAX_BYTES: 12 * 1024 * 1024 }));
+vi.mock("./attachmentShare", () => ({ shareAttachment: hoisted.shareAttachment }));
+vi.mock("./useAttachmentFile", () => ({
+  useAttachmentFile: (input: { reference: { attachmentId: string } | null; uri?: string }) =>
+    hoisted.file ??
+    (input.uri !== undefined
+      ? { status: "ready", uri: input.uri }
+      : { status: "ready", uri: `file:///cache/${input.reference?.attachmentId}` }),
+}));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 vi.mock("./ImageGalleryModal", () => ({
   useImageGallery: () => ({ open: () => {}, modal: null }),
@@ -370,6 +386,17 @@ describe("ThreadMessage attachment rows", () => {
 
   beforeEach(() => {
     hoisted.share.mockClear();
+    hoisted.shareAttachment.mockClear();
+    hoisted.file = null;
+  });
+
+  const referenceOf = (attachmentId: string, name: string, sizeBytes: number) => ({
+    environmentId,
+    threadId,
+    messageId: "m-1",
+    attachmentId,
+    name,
+    sizeBytes,
   });
 
   it("renders audio playback controls and a share fallback", () => {
@@ -391,8 +418,7 @@ describe("ThreadMessage attachment rows", () => {
     expect(buttons.some((button) => pressableLabel(button) === "Share voice.mp3")).toBe(true);
   });
 
-  it("renders a tappable row for a file attachment that shares its preview URL", async () => {
-    const previewUrl = "http://node.local/attachments/att-1";
+  it("renders a tappable row for a file attachment that shares the file read over its machine", async () => {
     const tree = renderMessage([
       {
         type: "file",
@@ -400,7 +426,6 @@ describe("ThreadMessage attachment rows", () => {
         name: "report.pdf",
         mimeType: "application/pdf",
         sizeBytes: 2048,
-        previewUrl,
       },
     ]);
 
@@ -408,24 +433,10 @@ describe("ThreadMessage attachment rows", () => {
     const openRow = pressables.find((p) => pressableLabel(p) === "Open report.pdf");
     expect(openRow).toBeDefined();
 
-    const onPress = (openRow!.props as { onPress: () => Promise<void> }).onPress;
-    await onPress();
-    expect(hoisted.share).toHaveBeenCalledWith({ url: previewUrl });
-  });
-
-  it("renders an inert row when a file attachment has no preview URL", () => {
-    const tree = renderMessage([
-      {
-        type: "file",
-        id: "att-1",
-        name: "report.pdf",
-        mimeType: "application/pdf",
-        sizeBytes: 2048,
-      },
-    ]);
-    expect(
-      findPressables(tree).find((p) => pressableLabel(p) === "Open report.pdf"),
-    ).toBeUndefined();
+    (openRow!.props as { onPress: () => void }).onPress();
+    // No URL is involved: the share goes through the machine's own connection.
+    expect(hoisted.shareAttachment).toHaveBeenCalledWith(referenceOf("att-1", "report.pdf", 2048));
+    expect(hoisted.share).not.toHaveBeenCalled();
   });
 
   it("renders an unknown attachment without a tappable row", () => {
@@ -438,6 +449,33 @@ describe("ThreadMessage attachment rows", () => {
       },
     ]);
     expect(findPressables(tree)).toHaveLength(0);
+  });
+
+  it("shows an image read over its machine, and a placeholder while it loads", () => {
+    const image = {
+      type: "image",
+      id: "att-2",
+      name: "shot.png",
+      mimeType: "image/png",
+      sizeBytes: 2048,
+    } as const;
+    const ready = collectElements(renderMessage([image]), (element) => element.type === "Image");
+    expect((ready[0]!.props as { source: unknown }).source).toEqual({
+      uri: "file:///cache/att-2",
+    });
+
+    hoisted.file = { status: "loading" };
+    const loading = renderMessage([image]);
+    expect(collectElements(loading, (element) => element.type === "Image")).toHaveLength(0);
+    expect(findPressables(loading)[0]!.props).toMatchObject({
+      accessibilityLabel: "Loading shot.png",
+      disabled: true,
+    });
+
+    hoisted.file = { status: "failed" };
+    expect(findPressables(renderMessage([image]))[0]!.props).toMatchObject({
+      accessibilityLabel: "shot.png could not be loaded. Try again",
+    });
   });
 
   it("renders an image attachment that opens the full-screen gallery", () => {
@@ -495,7 +533,6 @@ describe("ThreadMessage attachment rows", () => {
   });
 
   it("renders an inline video row with native controls and a share affordance", async () => {
-    const previewUrl = "http://node.local/attachments/att-3";
     const tree = renderMessage([
       {
         type: "file",
@@ -503,7 +540,6 @@ describe("ThreadMessage attachment rows", () => {
         name: "demo.mp4",
         mimeType: "video/mp4",
         sizeBytes: 4096,
-        previewUrl,
       },
     ]);
 
@@ -514,9 +550,17 @@ describe("ThreadMessage attachment rows", () => {
 
     const openRow = findPressables(tree).find((p) => pressableLabel(p) === "Open demo.mp4");
     expect(openRow).toBeDefined();
-    const onPress = (openRow!.props as { onPress: () => Promise<void> }).onPress;
-    await onPress();
-    expect(hoisted.share).toHaveBeenCalledWith({ url: previewUrl });
+    (openRow!.props as { onPress: () => void }).onPress();
+    expect(hoisted.shareAttachment).toHaveBeenCalledWith(referenceOf("att-3", "demo.mp4", 4096));
+  });
+
+  it("offers to load a video until its file is read", () => {
+    hoisted.file = { status: "idle" };
+    const tree = renderMessage([
+      { type: "file", id: "att-3", name: "demo.mp4", mimeType: "video/mp4", sizeBytes: 4096 },
+    ]);
+    expect(collectElements(tree, (element) => element.type === "VideoView")).toHaveLength(0);
+    expect(findPressables(tree).some((p) => pressableLabel(p) === "Load demo.mp4")).toBe(true);
   });
 
   it("falls back to a 16:9 video slot when dimensions are unknown", () => {
@@ -692,6 +736,8 @@ describe("ThreadMessage HTML renders", () => {
 
   beforeEach(() => {
     hoisted.share.mockClear();
+    hoisted.shareAttachment.mockClear();
+    hoisted.file = null;
   });
 
   it("shows an assistant's render as the page, not a share row", () => {

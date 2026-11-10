@@ -4,7 +4,7 @@ import {
   type ThreadFileArtifact,
   type ThreadPageArtifact,
 } from "@ryco/client-runtime/state/session";
-import { selectThreadDetailLoaded } from "@ryco/client-runtime/state/threads";
+import { selectThreadLiveDetailLoaded } from "@ryco/client-runtime/state/threads";
 import type { ChatAttachmentHandoff, EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { htmlRenderThumbnail } from "@ryco/shared/htmlRender";
 import type { ThemeAppearance } from "@ryco/shared/themePalettes";
@@ -250,9 +250,11 @@ export function ArtifactsPanel(props: {
 }) {
   const { environmentId, threadId, onOpenPage, onShowInThread, onOpenThread } = props;
   const { resolvedTheme } = useTheme();
+  // Live detail only: messages a reload restored from a display cache (local
+  // or the Hub's) carry no attachments, so they cannot say there are none.
   const detailLoaded = useStore((state) =>
     environmentId && threadId
-      ? selectThreadDetailLoaded(state, scopeThreadRef(environmentId, threadId))
+      ? selectThreadLiveDetailLoaded(state, scopeThreadRef(environmentId, threadId))
       : false,
   );
   const history = useStore((state) =>
@@ -282,7 +284,7 @@ export function ArtifactsPanel(props: {
   const expandedImageReady = useLazyComponentReady(LazyExpandedImageDialog, expandedImage !== null);
 
   if (!environmentId || !threadId) return <ArtifactsEmptyState />;
-  // The thread is still arriving: no verdict yet.
+  // The thread is still arriving (or shows its cached text only): no verdict yet.
   if (!detailLoaded) return <div aria-busy className="min-h-0 flex-1" />;
   if (artifacts.length === 0) {
     return earlier.loading ? (
@@ -297,7 +299,11 @@ export function ArtifactsPanel(props: {
   }
 
   return (
-    <div data-artifacts-panel="" className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col">
+    // Positioned, so an expanded image fills the panel rather than a window it is not in.
+    <div
+      data-artifacts-panel=""
+      className="relative flex h-full min-h-0 w-full min-w-0 flex-1 flex-col"
+    >
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-5 p-4">
           {pages.length > 0 ? (
@@ -348,7 +354,13 @@ export function ArtifactsPanel(props: {
         </div>
       </ScrollArea>
       {expandedImage && expandedImageReady ? (
-        <LazyExpandedImageDialog preview={expandedImage} onClose={() => setExpandedImage(null)} />
+        <LazyExpandedImageDialog
+          preview={expandedImage}
+          onClose={() => setExpandedImage(null)}
+          // The panel is the viewer's whole space: a fixed overlay would size
+          // the image to the window and spill it out of the panel.
+          contained
+        />
       ) : null}
     </div>
   );

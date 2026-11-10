@@ -321,22 +321,23 @@ function mapSession(session: OrchestrationSession): ThreadSession {
   };
 }
 
+function attachmentPreviewUrl(
+  environmentId: EnvironmentId,
+  attachmentId: string,
+): string | undefined {
+  const runtime = getThreadsRuntimeConfiguration();
+  return runtime.isHostedHubMode()
+    ? undefined
+    : runtime.resolveAttachmentPreviewUrl({ environmentId, attachmentId });
+}
+
 function mapMessage(environmentId: EnvironmentId, message: OrchestrationMessage): ChatMessage {
-  const attachments = message.attachments?.map((attachment) =>
-    (attachment.type === "image" || attachment.type === "file") && attachment.id !== undefined
-      ? {
-          ...attachment,
-          ...(getThreadsRuntimeConfiguration().isHostedHubMode()
-            ? {}
-            : {
-                previewUrl: getThreadsRuntimeConfiguration().resolveAttachmentPreviewUrl({
-                  environmentId,
-                  attachmentId: attachment.id,
-                }),
-              }),
-        }
-      : { ...attachment },
-  );
+  const attachments = message.attachments?.map((attachment) => {
+    if ((attachment.type !== "image" && attachment.type !== "file") || attachment.id === undefined)
+      return { ...attachment };
+    const previewUrl = attachmentPreviewUrl(environmentId, attachment.id);
+    return previewUrl === undefined ? { ...attachment } : { ...attachment, previewUrl };
+  });
 
   return {
     id: message.id,
