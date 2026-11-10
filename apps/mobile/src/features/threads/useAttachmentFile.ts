@@ -50,6 +50,7 @@ export function useAttachmentFile(input: {
   const attachmentId = reference?.attachmentId;
   const name = reference?.name;
   const sizeBytes = reference?.sizeBytes;
+  const preview = reference?.preview;
   useEffect(() => {
     if (
       !wanted ||
@@ -63,7 +64,7 @@ export function useAttachmentFile(input: {
     )
       return;
     const lease = acquireAttachmentFile({
-      reference: { environmentId, threadId, messageId, attachmentId, name, sizeBytes },
+      reference: { environmentId, threadId, messageId, attachmentId, name, sizeBytes, preview },
       currentTransport: () => readEnvironmentApi(environmentId)?.attachments,
     });
     let active = true;
@@ -87,6 +88,7 @@ export function useAttachmentFile(input: {
     kept,
     messageId,
     name,
+    preview,
     sizeBytes,
     threadId,
     wanted,

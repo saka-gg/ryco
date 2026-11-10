@@ -28,6 +28,7 @@ import { injectHtmlRenderBootstrap } from "@ryco/shared/htmlRender";
 import { useMemo, useState } from "react";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { clearHostedImageSources } from "../chat/hostedImageSource";
 import { render } from "vitest-browser-react";
 
 // The app as the hosted Hub serves it. Every export of the small env module is
@@ -221,7 +222,12 @@ function base64(bytes: Uint8Array) {
 
 /** The node's side of the attachments RPC, as the relay carries it. */
 const readChunk = vi.fn(
-  async (input: { messageId: string; attachmentId: string; offset: number }) => {
+  async (input: {
+    messageId: string;
+    attachmentId: string;
+    offset: number;
+    preview?: number | undefined;
+  }) => {
     const bytes = input.attachmentId.endsWith("-png") ? IMAGE_BYTES : PAGE_BYTES;
     return {
       offset: input.offset,
@@ -338,6 +344,7 @@ describe("artifacts in the hosted app", () => {
     __resetEarlierThreadArtifactsForTests();
     __resetHtmlRenderSourceCacheForTests();
     __resetWorkspaceHtmlRenderLookupForTests();
+    clearHostedImageSources();
     useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
     document.body.innerHTML = "";
   });
@@ -374,11 +381,8 @@ describe("artifacts in the hosted app", () => {
     await vi.waitFor(() => expect(frameIn(pageTab)?.srcdoc).toBe(PAGE), { timeout: 10_000 });
     await expect.element(pageTab.getByRole("heading", { name: TITLE })).toBeInTheDocument();
 
-    // The image opens on request, read over the RPC, and expands full size.
-    expect(readChunk.mock.calls.some(([input]) => input.attachmentId === IMAGE_ATTACHMENT_ID)).toBe(
-      false,
-    );
-    await artifacts.getByRole("button", { name: /^chart\.png/ }).click();
+    // The image shows by itself, its preview asked for over the RPC (this node
+    // answers with the small original), and expands full size.
     const image = artifacts.getByRole("img", { name: "chart.png" });
     await expect.element(image).toBeVisible();
     await vi.waitFor(() => expect((image.element() as HTMLImageElement).naturalWidth).toBe(1));
@@ -387,6 +391,7 @@ describe("artifacts in the hosted app", () => {
       messageId: IMAGE_MESSAGE_ID,
       attachmentId: IMAGE_ATTACHMENT_ID,
       offset: 0,
+      preview: 1024,
     });
     await artifacts.getByRole("button", { name: "Preview chart.png" }).click();
     const expanded = page.getByRole("dialog", { name: "Expanded image preview" });
@@ -512,13 +517,13 @@ describe("artifacts in the hosted app", () => {
     ).toBe(THUMBNAIL);
 
     // The image there has no URL of any kind; it reads over the attachments RPC.
-    await artifacts.getByRole("button", { name: /^chart\.png/ }).click();
     await expect.element(artifacts.getByRole("img", { name: "chart.png" })).toBeVisible();
     expect(readChunk).toHaveBeenCalledWith({
       threadId: THREAD_ID,
       messageId: "msg-older-image",
       attachmentId: "thread-hosted-older-png",
       offset: 0,
+      preview: 1024,
     });
 
     // The page tab finds the older page on its own and loads it.

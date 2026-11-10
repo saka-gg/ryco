@@ -56,6 +56,7 @@ import type { TurnHtmlRender } from "./threadActivityFold";
 import {
   DEFAULT_MEDIA_ASPECT_RATIO,
   IMAGE_ATTACHMENT_SLOT_WIDTH,
+  imageAttachmentPreviewSize,
   isVideoFileAttachment,
   readAttachmentDimensions,
 } from "./threadAttachmentModel";
@@ -114,7 +115,8 @@ function ImageAttachment(props: {
 }) {
   const dimensions = readAttachmentDimensions(props.attachment);
   const file = useAttachmentFile({
-    reference: props.reference,
+    // The thread shows the machine's preview; the gallery opens the original.
+    reference: { ...props.reference, preview: imageAttachmentPreviewSize(dimensions) },
     auto: props.attachment.sizeBytes <= ATTACHMENT_FILE_AUTO_LOAD_MAX_BYTES,
     // A message this device is still sending shows its own copy.
     uri: props.attachment.previewUrl,
