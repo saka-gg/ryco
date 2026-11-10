@@ -808,7 +808,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // storage wiring (1.7 KB), migration 103 and the event log's time search shared with the
     // events tool (1.2 KB); the usage warm-up left (-0.5 KB). The backup listing and removal
     // load through import().
-    expect(bytes).toBeLessThan(7_240_000);
+    // 7.243 MB on 2026-11-10 with one-click database compaction (+3.6 KB, measured 7.241756
+    // MB): the status and start RPCs' contracts and handlers that every boot decodes (2.6 KB)
+    // and the storage service's wiring to the agent-work tracker (1 KB). Their logic (status,
+    // the detached doctor) loads through import(); the desktop's runner is not server code.
+    expect(bytes).toBeLessThan(7_243_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

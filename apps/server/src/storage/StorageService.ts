@@ -42,7 +42,6 @@ import {
   type ProviderSessionDirectoryShape,
 } from "../provider/Services/ProviderSessionDirectory.ts";
 import { TerminalManager, type TerminalManagerShape } from "../terminal/Services/Manager.ts";
-import { isTerminalWorking } from "../terminal/terminalActivity.ts";
 import { AgentWorkActivity } from "../orchestration/AgentWorkActivity.ts";
 import {
   WorkspaceAccessPolicy,
@@ -1699,34 +1698,17 @@ export const StorageServiceLive = Layer.effect(
     const agentWork = yield* Effect.serviceOption(AgentWorkActivity);
     const terminalManager = yield* TerminalManager;
     const restartSensitive = yield* RestartSensitiveWork;
-    const processStartedAtMs = Date.now() - process.uptime() * 1000;
-    const compactionStatus = Effect.gen(function* () {
-      const compaction = yield* loadCompaction;
-      const runner = compaction.compactionRunner({
-        mode: databaseConfig.mode,
-        serviceLabel: process.env.RYCO_SERVICE_LABEL,
-        platform: process.platform,
-      });
-      const busy = yield* compaction.compactionBusyReasons({
-        // Unknown counts as working: never stop the server on a guess.
-        agentWork: Option.isSome(agentWork)
-          ? Effect.map(
-              Effect.all([agentWork.value.interruptible, agentWork.value.restartInterruptible]),
-              ([now, next]) => now || next,
-            )
-          : Effect.succeed(true),
-        busyTerminals: terminalManager.listDiagnostics.pipe(
-          Effect.map((list) => list.some(isTerminalWorking)),
-          Effect.orElseSucceed(() => true),
-        ),
-        restartSensitiveWork: restartSensitive.count,
-      });
-      const lastRun = yield* compaction.readLastCompactionRun({
-        stateDir: databaseConfig.stateDir,
-        processStartedAtMs,
-      });
-      return { runner, busy, lastRun } satisfies DatabaseCompactionStatus;
-    });
+    // Status and the service start load with the first Storage read (databaseCompaction.ts).
+    const compactionControl = loadCompaction.pipe(
+      Effect.map((compaction) =>
+        compaction.makeCompactionControl({
+          config: databaseConfig,
+          agentWork: Option.getOrUndefined(agentWork),
+          terminals: terminalManager,
+          restartWork: restartSensitive,
+        }),
+      ),
+    );
     const service = makeStorageService({
       recordCheckoutRemoval,
       runInBackground: (work) =>
@@ -1751,27 +1733,8 @@ export const StorageServiceLive = Layer.effect(
         })),
       ),
       databaseCompaction: {
-        status: compactionStatus,
-        start: Effect.gen(function* () {
-          const status = yield* compactionStatus;
-          if (status.runner !== "service") {
-            return {
-              started: false,
-              detail:
-                status.runner === "desktop"
-                  ? "The desktop app runs the compaction."
-                  : "Stop this server and run the doctor command instead.",
-            };
-          }
-          if (status.busy.length > 0) return { started: false, detail: status.busy.join(" ") };
-          const compaction = yield* loadCompaction;
-          return yield* compaction.startServiceCompaction({
-            stateDir: databaseConfig.stateDir,
-            baseDir: databaseConfig.baseDir,
-            devUrl: databaseConfig.devUrl?.href ?? null,
-            now: new Date(),
-          });
-        }),
+        status: Effect.flatMap(compactionControl, (control) => control.status),
+        start: Effect.flatMap(compactionControl, (control) => control.start),
       },
       removeDatabaseBackup: (name) =>
         loadBackupList.pipe(

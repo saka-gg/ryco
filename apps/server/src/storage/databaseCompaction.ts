@@ -25,8 +25,18 @@ import * as ChildProcess from "node:child_process";
 import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import * as NodePath from "node:path";
 
-import type { DatabaseCompactionRun, DatabaseCompactionStatus } from "@ryco/contracts";
+import type {
+  DatabaseCompactionRun,
+  DatabaseCompactionStatus,
+  StartDatabaseCompactionResult,
+} from "@ryco/contracts";
 import { Effect } from "effect";
+
+import type { ServerConfigShape } from "../config.ts";
+import type { AgentWorkActivityShape } from "../orchestration/AgentWorkActivity.ts";
+import type { TerminalManagerShape } from "../terminal/Services/Manager.ts";
+import { isTerminalWorking } from "../terminal/terminalActivity.ts";
+import type { RestartSensitiveWorkShape } from "../updates/restartSensitiveWork.ts";
 
 /** The record of the last run, next to the database (written by the desktop app too). */
 export const COMPACTION_RECORD_FILE = "database-compaction.json";
@@ -262,3 +272,65 @@ export const startServiceCompaction = (input: {
       }
     });
   });
+
+/** This process's start, for a service run's downtime. */
+const processStartedAtMs = Date.now() - process.uptime() * 1000;
+
+/** The status and start the storage RPCs answer with, from the server's services. */
+export function makeCompactionControl(input: {
+  readonly config: Pick<ServerConfigShape, "mode" | "stateDir" | "baseDir" | "devUrl">;
+  /** Absent: unknown, which counts as working (never stop the server on a guess). */
+  readonly agentWork:
+    | Pick<AgentWorkActivityShape, "interruptible" | "restartInterruptible">
+    | undefined;
+  readonly terminals: Pick<TerminalManagerShape, "listDiagnostics">;
+  readonly restartWork: Pick<RestartSensitiveWorkShape, "count">;
+}) {
+  const status = Effect.gen(function* () {
+    const runner = compactionRunner({
+      mode: input.config.mode,
+      serviceLabel: process.env.RYCO_SERVICE_LABEL,
+      platform: process.platform,
+    });
+    const agentWork = input.agentWork;
+    const busy = yield* compactionBusyReasons({
+      agentWork:
+        agentWork === undefined
+          ? Effect.succeed(true)
+          : Effect.map(
+              Effect.all([agentWork.interruptible, agentWork.restartInterruptible]),
+              ([now, next]) => now || next,
+            ),
+      busyTerminals: input.terminals.listDiagnostics.pipe(
+        Effect.map((list) => list.some(isTerminalWorking)),
+        Effect.orElseSucceed(() => true),
+      ),
+      restartSensitiveWork: input.restartWork.count,
+    });
+    const lastRun = yield* readLastCompactionRun({
+      stateDir: input.config.stateDir,
+      processStartedAtMs,
+    });
+    return { runner, busy, lastRun } satisfies DatabaseCompactionStatus;
+  });
+  const start = Effect.gen(function* () {
+    const current = yield* status;
+    if (current.runner !== "service") {
+      return {
+        started: false,
+        detail:
+          current.runner === "desktop"
+            ? "The desktop app runs the compaction."
+            : "Stop this server and run the doctor command instead.",
+      } satisfies StartDatabaseCompactionResult;
+    }
+    if (current.busy.length > 0) return { started: false, detail: current.busy.join(" ") };
+    return yield* startServiceCompaction({
+      stateDir: input.config.stateDir,
+      baseDir: input.config.baseDir,
+      devUrl: input.config.devUrl?.href ?? null,
+      now: new Date(),
+    });
+  });
+  return { status, start };
+}
