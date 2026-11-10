@@ -1,4 +1,5 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
+import { makeConnectionVisibility } from "./connectionVisibility.ts";
 import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
 import { readNoticeableStall } from "../observability/NoticeableStall.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
@@ -1538,6 +1539,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       workspaceContentSearch,
       workspaceFileSystem,
       clientWorkspaceUse,
+      connectionVisibility: makeConnectionVisibility(),
       fileSystem,
       workspaceAccessPolicy,
       sourceControlDiscovery,

@@ -357,8 +357,9 @@ import {
 import {
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalDetachOutputInput,
+  TerminalStreamItem,
   TerminalError,
-  TerminalWireEvent,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -599,6 +600,7 @@ export const WS_METHODS = {
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
+  terminalDetachOutput: "terminal.detachOutput",
 
   // Server meta
   serverGetConfig: "server.getConfig",
@@ -636,6 +638,7 @@ export const WS_METHODS = {
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
   serverNoteClientInteraction: "server.noteClientInteraction",
+  serverSetConnectionVisibility: "server.setConnectionVisibility",
   serverSubscribeNodeUpdate: "server.subscribeNodeUpdate",
   serverCheckNodeUpdate: "server.checkNodeUpdate",
   serverUpdateNode: "server.updateNode",
@@ -1173,6 +1176,21 @@ export const WsServerNoteClientInteractionRpc = Rpc.make(WS_METHODS.serverNoteCl
   success: EmptyRpcResult,
   error: AuthRpcError,
 });
+
+/**
+ * The client of this connection went to the background (a hidden tab, a minimized window, a phone
+ * about to suspend) or came back. In the background the node pauses scoped terminal output for the
+ * connection and may send the thread list less often; on return the client's resume paths catch
+ * up. Only for nodes whose terminal event stream acknowledged scoped output (`outputScope`).
+ */
+export const WsServerSetConnectionVisibilityRpc = Rpc.make(
+  WS_METHODS.serverSetConnectionVisibility,
+  {
+    payload: Schema.Struct({ visibility: Schema.Literals(["foreground", "background"]) }),
+    success: EmptyRpcResult,
+    error: AuthRpcError,
+  },
+);
 
 export const WsServerSubscribeNodeUpdateRpc = Rpc.make(WS_METHODS.serverSubscribeNodeUpdate, {
   payload: Schema.Struct({}),
@@ -2394,6 +2412,12 @@ export const WsTerminalCloseRpc = Rpc.make(WS_METHODS.terminalClose, {
   error: Schema.Union([TerminalError, AuthRpcError]),
 });
 
+export const WsTerminalDetachOutputRpc = Rpc.make(WS_METHODS.terminalDetachOutput, {
+  payload: TerminalDetachOutputInput,
+  success: EmptyRpcResult,
+  error: AuthRpcError,
+});
+
 export const WsOrchestrationDispatchCommandRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.dispatchCommand,
   {
@@ -2590,7 +2614,7 @@ export const WsContextHandoffReadExportChunkRpc = Rpc.make(
 
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: TerminalSubscribeEventsInput,
-  success: TerminalWireEvent,
+  success: TerminalStreamItem,
   error: Schema.Union([AuthRpcError, TerminalSubscriptionResyncError]),
   stream: true,
 });
@@ -2840,6 +2864,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerNoteClientInteractionRpc
+  | typeof WsServerSetConnectionVisibilityRpc
   | typeof WsServerSubscribeNodeUpdateRpc
   | typeof WsServerCheckNodeUpdateRpc
   | typeof WsServerUpdateNodeRpc
@@ -2996,6 +3021,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsTerminalClearRpc
   | typeof WsTerminalRestartRpc
   | typeof WsTerminalCloseRpc
+  | typeof WsTerminalDetachOutputRpc
   | typeof WsSubscribeTerminalEventsRpc
   | typeof WsSubscribeServerConfigRpc
   | typeof WsSubscribeServerLifecycleRpc
@@ -3089,6 +3115,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
   WsServerNoteClientInteractionRpc,
+  WsServerSetConnectionVisibilityRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsServerCheckNodeUpdateRpc,
   WsServerUpdateNodeRpc,
@@ -3245,6 +3272,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
   WsTerminalCloseRpc,
+  WsTerminalDetachOutputRpc,
   WsSubscribeTerminalEventsRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,

@@ -1,17 +1,21 @@
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   createTerminalEventReconciler,
+  createTerminalInputCoalescer,
   isTerminalReplayEvent,
   selectPendingTerminalEventEntries,
   selectTerminalEventEntries,
   selectTerminalEventEntriesAfterSnapshot,
   type TerminalEventEntry,
+  type TerminalHistoryMirrorCache,
+  type TerminalInputCoalescer,
   type TerminalStateStoreState,
 } from "@ryco/client-runtime/state/terminal";
 import type {
   EnvironmentApi,
   EnvironmentId,
   ScopedThreadRef,
+  TerminalCursor,
   TerminalEvent,
   TerminalSessionSnapshot,
   ThreadId,
@@ -32,7 +36,7 @@ import {
   TERMINAL_PASTE_UNAVAILABLE,
   type SafeTerminalError,
 } from "./terminalErrors";
-import { chunkTerminalInput, planTerminalPaste, terminalControlSequence } from "./terminalInput";
+import { planTerminalPaste, terminalControlSequence } from "./terminalInput";
 import {
   acknowledgeTerminalRendererOutput,
   clampTerminalDimensions,
@@ -108,6 +112,11 @@ export interface TerminalControllerPorts {
     readonly subscribe: (listener: (foreground: boolean) => void) => () => void;
   };
   readonly createTerminalId: () => string;
+  /**
+   * The scrollback this device showed of each terminal, kept across screens: an open asks only
+   * for the output after its cursor. Without it every open downloads the full history.
+   */
+  readonly historyMirrors?: TerminalHistoryMirrorCache;
   readonly scheduleFrame: (callback: () => void) => void;
   readonly setTimer: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer: (handle: unknown) => void;
@@ -169,6 +178,10 @@ interface Surface {
   bracketedPaste: boolean;
   dimensions: TerminalDimensions | null;
   writeChain: Promise<void>;
+  /** Typed input of one connection fence; keys typed while a write is unanswered merge. */
+  input: { readonly fence: OperationFence; readonly coalescer: TerminalInputCoalescer } | null;
+  /** The next open asks for the full history: the kept copy no longer matches a delta. */
+  openFull: boolean;
 }
 
 /** What every asynchronous answer is checked against before it may change anything. */
@@ -233,6 +246,8 @@ export class TerminalController {
 
   #attached = false;
   #suspended = false;
+  /** Releases of the sessions whose output this screen holds (`attachOutput`). */
+  readonly #outputHolds = new Map<string, () => void>();
   readonly #listeners = new Set<() => void>();
   #view: TerminalControllerView | null = null;
 
@@ -274,6 +289,10 @@ export class TerminalController {
     this.#observeStore(false);
     this.#invalidate();
     this.#frameOutput.clear();
+    // Detached, the screen neither observes the store nor holds the output: a later attach
+    // re-hydrates (with the delta after the kept scrollback) instead of trusting the buffer.
+    for (const surface of this.#surfaces.values()) surface.hydrated = false;
+    this.#syncOutputHolds();
   };
 
   #stopLifecycle: (() => void) | null = null;
@@ -516,7 +535,7 @@ export class TerminalController {
   readonly sendKeys = (data: string): void => {
     const terminalId = this.#activeTerminalId();
     if (terminalId === null) return;
-    void this.#sendInput(terminalId, this.#consumeControl(data));
+    this.#sendInput(terminalId, this.#consumeControl(data));
     this.focus();
   };
 
@@ -648,6 +667,9 @@ export class TerminalController {
       surface.status ?? this.#storeStatus(surface.terminalId),
       event,
     );
+    if (event.type === "output" || event.type === "cleared") {
+      this.#ports.historyMirrors?.apply(this.#mirrorKey(surface.terminalId), event);
+    }
     switch (event.type) {
       case "output":
         this.#enqueueOutput(surface.terminalId, event.data);
@@ -707,6 +729,13 @@ export class TerminalController {
     this.#opening = opening;
     this.#changed();
     const dimensions = surface.dimensions;
+    // Held before the open, so the node attaches the output ahead of its snapshot.
+    this.#syncOutputHolds();
+    // The scrollback kept from an earlier screen: only the output after it comes back.
+    const sinceCursor = surface.openFull
+      ? undefined
+      : this.#ports.historyMirrors?.cursorFor(this.#mirrorKey(terminalId));
+    surface.openFull = false;
     void fence.api.terminal
       .open({
         threadId: this.#threadRef.threadId,
@@ -716,11 +745,12 @@ export class TerminalController {
         ...(runtimeEnv ? { env: { ...runtimeEnv } } : {}),
         cols: dimensions.cols,
         rows: dimensions.rows,
+        ...(sinceCursor ? { sinceCursor } : {}),
       })
       .then(
         (snapshot) => {
           if (!this.#fenceHolds(fence) || this.#rendererPhase !== "ready") return;
-          this.#hydrate(surface, snapshot);
+          this.#hydrate(surface, snapshot, sinceCursor);
         },
         (failure: unknown) => {
           if (this.#fenceHolds(fence)) this.#setError(safeTerminalError(failure));
@@ -734,7 +764,24 @@ export class TerminalController {
       });
   }
 
-  #hydrate(surface: Surface, snapshot: TerminalSessionSnapshot): void {
+  #hydrate(
+    surface: Surface,
+    snapshot: TerminalSessionSnapshot,
+    sinceCursor?: TerminalCursor,
+  ): void {
+    const mirrors = this.#ports.historyMirrors;
+    const history = mirrors
+      ? mirrors.hydrate(this.#mirrorKey(surface.terminalId), snapshot, sinceCursor)
+      : snapshot.history;
+    if (history === null) {
+      // A delta for scrollback this device no longer keeps: ask again for all of it.
+      surface.openFull = true;
+      surface.hydrated = false;
+      // Queued, not requested: the open that brought this answer still counts as in flight.
+      this.#pendingOpen.add(surface.terminalId);
+      this.#drainOpen();
+      return;
+    }
     const hydration = ++this.#hydrationCounter;
     surface.snapshot = snapshot;
     surface.reconciler.reset(snapshot);
@@ -749,7 +796,7 @@ export class TerminalController {
         type: "hydrate",
         terminalId: surface.terminalId,
         hydration,
-        history: boundTerminalHistory(snapshot.history),
+        history: boundTerminalHistory(history),
       })
     ) {
       this.#failRenderer();
@@ -827,7 +874,7 @@ export class TerminalController {
   // --- Input -----------------------------------------------------------------------
 
   #onRendererInput(terminalId: string, data: string): void {
-    void this.#sendInput(terminalId, this.#consumeControl(data));
+    this.#sendInput(terminalId, this.#consumeControl(data));
   }
 
   #consumeControl(data: string): string {
@@ -837,28 +884,43 @@ export class TerminalController {
     return terminalControlSequence(data) ?? data;
   }
 
-  #sendInput(terminalId: string, data: string): Promise<void> {
+  #sendInput(terminalId: string, data: string): void {
     const surface = this.#surfaces.get(terminalId);
     const fence = this.#fence();
-    if (data.length === 0 || !surface || fence === null || !this.#isWritable(terminalId)) {
-      return Promise.resolve();
+    if (data.length === 0 || !surface || fence === null || !this.#isWritable(terminalId)) return;
+    this.#inputFor(surface, fence).push(data);
+  }
+
+  /**
+   * One coalescer per session and connection fence: keys typed while a write is unanswered
+   * leave together with the next write, in order behind any paste. Input of an older fence is
+   * dropped when its turn comes, as before.
+   */
+  #inputFor(surface: Surface, fence: OperationFence): TerminalInputCoalescer {
+    const current = surface.input;
+    if (
+      current !== null &&
+      current.fence.generation === fence.generation &&
+      current.fence.api === fence.api
+    ) {
+      return current.coalescer;
     }
-    const chunks = chunkTerminalInput(data);
-    return this.#enqueueWrite(surface, async () => {
-      for (const chunk of chunks) {
-        if (!this.#fenceHolds(fence)) return;
-        try {
+    const coalescer = createTerminalInputCoalescer({
+      send: (data) =>
+        this.#enqueueWrite(surface, async () => {
+          if (!this.#fenceHolds(fence)) return;
           await fence.api.terminal.write({
             threadId: this.#threadRef.threadId,
-            terminalId,
-            data: chunk,
+            terminalId: surface.terminalId,
+            data,
           });
-        } catch (failure) {
-          if (this.#fenceHolds(fence)) this.#setError(safeTerminalError(failure));
-          return;
-        }
-      }
+        }),
+      onError: (failure) => {
+        if (this.#fenceHolds(fence)) this.#setError(safeTerminalError(failure));
+      },
     });
+    surface.input = { fence, coalescer };
+    return coalescer;
   }
 
   /** Input to one session is strictly ordered: each write waits for the one before it. */
@@ -956,6 +1018,7 @@ export class TerminalController {
     const store = this.#ports.store.getState();
     store.closeTerminal(this.#threadRef, terminalId);
     store.clearTerminalEventHistory(this.#threadRef, terminalId);
+    this.#ports.historyMirrors?.delete(this.#mirrorKey(terminalId));
     this.#post({ type: "dispose", terminalId });
     this.#surfaces.delete(terminalId);
     this.#pendingOpen.delete(terminalId);
@@ -1030,6 +1093,8 @@ export class TerminalController {
       bracketedPaste: false,
       dimensions: null,
       writeChain: Promise.resolve(),
+      input: null,
+      openFull: false,
     };
     this.#surfaces.set(terminalId, created);
     return created;
@@ -1178,7 +1243,44 @@ export class TerminalController {
     );
   }
 
+  #mirrorKey(terminalId: string): string {
+    return `${this.#threadKey}\u0000${terminalId}`;
+  }
+
+  /**
+   * Holds the output of the sessions this screen shows: the active one and every renderer still
+   * hydrated (a quick switch back). Nothing while detached or in the background; a re-hydration
+   * then asks for the delta after the kept scrollback. Without a connection the holds stay.
+   */
+  #syncOutputHolds(): void {
+    const api = this.#inputs.api;
+    const wanted = new Set<string>();
+    if (this.#attached && !this.#suspended) {
+      const active = this.#activeTerminalId();
+      if (active !== null) wanted.add(active);
+      for (const surface of this.#surfaces.values()) {
+        if (surface.hydrated || surface.pendingHydration !== null) wanted.add(surface.terminalId);
+      }
+    }
+    // Holds are kept per environment, so they carry over to a replacing connection.
+    if (api?.terminal.attachOutput) {
+      for (const terminalId of wanted) {
+        if (this.#outputHolds.has(terminalId)) continue;
+        this.#outputHolds.set(
+          terminalId,
+          api.terminal.attachOutput({ threadId: this.#threadRef.threadId, terminalId }),
+        );
+      }
+    }
+    for (const [terminalId, release] of this.#outputHolds) {
+      if (wanted.has(terminalId)) continue;
+      this.#outputHolds.delete(terminalId);
+      release();
+    }
+  }
+
   #changed(): void {
+    this.#syncOutputHolds();
     this.#view = null;
     for (const listener of [...this.#listeners]) listener();
   }

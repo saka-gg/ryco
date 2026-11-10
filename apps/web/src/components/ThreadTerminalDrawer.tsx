@@ -2,6 +2,7 @@ import { usePaneEffect } from "./chat/PaneFocus";
 import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
+  createTerminalInputCoalescer,
   createTerminalReplayGate,
   isTerminalReplayEvent,
   isTerminalSnapshotDeltaFor,
@@ -83,6 +84,7 @@ import {
 } from "../terminalStateStore";
 import {
   rememberTerminalDimensions,
+  returnPreparedTerminalOpen,
   takePreparedTerminalOpen,
   terminalLaunchKey,
   type TerminalDimensions,
@@ -391,6 +393,9 @@ export function TerminalViewport({
     const localApi = readLocalApi();
     if (!api || !localApi) return;
     const snippetRequest = terminalSnippetBroker.read({ threadRef, terminalId });
+    // Held while this pane shows the terminal: a node that scopes output sends it only then, and
+    // every open below attaches it before taking its snapshot.
+    const releaseOutput = api.terminal.attachOutput?.({ threadId, terminalId }) ?? null;
     const viewKey = terminalViewCacheKey(environmentId, threadId, terminalId);
     const launchKey = terminalLaunchKey({ cwd, worktreePath, runtimeEnv });
     // A snippet insertion tracks parse progress from a fresh hydration.
@@ -644,18 +649,20 @@ export function TerminalViewport({
       },
     });
 
+    // Keys typed while a write is unanswered leave together with the next write.
+    const input = createTerminalInputCoalescer({
+      send: (data) => api.terminal.write({ threadId, terminalId, data }),
+      onError: (err) =>
+        writeBufferedSystemMessage(
+          terminal,
+          err instanceof Error ? err.message : "Terminal write failed",
+        ),
+    });
     const inputDisposable = terminal.onData((data) => {
       if (inputBlocked()) return;
       // Replayed output already had its queries answered (or timed out) when it was live.
       if (replayGate.dropsData(data)) return;
-      void api.terminal
-        .write({ threadId, terminalId, data })
-        .catch((err) =>
-          writeBufferedSystemMessage(
-            terminal,
-            err instanceof Error ? err.message : "Terminal write failed",
-          ),
-        );
+      input.push(data);
     });
 
     const selectionDisposable = terminal.onSelectionChange(() => {
@@ -870,6 +877,12 @@ export function TerminalViewport({
     let openGeneration = 0;
     /** An open asked for the history after `appliedCursor`; the view holds still until it answers. */
     let awaitingHistoryDelta = false;
+    /** A full open still in flight; handed to the next mount if this one ends before it answers. */
+    let fullOpenInFlight: {
+      readonly promise: Promise<TerminalSessionSnapshot>;
+      readonly dimensions: TerminalDimensions;
+      readonly createdAt: number;
+    } | null = null;
     const openTerminal = async (options?: { readonly resync?: boolean }) => {
       const generation = ++openGeneration;
       try {
@@ -895,7 +908,8 @@ export function TerminalViewport({
           rows: activeTerminal.rows,
         };
         lastSentDimensionsRef.current = openDimensions;
-        const snapshot = await (prepared?.promise ??
+        const opening =
+          prepared?.promise ??
           api.terminal.open({
             threadId,
             terminalId,
@@ -905,8 +919,18 @@ export function TerminalViewport({
             ...(runtimeEnv ? { env: runtimeEnv } : {}),
             ...(snippetRequest ? { requireCurrentWorkspace: true } : {}),
             ...(sinceCursor ? { sinceCursor } : {}),
-          }));
+          });
+        fullOpenInFlight =
+          sinceCursor === undefined && !snippetRequest
+            ? {
+                promise: opening,
+                dimensions: openDimensions,
+                createdAt: prepared?.createdAt ?? Date.now(),
+              }
+            : null;
+        const snapshot = await opening;
         if (disposed || generation !== openGeneration) return;
+        fullOpenInFlight = null;
         awaitingHistoryDelta = false;
         hydratedSnapshot = snapshot;
         const historyDelta = isTerminalSnapshotDeltaFor(snapshot, sinceCursor);
@@ -966,6 +990,7 @@ export function TerminalViewport({
         }
       } catch (err) {
         if (disposed || generation !== openGeneration) return;
+        fullOpenInFlight = null;
         // A failed resync or delta open keeps applying live events over the
         // scrollback the view already shows, starting with those it held while
         // the open was in flight (an idle shell may send nothing to flush them).
@@ -989,10 +1014,14 @@ export function TerminalViewport({
     // is current before the open round trip returns. This runs after openTerminal
     // exists: a buffered replay event re-hydrates through it.
     if (cachedView) {
-      const catchUp = resolveTerminalViewCatchUp(
-        readTerminalEventEntries(),
-        cachedView.lastAppliedTerminalEventId,
-      );
+      // A node that scopes output sent none for this terminal while its view was detached, so
+      // the buffer cannot bring the view current; the delta open below does.
+      const catchUp = api.terminal.isOutputScoped?.()
+        ? null
+        : resolveTerminalViewCatchUp(
+            readTerminalEventEntries(),
+            cachedView.lastAppliedTerminalEventId,
+          );
       if (catchUp !== null) {
         // Output that arrived while the view was detached is not live either.
         replayGate.replay(() => {
@@ -1119,6 +1148,18 @@ export function TerminalViewport({
       lastAppliedTerminalEventIdRef.current = 0;
       lastSentDimensionsRef.current = null;
       unsubscribeTerminalEvents();
+      // Unmounted before the full open answered: the next mount takes the same answer. Handed
+      // back before this pane's hold goes, so the output stays held from the open's snapshot on.
+      if (fullOpenInFlight && !keepView) {
+        returnPreparedTerminalOpen({
+          environmentId,
+          threadId,
+          terminalId,
+          launchKey,
+          ...fullOpenInFlight,
+        });
+      }
+      releaseOutput?.();
       window.clearTimeout(fitTimer);
       inputDisposable.dispose();
       selectionDisposable.dispose();

@@ -68,6 +68,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
         rpcClient.terminal.onEvent((event) => {
           if (!isUnknownUnionMember(event)) callback(event);
         }),
+      attachOutput: (ref) => rpcClient.terminal.attachOutput(ref),
+      isOutputScoped: () => rpcClient.terminal.isOutputScoped(),
     },
     projects: {
       listEntries: rpcClient.projects.listEntries,

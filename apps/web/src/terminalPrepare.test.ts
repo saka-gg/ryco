@@ -10,6 +10,7 @@ import {
   rememberTerminalDimensions,
   resetPreparedTerminalOpensForTests,
   resolveThreadTerminalLaunch,
+  returnPreparedTerminalOpen,
   takePreparedTerminalOpen,
   TERMINAL_DIMENSIONS_STORAGE_KEY,
   terminalLaunchKey,
@@ -274,5 +275,65 @@ describe("terminal dimensions", () => {
   it("ignores sizes the server would reject", () => {
     rememberTerminalDimensions("drawer", { cols: 0, rows: 24 });
     expect(readLastTerminalDimensions("drawer")).toEqual({ cols: 80, rows: 24 });
+  });
+});
+
+describe("returnPreparedTerminalOpen", () => {
+  const launchKey = terminalLaunchKey({ cwd: "/repo", worktreePath: null, runtimeEnv: undefined });
+
+  it("hands an unanswered full open to the next mount, holding the output meanwhile", async () => {
+    const holds: string[] = [];
+    const releases: string[] = [];
+    const open = vi.fn();
+    vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue({
+      terminal: {
+        open,
+        attachOutput: (ref: { terminalId: string }) => {
+          holds.push(ref.terminalId);
+          return () => releases.push(ref.terminalId);
+        },
+      },
+    } as unknown as EnvironmentApi);
+    const promise = Promise.resolve({ history: "full", status: "running" } as never);
+    returnPreparedTerminalOpen({
+      environmentId,
+      threadId,
+      terminalId: "default",
+      launchKey,
+      dimensions: { cols: 80, rows: 24 },
+      promise,
+      createdAt: Date.now(),
+    });
+    expect(holds).toEqual(["default"]);
+    const taken = takePreparedTerminalOpen({
+      environmentId,
+      threadId,
+      terminalId: "default",
+      launchKey,
+    });
+    // The same answer, not a second open.
+    expect(taken?.promise).toBe(promise);
+    expect(taken?.dimensions).toEqual({ cols: 80, rows: 24 });
+    expect(open).not.toHaveBeenCalled();
+    // The taking terminal holds the output itself.
+    expect(releases).toEqual(["default"]);
+  });
+
+  it("does not hand back an open older than a prepared open may be", () => {
+    vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue({
+      terminal: { open: vi.fn() },
+    } as unknown as EnvironmentApi);
+    returnPreparedTerminalOpen({
+      environmentId,
+      threadId,
+      terminalId: "default",
+      launchKey,
+      dimensions: { cols: 80, rows: 24 },
+      promise: new Promise(() => undefined),
+      createdAt: Date.now() - 10_000,
+    });
+    expect(
+      takePreparedTerminalOpen({ environmentId, threadId, terminalId: "default", launchKey }),
+    ).toBeNull();
   });
 });

@@ -153,7 +153,11 @@ describe("terminal subscription bootstrap", () => {
       },
     } as unknown as WsRpcContext);
     return {
-      stream: handlers[WS_METHODS.subscribeTerminalEvents](input),
+      // Unscoped subscriptions carry session events only.
+      stream: handlers[WS_METHODS.subscribeTerminalEvents](input) as Stream.Stream<
+        TerminalEvent,
+        TerminalSubscriptionResyncError
+      >,
       unsubscribed: () => unsubscribed,
     };
   };
@@ -383,7 +387,10 @@ describe("terminal subscription batching", () => {
       },
     } as unknown as WsRpcContext);
     return {
-      stream: handlers[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }),
+      stream: handlers[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }) as Stream.Stream<
+        TerminalEvent,
+        TerminalSubscriptionResyncError
+      >,
       emit: (next: TerminalEvent) => listener(next),
     };
   };

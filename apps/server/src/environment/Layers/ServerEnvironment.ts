@@ -120,6 +120,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       localTasks: true,
       nodeSelfUpdate: true,
       terminalWriteRequireIdle: true,
+      terminalOutputScope: true,
       threadFork: true,
       threadForkCarried: true,
       conversationRevert: true,

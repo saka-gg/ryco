@@ -1,6 +1,7 @@
 export * from "./atomRegistry.ts";
 export * from "./attachmentRead.ts";
 export * from "./checkpointDiffStore.ts";
+export * from "./clientVisibility.ts";
 export * from "./invalidation.ts";
 export * from "./keyedQuery.ts";
 export * from "./newerNodeState.ts";

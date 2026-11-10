@@ -270,6 +270,7 @@ import type {
   TerminalCloseInput,
   TerminalEvent,
   TerminalOpenInput,
+  TerminalRef,
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
@@ -1675,6 +1676,17 @@ export interface EnvironmentApi {
     restart: (input: typeof TerminalRestartInput.Encoded) => Promise<TerminalSessionSnapshot>;
     close: (input: typeof TerminalCloseInput.Encoded) => Promise<void>;
     onEvent: (callback: (event: TerminalEvent) => void) => () => void;
+    /**
+     * Shows a terminal until the returned release: its output keeps reaching this client from a
+     * node that scopes output, and `open` attaches it before taking the snapshot. Absent on APIs
+     * without a live connection.
+     */
+    attachOutput?: (ref: TerminalRef) => () => void;
+    /**
+     * Whether the node sends this connection output only for held terminals, so a client buffer
+     * misses the output of terminals nobody held. False for older nodes, which send all of it.
+     */
+    isOutputScoped?: () => boolean;
   };
   projects: {
     listEntries: (input: ProjectListEntriesInput) => Promise<ProjectListEntriesResult>;
