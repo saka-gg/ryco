@@ -12,6 +12,7 @@ import {
   scheduleModelPicker,
   schedulePolicyModel,
   scheduleRepeatOf,
+  scheduleShowsModelPicker,
   scheduleTokenMode,
   withCalendarChoice,
   withRepeat,
@@ -363,5 +364,16 @@ describe("the phone's schedule editor", () => {
     expect(withRepeat(renamed, "webhook").kind).toBe("webhook");
     // A switch back to times starts from the draft's kept time fields.
     expect(withRepeat(renamed, "interval").kind).toBe("fixed-interval");
+  });
+});
+
+describe("the model pill of a heartbeat", () => {
+  it("is hidden, because its runs use the chat's model, unless the stored model needs fixing", () => {
+    const heartbeat = { target: { threadId: "thread-1" } } as unknown as Parameters<
+      typeof scheduleShowsModelPicker
+    >[0];
+    expect(scheduleShowsModelPicker({ target: null }, undefined)).toBe(true);
+    expect(scheduleShowsModelPicker(heartbeat, undefined)).toBe(false);
+    expect(scheduleShowsModelPicker(heartbeat, "Pick a model.")).toBe(true);
   });
 });

@@ -199,6 +199,21 @@ export function schedulePolicyModel(
   });
 }
 
+/** Said where the model pill would be, for a heartbeat: its runs use the chat's own model. */
+export const HEARTBEAT_MODEL_HINT = "Each run uses the chat's model";
+
+/**
+ * Whether the editor offers the model pill. A heartbeat's runs are turns of its chat, which
+ * use the chat's model, so it shows none, unless the stored model fails validation: then the
+ * pill stays so the schedule can still be saved.
+ */
+export function scheduleShowsModelPicker(
+  draft: Pick<ScheduleDraft, "target">,
+  modelError: string | null | undefined,
+): boolean {
+  return draft.target === null || (modelError !== undefined && modelError !== null);
+}
+
 /**
  * The token mode the Tokens group shows: the schedule's own, else the machine's default, which
  * a run without one starts with. Picking that default again keeps the schedule without one.

@@ -52,7 +52,9 @@ import { ComposerModelControls } from "../threads/ComposerModelControls";
 import { isComposerFooterCompact } from "../threads/composerFooterModel";
 import {
   scheduleEditorOpening,
+  HEARTBEAT_MODEL_HINT,
   scheduleModelPicker,
+  scheduleShowsModelPicker,
   schedulePolicyModel,
   scheduleRepeatOf,
   scheduleTokenMode,
@@ -302,6 +304,7 @@ function Editor(props: {
   const dirty =
     props.opening.initialKey === "" || scheduleDraftKey(draft) !== props.opening.initialKey;
   const heartbeat = draft.target !== null;
+  const showModelPicker = scheduleShowsModelPicker(draft, validation.errors.model);
   const modelError = attempted ? (validation.errors.model ?? null) : null;
   const otherErrors = [validation.errors.prompt, validation.errors.limit].filter(
     (message): message is string => typeof message === "string" && message.length > 0,
@@ -439,7 +442,9 @@ function Editor(props: {
         >
           <View className="min-w-0 flex-1 flex-row items-center" style={{ gap: 2 }}>
             <ComposerModelControls
-              modelPicker={scheduleModelPicker(providers, draft.modelSelection)}
+              modelPicker={
+                showModelPicker ? scheduleModelPicker(providers, draft.modelSelection) : null
+              }
               modelSelection={draft.modelSelection}
               onSelectModel={(selection) => change(withScheduleModel(draft, providers, selection))}
               policy={schedulePolicyModel(draft, providers)}
@@ -455,6 +460,14 @@ function Editor(props: {
               prompt={draft.prompt}
               onClose={noop}
             />
+            {showModelPicker ? null : (
+              <Text
+                numberOfLines={1}
+                className="ms-1.5 shrink text-[12px] text-foreground-tertiary"
+              >
+                {HEARTBEAT_MODEL_HINT}
+              </Text>
+            )}
           </View>
           {draft.prompt.length > 0 ? (
             <Text className="pe-1.5 text-[11px] text-foreground-tertiary">
