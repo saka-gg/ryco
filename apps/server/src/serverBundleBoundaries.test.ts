@@ -813,7 +813,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // compaction (3.6 KB), attachment previews (6.5 KB), event intake (5.1 KB), files and diffs
     // (3.5 KB), forge and git polling (1.9 KB), the config stream (1.2 KB), push excerpts
     // (0.9 KB), the phone lifecycle (0.2 KB).
-    expect(bytes).toBeLessThan(7_309_000);
+    // 7.314 MB on 2026-11-11 with automations without a project (+4.7 KB, measured 7.312885 MB):
+    // the "No project" scope's checks in the validator, the executor's chat-project step, the
+    // MCP tools' scope mapping, the centre's scope read and the decider's reserved id.
+    expect(bytes).toBeLessThan(7_314_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
