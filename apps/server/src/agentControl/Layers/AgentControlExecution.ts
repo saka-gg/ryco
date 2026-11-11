@@ -17,6 +17,7 @@ import {
   AgentControlOperationId,
   CommandId,
   MessageId,
+  ProjectId,
   ThreadId,
   WorktreeId,
   type AgentControlExecutionReceipt,
@@ -90,6 +91,10 @@ import {
   isPastAgentControlClientExecutionDeadline,
 } from "../projectCopyControl.ts";
 import { ProjectImports } from "../../projectCopy/Services/ProjectImports.ts";
+import { ChatFolders } from "../../project/chatFolders.ts";
+import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { prepareChatProject } from "../../ws/context/chatBootstrap.ts";
+import { isChatProject, isChatsAutomationScope } from "@ryco/shared/projectKind";
 
 const TARGET_WAIT_TIMEOUT_MS = 60_000;
 /** Minimum spacing of woken target checks: the interval of the poll the waits replaced. */
@@ -203,6 +208,10 @@ const branchFor = (operationId: AgentControlOperationId, index: number, prefix: 
     `agent-control-${operationSlug(operationId)}-${index + 1}`,
     prefix,
   );
+
+/** The chat without a project a "No project" automation's run starts in. */
+const chatProjectIdFor = (operationId: AgentControlOperationId): ProjectId =>
+  ProjectId.make(`chat-agent-control-${operationSlug(operationId)}`);
 
 const messageIdFor = (operationId: AgentControlOperationId, step: string): MessageId =>
   MessageId.make(`${AGENT_CONTROL_MESSAGE_ID_PREFIX}${operationSlug(operationId)}-${step}`);
@@ -340,6 +349,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const deviceService = yield* Effect.serviceOption(DeviceService);
     const localTasks = yield* Effect.serviceOption(LocalTaskService);
     const projectImports = yield* Effect.serviceOption(ProjectImports);
+    const chatFolders = yield* Effect.serviceOption(ChatFolders);
+    const projectRecords = yield* Effect.serviceOption(ProjectionProjectRepository);
     // Required, not optional: provided beneath the runtime services (`server.ts`), so a layer
     // placed where execution cannot see it fails to compile instead of failing every watch.
     const pullRequestWatches = yield* PullRequestWatchService;
@@ -1258,6 +1269,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               messageId: (step) => messageIdFor(operation.operationId, step),
               commandId: (step) => commandIdFor(operation.operationId, step),
               loadThread,
+              isChatProjectId: (projectId) =>
+                projections
+                  .getProjectShellById(projectId)
+                  .pipe(Effect.map((project) => isChatProject(Option.getOrUndefined(project)))),
               queuedIn,
               coalesced: Effect.asVoid(
                 checkpoint(appendStep(operation.state, "automation-coalesced")),
@@ -1270,10 +1285,21 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         }
 
         if (proposal.plan.kind === "createThreads" || proposal.plan.kind === "automationRun") {
+          // A "No project" automation's run starts a new chat without a project: its own
+          // folder and `chat` project, created first (a replay reuses them).
+          const chatProjectId =
+            proposal.plan.kind === "automationRun" &&
+            isChatsAutomationScope(proposal.plan.execution.projectId)
+              ? chatProjectIdFor(operation.operationId)
+              : null;
           const entries =
             proposal.plan.kind === "createThreads"
               ? proposal.plan.entries
-              : [proposal.plan.execution];
+              : [
+                  chatProjectId === null
+                    ? proposal.plan.execution
+                    : { ...proposal.plan.execution, projectId: chatProjectId },
+                ];
           const plannedThreadIds = entries.map((_, index) =>
             threadIdFor(operation.operationId, index),
           );
@@ -1304,13 +1330,44 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               ? proposal.principal.threadId
               : null;
 
-          const projects = yield* readProjectShells(projections);
           for (const threadId of plannedThreadIds) {
             const existing = yield* projections.getThreadShellById(threadId);
             if (Option.isSome(existing)) {
               return yield* Effect.fail(new Error("Planned thread identifier is unavailable."));
             }
           }
+          if (chatProjectId !== null) {
+            yield* validator.revalidateExecution(proposal);
+            yield* prepareChatProject(
+              {
+                chatFolders: Option.getOrUndefined(chatFolders),
+                projects: projections,
+                projectRecords: Option.getOrUndefined(projectRecords),
+                dispatch: engine.dispatch,
+                serverCommandId: (tag) => commandIdFor(operation.operationId, tag),
+              },
+              {
+                chat: { projectId: chatProjectId, titleSeed: entries[0]!.title },
+                createThread: { worktreePath: null, createdAt: new Date().toISOString() },
+              },
+            ).pipe(Effect.mapError((error) => new Error(error.message)));
+            yield* checkpoint(
+              appendStep(
+                {
+                  ...operation.state,
+                  resources: {
+                    ...operation.state.resources,
+                    projectIds: unique([
+                      ...(operation.state.resources.projectIds ?? []),
+                      chatProjectId,
+                    ]),
+                  },
+                },
+                "chat-project-prepared",
+              ),
+            );
+          }
+          const projects = yield* readProjectShells(projections);
           const prepared = [] as Array<{
             readonly index: number;
             readonly project: (typeof projects)[number];

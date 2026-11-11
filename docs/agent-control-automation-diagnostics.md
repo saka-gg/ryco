@@ -30,6 +30,17 @@ open chat of the automation's project, checked when the definition is proposed, 
 a run whose chat was archived, deleted or moved fails (and counts toward the unattended pause).
 The run creates no thread, so nothing undoes or archives the chat.
 
+**Automations without a project** use the node's "No project" scope in place of a project id
+(`AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID`, `ryco:chats`; the decider refuses it as a project's
+id). Nodes that take them say `chatAutomations: true` in their server config; the Automations
+dialog lists them as "No project". Each run of one without a `target` starts a new chat without a
+project: the executor allocates a folder under the chats root and creates its `chat` project, then
+the run's thread in it (`envMode` must be `local`, with no `baseRef`). With a `target` the run
+queues into one open chat without a project, as a heartbeat does. Creating or changing one needs
+the node to offer chats at that moment. An agent in a chat without a project names its own project
+and gets this scope; external integrations cannot schedule in it. A run whose chat was turned into
+a project fails like one whose chat moved.
+
 SQLite uniqueness constraints make occurrence claims and active-run creation idempotent across
 concurrent ticks and restart recovery. A revision change or cancellation before proposal
 materialization invalidates the claimed occurrence. Cancellation prevents future proposals and

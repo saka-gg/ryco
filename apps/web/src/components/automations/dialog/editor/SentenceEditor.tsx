@@ -7,6 +7,9 @@
  * A heartbeat runs into one chat instead: "… in [an existing chat] called
  * [Fix CI flakes]".
  *
+ * Without a project each run goes to "… in [a new chat]" (its own folder) or
+ * into one existing chat without a project; there is no checkout or branch.
+ *
  * A webhook schedule has no times: "When its webhook is called, it runs on
  * [This device] in [a new worktree] off [main]".
  *
@@ -18,7 +21,7 @@
 import type { ScheduleDraft } from "@ryco/client-runtime/state/agentControl";
 import type { EnvironmentId, ThreadEnvMode, ThreadId } from "@ryco/contracts";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
-import { FolderIcon, GitForkIcon, MessageSquareIcon } from "lucide-react";
+import { FolderIcon, GitForkIcon, MessageSquareIcon, MessageSquarePlusIcon } from "lucide-react";
 import { useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { DeviceIcon } from "../../../DeviceIcon";
@@ -97,6 +100,8 @@ export interface SentenceEditorProps {
   readonly onDevice: (key: string) => void;
   /** "an existing chat" in the menu, and its chat token; null where the device has no heartbeats. */
   readonly heartbeat: SentenceHeartbeat | null;
+  /** The "No project" scope: runs go to a new chat or an existing chat, never a checkout. */
+  readonly withoutProject: boolean;
   readonly onEnv: (choice: SentenceRunsIn) => void;
   /** The "Runs in" menu closed (the chat list opens after it, focus settled). */
   readonly onEnvClosed: () => void;
@@ -123,15 +128,30 @@ const ENV_ITEMS = [
   },
 ] as const;
 
-const HEARTBEAT_ENV_ITEMS = [
-  ...ENV_ITEMS,
-  {
-    value: "chat",
-    label: "an existing chat",
-    hint: "Each run queues its prompt in one chat, after that chat's own follow-ups.",
-    icon: <MessageSquareIcon aria-hidden="true" />,
-  },
-] as const;
+const EXISTING_CHAT_ITEM = {
+  value: "chat",
+  label: "an existing chat",
+  hint: "Each run queues its prompt in one chat, after that chat's own follow-ups.",
+  icon: <MessageSquareIcon aria-hidden="true" />,
+} as const;
+
+const HEARTBEAT_ENV_ITEMS = [...ENV_ITEMS, EXISTING_CHAT_ITEM] as const;
+
+/** Without a project: a new chat each run (`local`: its own new folder), or one existing chat. */
+const NEW_CHAT_ITEM = {
+  value: "local",
+  label: "a new chat",
+  hint: "Each run starts a new chat without a project, in its own folder.",
+  icon: <MessageSquarePlusIcon aria-hidden="true" />,
+} as const;
+const WITHOUT_PROJECT_ENV_ITEMS = [NEW_CHAT_ITEM] as const;
+const WITHOUT_PROJECT_HEARTBEAT_ENV_ITEMS = [NEW_CHAT_ITEM, EXISTING_CHAT_ITEM] as const;
+
+function envItems(withoutProject: boolean, heartbeat: boolean) {
+  if (withoutProject)
+    return heartbeat ? WITHOUT_PROJECT_HEARTBEAT_ENV_ITEMS : WITHOUT_PROJECT_ENV_ITEMS;
+  return heartbeat ? HEARTBEAT_ENV_ITEMS : ENV_ITEMS;
+}
 
 function Pair(props: {
   readonly hidden?: boolean;
@@ -159,7 +179,7 @@ export function SentenceEditor(props: SentenceEditorProps) {
   const repeat = timed && draft.kind !== "once";
   const heartbeat = props.heartbeat;
   const inChat = draft.target !== null || !!heartbeat?.choosing;
-  const worktree = draft.envMode === "worktree" && !inChat;
+  const worktree = draft.envMode === "worktree" && !inChat && !props.withoutProject;
   const isOpen = (kind: EditorTokenKind) => open?.kind === kind;
   const tokenProps = (kind: EditorTokenKind) => ({
     type: "button" as const,
@@ -361,7 +381,7 @@ export function SentenceEditor(props: SentenceEditorProps) {
           open={isOpen("env")}
           onOpenChange={(next) => props.onOpenChange("env", next)}
           value={draft.target !== null ? "chat" : draft.envMode}
-          items={heartbeat ? HEARTBEAT_ENV_ITEMS : ENV_ITEMS}
+          items={envItems(props.withoutProject, heartbeat !== null)}
           onPick={props.onEnv}
           onClosed={props.onEnvClosed}
           trigger={

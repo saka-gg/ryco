@@ -119,6 +119,12 @@ A chat row's menu has these items:
 - **Copy folder path**.
 - **Turn into project…**.
 
+## Scheduling chats
+
+The Automations dialog's "No project" entry holds schedules that need no project: each run starts
+a new chat without a project (in its own folder, named after the schedule), or runs into one chat
+you pick. See [the automation boundary](agent-control-automation-diagnostics.md).
+
 ## Forking a chat
 
 **Fork from here** on a reply of a chat creates a new chat with its own, empty folder. The new chat

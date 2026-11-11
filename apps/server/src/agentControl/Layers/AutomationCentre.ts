@@ -22,6 +22,8 @@ import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { AutomationHookStore } from "../../automationHooks/Services/AutomationHookStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { agentControlPrincipalScope } from "../principal.ts";
+import { ChatFolders } from "../../project/chatFolders.ts";
+import { isChatsAutomationScope } from "@ryco/shared/projectKind";
 
 /** Schedules per snapshot; above the per-project active limit, which they all fit in. */
 const AUTOMATION_CENTRE_SCHEDULE_LIMIT = 50;
@@ -59,12 +61,20 @@ export const AutomationCentreLive = Layer.effect(
     const projections = yield* ProjectionSnapshotQuery;
     const hookStore = yield* Effect.serviceOption(AutomationHookStore);
     const serverConfig = yield* Effect.serviceOption(ServerConfig);
+    const chatFolders = yield* Effect.serviceOption(ChatFolders);
 
     const checkProject = (
       projectId: Parameters<AutomationCentreShape["snapshot"]>[0]["projectId"],
     ) =>
       Effect.gen(function* () {
         yield* policy.requireEnabled("AutomationCentre");
+        // The "No project" scope exists wherever the node keeps chats; its schedules stay
+        // readable while chats are off (saving one asks for chats again).
+        if (isChatsAutomationScope(projectId)) {
+          if (Option.isNone(chatFolders))
+            return yield* conflict("Chats without a project are not available on this server.");
+          return;
+        }
         const project = yield* projections.getProjectShellById(projectId);
         if (Option.isNone(project)) return yield* conflict("Project is unavailable.");
       });

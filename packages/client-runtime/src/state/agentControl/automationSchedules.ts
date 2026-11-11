@@ -35,6 +35,7 @@ import {
   type AgentControlProposalStatus,
   type AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
+import { isChatsAutomationScope } from "@ryco/shared/projectKind";
 import {
   AUTOMATION_LIMITS,
   DAY_MS,
@@ -816,11 +817,18 @@ export function envWords(mode: ThreadEnvMode): string {
 /** Where a heartbeat's runs go (`execution.target`): one chat, not a new one each time. */
 export const EXISTING_CHAT_WORDS = "an existing chat";
 
-/** Where each run goes: "an existing chat" (a heartbeat), else its new chat's checkout. */
+/** Where a "No project" schedule's runs go when they name no chat: a new chat each time. */
+export const NEW_CHAT_WORDS = "a new chat";
+
+/**
+ * Where each run goes: "an existing chat" (a heartbeat), "a new chat" (a schedule without a
+ * project), else its new chat's checkout.
+ */
 export function runsInWords(
-  execution: Pick<AgentControlAutomationExecutionTemplate, "envMode" | "target">,
+  execution: Pick<AgentControlAutomationExecutionTemplate, "projectId" | "envMode" | "target">,
 ): string {
-  return execution.target === undefined ? envWords(execution.envMode) : EXISTING_CHAT_WORDS;
+  if (execution.target !== undefined) return EXISTING_CHAT_WORDS;
+  return isChatsAutomationScope(execution.projectId) ? NEW_CHAT_WORDS : envWords(execution.envMode);
 }
 
 const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
@@ -1092,7 +1100,8 @@ function tomorrowAtNine(nowMs: number): number {
 
 /**
  * A fresh draft: repeats every 24 hours from tomorrow 09:00 for 30 days, in a
- * new worktree off `baseRef` (default "main"), accepting edits.
+ * new worktree off `baseRef` (default "main"), accepting edits. Without a
+ * project each run gets a new chat (its own folder), never a worktree.
  */
 export function blankScheduleDraft(input: {
   readonly projectId: ProjectId;
@@ -1108,7 +1117,7 @@ export function blankScheduleDraft(input: {
     prompt: "",
     modelSelection: input.modelSelection,
     runtimeMode: "auto-accept-edits",
-    envMode: "worktree",
+    envMode: isChatsAutomationScope(input.projectId) ? "local" : "worktree",
     baseRef: input.baseRef ?? "main",
     tokenMode: null,
     target: null,

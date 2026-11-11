@@ -24,6 +24,7 @@ import {
 import { AgentControlAutomationId, type ThreadId } from "@ryco/contracts";
 import { AGENT_CONTROL_AUTOMATION_UNATTENDED_FAILURES_MAX } from "@ryco/contracts/agent-control";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
+import { isChatsAutomationScope } from "@ryco/shared/projectKind";
 import { CircleAlertIcon, Repeat2Icon } from "lucide-react";
 import {
   useEffect,
@@ -44,7 +45,7 @@ import { Switch } from "../../../ui/switch";
 import { Textarea } from "../../../ui/textarea";
 import { toastManager } from "../../../ui/toast";
 import type { ProjectAutomationsCheckout } from "../../data/useProjectAutomations";
-import { useProjectChats } from "../../data/useProjectChats";
+import { useScheduleChats } from "../../data/useProjectChats";
 import { PickerRadioRow } from "../../pickers/PickerRadioRow";
 import { RunPreview } from "../../pickers/RunPreview";
 import { DialogButton } from "../dialogControls";
@@ -173,7 +174,9 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
   // A heartbeat is offered where the device takes one; a draft that has one keeps it. Only
   // then are the project's chats read: every chat change would re-render the editor.
   const offersHeartbeat = checkout?.snapshot?.heartbeats === true || draft.target !== null;
-  const projectChats = useProjectChats(
+  /** "No project": each run starts a new chat without a project, or goes into one. */
+  const withoutProject = isChatsAutomationScope(draft.projectId);
+  const projectChats = useScheduleChats(
     offersHeartbeat ? checkout?.environmentId : null,
     checkout?.projectId,
   );
@@ -455,9 +458,11 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
     }
   };
 
-  const refSource = checkout
-    ? { environmentId: checkout.environmentId, cwd: checkout.member.cwd }
-    : null;
+  // Chats without a project have no branches to start off.
+  const refSource =
+    checkout && !withoutProject
+      ? { environmentId: checkout.environmentId, cwd: checkout.member.cwd }
+      : null;
 
   return (
     <div className="contents" data-ae-ed={editorId} onKeyDown={onEditorKeyDown}>
@@ -541,6 +546,7 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
               update({ ...draft, kind, projectId: next.projectId, target: null }, key);
             }}
             heartbeat={heartbeat}
+            withoutProject={withoutProject}
             onEnv={onRunsIn}
             onEnvClosed={onRunsInClosed}
             onRef={(ref) => update({ ...draft, baseRef: ref })}

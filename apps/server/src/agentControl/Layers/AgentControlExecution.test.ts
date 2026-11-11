@@ -7,6 +7,7 @@ import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import {
+  AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
   AgentControlAutomationId,
   AgentControlAutomationRunId,
   AgentControlIntegrationId,
@@ -69,6 +70,7 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ChatFolders } from "../../project/chatFolders.ts";
 import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "../../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
@@ -193,10 +195,16 @@ const makeTestExecution = (input: {
   readonly validator?: unknown;
   readonly deviceService?: unknown;
   readonly pullRequestWatches?: unknown;
+  /** The node's chat folders; absent: it offers no chats without a project. */
+  readonly chatFolders?: unknown;
   /** The server's base directory; a fresh temporary one when absent. */
   readonly baseDir?: string;
 }) =>
   makeAgentControlExecution({ disableBackground: true }).pipe(
+    (effect) =>
+      input.chatFolders === undefined
+        ? effect
+        : Effect.provideService(effect, ChatFolders, input.chatFolders as never),
     Effect.provideService(AgentControlProposalStore, input.proposalStore as never),
     Effect.provideService(AgentControlOperationStore, input.operationStore as never),
     Effect.provideService(AgentControlProposalEvents, {} as never),
@@ -1982,7 +1990,104 @@ it.effect("keeps automation runs as plain thread creates even for provider-sessi
   }),
 );
 
-const heartbeatProposal = (): AgentControlProposal => {
+it.effect("starts a run without a project in a new chat: its own folder, then its thread", () =>
+  Effect.gen(function* () {
+    const automationPlan = {
+      kind: "automationRun" as const,
+      automationId: AgentControlAutomationId.make("automation-chats"),
+      runId: AgentControlAutomationRunId.make("automation-chats-run"),
+      automationRevision: 1,
+      scheduledFor: now,
+      coalescedOccurrences: 0,
+      execution: {
+        projectId: AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
+        title: "Morning news",
+        prompt: "Summarize the news.",
+        modelSelection: target.modelSelection,
+        runtimeMode: "auto" as const,
+        envMode: "local" as const,
+      },
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan: automationPlan,
+      planDigest: computeAgentControlPlanDigest(automationPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const applied: DispatchedCommand[] = [];
+    const dispatched: Array<Record<string, unknown> & { readonly type: string }> = [];
+    const projects: Array<{ id: string; workspaceRoot: string; kind?: "chat" }> = [];
+    const allocated: string[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      chatFolders: {
+        allocateChatFolder: (input: { readonly titleSeed: string }) =>
+          Effect.sync(() => {
+            allocated.push(input.titleSeed);
+            return "/chats/2026-11-11-morning-news-0000abcd";
+          }),
+        ensureChatFolder: () => Effect.succeed({ created: false }),
+        removeEmptyChatFolder: () => Effect.succeed(true),
+      },
+      engine: {
+        dispatch: (command: {
+          readonly type: string;
+          readonly projectId?: string;
+          readonly workspaceRoot?: string;
+        }) =>
+          Effect.sync(() => {
+            dispatched.push(command);
+            if (command.type === "project.create")
+              projects.push({
+                id: command.projectId!,
+                workspaceRoot: command.workspaceRoot!,
+                kind: "chat",
+              });
+            return { sequence: dispatched.length };
+          }),
+      },
+      projections: {
+        getShellSnapshot: () => Effect.succeed({ projects }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+        getProjectShellById: (id: string) =>
+          Effect.succeed(Option.fromNullishOr(projects.find((project) => project.id === id))),
+        getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+        getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+      },
+      commandApplication: {
+        apply: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            applied.push(command);
+            return { sequence: applied.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    // The chat's own project first, named for the schedule, in a new folder.
+    assert.deepStrictEqual(allocated, ["Morning news"]);
+    const projectCreate = dispatched.find((command) => command.type === "project.create");
+    assert.isDefined(projectCreate);
+    assert.strictEqual(projectCreate?.kind, "chat");
+    assert.strictEqual(projectCreate?.workspaceRoot, "/chats/2026-11-11-morning-news-0000abcd");
+    const chatProjectId = projectCreate?.projectId as ProjectId;
+    assert.match(String(chatProjectId), /^chat-agent-control-/);
+    // Then the run's thread in it, with no checkout of its own, and its first message.
+    const created = applied.find((command) => command.type === "thread.create");
+    assert.isDefined(created);
+    assert.deepInclude(created as Record<string, unknown>, {
+      projectId: chatProjectId,
+      worktreePath: null,
+      branch: null,
+    });
+    assert.isDefined(applied.find((command) => command.type === "thread.turn.start"));
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.deepStrictEqual(operation.state.resources.projectIds, [chatProjectId]);
+    assert.lengthOf(operation.state.resources.threadIds, 1);
+  }).pipe(Effect.scoped),
+);
+
+const heartbeatProposal = (scope: ProjectId = projectId): AgentControlProposal => {
   const heartbeatPlan = {
     kind: "automationRun" as const,
     automationId: AgentControlAutomationId.make("automation-heartbeat"),
@@ -1991,7 +2096,7 @@ const heartbeatProposal = (): AgentControlProposal => {
     scheduledFor: now,
     coalescedOccurrences: 0,
     execution: {
-      projectId,
+      projectId: scope,
       title: "Check CI",
       prompt: "Check CI and continue.",
       modelSelection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
@@ -2010,9 +2115,10 @@ const heartbeatProposal = (): AgentControlProposal => {
 const runHeartbeat = (
   shell: OrchestrationThreadShell,
   queued: ReadonlyArray<{ readonly messageId: string; readonly author: string }> = [],
+  options: { readonly scope?: ProjectId; readonly chatProject?: boolean } = {},
 ) =>
   Effect.gen(function* () {
-    const proposal = heartbeatProposal();
+    const proposal = heartbeatProposal(options.scope);
     const stores = yield* makeExecutionStores(proposal);
     const commands: DispatchedCommand[] = [];
     const executor = yield* makeTestExecution({
@@ -2028,6 +2134,12 @@ const runHeartbeat = (
           Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
         getThreadShellById: (id: ThreadId) =>
           Effect.succeed(id === threadId ? Option.some(shell) : Option.none()),
+        getProjectShellById: (id: ProjectId) =>
+          Effect.succeed(
+            id === shell.projectId
+              ? Option.some({ id, ...(options.chatProject ? { kind: "chat" as const } : {}) })
+              : Option.none(),
+          ),
       },
       commandApplication: {
         apply: (command: DispatchedCommand) =>
@@ -2045,6 +2157,22 @@ const runHeartbeat = (
     yield* executor.executeApproved(proposal.proposalId);
     return { commands, proposal: yield* Ref.get(stores.proposalRef), stores };
   });
+
+it.effect("queues a run without a project into its chat without a project, never a project's", () =>
+  Effect.gen(function* () {
+    const scope = AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID;
+    const chat = yield* runHeartbeat(target, [], { scope, chatProject: true });
+    assert.strictEqual(chat.proposal.status, "completed");
+    assert.deepStrictEqual(
+      chat.commands.map((command) => command.type),
+      ["thread.queue.add"],
+    );
+    // A project's chat is outside the "No project" scope (say, one turned into a project).
+    const project = yield* runHeartbeat(target, [], { scope, chatProject: false });
+    assert.strictEqual(project.proposal.status, "failed");
+    assert.deepStrictEqual(project.commands, []);
+  }),
+);
 
 it.effect("queues a heartbeat run's prompt in its chat as the automation's, creating nothing", () =>
   Effect.gen(function* () {

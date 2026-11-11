@@ -124,7 +124,7 @@ export const prepareChatProject = (
   deps: ChatBootstrapDependencies,
   input: {
     readonly chat: BootstrapCreateChatProject;
-    readonly createThread: BootstrapCreateThread;
+    readonly createThread: Pick<BootstrapCreateThread, "worktreePath" | "createdAt">;
   },
 ): Effect.Effect<PreparedChatProject, OrchestrationDispatchCommandError> =>
   Effect.gen(function* () {

@@ -19,6 +19,8 @@ export function EmptyProjectState(props: {
   readonly path: string | null;
   readonly newOff: boolean;
   readonly newOffReason: string | null;
+  /** The "No project" entry: runs start or continue chats without a project. */
+  readonly withoutProject?: boolean;
   readonly onNew: (origin: HTMLElement) => void;
 }) {
   return (
@@ -26,11 +28,24 @@ export function EmptyProjectState(props: {
       <span className="ad-empty-ic" aria-hidden="true">
         <CalendarClockIcon />
       </span>
-      <h3>No schedules in {props.projectName}</h3>
-      <p>
-        A schedule runs a prompt in <span className="ad-path">{props.path ?? "this checkout"}</span>{" "}
-        at the times you pick. Every run waits for your approval before it starts a thread.
-      </p>
+      {props.withoutProject ? (
+        <>
+          <h3>No schedules without a project</h3>
+          <p>
+            A schedule runs a prompt at the times you pick, in a new chat without a project each
+            time or in one chat you choose. Every run waits for your approval before it starts.
+          </p>
+        </>
+      ) : (
+        <>
+          <h3>No schedules in {props.projectName}</h3>
+          <p>
+            A schedule runs a prompt in{" "}
+            <span className="ad-path">{props.path ?? "this checkout"}</span> at the times you pick.
+            Every run waits for your approval before it starts a thread.
+          </p>
+        </>
+      )}
       <DialogButton
         tone="primary"
         off={props.newOff}
