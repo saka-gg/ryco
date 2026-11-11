@@ -13,9 +13,12 @@ describe("Settings list", () => {
 
   it("keeps every settings page reachable from the list or from the page that owns it", () => {
     // The account page opens from Hub and account (the summary card); the verification
-    // ceremony from Node security; one machine's pages from Machine settings.
+    // ceremony from Node security; one machine's pages from Machine settings; the open source
+    // licenses from About.
     const reachedElsewhere = new Set([
       "SettingsAccount",
+      "SettingsOpenSourceLicenses",
+      "SettingsOpenSourceLicense",
       "SettingsNodeVerification",
       "SettingsMachine",
       "SettingsMachineProviders",

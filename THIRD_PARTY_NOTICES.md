@@ -29,6 +29,16 @@ delivery to Claude native subagents through a SubagentStart hook, and the device
 (`packages/provider-core/src/server/orchestrationInstructions.ts`) and its `evals/mcp-tool-use`
 device cases at commit `6577c6b6`, under the same copyright and license.
 
+The open source license manifest is adapted from upstream at commit `ade473018d`, under the same
+copyright and license: its generator and SPDX template handling
+(`scripts/lib/third-party-licenses.ts`, `scripts/sync-third-party-license-notices.ts`, from
+upstream's `scripts/lib/third-party-licenses.ts` and `sync-third-party-license-notices.ts`), the
+manifest decoding and search (`packages/shared/src/thirdPartyLicenses.ts`), its generation before
+Metro starts and lazy loading in the phone app (`apps/mobile/metro.config.js`,
+`apps/mobile/src/features/settings/mobileThirdPartyLicenses.ts`), the license screens
+(`SettingsOpenSourceLicensesRouteScreen.tsx`) and the committed SPDX templates in
+`third-party-licenses/spdx/` (from the SPDX License List, CC0-1.0).
+
 The simulator pane's live input follows upstream's device stream at commit
 `6577c6b6` (`packages/client-runtime/src/device/stream.ts`,
 `apps/web/src/components/device/DeviceStreamView.tsx`), under the same copyright and license:

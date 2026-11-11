@@ -33,7 +33,10 @@ export function SettingsAboutRouteScreen() {
           onPress={() => navigation.navigate("SettingsDiagnostics" as never)}
         />
         <SettingsRow label="Privacy" value="Node-owned workspace data" />
-        <SettingsRow label="Licenses" value="Open source" />
+        <SettingsRow
+          label="Open source licenses"
+          onPress={() => navigation.navigate("SettingsOpenSourceLicenses")}
+        />
       </SettingsSection>
     </ScrollView>
   );

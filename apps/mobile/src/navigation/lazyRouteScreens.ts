@@ -290,6 +290,20 @@ export const SettingsAboutRouteScreen = lazyScreen(
       require("../features/settings/SettingsAboutRouteScreen") as typeof import("../features/settings/SettingsAboutRouteScreen")
     ).SettingsAboutRouteScreen,
 );
+export const SettingsOpenSourceLicensesRouteScreen = lazyScreen(
+  "SettingsOpenSourceLicensesRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsOpenSourceLicensesRouteScreen") as typeof import("../features/settings/SettingsOpenSourceLicensesRouteScreen")
+    ).SettingsOpenSourceLicensesRouteScreen,
+);
+export const SettingsOpenSourceLicenseRouteScreen = lazyScreen(
+  "SettingsOpenSourceLicenseRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsOpenSourceLicensesRouteScreen") as typeof import("../features/settings/SettingsOpenSourceLicensesRouteScreen")
+    ).SettingsOpenSourceLicenseRouteScreen,
+);
 export const SettingsDiagnosticsRouteScreen = lazyScreen(
   "SettingsDiagnosticsRouteScreen",
   () =>

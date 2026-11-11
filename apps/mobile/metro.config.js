@@ -1,6 +1,8 @@
+const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { getDefaultConfig } = require("expo/metro-config");
 const { withUniwindConfig } = require("uniwind/metro");
 
@@ -24,6 +26,17 @@ const resolveShikiDependencyRoot = (packageName) => {
 
   return currentDir;
 };
+
+// The open source license manifest the Settings > About > Open source licenses screen loads
+// lazily: an ignored package Metro resolves as `@ryco/mobile-third-party-licenses`. It must exist
+// before Metro crawls the file system, so it is written here, synchronously; the script returns
+// at once when its inputs (bun.lock, the license config) are unchanged.
+const generatedLicensesRoot = path.join(__dirname, ".generated", "third-party-licenses");
+execFileSync(
+  process.execPath,
+  [path.join(__dirname, "scripts", "generate-third-party-licenses.mts")],
+  { stdio: ["ignore", "inherit", "inherit"] },
+);
 
 // Metro keys a cached transform by the file's content, the Babel config files
 // and cacheVersion, but not by the Babel presets and plugins those files load,
@@ -83,6 +96,7 @@ config.resolver = {
   ],
   extraNodeModules: {
     ...config.resolver?.extraNodeModules,
+    "@ryco/mobile-third-party-licenses": generatedLicensesRoot,
     shiki: mobileShikiRoot,
     "@shikijs/core": resolveShikiDependencyRoot("@shikijs/core"),
     "@shikijs/engine-javascript": resolveShikiDependencyRoot("@shikijs/engine-javascript"),
@@ -123,7 +137,41 @@ config.transformer = {
   }),
 };
 
-module.exports = withUniwindConfig(config, {
+const finalConfig = withUniwindConfig(config, {
   cssEntryFile: "./global.css",
   polyfills: { rem: 14 },
 });
+
+// A release bundle may not ship an npm package the license manifest leaves out (one a
+// `buildOnlyDependencies` rule in third-party-licenses.config.json skipped by mistake, say):
+// production serialization fails and names it. Development bundles carry dev-only modules and
+// are not checked.
+const serializeBundle = finalConfig.serializer.customSerializer;
+if (typeof serializeBundle !== "function") {
+  throw new Error("expo/metro-config no longer sets serializer.customSerializer; adapt the check.");
+}
+finalConfig.serializer = {
+  ...finalConfig.serializer,
+  customSerializer: async (entryPoint, preModules, graph, options) => {
+    if (!options.dev) {
+      const { findUnlistedBundledPackages } = await import(
+        pathToFileURL(path.join(workspaceRoot, "scripts", "lib", "third-party-licenses.ts")).href
+      );
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(generatedLicensesRoot, "manifest.json"), "utf8"),
+      );
+      const unlisted = await findUnlistedBundledPackages(manifest, [
+        ...preModules.map((module) => module.path),
+        ...graph.dependencies.keys(),
+      ]);
+      if (unlisted.length > 0) {
+        throw new Error(
+          `The bundle includes npm packages the open source license manifest does not list: ${unlisted.join(", ")}. Remove the third-party-licenses.config.json rule that skips them.`,
+        );
+      }
+    }
+    return serializeBundle(entryPoint, preModules, graph, options);
+  },
+};
+
+module.exports = finalConfig;
