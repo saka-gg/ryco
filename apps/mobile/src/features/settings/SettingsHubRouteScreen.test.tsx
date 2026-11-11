@@ -161,13 +161,7 @@ describe("Hub domain change", () => {
 });
 
 describe("Hub settings navigation", () => {
-  it("pushes Machines above the Settings page", () => {
-    const row = findPropsByLabel(SettingsHubRouteScreen(), "SettingsRow", "Machines");
-
-    expect(typeof row?.onPress).toBe("function");
-    if (typeof row?.onPress !== "function") throw new Error("Machines row is not actionable");
-    row.onPress();
-
-    expect(hoisted.navigate).toHaveBeenCalledWith("Connections");
+  it("names machines once: the Settings tab's Machines row, not a second one here", () => {
+    expect(findPropsByLabel(SettingsHubRouteScreen(), "SettingsRow", "Machines")).toBeNull();
   });
 });

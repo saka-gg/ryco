@@ -1,55 +1,17 @@
-import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { ScrollView } from "react-native";
-
-import { EmptyState } from "../../../components/EmptyState";
-import { useHomeEnvironments } from "../../home/useHomeEnvironments";
-import { SettingsRow } from "../components/SettingsRow";
-import { SettingsSection } from "../components/SettingsSection";
-import { machineStatusLabel } from "./machineSettingsModel";
+import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import { useEffect } from "react";
+import { View } from "react-native";
 
 type SettingsMachinesRouteScreenProps = StaticScreenProps<undefined>;
 
 /**
- * The machines whose own settings this phone can open: providers, agents, work defaults and
- * the machine itself. With one machine the Settings row opens its page directly.
+ * `settings/machines`, kept for saved links: machines are listed in one place, the Machines
+ * sheet, and each machine's settings are on its page there. This route only hands over.
  */
 export function SettingsMachinesRouteScreen(_props: SettingsMachinesRouteScreenProps) {
   const navigation = useNavigation();
-  const machines = useHomeEnvironments();
-  if (machines.length === 0) {
-    return (
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        className="flex-1 bg-screen px-6 pt-16"
-      >
-        <EmptyState
-          variant="plain"
-          title="No machine yet"
-          detail="Pair a machine or sign in to your Hub to change its settings here."
-        />
-      </ScrollView>
-    );
-  }
-  return (
-    <ScrollView
-      contentInsetAdjustmentBehavior="automatic"
-      className="flex-1 bg-screen"
-      contentContainerStyle={{ paddingTop: 4, paddingBottom: 40 }}
-    >
-      <SettingsSection footer="Each machine keeps its own providers, agents and folders. Shared settings follow you to every machine.">
-        {machines.map((machine, index) => (
-          <SettingsRow
-            key={machine.environmentId}
-            first={index === 0}
-            icon="desktopcomputer"
-            label={machine.label}
-            value={machineStatusLabel(machine)}
-            onPress={() =>
-              navigation.navigate("SettingsMachine", { environmentId: machine.environmentId })
-            }
-          />
-        ))}
-      </SettingsSection>
-    </ScrollView>
-  );
+  useEffect(() => {
+    navigation.dispatch(StackActions.replace("Connections"));
+  }, [navigation]);
+  return <View className="flex-1 bg-screen" />;
 }

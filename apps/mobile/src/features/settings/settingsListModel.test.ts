@@ -12,11 +12,14 @@ describe("Settings list", () => {
   const ids = new Set(sections.flatMap((section) => section.rows.map((row) => row.id)));
 
   it("keeps every settings page reachable from the list or from the page that owns it", () => {
-    // The account page opens from Hub and account (the summary card); the verification
-    // ceremony from Node security; one machine's pages from Machine settings.
+    // The account page opens from Hub and account (the summary card); every machine's own
+    // pages (its settings and the Hub node security with its verification) from the machine's
+    // page in Machines, the summary card's other row.
     const reachedElsewhere = new Set([
       "SettingsAccount",
+      "SettingsNodeSecurity",
       "SettingsNodeVerification",
+      "SettingsMachines",
       "SettingsMachine",
       "SettingsMachineProviders",
       "SettingsMachineProvider",
@@ -28,10 +31,15 @@ describe("Settings list", () => {
     ]);
     for (const route of Object.keys(MVP_SETTINGS_ROUTES)) {
       if (reachedElsewhere.has(route)) continue;
-      const id = route === "SettingsNodeSecurity" ? "NodeSecurity" : route;
       if (route === "SettingsHub") continue; // the summary card
-      expect(ids.has(id as never), route).toBe(true);
+      expect(ids.has(route as never), route).toBe(true);
     }
+  });
+
+  it("names machines once: no Machines group under the Machines summary row", () => {
+    expect(sections.map((section) => section.title)).not.toContain("Machines");
+    const labels = sections.flatMap((section) => section.rows.map((row) => row.label));
+    expect(labels.some((label) => /machine|node security/i.test(label))).toBe(false);
   });
 
   it("drops the Usage row now that Usage is a tab, and lists no page twice", () => {

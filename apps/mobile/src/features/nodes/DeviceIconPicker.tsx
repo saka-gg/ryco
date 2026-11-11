@@ -13,21 +13,46 @@ import { AppText as Text } from "../../components/AppText";
 import { EnvironmentMachineIcon } from "../../components/DeviceIcon";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 
-export function DeviceIconPicker({
+/** The icon a machine shows: "Automatic", or the kind its owner picked. */
+export function deviceIconChoiceLabel(choice: EnvironmentMachineKind | null | undefined): string {
+  return choice ? ENVIRONMENT_MACHINE_LABELS[choice] : "Automatic";
+}
+
+/**
+ * Whether this device may change a machine's icon now: `canEdit` (a connected owner) and a
+ * machine that supports the setting.
+ */
+export function useDeviceIconEditable(environmentId: EnvironmentId, canEdit: boolean) {
+  const config = useEnvironmentServerConfigs().get(environmentId);
+  return {
+    editable: canEdit && config?.environment.capabilities.environmentIcon === true,
+    choice: config?.settings.environmentIcon ?? null,
+  };
+}
+
+/** The machine's icon choices, in a page sheet opened from its page in the Machines sheet. */
+export function DeviceIconPickerSheet({
   environmentId,
   label,
   canEdit,
+  visible,
+  onClose,
 }: {
   environmentId: EnvironmentId;
   label: string;
   canEdit: boolean;
+  visible: boolean;
+  onClose: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const config = useEnvironmentServerConfigs().get(environmentId);
   const allowed = canEdit && config?.environment.capabilities.environmentIcon === true;
   const current = config?.settings.environmentIcon ?? null;
+  const close = () => {
+    setError(null);
+    onClose();
+  };
   const save = async (kind: EnvironmentMachineKind | null) => {
     if (!allowed || pending) return;
     setPending(true);
@@ -36,7 +61,7 @@ export function DeviceIconPicker({
       // The directory stays independent of connection bootstrap until an authorized edit.
       const { updateEnvironmentServerSettings } = await import("../../connection/environmentApi");
       await updateEnvironmentServerSettings(environmentId, { environmentIcon: kind });
-      setOpen(false);
+      close();
     } catch {
       setError(`Could not save the icon for ${label}. Reconnect and try again.`);
     } finally {
@@ -45,22 +70,11 @@ export function DeviceIconPicker({
   };
   return (
     <>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Change icon for ${label}`}
-        onPress={() => {
-          setError(null);
-          setOpen(true);
-        }}
-        className="mx-4 mb-4 min-h-11 self-start justify-center rounded-xl border border-border px-3 active:bg-subtle"
-      >
-        <Text className="text-xs font-ryco-bold text-foreground">Device icon</Text>
-      </Pressable>
       <Modal
-        visible={open}
+        visible={visible}
         animationType="slide"
         presentationStyle="pageSheet"
-        onRequestClose={() => setOpen(false)}
+        onRequestClose={close}
       >
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
@@ -73,7 +87,7 @@ export function DeviceIconPicker({
             </Text>
             <Pressable
               accessibilityRole="button"
-              onPress={() => setOpen(false)}
+              onPress={close}
               className="min-h-11 justify-center px-3"
             >
               <Text className="text-base text-foreground">Done</Text>

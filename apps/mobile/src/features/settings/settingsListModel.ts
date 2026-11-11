@@ -5,7 +5,11 @@
 
 import type { AppSymbolName } from "../../components/AppSymbol";
 
-/** Where a row goes: a settings page pushed above the tabs, Machines, or the node's security. */
+/**
+ * Where a row goes: a settings page pushed above the tabs, or Machines. Every machine's own
+ * settings, access and security are on that machine's page in Machines, so the list names
+ * machines once: the Machines row at the top.
+ */
 export type SettingsListTarget =
   | "SettingsHub"
   | "SettingsAppearance"
@@ -13,13 +17,11 @@ export type SettingsListTarget =
   | "SettingsInbox"
   | "SettingsProviderAccounts"
   | "SettingsWorkspace"
-  | "SettingsMachines"
   | "SettingsArchived"
   | "SettingsClientStorage"
   | "SettingsDiagnostics"
   | "SettingsAbout"
-  | "Connections"
-  | "NodeSecurity";
+  | "Connections";
 
 export interface SettingsListRow {
   readonly id: SettingsListTarget;
@@ -102,19 +104,6 @@ export function buildSettingsSections(input: {
           label: "New task defaults",
           value: "Per machine",
         },
-      ],
-    },
-    {
-      key: "machines",
-      title: "Machines",
-      rows: [
-        {
-          id: "SettingsMachines",
-          icon: "gearshape.2",
-          label: "Machine settings",
-          value: "Providers, agents, work",
-        },
-        { id: "NodeSecurity", icon: "lock.shield", label: "Node security" },
       ],
     },
     {

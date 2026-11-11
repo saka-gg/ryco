@@ -198,11 +198,6 @@ export function SettingsHubRouteScreen() {
             label="Compatibility"
             value={compatibilityLabel(profile, storedProfile === null && buildConfig !== null)}
           />
-          <SettingsRow
-            label="Machines"
-            value="Hub relay and direct"
-            onPress={() => navigation.navigate("Connections")}
-          />
         </SettingsSection>
 
         <SettingsSection title="Account and security">
