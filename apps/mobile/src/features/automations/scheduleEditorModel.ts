@@ -1,38 +1,38 @@
 // The phone's schedule editor: where a draft starts and how its pickers change it. The rules
 // (the sentence, fixes, validation, the model default) are the web editor's, shared through
-// `@ryco/client-runtime/state/automations/editor` and the schedule model. Pure.
+// `@ryco/client-runtime/state/automations/editor` and the schedule model; the model pill and
+// the "⋯" menu are the chat composer's (`ComposerModelControls`), fed from here. Pure.
 
 import {
   blankScheduleDraft,
   draftOfLatest,
   scheduleDraftKey,
+  scheduleModelLabel,
   type ScheduleDraft,
 } from "@ryco/client-runtime/state/agentControl";
+import { getAutoRuntimeModeUnavailableReason } from "@ryco/client-runtime/state/composer";
 import type { DialogRow } from "@ryco/client-runtime/state/automations/dialogModel";
 import {
   calendarChoiceWeekdays,
   defaultScheduleModel,
   emptyModelSelection,
+  modelMissing,
   type CalendarChoice,
 } from "@ryco/client-runtime/state/automations/editor";
-import type {
-  ModelSelection,
-  ProjectId,
-  ProviderInstanceId,
-  ServerProvider,
-} from "@ryco/contracts";
+import type { AgentTokenMode, ModelSelection, ProjectId, ServerProvider } from "@ryco/contracts";
 import {
   DAY_MS,
   fitScheduleModelOptions,
   isAutomationProviderReady,
   providerDisplayName,
 } from "@ryco/shared/automationSchedule";
+
+import { buildModelOptionsFromProviders, type ModelOption } from "../../lib/modelOptions";
 import {
-  createModelSelection,
-  getModelDisplayName,
-  getProviderOptionCurrentValue,
-  REASONING_DESCRIPTOR_IDS,
-} from "@ryco/shared/model";
+  buildModelPickerModelFromOptions,
+  type ModelPickerModel,
+} from "../threads/modelPickerModel";
+import { buildSessionPolicyModel, type SessionPolicyModel } from "../threads/sessionPolicyModel";
 
 export type ScheduleEditorMode = "new" | "edit" | "repropose";
 
@@ -116,122 +116,96 @@ export function withCalendarChoice(draft: ScheduleDraft, choice: CalendarChoice)
   return { ...draft, kind: "calendar", weekdays: calendarChoiceWeekdays(choice, draft) };
 }
 
-export interface ScheduleModelChoice {
-  /** `instanceId` and slug, joined by a unit separator. */
-  readonly id: string;
-  readonly title: string;
-  readonly selected: boolean;
+/** A stored model no provider offers: named as the schedule list names it, under its provider. */
+function storedModelOption(
+  option: ModelOption,
+  providers: ReadonlyArray<ServerProvider>,
+): ModelOption {
+  const owner = providers.find((provider) => provider.instanceId === option.selection.instanceId);
+  return {
+    ...option,
+    label: scheduleModelLabel(option.selection, providers),
+    providerLabel: owner ? providerDisplayName(owner) : option.providerLabel,
+    providerDriver: owner?.driver ?? option.providerDriver,
+  };
 }
 
-export interface ScheduleProviderChoices {
-  readonly instanceId: string;
-  readonly title: string;
-  readonly models: ReadonlyArray<ScheduleModelChoice>;
-}
-
-const SEPARATOR = "\u001f";
-
-/** The models a schedule can run on: each ready provider's, by provider. */
-export function scheduleModelChoices(
+/**
+ * The schedule's model as the chat composer's model picker: the models of every provider runs
+ * can start on (the server's `isAgentControlProviderReady`), by provider. A stored model that is
+ * no longer offered (its provider gone, off or not ready, or the model dropped) stays in view
+ * under its own name, so the pill reads it and saving without a change keeps it.
+ */
+export function scheduleModelPicker(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection,
-): ReadonlyArray<ScheduleProviderChoices> {
-  return providers
-    .filter((provider) => isAutomationProviderReady(provider) && provider.models.length > 0)
-    .map((provider) => ({
-      instanceId: provider.instanceId,
-      title: providerDisplayName(provider),
-      models: provider.models.map((model) => ({
-        id: `${provider.instanceId}${SEPARATOR}${model.slug}`,
-        title: getModelDisplayName(model),
-        selected: selection.instanceId === provider.instanceId && selection.model === model.slug,
-      })),
-    }));
-}
-
-function reasoningDescriptor(providers: ReadonlyArray<ServerProvider>, selection: ModelSelection) {
-  const model = providers
-    .find((provider) => provider.instanceId === selection.instanceId)
-    ?.models.find((candidate) => candidate.slug === selection.model);
-  const descriptor = (model?.capabilities?.optionDescriptors ?? []).find(
-    (candidate) => candidate.type === "select" && REASONING_DESCRIPTOR_IDS.has(candidate.id),
-  );
-  return descriptor?.type === "select" ? descriptor : null;
-}
-
-/** A model picked from `scheduleModelChoices`: the effort is kept where it fits, else its default. */
-export function withModelChoice(
-  draft: ScheduleDraft,
-  providers: ReadonlyArray<ServerProvider>,
-  choiceId: string,
-): ScheduleDraft {
-  const [instanceId, slug] = choiceId.split(SEPARATOR);
-  if (!instanceId || !slug) return draft;
-  const kept = fitScheduleModelOptions(
-    createModelSelection(instanceId as ProviderInstanceId, slug, draft.modelSelection.options),
+): ModelPickerModel {
+  const ready = providers.filter(isAutomationProviderReady);
+  if (modelMissing(selection)) {
+    const picker = buildModelPickerModelFromOptions({
+      modelOptions: buildModelOptionsFromProviders(ready, null),
+      providers,
+      currentSelection: null,
+    });
+    return {
+      ...picker,
+      pillLabel: "Pick a model",
+      pillAccessibilityLabel: "Model: pick a model.",
+    };
+  }
+  const key = `${selection.instanceId}:${selection.model}`;
+  const offered = buildModelOptionsFromProviders(ready, null).some((option) => option.key === key);
+  const options = buildModelOptionsFromProviders(ready, selection);
+  const modelOptions = offered
+    ? options
+    : options.map((option) => (option.key === key ? storedModelOption(option, providers) : option));
+  return buildModelPickerModelFromOptions({
+    modelOptions,
     providers,
-  );
-  const descriptor = reasoningDescriptor(providers, kept);
-  if (!descriptor || kept.options?.some((option) => option.id === descriptor.id))
-    return { ...draft, modelSelection: kept };
-  const value = getProviderOptionCurrentValue(descriptor);
-  return {
-    ...draft,
-    modelSelection: createModelSelection(
-      kept.instanceId,
-      kept.model,
-      typeof value === "string"
-        ? [...(kept.options ?? []), { id: descriptor.id, value }]
-        : kept.options,
-    ),
-  };
+    currentSelection: selection,
+  });
 }
 
-export interface ScheduleEffortChoices {
-  readonly descriptorId: string;
-  readonly label: string;
-  readonly choices: ReadonlyArray<{
-    readonly id: string;
-    readonly title: string;
-    readonly selected: boolean;
-  }>;
-}
-
-/** The model's reasoning effort choices, or null when it has none. */
-export function scheduleEffortChoices(
+/** A model or tuning picked in the model picker: only the options that model offers survive. */
+export function withScheduleModel(
+  draft: ScheduleDraft,
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection,
-): ScheduleEffortChoices | null {
-  const descriptor = reasoningDescriptor(providers, selection);
-  if (!descriptor) return null;
-  const current =
-    selection.options?.find((option) => option.id === descriptor.id)?.value ??
-    getProviderOptionCurrentValue(descriptor);
-  return {
-    descriptorId: descriptor.id,
-    label: descriptor.label,
-    choices: descriptor.options.map((choice) => ({
-      id: choice.id,
-      title: choice.label,
-      selected: choice.id === current,
-    })),
-  };
+): ScheduleDraft {
+  return { ...draft, modelSelection: fitScheduleModelOptions(selection, providers) };
 }
 
-export function withEffort(
+/**
+ * The composer's Access group for a schedule. A schedule stores no interaction mode (each run
+ * starts in the default one), so the Mode group is not offered; Auto is off where the model
+ * cannot run it, as in a chat.
+ */
+export function schedulePolicyModel(
   draft: ScheduleDraft,
-  descriptorId: string,
-  value: string,
-): ScheduleDraft {
-  const others = (draft.modelSelection.options ?? []).filter(
-    (option) => option.id !== descriptorId,
+  providers: ReadonlyArray<ServerProvider>,
+): SessionPolicyModel {
+  const provider = providers.find(
+    (candidate) => candidate.instanceId === draft.modelSelection.instanceId,
   );
-  return {
-    ...draft,
-    modelSelection: createModelSelection(
-      draft.modelSelection.instanceId,
+  return buildSessionPolicyModel({
+    runtimeMode: draft.runtimeMode,
+    interactionMode: "default",
+    interactionModeSupported: false,
+    askModeSupported: false,
+    autoModeUnavailableReason: getAutoRuntimeModeUnavailableReason(
+      provider?.models ?? [],
       draft.modelSelection.model,
-      [...others, { id: descriptorId, value }],
     ),
-  };
+  });
+}
+
+/**
+ * The token mode the Tokens group shows: the schedule's own, else the machine's default, which
+ * a run without one starts with. Picking that default again keeps the schedule without one.
+ */
+export function scheduleTokenMode(
+  draft: ScheduleDraft,
+  machineDefault: AgentTokenMode,
+): AgentTokenMode {
+  return draft.tokenMode ?? machineDefault;
 }

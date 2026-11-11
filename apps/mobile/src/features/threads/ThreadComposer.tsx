@@ -9,30 +9,18 @@ import type {
 import type { FastModeNotice } from "@ryco/client-runtime/state/session";
 import type { ModelPickerModel } from "./modelPickerModel";
 import type { SessionPolicyModel } from "./sessionPolicyModel";
-import { isTuningDescriptor } from "@ryco/client-runtime/state/composer/modelTuning";
-import { getModelSelectionOptionDescriptors } from "@ryco/shared/model";
 import { composerShrinkHeld } from "./composerShrinkModel";
 import {
   composerPlaceholder,
   composerPrimaryAction,
-  composerTriggerTraits,
   isComposerFooterCompact,
-  resolveComposerTuning,
-  summarizeComposerTuning,
 } from "./composerFooterModel";
-import { ComposerModelMenu } from "./ComposerModelMenu";
-import { ComposerMoreControlsMenu, ComposerPolicySelects } from "./ComposerFooterControls";
+import { ComposerModelControls } from "./ComposerModelControls";
 import {
   ComposerContextMeter,
-  ComposerModelTrigger,
   ComposerRoundButton,
   ComposerSendGlyph,
 } from "./ComposerFooterParts";
-import {
-  applyModelOption,
-  listModelPickerEntries,
-  resolveModelPillFastMode,
-} from "./modelPickerModel";
 import { COMPOSER_SIDE_INSET } from "./ComposerShrunkBubble";
 import type { ComposerShrinkBinding } from "./useComposerShrink";
 import { Pressable, View } from "react-native";
@@ -311,41 +299,6 @@ export function ThreadComposer(props: {
   });
   const collapsed = shrink?.collapsed === true;
 
-  // The model pill's readout and the options the tuning dial does not own (agent, variant).
-  const tuning =
-    modelPicker && modelSelection
-      ? resolveComposerTuning({ model: modelPicker, selection: modelSelection, prompt: text })
-      : null;
-  const triggerTraits = composerTriggerTraits(summarizeComposerTuning(tuning), compact);
-  const fast = modelPicker ? resolveModelPillFastMode(modelPicker, props.fastModeNotice) : null;
-  const selectedCapabilities =
-    modelPicker && modelSelection
-      ? listModelPickerEntries(modelPicker).find(
-          (entry) => entry.key === `${modelSelection.instanceId}:${modelSelection.model}`,
-        )?.capabilities
-      : undefined;
-  const traitIds = new Set(
-    getModelSelectionOptionDescriptors(modelSelection, selectedCapabilities)
-      .filter((descriptor) => !isTuningDescriptor(descriptor))
-      .map((descriptor) => descriptor.id),
-  );
-  const traits = (modelPicker?.options ?? []).filter((option) => traitIds.has(option.id));
-  const policyControls = policyModel
-    ? {
-        policy: policyModel,
-        tokenMode: props.tokenMode ?? "off",
-        onSelectTokenMode: props.tokenMode === undefined ? undefined : props.onSelectTokenMode,
-        onSelectRuntimeMode: props.onSelectRuntimeMode,
-        onSelectInteractionMode: props.onSelectInteractionMode,
-        traits,
-        onSelectTrait: (id: string, value: string | boolean) => {
-          if (!modelSelection || policyDisabled) return;
-          props.onSelectModel(applyModelOption(modelSelection, selectedCapabilities, id, value));
-        },
-        disabled: policyDisabled,
-      }
-    : null;
-
   return (
     <Animated.View
       pointerEvents={collapsed ? "none" : "auto"}
@@ -473,54 +426,24 @@ export function ThreadComposer(props: {
                       </Pressable>
                     )}
                   </ComposerAttachMenu>
-                  {modelPicker && modelSelection ? (
-                    <ComposerModelMenu
-                      ref={modelMenuRef}
-                      model={modelPicker}
-                      selection={modelSelection}
-                      disabled={policyDisabled}
-                      prompt={text}
-                      onSelect={props.onSelectModel}
-                      onOpenCacheInfo={props.onOpenCacheInfo}
-                      onAddProviders={props.onAddProviders}
-                      onClose={restoreFocus}
-                      anchorClassName="min-w-0 shrink"
-                    >
-                      {(open) => (
-                        <ComposerModelTrigger
-                          providerDriver={modelPicker.pillProviderDriver}
-                          label={modelPicker.pillLabel}
-                          traits={triggerTraits}
-                          fastNotice={
-                            props.fastModeNotice && fast?.icon && fast.icon !== "bolt.fill"
-                              ? { icon: fast.icon, muted: fast.muted }
-                              : null
-                          }
-                          accessibilityLabel={
-                            fast?.accessibilityLabel ?? modelPicker.pillAccessibilityLabel
-                          }
-                          disabled={policyDisabled}
-                          onPress={open}
-                        />
-                      )}
-                    </ComposerModelMenu>
-                  ) : null}
-                  {policyControls ? (
-                    compact ? (
-                      <ComposerMoreControlsMenu {...policyControls} onClose={restoreFocus} />
-                    ) : (
-                      <>
-                        {traits.length > 0 ? (
-                          <ComposerMoreControlsMenu
-                            {...policyControls}
-                            traitsOnly
-                            onClose={restoreFocus}
-                          />
-                        ) : null}
-                        <ComposerPolicySelects {...policyControls} onClose={restoreFocus} />
-                      </>
-                    )
-                  ) : null}
+                  <ComposerModelControls
+                    ref={modelMenuRef}
+                    modelPicker={modelPicker ?? null}
+                    modelSelection={modelSelection}
+                    onSelectModel={props.onSelectModel}
+                    policy={policyModel ?? null}
+                    onSelectRuntimeMode={props.onSelectRuntimeMode}
+                    onSelectInteractionMode={props.onSelectInteractionMode}
+                    tokenMode={props.tokenMode}
+                    onSelectTokenMode={props.onSelectTokenMode}
+                    compact={compact}
+                    disabled={policyDisabled}
+                    prompt={text}
+                    fastModeNotice={props.fastModeNotice}
+                    onOpenCacheInfo={props.onOpenCacheInfo}
+                    onAddProviders={props.onAddProviders}
+                    onClose={restoreFocus}
+                  />
                 </View>
                 <View className="flex-row items-center" style={{ gap: 8 }}>
                   <View className="flex-row items-center" style={{ gap: 2 }}>

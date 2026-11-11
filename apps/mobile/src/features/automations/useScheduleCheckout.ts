@@ -7,11 +7,13 @@ import { automationCheckoutKey } from "@ryco/client-runtime/state/automations/pr
 import type {
   AgentControlProposalId,
   AgentControlProposalView,
+  AgentTokenMode,
   AutomationCentreSnapshot,
   EnvironmentId,
   ProjectId,
   ServerProvider,
 } from "@ryco/contracts";
+import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 import { useEffect, useMemo, useState } from "react";
 
 import { useAgentControlStore } from "../../state/agentControlRuntime";
@@ -42,6 +44,8 @@ export interface ScheduleCheckout {
   readonly rows: ReadonlyArray<DialogRow>;
   readonly group: DialogCheckoutRows | null;
   readonly providers: ReadonlyArray<ServerProvider>;
+  /** The token mode a run without its own starts with (the machine's default). */
+  readonly defaultTokenMode: AgentTokenMode;
   readonly queueProposals: ReadonlyArray<AgentControlProposalView>;
   /** Expired or failed proposals dismissed this session. */
   readonly dismissed: ReadonlySet<AgentControlProposalId>;
@@ -132,6 +136,7 @@ export function useScheduleCheckout(
     rows: group?.rows ?? [],
     group,
     providers: config?.providers ?? NO_PROVIDERS,
+    defaultTokenMode: config?.settings.defaultAgentTokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
     queueProposals,
     dismissed,
     connected,

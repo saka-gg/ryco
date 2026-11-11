@@ -4,14 +4,12 @@ import {
   definitionFromDraft,
   scheduleDraftKey,
   scheduleDraftMessages,
-  scheduleModelLabel,
   validateScheduleDraft,
   type ScheduleDraft,
 } from "@ryco/client-runtime/state/agentControl";
 import {
   applyDraftFix,
   calendarChoiceOf,
-  modelMissing,
   promptCount,
   SAVE_REFUSED,
   sentenceWords,
@@ -19,7 +17,7 @@ import {
 } from "@ryco/client-runtime/state/automations/editor";
 import { AgentControlAutomationId } from "@ryco/contracts/agent-control";
 import { EnvironmentId } from "@ryco/contracts/base-schemas";
-import type { ProjectId, RuntimeMode } from "@ryco/contracts";
+import type { ProjectId } from "@ryco/contracts";
 import {
   AUTOMATION_LIMITS,
   endFor,
@@ -46,19 +44,21 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
+import { OverlayPortalScope } from "../../components/OverlayPortal";
 import { cn } from "../../lib/cn";
 import { uuidv4 } from "../../lib/uuid";
 import { useThemeColor } from "../../lib/useThemeColor";
-import { runtimeModeConfig } from "../threads/sessionPolicyPresentation";
+import { ComposerModelControls } from "../threads/ComposerModelControls";
+import { isComposerFooterCompact } from "../threads/composerFooterModel";
 import {
   scheduleEditorOpening,
-  scheduleEffortChoices,
-  scheduleModelChoices,
+  scheduleModelPicker,
+  schedulePolicyModel,
   scheduleRepeatOf,
+  scheduleTokenMode,
   withCalendarChoice,
-  withEffort,
-  withModelChoice,
   withRepeat,
+  withScheduleModel,
   type ScheduleEditorMode,
   type ScheduleEditorOpening,
   type ScheduleRepeat,
@@ -73,12 +73,7 @@ type ScheduleEditorRouteScreenProps = StaticScreenProps<{
   readonly automationId?: string;
 }>;
 
-const RUNTIME_MODES: ReadonlyArray<RuntimeMode> = [
-  "approval-required",
-  "auto-accept-edits",
-  "auto",
-  "full-access",
-];
+const noop = () => undefined;
 
 function Chip(props: {
   readonly label: string;
@@ -278,6 +273,9 @@ function Editor(props: {
   const [saving, setSaving] = useState(false);
   const [refused, setRefused] = useState<string | null>(null);
   const [editing, setEditing] = useState<"start" | null>(null);
+  // The footer's width picks the composer's layout (the ⋯ menu on a phone); phone-first.
+  const [footerWidth, setFooterWidth] = useState<number | null>(null);
+  const compactFooter = footerWidth === null || isComposerFooterCompact(footerWidth);
   const placeholder = useThemeColor("--color-placeholder") as string;
   const foreground = useThemeColor("--color-foreground") as string;
   const primary = useThemeColor("--color-primary") as string;
@@ -301,16 +299,13 @@ function Editor(props: {
   const words = sentenceWords(draft, nowMs);
   const repeat = scheduleRepeatOf(draft);
   const calendarChoice = calendarChoiceOf(draft);
-  const modelChoices = scheduleModelChoices(providers, draft.modelSelection);
-  const effort = scheduleEffortChoices(providers, draft.modelSelection);
   const dirty =
     props.opening.initialKey === "" || scheduleDraftKey(draft) !== props.opening.initialKey;
   const heartbeat = draft.target !== null;
-  const otherErrors = [
-    validation.errors.prompt,
-    validation.errors.model,
-    validation.errors.limit,
-  ].filter((message): message is string => typeof message === "string" && message.length > 0);
+  const modelError = attempted ? (validation.errors.model ?? null) : null;
+  const otherErrors = [validation.errors.prompt, validation.errors.limit].filter(
+    (message): message is string => typeof message === "string" && message.length > 0,
+  );
 
   const save = async () => {
     if (saving || !checkout.editable) return;
@@ -404,15 +399,6 @@ function Editor(props: {
       </View>
     );
   };
-  const modelActions: MenuAction[] = modelChoices.map((provider) => ({
-    id: `p:${provider.instanceId}`,
-    title: provider.title,
-    subactions: provider.models.map((model) => ({
-      id: model.id,
-      title: model.title,
-      state: model.selected ? ("on" as const) : ("off" as const),
-    })),
-  }));
   const endPresetSelected = (ms: number) =>
     Math.abs(draft.endsAt - endFor(draft.start, ms)) < 60_000;
   const maxEnd = untilLimit(nowMs);
@@ -446,9 +432,39 @@ function Editor(props: {
           className="min-h-[120px] border-t border-border-subtle px-4 py-3 font-sans text-[16px] leading-[22px]"
           style={{ color: foreground }}
         />
-        {draft.prompt.length > 0 ? (
-          <Text className="px-4 pb-2 text-right text-[11px] text-foreground-tertiary">
-            {promptCount(draft.prompt.length, AUTOMATION_LIMITS.promptMax)}
+        {/* What each run uses, as a chat's composer footer shows it: the model pill and ⋯. */}
+        <View
+          onLayout={(event) => setFooterWidth(event.nativeEvent.layout.width)}
+          className="min-h-11 flex-row items-center gap-2 px-2.5 pb-2.5"
+        >
+          <View className="min-w-0 flex-1 flex-row items-center" style={{ gap: 2 }}>
+            <ComposerModelControls
+              modelPicker={scheduleModelPicker(providers, draft.modelSelection)}
+              modelSelection={draft.modelSelection}
+              onSelectModel={(selection) => change(withScheduleModel(draft, providers, selection))}
+              policy={schedulePolicyModel(draft, providers)}
+              onSelectRuntimeMode={(runtimeMode) => change({ ...draft, runtimeMode })}
+              onSelectInteractionMode={noop}
+              // A heartbeat's runs take its chat's token mode, so it offers none.
+              tokenMode={
+                heartbeat ? undefined : scheduleTokenMode(draft, checkout.defaultTokenMode)
+              }
+              onSelectTokenMode={(tokenMode) => change({ ...draft, tokenMode })}
+              compact={compactFooter}
+              disabled={saving}
+              prompt={draft.prompt}
+              onClose={noop}
+            />
+          </View>
+          {draft.prompt.length > 0 ? (
+            <Text className="pe-1.5 text-[11px] text-foreground-tertiary">
+              {promptCount(draft.prompt.length, AUTOMATION_LIMITS.promptMax)}
+            </Text>
+          ) : null}
+        </View>
+        {modelError ? (
+          <Text className="border-t border-border-subtle px-4 py-2.5 text-[13px] text-danger-foreground">
+            {modelError}
           </Text>
         ) : null}
       </Card>
@@ -569,48 +585,14 @@ function Editor(props: {
       )}
 
       <Card title="Each run">
-        <MenuRow
-          first
-          label="Model"
-          value={
-            modelMissing(draft.modelSelection)
-              ? "Pick a model"
-              : scheduleModelLabel(draft.modelSelection, providers)
-          }
-          invalid={attempted && !!validation.errors.model}
-          actions={modelActions}
-          onPick={(id) => change(withModelChoice(draft, providers, id))}
-        />
-        {effort ? (
-          <MenuRow
-            label={effort.label}
-            value={effort.choices.find((choice) => choice.selected)?.title ?? "Default"}
-            actions={effort.choices.map((choice) => ({
-              id: choice.id,
-              title: choice.title,
-              state: choice.selected ? ("on" as const) : ("off" as const),
-            }))}
-            onPick={(id) => change(withEffort(draft, effort.descriptorId, id))}
-          />
-        ) : null}
-        <MenuRow
-          label="Permissions"
-          value={runtimeModeConfig[draft.runtimeMode].label}
-          actions={RUNTIME_MODES.map((mode) => ({
-            id: mode,
-            title: runtimeModeConfig[mode].label,
-            subtitle: runtimeModeConfig[mode].description,
-            state: draft.runtimeMode === mode ? ("on" as const) : ("off" as const),
-          }))}
-          onPick={(id) => change({ ...draft, runtimeMode: id as RuntimeMode })}
-        />
         {heartbeat ? (
-          <View className="min-h-[50px] flex-row items-center border-t border-border-subtle px-4 py-3">
+          <View className="min-h-[50px] flex-row items-center px-4 py-3">
             <Text className="flex-1 text-[16px] text-foreground">Runs in</Text>
             <Text className="text-[15px] text-foreground-muted">{words.env}</Text>
           </View>
         ) : (
           <MenuRow
+            first
             label="Runs in"
             value={words.env}
             actions={[
@@ -733,5 +715,10 @@ export function ScheduleEditorRouteScreen(props: ScheduleEditorRouteScreenProps)
       </View>
     );
   }
-  return <Editor checkout={checkout} opening={opening} />;
+  return (
+    // The model picker and the ⋯ menu project into the sheet's own host.
+    <OverlayPortalScope>
+      <Editor checkout={checkout} opening={opening} />
+    </OverlayPortalScope>
+  );
 }
