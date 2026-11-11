@@ -21,7 +21,7 @@
 import type { ScheduleDraft } from "@ryco/client-runtime/state/agentControl";
 import type { EnvironmentId, ThreadEnvMode, ThreadId } from "@ryco/contracts";
 import { AUTOMATION_LIMITS } from "@ryco/shared/automationSchedule";
-import { FolderIcon, GitForkIcon, MessageSquareIcon, MessageSquarePlusIcon } from "lucide-react";
+import { FolderIcon, GitForkIcon, MessageSquareIcon, PlusIcon } from "lucide-react";
 import { useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 
 import { DeviceIcon } from "../../../DeviceIcon";
@@ -142,7 +142,8 @@ const NEW_CHAT_ITEM = {
   value: "local",
   label: "a new chat",
   hint: "Each run starts a new chat without a project, in its own folder.",
-  icon: <MessageSquarePlusIcon aria-hidden="true" />,
+  // An icon the dialog already loads: a new one regroups the shared lucide chunks.
+  icon: <PlusIcon aria-hidden="true" />,
 } as const;
 const WITHOUT_PROJECT_ENV_ITEMS = [NEW_CHAT_ITEM] as const;
 const WITHOUT_PROJECT_HEARTBEAT_ENV_ITEMS = [NEW_CHAT_ITEM, EXISTING_CHAT_ITEM] as const;
