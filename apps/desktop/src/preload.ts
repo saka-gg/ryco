@@ -268,6 +268,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     open: (input) => ipcRenderer.invoke("desktop:nightly-open", input),
     switchBack: () => ipcRenderer.invoke("desktop:nightly-switch-back"),
   },
+  appIcon: {
+    getVariant: () => ipcRenderer.invoke("desktop:app-icon-get"),
+    setVariant: (variant) => ipcRenderer.invoke("desktop:app-icon-set", variant),
+  },
   quitShortcut: {
     getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
     setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),

@@ -9,6 +9,10 @@ export interface RycoAppRuntimeNativeModule {
   readonly backgroundStayExpired: (stayId: number) => boolean;
   /** Raw DEFLATE with the relay's cap and end-of-stream rules, off the JavaScript thread. */
   readonly inflateRaw: (body: Uint8Array, maxOutputBytes: number) => Promise<Uint8Array>;
+  /** The alternate app icon iOS shows, null for the primary one; absent in older builds. */
+  readonly getAppIconName?: () => Promise<string | null>;
+  /** Switches the home screen icon; iOS tells the user itself. Absent in older builds. */
+  readonly setAppIconName?: (name: string | null) => Promise<void>;
   readonly addListener: (
     event: "onBackgroundStayExpiring",
     listener: (event: { readonly stayId: number }) => void,

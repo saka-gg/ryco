@@ -11,6 +11,7 @@ import UIKit
 ///   when iOS takes it back.
 /// - Relay payload inflation (findings F8) on a background queue instead of the
 ///   JavaScript thread that also draws.
+/// - The home screen icon: which alternate app icon iOS shows.
 public final class RycoAppRuntimeModule: Module {
   private static let expiringEvent = "onBackgroundStayExpiring"
 
@@ -52,6 +53,30 @@ public final class RycoAppRuntimeModule: Module {
       defer { self.lock.unlock() }
       return self.expired.contains(stayId)
     }
+
+    // The home screen icon (Settings → Appearance → App icon): an alternate icon set's name
+    // (plugins/withIosAlternateAppIcons.cjs), or nil for the primary icon. UIKit, so main queue.
+    AsyncFunction("getAppIconName") { () -> String? in
+      UIApplication.shared.supportsAlternateIcons ? UIApplication.shared.alternateIconName : nil
+    }.runOnQueue(.main)
+
+    AsyncFunction("setAppIconName") { (name: String?, promise: Promise) in
+      guard UIApplication.shared.supportsAlternateIcons else {
+        promise.reject("AppIconUnsupported", "This device cannot change the app icon.")
+        return
+      }
+      if UIApplication.shared.alternateIconName == name {
+        promise.resolve(nil)
+        return
+      }
+      UIApplication.shared.setAlternateIconName(name) { error in
+        if let error {
+          promise.reject("AppIconFailed", error.localizedDescription)
+        } else {
+          promise.resolve(nil)
+        }
+      }
+    }.runOnQueue(.main)
 
     // Runs on the module's background queue, off the JavaScript thread.
     AsyncFunction("inflateRaw") { (body: Data, maxOutputBytes: Int) throws -> Data in

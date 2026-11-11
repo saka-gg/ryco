@@ -211,7 +211,9 @@ const config: ExpoConfig = {
     reactCompiler: true,
   },
   ios: {
-    icon: "./assets/icon.png",
+    // Liquid Glass (Icon Composer); the alternates beside it come from
+    // plugins/withIosAlternateAppIcons.cjs. Both from scripts/generate-app-icon-variants.py.
+    icon: "./assets/app-icons/AppIcon.icon",
     supportsTablet: true,
     bundleIdentifier: iosBundleIdentifier,
     ...(appleTeamId ? { appleTeamId } : {}),
@@ -361,6 +363,7 @@ const config: ExpoConfig = {
       : ["./plugins/withShareExtensionDisplayName.cjs", sharingPlugin]),
     "./plugins/withIosCocoaPodsUuidCache.cjs",
     "./plugins/withIosSceneLifecycle.cjs",
+    "./plugins/withIosAlternateAppIcons.cjs",
     // Personal Team builds strip APNs and cannot sign an extension, its
     // keychain group or an App Group, so background push alerts and widgets
     // are off there.

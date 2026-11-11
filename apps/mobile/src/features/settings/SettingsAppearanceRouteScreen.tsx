@@ -3,6 +3,7 @@ import { ScrollView, View } from "react-native";
 import { AppText as Text } from "../../components/AppText";
 import { LoadingScreen } from "../../components/LoadingScreen";
 import { stepBaseFontSize, stepCodeFontSize } from "../../lib/appearancePreferences";
+import { AppIconSettings } from "./AppIconSettings";
 import { useAppearancePreferences } from "./appearance/AppearancePreferencesProvider";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
@@ -88,6 +89,7 @@ export function SettingsAppearanceRouteScreen() {
           onValueChange={setCodeWordBreak}
         />
       </SettingsSection>
+      <AppIconSettings />
       <SettingsSection title="Feel">
         <SettingsSwitchRow
           first
