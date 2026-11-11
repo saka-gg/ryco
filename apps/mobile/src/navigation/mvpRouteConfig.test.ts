@@ -466,13 +466,13 @@ describe("the root navigator matches the route table", () => {
     }
   });
 
-  it("reaches the §13.1.1 security surface from the Settings tab", () => {
-    const settings = readFileSync(
-      join(SRC, "features", "settings", "SettingsRouteScreen.tsx"),
+  it("reaches the §13.1.1 security surface from the selected Hub node's page in Machines", () => {
+    const hubSection = readFileSync(
+      join(SRC, "features", "hostedHub", "HubNodeSection.tsx"),
       "utf8",
     );
-    expect(settings).toContain('StackActions.push("SettingsNodeSecurity"');
-    expect(settings).toContain("exactNodeRouteParams(selectedNode)");
+    expect(hubSection).toContain('StackActions.push("SettingsNodeSecurity"');
+    expect(hubSection).toContain("exactNodeRouteParams(node)");
     // …and the ceremony is reached from the security surface itself.
     const security = readFileSync(
       join(SRC, "features", "e2ee", "E2eeNodeSecurityRouteScreen.tsx"),

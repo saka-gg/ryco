@@ -391,6 +391,22 @@ export function hostedStatusTone(indicator: HostedConnectionStatusIndicator): St
   };
 }
 
+/**
+ * The machine avatar's ring for a Hub node's live status: green when usable, grey when it
+ * needs the owner (the same labels the pill paints red) or is offline, amber on the way.
+ * It says only whether the node is reachable, never how safe the channel is: that claim is
+ * `hostedStatusTone`'s alone, and the row beside the ring carries the status word itself.
+ */
+export function hostedMachineTone(
+  indicator: HostedConnectionStatusIndicator,
+): "connected" | "connecting" | "offline" {
+  if (indicator.connected) return "connected";
+  if (indicator.shortLabel === "Offline" || HOSTED_ATTENTION_LABELS.has(indicator.shortLabel)) {
+    return "offline";
+  }
+  return "connecting";
+}
+
 function deliveryUnknownView(state: HostedHubState): HostedDeliveryUnknownView | null {
   if (state.sessionStatus !== "delivery-unknown") return null;
   const recovered = state.sessionRecoveredAfterUnknown;

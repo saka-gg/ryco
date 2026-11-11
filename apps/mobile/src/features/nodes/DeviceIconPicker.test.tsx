@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco/contracts";
-import { DeviceIconPicker } from "./DeviceIconPicker";
+import { DeviceIconPickerSheet } from "./DeviceIconPicker";
 
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
@@ -35,7 +35,13 @@ function elements(value: unknown): ReactElement<Record<string, unknown>>[] {
 }
 function choices(canEdit = true) {
   return elements(
-    DeviceIconPicker({ environmentId: EnvironmentId.make("remote"), label: "Remote", canEdit }),
+    DeviceIconPickerSheet({
+      environmentId: EnvironmentId.make("remote"),
+      label: "Remote",
+      canEdit,
+      visible: true,
+      onClose: () => {},
+    }),
   ).filter((element) => element.props.accessibilityRole === "radio");
 }
 beforeEach(() => {

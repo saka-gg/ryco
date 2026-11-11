@@ -574,9 +574,9 @@ export const MVP_SETTINGS_ROUTES = {
     linking: `${SETTINGS}/node-verification/:environmentId/:nodeId`,
     ...SETTINGS_PAGE,
   },
-  /** The machines whose own settings this device may open (one goes straight to it). */
+  /** Kept for saved links: hands over to Machines, the one list of machines. */
   SettingsMachines: { linking: `${SETTINGS}/machines`, ...SETTINGS_PAGE },
-  /** One machine's own settings, grouped: Providers, Agents, Work, Machine. */
+  /** Kept for saved links: opens the machine's page in Machines, where its settings are. */
   SettingsMachine: { linking: `${SETTINGS}/machines/:environmentId`, ...SETTINGS_PAGE },
   SettingsMachineProviders: {
     linking: `${SETTINGS}/machines/:environmentId/providers`,

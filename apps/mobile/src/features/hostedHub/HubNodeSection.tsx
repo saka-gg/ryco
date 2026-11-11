@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { DeviceRenameSheet } from "../nodes/DeviceRenameSheet";
-import { useNavigation } from "@react-navigation/native";
+import { StackActions, useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
 import type { RelayEffectiveRole, ServerEventLoopStall } from "@ryco/contracts";
@@ -42,10 +42,11 @@ import { useMobileNativeE2eeEnrollmentStatus } from "../e2ee/useMobileNativeE2ee
 import { acquireBeforeNodeSecurity } from "../e2ee/acquireBeforeNodeSecurity";
 import { exactNodeRouteParams } from "../e2ee/exactNodeRouteModel";
 import { useAuthoritativeNodeTrust } from "../home/useAuthoritativeNodeTrust";
-import { NodeRow } from "../nodes/NodeRow";
+import { MachineListRow } from "../nodes/MachineListRow";
+import type { HubMachineFacts } from "../nodes/machinesSheetModel";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHostFreezeNowMs } from "../../state/useHostFreezeNowMs";
-import { hostedStatusTone } from "./hostedAuthModel";
+import { hostedMachineTone, hostedStatusTone } from "./hostedAuthModel";
 import { hostedSelectionKey, type SettledHostedStatus } from "./settledHostedStatus";
 import { useHostedModeAvailable } from "./useHostedMode";
 import { useSettledHostedStatus } from "./useSettledHostedStatus";
@@ -99,6 +100,8 @@ export interface HubNodeSectionActions {
   readonly removeDirectAccess?: (node: HostedHubNode) => unknown;
   /** The machine access screen: pairing links, clients, reach, and Hub revocation. */
   readonly openAccess?: (node: HostedHubNode) => unknown;
+  /** The selected node's security page (§13.1.1), from its page in the Machines sheet. */
+  readonly openSecurityPage?: (node: HostedHubNode) => unknown;
 }
 
 /** Linked direct access as the rows show it (`hostedHub/linkedDirectAccessState.ts`). */
@@ -113,7 +116,7 @@ export interface HubNodeDirectAccess {
 
 export interface HubNodeRowModel {
   readonly canEditIcon?: boolean;
-  readonly environmentId?: HostedHubNode["environmentId"];
+  readonly environmentId: HostedHubNode["environmentId"];
   readonly platformOs?: string;
   readonly nodeId: string;
   readonly rename?: (() => void) | undefined;
@@ -136,6 +139,10 @@ export interface HubNodeRowModel {
   readonly disabled: boolean;
   /** `undefined` whenever the row must not be tappable — never a broken handler. */
   readonly onPress: (() => void) | undefined;
+  /** The selected node's security page; undefined for every other node. */
+  readonly openSecurity: (() => void) | undefined;
+  /** What the Machines sheet's list row and the node's own page show. */
+  readonly facts: HubMachineFacts;
 }
 
 export type HubNodeSectionKind = "unavailable" | "signed-out" | "busy" | "ready";
@@ -334,7 +341,74 @@ export function deriveHubNodeSectionModel(input: {
       const directDetail = linking
         ? "Adding direct access…"
         : (direct?.notice[node.environmentId] ?? null);
+      const selected = state.selectedNode?.id === node.id;
+      const revoked = node.revokedAt !== null;
+      const rename =
+        state.directoryStatus === "ready" &&
+        state.accountStatus === "authenticated" &&
+        node.effectiveRole === "owner" &&
+        !revoked &&
+        actions.renameNode
+          ? () => actions.renameNode?.(node)
+          : undefined;
+      const routeNotice =
+        selected && !onDirectRoute && node.presence.online && !revoked
+          ? diagnoseNodeRoute({
+              nodeLabel: node.label,
+              via: "hub",
+              status: statusInput,
+              presence: node.presence,
+              revoked,
+              outageFailure: connection?.outageFailure ?? null,
+              nowMs: input.hostFreeze?.nowMs ?? 0,
+            }).headline
+          : null;
+      const freezeNotice = input.hostFreeze
+        ? describeHostFreeze(input.hostFreeze.lastEventLoopStall(node.environmentId), {
+            nowMs: input.hostFreeze.nowMs,
+          })
+        : null;
+      const openSecurity =
+        selected && !revoked && actions.openSecurityPage
+          ? () => void actions.openSecurityPage?.(node)
+          : undefined;
+      const facts: HubMachineFacts = {
+        plane: "hub",
+        label: node.label,
+        role: ROLE_LABELS[node.effectiveRole],
+        // The selected node shows its live connection; every other node its presence.
+        tone:
+          revoked || !node.presence.online
+            ? "offline"
+            : selected
+              ? hostedMachineTone(indicator)
+              : "connected",
+        status: selected && !revoked ? indicator.shortLabel : rowTone(node).label,
+        revoked,
+        offline: !node.presence.online,
+        offlineSince:
+          input.hostFreeze === undefined
+            ? null
+            : describeOfflineSince(node.presence.lastHeartbeatAt, {
+                nowMs: input.hostFreeze.nowMs,
+              }),
+        reach: onDirectRoute ? "Direct" : "Hub relay",
+        trustDetail,
+        directNotice: directDetail,
+        routeNotice,
+        freezeNotice,
+        selected,
+        primary: selectable ? "use" : canVerify ? "verify" : null,
+        canRename: rename !== undefined,
+        // Removing is offered only for a linked node, adding only for an unlinked one.
+        directAccess: directAccess === undefined ? null : linked ? "remove" : "add",
+        linked,
+        canOpenAccess: actions.openAccess !== undefined,
+        canOpenSecurity: openSecurity !== undefined,
+      };
       return {
+        facts,
+        openSecurity,
         nodeId: node.id,
         environmentId: node.environmentId,
         platformOs: node.platformOs,
@@ -353,40 +427,15 @@ export function deriveHubNodeSectionModel(input: {
             method: WS_METHODS.serverUpdateSettings,
           }).allowed,
 
-        rename:
-          state.directoryStatus === "ready" &&
-          state.accountStatus === "authenticated" &&
-          node.effectiveRole === "owner" &&
-          node.revokedAt === null &&
-          actions.renameNode
-            ? () => actions.renameNode?.(node)
-            : undefined,
+        rename,
         directAccess,
         access: actions.openAccess ? () => void actions.openAccess?.(node) : undefined,
         label: node.label,
         detail: [trustDetail, rowDetail(node, input.hostFreeze?.nowMs), directDetail]
           .filter((part): part is string => part !== null)
           .join(" · "),
-        routeNotice:
-          state.selectedNode?.id === node.id &&
-          !onDirectRoute &&
-          node.presence.online &&
-          node.revokedAt === null
-            ? diagnoseNodeRoute({
-                nodeLabel: node.label,
-                via: "hub",
-                status: statusInput,
-                presence: node.presence,
-                revoked: node.revokedAt !== null,
-                outageFailure: connection?.outageFailure ?? null,
-                nowMs: input.hostFreeze?.nowMs ?? 0,
-              }).headline
-            : null,
-        freezeNotice: input.hostFreeze
-          ? describeHostFreeze(input.hostFreeze.lastEventLoopStall(node.environmentId), {
-              nowMs: input.hostFreeze.nowMs,
-            })
-          : null,
+        routeNotice,
+        freezeNotice,
         transportLabel: onDirectRoute ? "Direct" : "Hub relay",
         // The selected node's row shows the live connection status; every other
         // row shows directory presence, which is all the directory knows.
@@ -443,11 +492,15 @@ function ActionPill(props: { readonly label: string; readonly onPress: () => voi
 }
 
 /** Presentation only — every decision above lives in `deriveHubNodeSectionModel`. */
-export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel }) {
+export function HubNodeSectionView(props: {
+  readonly model: HubNodeSectionModel;
+  /** Opens a node's own page in the Machines sheet. */
+  readonly onOpen: (row: HubNodeRowModel) => void;
+}) {
   const { model } = props;
   return (
-    <View className="mt-6">
-      <View className="flex-row items-center gap-3 px-5 pb-2.5">
+    <View>
+      <View className="flex-row items-center gap-3 px-5 pt-[26px] pb-2">
         <Text className="flex-1 text-sm font-ryco-medium text-foreground-muted">Hub nodes</Text>
         {model.kind === "ready" ? (
           <StatusPill
@@ -460,29 +513,16 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
       </View>
 
       {model.rows.length > 0 ? (
-        <View className="mx-5 overflow-hidden rounded-2xl border border-border bg-card">
+        <View className="mx-4 overflow-hidden rounded-2xl bg-card">
           {model.rows.map((row, index) => (
-            <NodeRow
+            <MachineListRow
               key={row.nodeId}
               environmentId={row.environmentId}
               platformOs={row.platformOs}
-              canEditIcon={row.canEditIcon}
               label={row.label}
-              detail={row.detail}
-              routeNotice={row.routeNotice}
-              freezeNotice={row.freezeNotice}
-              transportLabel={row.transportLabel}
-              statusTone={row.tone}
-              selected={row.selected}
-              selectable
-              disabled={row.disabled}
+              facts={row.facts}
               showDivider={index > 0}
-              onPress={row.onPress}
-              actions={[
-                ...(row.rename ? [{ label: "Rename", onPress: row.rename }] : []),
-                ...(row.directAccess ? [row.directAccess] : []),
-                ...(row.access ? [{ label: "Access", onPress: row.access }] : []),
-              ]}
+              onPress={() => props.onOpen(row)}
             />
           ))}
         </View>
@@ -501,7 +541,7 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
       ) : null}
 
       {model.allNodes || model.refresh || model.retry ? (
-        <View className="mx-5 mt-3 flex-row gap-2">
+        <View className="mx-4 mt-3 flex-row gap-2">
           {model.allNodes ? <ActionPill label="All nodes" onPress={model.allNodes} /> : null}
           {model.refresh ? <ActionPill label="Refresh" onPress={model.refresh} /> : null}
           {model.retry ? <ActionPill label="Retry" onPress={model.retry} /> : null}
@@ -511,7 +551,15 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
   );
 }
 
-export function HubNodeSection(props: { readonly query?: string } = {}) {
+/**
+ * The Hub nodes as the Machines sheet shows them: the section's model, live, and the node
+ * the rename sheet is open for. The sheet draws both the list and a node's own page from it.
+ */
+export function useHubNodeSection(props: { readonly query?: string } = {}): {
+  readonly model: HubNodeSectionModel;
+  readonly renameTarget: HostedHubNode | null;
+  readonly closeRename: () => void;
+} {
   const navigation = useNavigation();
   const [renameTarget, setRenameTarget] = useState<HostedHubNode | null>(null);
   const state = useHostedHubStore((current) => current);
@@ -575,6 +623,8 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
       removeDirectAccess: removeMobileDirectAccessLazily,
       openAccess: (node) =>
         navigation.navigate("MachineAccess", { environmentId: node.environmentId }),
+      openSecurityPage: (node) =>
+        navigation.dispatch(StackActions.push("SettingsNodeSecurity", exactNodeRouteParams(node))),
       returnToDirectory: () => hostedHubController.returnToDirectory(),
       refreshDirectory: () => hostedHubController.refreshDirectory(),
       retrySelectedNode: () => hostedHubController.retrySelectedNode(),
@@ -593,27 +643,35 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     directAccess,
   });
 
+  // The rename sheet stays open only while this device may still rename the node.
+  const renamable =
+    renameTarget !== null &&
+    state.accountStatus === "authenticated" &&
+    state.nodes.some(
+      (node) =>
+        node.id === renameTarget.id && node.effectiveRole === "owner" && node.revokedAt === null,
+    );
+  return {
+    model,
+    renameTarget: renamable ? renameTarget : null,
+    closeRename: () => setRenameTarget(null),
+  };
+}
+
+/** Renames a Hub node for everyone who can reach it (owners only, `useHubNodeSection`). */
+export function HubNodeRenameSheet(props: {
+  readonly target: HostedHubNode;
+  readonly onClose: () => void;
+}) {
   return (
-    <>
-      <HubNodeSectionView model={model} />
-      {renameTarget &&
-        state.accountStatus === "authenticated" &&
-        state.nodes.some(
-          (node) =>
-            node.id === renameTarget.id &&
-            node.effectiveRole === "owner" &&
-            node.revokedAt === null,
-        ) && (
-          <DeviceRenameSheet
-            key={renameTarget.id}
-            label={renameTarget.label}
-            onClose={() => setRenameTarget(null)}
-            onSave={async (label) => {
-              await getHostedHubApi().renameNode(renameTarget.id, label);
-              await hostedHubController.refreshDirectory();
-            }}
-          />
-        )}
-    </>
+    <DeviceRenameSheet
+      key={props.target.id}
+      label={props.target.label}
+      onClose={props.onClose}
+      onSave={async (label) => {
+        await getHostedHubApi().renameNode(props.target.id, label);
+        await hostedHubController.refreshDirectory();
+      }}
+    />
   );
 }
