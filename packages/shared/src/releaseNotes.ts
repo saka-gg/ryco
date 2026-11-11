@@ -32,6 +32,41 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.47",
+    date: "November 11, 2026",
+    dateTime: "2026-11-11",
+    summary:
+      "Automations that run without a project, a choice of app icons, and an iPhone app with a page per machine, open source licenses and calmer offline machines.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.47`,
+    highlights: [
+      {
+        title: "Automations without a project",
+        summary:
+          "The Automations dialog has a No project entry. A schedule there starts a new chat on each run, or sends its prompt into one chat you pick.",
+      },
+      {
+        title: "A choice of app icons",
+        summary:
+          "Ryco can wear a Light, Dark, Ember or Ignition icon on macOS, Windows and Linux, and in the iPhone app, still in development.",
+      },
+      {
+        title: "A machine that can't be reached says so calmly",
+        summary:
+          "A machine that is off, asleep or on another network now reads as offline with a short sentence and a retry, instead of a technical error.",
+      },
+      {
+        title: "A page for every machine on the phone",
+        summary:
+          "In the iPhone app, still in development, the machines sheet lists each machine with its status, and a tap opens its own page with its actions, settings and access. Settings shows Machines once.",
+      },
+      {
+        title: "Schedules set up like a chat, and open source licenses",
+        summary:
+          "On the phone, a schedule now uses the same model picker and menu as a chat. Settings → About lists the open source licenses of everything the app ships.",
+      },
+    ],
+  },
+  {
     version: "0.1.46",
     date: "November 10, 2026",
     dateTime: "2026-11-10",
