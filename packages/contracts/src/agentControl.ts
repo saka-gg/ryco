@@ -730,10 +730,14 @@ export type AgentControlChangeSettingsPlan = typeof AgentControlChangeSettingsPl
  * exists in this schema. Each due occurrence copies this exact template into
  * a fresh `automationRun` proposal that still requires user approval.
  */
+export { AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID } from "./automationScope.ts";
+
 /**
  * Where a scheduled run goes: absent, a new chat each time; `thread`, the follow-up queue of one
  * existing chat of the same project (a heartbeat), as an `automation` entry the chat's queue
- * holds and sends like its other follow-ups, with the chat's current model and modes.
+ * holds and sends like its other follow-ups, with the chat's current model and modes. In the
+ * "No project" scope (`AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID`) the chat is any open chat
+ * without a project.
  */
 export const AgentControlAutomationTarget = Schema.Struct({
   kind: Schema.Literal("thread"),

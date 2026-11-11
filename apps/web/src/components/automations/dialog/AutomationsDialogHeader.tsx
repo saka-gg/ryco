@@ -4,7 +4,14 @@
  */
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
 import { formatTime, localTimeZone } from "@ryco/shared/automationSchedule";
-import { CheckIcon, ChevronsUpDownIcon, ClockIcon, PlusIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronsUpDownIcon,
+  ClockIcon,
+  MessageSquareIcon,
+  PlusIcon,
+  XIcon,
+} from "lucide-react";
 import type { Ref } from "react";
 
 import { ProjectFavicon } from "../../ProjectFavicon";
@@ -12,6 +19,7 @@ import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
 import { DialogTitle } from "../../ui/dialog";
 import { Menu, MenuPopup, MenuTrigger } from "../../ui/menu";
 import { useAutomationProjectCounts } from "../data/useAutomationProjectCounts";
+import { isChatsAutomationSnapshot } from "../data/chatsAutomationScope.logic";
 import { Countdown } from "./Ticking";
 import { DialogButton, Tip } from "./dialogControls";
 import { focusCheckedItemOnEntry } from "./menuFocus";
@@ -52,7 +60,9 @@ export function AutomationsDialogHeader({ newButtonRef, ...props }: AutomationsD
   const { project, limit, editing } = props;
   const name = project.displayName;
   const fullWhy = limit.allFull
-    ? `${name} has ${limit.perProject} active schedules, the most a project can have. Pause or cancel one to add another.`
+    ? isChatsAutomationSnapshot(project)
+      ? `Chats without a project have ${limit.perProject} active schedules, the most they can have. Pause or cancel one to add another.`
+      : `${name} has ${limit.perProject} active schedules, the most a project can have. Pause or cancel one to add another.`
     : undefined;
   return (
     <header className="ad-head">
@@ -111,6 +121,23 @@ export function AutomationsDialogHeader({ newButtonRef, ...props }: AutomationsD
   );
 }
 
+/** A project's favicon; "No project" shows a chat glyph (it has no folder of its own). */
+function ScopeFavicon(props: { readonly project: SidebarProjectSnapshot }) {
+  const { project } = props;
+  if (isChatsAutomationSnapshot(project))
+    return <MessageSquareIcon className="ad-fav" aria-hidden="true" />;
+  return (
+    <ProjectFavicon
+      environmentId={project.environmentId}
+      cwd={project.cwd}
+      projectId={project.id}
+      customAvatarContentHash={project.customAvatarContentHash ?? null}
+      fallbackName={project.displayName}
+      className="ad-fav"
+    />
+  );
+}
+
 function ProjectSwitcher(props: {
   readonly project: SidebarProjectSnapshot;
   readonly projects: readonly SidebarProjectSnapshot[];
@@ -122,14 +149,7 @@ function ProjectSwitcher(props: {
   const counts = useAutomationProjectCounts(props.projects);
   const face = (
     <>
-      <ProjectFavicon
-        environmentId={project.environmentId}
-        cwd={project.cwd}
-        projectId={project.id}
-        customAvatarContentHash={project.customAvatarContentHash ?? null}
-        fallbackName={project.displayName}
-        className="ad-fav"
-      />
+      <ScopeFavicon project={project} />
       <span className="ad-trunc">{project.displayName}</span>
       <ChevronsUpDownIcon className="ad-switch-ic" aria-hidden="true" />
     </>
@@ -185,14 +205,7 @@ function ProjectSwitcher(props: {
                     : candidate.displayName
                 }
               >
-                <ProjectFavicon
-                  environmentId={candidate.environmentId}
-                  cwd={candidate.cwd}
-                  projectId={candidate.id}
-                  customAvatarContentHash={candidate.customAvatarContentHash ?? null}
-                  fallbackName={candidate.displayName}
-                  className="ad-fav"
-                />
+                <ScopeFavicon project={candidate} />
                 <span className="ad-mi-t">
                   <span className="ad-mi-l ad-trunc">{candidate.displayName}</span>
                 </span>

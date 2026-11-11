@@ -1,4 +1,5 @@
 import {
+  AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
   CommandId,
   EventId,
   ProjectId,
@@ -72,6 +73,23 @@ describe("decider project kind", () => {
     expect(created.type).toBe("project.created");
     expect((created.payload as { kind?: ProjectKind }).kind).toBe("project");
     expect(readModel.projects[0]?.kind).toBe("project");
+  });
+
+  it("refuses the id of the automations without a project as a project's", async () => {
+    await expect(
+      decide(
+        {
+          type: "project.create",
+          commandId: CommandId.make("create-reserved"),
+          projectId: AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
+          kind: "chat",
+          title: "Chats",
+          workspaceRoot: "/tmp/chats",
+          createdAt: now,
+        },
+        createEmptyReadModel(now),
+      ),
+    ).rejects.toThrow(/reserved/);
   });
 
   it("creates a chat project and promotes it to a project", async () => {

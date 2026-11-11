@@ -28,7 +28,7 @@ import { ProviderInstanceIcon } from "../../chat/ProviderInstanceIcon";
 import { runtimeModeConfig } from "../../chat/sessionPolicyPresentation";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../ui/menu";
 import type { ProjectAutomationsCheckout } from "../data/useProjectAutomations";
-import { useProjectChats } from "../data/useProjectChats";
+import { useScheduleChats } from "../data/useProjectChats";
 import { ActiveRunBlock, DueRunBlock, LapsedBlock, ProposalBlock, hasBlocks } from "./DetailBlocks";
 import { RunHistory } from "./RunHistory";
 import { RelativeTime } from "./Ticking";
@@ -132,7 +132,7 @@ export function ScheduleDetail(props: ScheduleDetailProps) {
   const def = row.def;
   const ex = def.execution;
   // Only a heartbeat names a chat; any other schedule needs no chat list.
-  const chats = useProjectChats(
+  const chats = useScheduleChats(
     ex.target === undefined ? null : checkout.environmentId,
     checkout.projectId,
   );

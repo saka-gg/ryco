@@ -430,6 +430,11 @@ export const ServerConfig = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   workspaceAccessRoot: Schema.optional(TrimmedNonEmptyString),
   chats: Schema.optionalKey(ServerChatsCapability),
+  /**
+   * The node takes automations without a project (`AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID`)
+   * while it offers chats; absent on older nodes.
+   */
+  chatAutomations: Schema.optionalKey(Schema.Literal(true)),
   pullRequestWatch: Schema.optionalKey(ServerPullRequestWatchCapability),
   /** Node browser tabs (`@ryco/contracts/node-browser`); absent on older nodes. */
   nodeBrowser: Schema.optionalKey(NodeBrowserCapability),

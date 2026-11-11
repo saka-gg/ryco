@@ -2,6 +2,7 @@ import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
 import type { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
   AgentControlAutomationId,
   AgentControlAutomationRunId,
   AgentControlIntegrationId,
@@ -2211,3 +2212,73 @@ describe("worktree handoffs", () => {
     }),
   );
 });
+
+it.effect("takes the owner's schedules without a project: a new chat each run, or one chat", () =>
+  Effect.gen(function* () {
+    const chatProjectId = ProjectId.make("chat-project-1");
+    const chatThreadId = ThreadId.make("thread-chat");
+    const chatProject = { ...project, id: chatProjectId, kind: "chat" as const };
+    const chatThread = {
+      ...thread({ id: chatThreadId, runtimeMode: "approval-required", envMode: "local" }),
+      projectId: chatProjectId,
+    };
+    const snapshot = yield* Ref.make<OrchestrationShellSnapshot>({
+      ...makeSnapshot(),
+      projects: [project, chatProject],
+      threads: [...makeSnapshot().threads, chatThread],
+    });
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const chats = yield* Ref.make<{ available: boolean }>({ available: true });
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections: {
+        getShellSnapshot: () => Ref.get(snapshot),
+      } as unknown as ProjectionSnapshotQueryShape,
+      getProviders: Ref.get(providers),
+      listRefs: () => Effect.die("no branches without a project"),
+      automations: {
+        validateLifecyclePlan: () => Effect.void,
+      } as unknown as AgentControlAutomationShape,
+      chats: Ref.get(chats),
+    });
+    const execution = {
+      projectId: AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
+      title: "Morning news",
+      prompt: "Summarize the news.",
+      modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+      runtimeMode: "auto-accept-edits" as const,
+      envMode: "local" as const,
+    };
+    const create = (
+      overrides: Partial<typeof execution> & { target?: { kind: "thread"; threadId: ThreadId } },
+    ) => ({
+      kind: "createAutomation" as const,
+      automationId: AgentControlAutomationId.make("automation-chats"),
+      definition: {
+        execution: { ...execution, ...overrides },
+        schedule: { kind: "once" as const, runAt: "2099-01-01T00:00:00.000Z" },
+        enabled: true,
+      },
+    });
+
+    // A new chat each run: its own folder, so never a worktree.
+    yield* validator.validateOwnerAutomation(create({}));
+    const worktree = yield* Effect.flip(
+      validator.validateOwnerAutomation(create({ envMode: "worktree" as never })),
+    );
+    assert.strictEqual(worktree.reason, "invalid-plan");
+    // One chat: any open chat without a project, never a project's chat.
+    yield* validator.validateOwnerAutomation(
+      create({ target: { kind: "thread", threadId: chatThreadId } }),
+    );
+    const projectChat = yield* Effect.flip(
+      validator.validateOwnerAutomation(
+        create({ target: { kind: "thread", threadId: targetThreadId } }),
+      ),
+    );
+    assert.strictEqual(projectChat.reason, "thread-unavailable");
+    // While the node offers no chats, none can be scheduled.
+    yield* Ref.set(chats, { available: false });
+    const off = yield* Effect.flip(validator.validateOwnerAutomation(create({})));
+    assert.strictEqual(off.reason, "project-unavailable");
+  }),
+);

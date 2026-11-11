@@ -106,6 +106,11 @@
       "import": "./src/desktopNativeNodeClaim.ts",
       "require": "./src/desktopNativeNodeClaim.ts"
     },
+    "./automation-scope": {
+      "types": "./src/automationScope.ts",
+      "import": "./src/automationScope.ts",
+      "require": "./src/automationScope.ts"
+    },
     "./agent-control": {
       "types": "./src/agentControl.ts",
       "import": "./src/agentControl.ts",

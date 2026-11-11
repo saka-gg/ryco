@@ -11,10 +11,15 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationThreadShell,
   RuntimeMode,
+  ServerChatsCapability,
   ServerProvider,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_CAPABILITIES, ThreadId } from "@ryco/contracts";
-import { isChatProject } from "@ryco/shared/projectKind";
+import {
+  automationScopeOfProject,
+  isChatProject,
+  isChatsAutomationScope,
+} from "@ryco/shared/projectKind";
 import { Effect, Layer, Option } from "effect";
 
 import { ServerEnvironment } from "../../environment/Services/ServerEnvironment.ts";
@@ -71,6 +76,7 @@ import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalT
 import * as SqlClient from "effect/sql/SqlClient";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { hasDelegationLimits } from "../../orchestration/delegationLimits.ts";
+import { ChatFolders, describeChatsUnavailable } from "../../project/chatFolders.ts";
 import {
   CompletionReturnRepository,
   isPendingCompletionReturn,
@@ -187,8 +193,9 @@ const lowerSendCeiling = (
 });
 
 /**
- * A heartbeat's chat: an open chat of the automation's project, which a proposer's heartbeat
- * (`asSender`) must also be allowed to message. The owner's own schedules need only the first.
+ * A heartbeat's chat: an open chat of the automation's project (in the "No project" scope, any
+ * open chat without a project), which a proposer's heartbeat (`asSender`) must also be allowed
+ * to message. The owner's own schedules need only the first.
  */
 const validateAutomationTarget = (
   execution: AgentControlAutomationExecutionTemplate,
@@ -199,11 +206,12 @@ const validateAutomationTarget = (
     const target = execution.target;
     if (target === undefined) return;
     const thread = snapshot.threads.find((candidate) => candidate.id === target.threadId);
-    if (
-      thread === undefined ||
-      thread.archivedAt !== null ||
-      thread.projectId !== execution.projectId
-    ) {
+    const inScope =
+      thread !== undefined &&
+      (isChatsAutomationScope(execution.projectId)
+        ? isChatProject(snapshot.projects.find((project) => project.id === thread.projectId))
+        : thread.projectId === execution.projectId);
+    if (thread === undefined || thread.archivedAt !== null || !inScope) {
       return yield* fail(
         "thread-unavailable",
         "The automation's chat is archived, deleted or outside the automation's project.",
@@ -491,11 +499,19 @@ const validatePlanAgainstSnapshot = (input: {
         if (entry.projectId !== input.originProjectId) {
           return yield* fail("project-scope", "The requested project is outside caller scope.");
         }
-        const project = input.snapshot.projects.find(
-          (candidate) => candidate.id === entry.projectId,
-        );
-        if (!project) {
+        // An automation without a project: each run's chat gets its own new folder.
+        const chats = isChatsAutomationScope(entry.projectId);
+        const project = chats
+          ? undefined
+          : input.snapshot.projects.find((candidate) => candidate.id === entry.projectId);
+        if (!chats && !project) {
           return yield* fail("project-unavailable", "The requested project is unavailable.");
+        }
+        if (chats && entry.envMode !== "local") {
+          return yield* fail(
+            "invalid-plan",
+            "A chat without a project runs in its own folder and cannot use a worktree.",
+          );
         }
         if (
           runtimeModePrivilegeRank[entry.runtimeMode] >
@@ -517,6 +533,7 @@ const validatePlanAgainstSnapshot = (input: {
         }
         yield* validateBaseRef(entry.baseRef);
         if (
+          project !== undefined &&
           entry.envMode === "worktree" &&
           entry.baseRef !== undefined &&
           entry.baseRef !== "HEAD"
@@ -645,6 +662,8 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   /** `copyProjectToNode`: the other nodes owner clients published. */
   readonly nodeDirectory?: Pick<AgentControlNodeDirectoryShape, "list">;
   readonly thisEnvironmentId?: Effect.Effect<EnvironmentId>;
+  /** Whether this node offers chats without a project now; absent: it never does. */
+  readonly chats?: Effect.Effect<ServerChatsCapability>;
   /** Whether a chat is a delegated one whose result its delegating chat still waits for. */
   readonly delegatedReturnPending?: (
     threadId: ThreadId,
@@ -672,6 +691,19 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             }),
       ),
     );
+  /** An automation without a project needs the node to offer chats when it is set up. */
+  const requireChatsForAutomation = (execution: AgentControlAutomationExecutionTemplate) =>
+    Effect.gen(function* () {
+      if (!isChatsAutomationScope(execution.projectId)) return;
+      const chats = deps.chats === undefined ? undefined : yield* deps.chats;
+      if (chats?.available !== true) {
+        return yield* fail(
+          "project-unavailable",
+          describeChatsUnavailable(chats?.unavailableReason),
+        );
+      }
+    });
+
   // Every live project (plans may create threads in other projects) and the summaries of the
   // threads this validation names: no whole shell snapshot per tool call.
   const loadState = (threadIds: ReadonlyArray<string>) =>
@@ -1062,12 +1094,17 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail("privilege-escalation", WEBHOOK_OWNER_ONLY);
         }
         yield* validateAutomation(deps.automations.validateLifecyclePlan(input.plan));
+        // A chat without a project schedules in the node's "No project" scope.
+        const callerScope = automationScopeOfProject(
+          caller.projectId,
+          snapshot.projects.find((project) => project.id === caller.projectId),
+        );
         const automation =
           input.plan.kind === "createAutomation"
             ? undefined
             : yield* validateAutomation(
                 deps.automations.get(input.plan.automationId, {
-                  projectId: caller.projectId,
+                  projectId: callerScope,
                   providerInstanceId: input.session.providerInstanceId,
                 }),
               );
@@ -1076,7 +1113,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             ? automation!.definition
             : automationDefinitionForPlan(input.plan);
         if (
-          definition.execution.projectId !== caller.projectId ||
+          definition.execution.projectId !== callerScope ||
           definition.execution.modelSelection.instanceId !== input.session.providerInstanceId
         ) {
           return yield* fail(
@@ -1084,9 +1121,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             "Automation project and provider must match the exact provider session.",
           );
         }
+        if (input.plan.kind !== "cancelAutomation") {
+          yield* requireChatsForAutomation(definition.execution);
+        }
         yield* validatePlanAgainstSnapshot({
           plan: { kind: "createThreads", entries: [definition.execution] },
-          originProjectId: caller.projectId,
+          originProjectId: callerScope,
           originRuntimeMode: caller.runtimeMode,
           originEnvMode,
           snapshot,
@@ -1243,8 +1283,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
                 ? input.plan.after
                 : input.plan.expected.definition;
           const scopeAllowed =
-            input.integration.projectScope.kind === "all" ||
-            input.integration.projectScope.projectIds.includes(definition.execution.projectId);
+            !isChatsAutomationScope(definition.execution.projectId) &&
+            (input.integration.projectScope.kind === "all" ||
+              input.integration.projectScope.projectIds.includes(definition.execution.projectId));
           if (!scopeAllowed) {
             return yield* fail("project-scope", "Automation project is outside integration scope.");
           }
@@ -1408,6 +1449,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       yield* validateAutomation(deps.automations.validateLifecyclePlan(plan));
       if (plan.kind === "cancelAutomation") return;
       const definition = plan.kind === "createAutomation" ? plan.definition : plan.after;
+      yield* requireChatsForAutomation(definition.execution);
       const { snapshot, providers } = yield* loadState(
         automationTargetThreadIds(definition.execution),
       );
@@ -1676,6 +1718,11 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
               providers,
               requireBaseRef,
             };
+      // A chat without a project schedules in the node's "No project" scope.
+      const automationScope = automationScopeOfProject(
+        originProjectId,
+        snapshot.projects.find((project) => project.id === originProjectId),
+      );
       if (isAutomationLifecyclePlan(proposal.plan)) {
         if (deps.automations === undefined) {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
@@ -1683,14 +1730,15 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         yield* validateAutomation(deps.automations.validateLifecyclePlan(proposal.plan));
         if (proposal.plan.kind === "cancelAutomation") {
           yield* validateAutomation(
-            deps.automations.get(proposal.plan.automationId, { projectId: originProjectId }),
+            deps.automations.get(proposal.plan.automationId, { projectId: automationScope }),
           );
           return;
         }
         const definition = automationDefinitionForPlan(proposal.plan);
+        yield* requireChatsForAutomation(definition.execution);
         yield* validatePlanAgainstSnapshot({
           plan: { kind: "createThreads", entries: [definition.execution] },
-          originProjectId,
+          originProjectId: automationScope,
           originRuntimeMode,
           originEnvMode,
           snapshot,
@@ -1709,7 +1757,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         yield* validateAutomation(deps.automations.validateRun(proposal));
         yield* validatePlanAgainstSnapshot({
           plan: { kind: "createThreads", entries: [proposal.plan.execution] },
-          originProjectId,
+          originProjectId: automationScope,
           originRuntimeMode,
           originEnvMode,
           snapshot,
@@ -1803,6 +1851,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
   const settings = yield* Effect.serviceOption(ServerSettingsService);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const chatFolders = yield* Effect.serviceOption(ChatFolders);
   return makeAgentControlActionValidatorFromDeps({
     projections,
     getProviders: providerRegistry.getProviders,
@@ -1815,6 +1864,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
     ...(Option.isSome(nodePaths) ? { nodePaths: nodePaths.value } : {}),
     ...(Option.isSome(gitNetwork) ? { gitNetwork: gitNetwork.value } : {}),
     ...(Option.isSome(nodeDirectory) ? { nodeDirectory: nodeDirectory.value } : {}),
+    ...(Option.isSome(chatFolders) ? { chats: chatFolders.value.capability } : {}),
     ...(Option.isSome(serverEnvironment)
       ? { thisEnvironmentId: serverEnvironment.value.getEnvironmentId }
       : {}),

@@ -1,6 +1,7 @@
 process.env.TZ = "Europe/Berlin";
 
 import {
+  AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
   AgentControlAutomationId,
   AgentControlErrorCode,
   AgentControlAutomationRunId,
@@ -1095,6 +1096,26 @@ describe("drafts", () => {
         runtimeModeLabel: (mode) => mode,
       }).map((row) => [row.key, row.before, row.after]),
     ).toEqual([["runsIn", "a new worktree", "an existing chat"]]);
+  });
+
+  it("says a schedule without a project runs in a new chat, or its one chat", () => {
+    const chats = {
+      ...twoHourly.execution,
+      projectId: AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
+      envMode: "local" as const,
+    };
+    expect(runsInWords(chats)).toBe("a new chat");
+    expect(
+      runsInWords({ ...chats, target: { kind: "thread", threadId: ThreadId.make("thread-chat") } }),
+    ).toBe("an existing chat");
+    // A blank draft without a project never starts in a worktree.
+    expect(
+      blankScheduleDraft({
+        projectId: AGENT_CONTROL_CHATS_AUTOMATION_PROJECT_ID,
+        nowMs: NOW,
+        modelSelection: { instanceId: CLAUDE, model: "claude-sonnet-5-5" },
+      }).envMode,
+    ).toBe("local");
   });
 
   it("carries run without asking, and writes the policy only when it is on", () => {
