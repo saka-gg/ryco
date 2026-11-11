@@ -1,9 +1,11 @@
 import type { MobileHostedConnectionState } from "../../connection/hostedConnectionCoordinator";
 vi.mock("../nodes/DeviceIconPicker", () => ({ DeviceIconPicker: () => null }));
 vi.mock("../../components/DeviceIcon", () => ({
+  DeviceAvatar: () => null,
   DeviceIcon: () => null,
   EnvironmentMachineIcon: () => null,
 }));
+vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => null }));
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -62,7 +64,12 @@ const tripwire = vi.hoisted(() => {
 
 vi.mock("../nodes/DeviceRenameSheet", () => ({ DeviceRenameSheet: () => null }));
 
-vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View", Text: "Text" }));
+vi.mock("react-native", () => ({
+  Pressable: "Pressable",
+  View: "View",
+  Text: "Text",
+  useColorScheme: () => "dark",
+}));
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
@@ -153,9 +160,20 @@ vi.mock("../../platform/secretKv", () => {
 import {
   canSelectHubNode,
   deriveHubNodeSectionModel,
-  HubNodeSection,
+  type HubNodeRowModel,
   type HubNodeSectionModel,
+  HubNodeSectionView,
+  useHubNodeSection,
 } from "./HubNodeSection";
+
+/** The rows the section opened a page for, as the Machines sheet would. */
+const openedRows: HubNodeRowModel[] = [];
+
+/** The section as the Machines sheet draws it: a row opens the node's own page. */
+function HubNodeSection() {
+  const hub = useHubNodeSection();
+  return HubNodeSectionView({ model: hub.model, onOpen: (row) => openedRows.push(row) });
+}
 import {
   hostedSelectionKey,
   type SettledHostedStatus,
@@ -557,6 +575,62 @@ describe("Hub node section status text", () => {
   });
 });
 
+describe("Hub node facts for the Machines sheet", () => {
+  it("shows the selected node's live status and ring, and leads its page to its security", () => {
+    const selected = node();
+    const [row] = model({
+      selectedNode: selected,
+      sessionStatus: "ready",
+      selectionStatus: "online",
+      transportStatus: "online",
+    }).rows;
+    expect(row?.facts).toMatchObject({
+      plane: "hub",
+      selected: true,
+      tone: "connected",
+      status: "Online",
+      role: "Operator",
+      reach: "Hub relay",
+      canOpenSecurity: false,
+    });
+    // The security page is offered only when the sheet passes its opener.
+    const withSecurity = deriveHubNodeSectionModel({
+      state: state({ selectedNode: selected, transportStatus: "connecting" }),
+      available: true,
+      e2eeStatus: "unavailable",
+      actions: {
+        selectNode: vi.fn(),
+        returnToDirectory: vi.fn(),
+        refreshDirectory: vi.fn(),
+        retrySelectedNode: vi.fn(),
+        openSecurityPage: vi.fn(),
+      },
+      onSignIn: vi.fn(),
+    }).rows[0];
+    expect(withSecurity?.facts.canOpenSecurity).toBe(true);
+    expect(withSecurity?.facts.tone).toBe("connecting");
+    expect(typeof withSecurity?.openSecurity).toBe("function");
+  });
+
+  it("shows another node by its presence, grey when offline or revoked", () => {
+    expect(model().rows[0]?.facts).toMatchObject({
+      selected: false,
+      tone: "connected",
+      status: "Online",
+      primary: "use",
+      canOpenSecurity: false,
+    });
+    const offline = model({
+      nodes: [
+        node({ presence: { online: false, lastHeartbeatAt: null } } as Partial<HostedHubNode>),
+      ],
+    }).rows[0]?.facts;
+    expect(offline).toMatchObject({ tone: "offline", offline: true });
+    const revoked = model({ nodes: [node({ revokedAt: 1 })] }).rows[0]?.facts;
+    expect(revoked).toMatchObject({ tone: "offline", revoked: true, canRename: false });
+  });
+});
+
 describe("Hub node section when hosted mode is unavailable or signed out", () => {
   it("renders an explicit empty state with no tappable rows when unavailable", () => {
     const unavailable = model({}, { available: false });
@@ -609,26 +683,30 @@ describe("Hub node section view", () => {
     expect(hostedMock.controller[method].mock.contexts).toEqual([hostedMock.controller]);
   });
 
-  it("renders a tappable row that acquires the node through the coordinator", () => {
+  it("opens a node's page from its row, whose Use acquires the node through the coordinator", () => {
     hostedMock.state = state();
+    openedRows.length = 0;
     const tree = HubNodeSection();
     const row = pressables(tree).find((element) =>
       (element.props.accessibilityLabel as string)?.startsWith("Studio Mac"),
     );
     expect(row).toBeDefined();
-    expect(row?.props.disabled).toBe(false);
     (row!.props.onPress as () => void)();
+    expect(openedRows.map((opened) => opened.nodeId)).toEqual(["node-1"]);
+    // Opening the page selects nothing; its Use button does.
+    expect(acquireNodeMock).not.toHaveBeenCalled();
+    expect(openedRows[0]?.facts.primary).toBe("use");
+    openedRows[0]?.onPress?.();
     expect(acquireNodeMock).toHaveBeenCalledWith("node-1");
     expect(hostedMock.controller.selectNode).not.toHaveBeenCalled();
   });
 
-  it("renders a disabled row with no press handler when the directory is stale", () => {
+  it("offers no Use on a node's page while the directory is stale", () => {
     hostedMock.state = state({ directoryStatus: "stale" });
-    const row = pressables(HubNodeSection()).find((element) =>
-      (element.props.accessibilityLabel as string)?.startsWith("Studio Mac"),
-    );
-    expect(row?.props.disabled).toBe(true);
-    expect(row?.props.onPress).toBeUndefined();
+    const [row] = model({ directoryStatus: "stale" }).rows;
+    expect(row?.disabled).toBe(true);
+    expect(row?.onPress).toBeUndefined();
+    expect(row?.facts.primary).toBeNull();
   });
 
   it("renders the disabled state and no tappable row when hosted mode is unavailable", () => {

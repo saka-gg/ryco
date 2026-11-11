@@ -64,7 +64,7 @@ const KNOWN_BAILOUTS: Readonly<Record<string, Readonly<Record<string, string>>>>
     NativeIdentityScreen: "a react-hooks ESLint rule is suppressed",
   },
   "src/features/nodes/DeviceIconPicker.tsx": {
-    DeviceIconPicker: "try/finally, and a dynamic import()",
+    DeviceIconPickerSheet: "try/finally, and a dynamic import()",
   },
   "src/features/nodes/NodesScreen.tsx": { NodesScreen: "try/finally in a handler" },
   "src/features/projects/AddProjectRouteScreen.tsx": {

@@ -1,10 +1,9 @@
-import { StackActions, useNavigation } from "@react-navigation/native";
+import { useNavigation } from "@react-navigation/native";
 import Constants from "expo-constants";
 import { useMemo, useSyncExternalStore } from "react";
 import { ScrollView } from "react-native";
 
 import { readCachedMobileHubProfile, subscribeMobileHubProfile } from "../../hostedHub/hubProfile";
-import { useHostedHubStore } from "../../hostedHub/state";
 import { MAIN_TABS } from "../../navigation/tabs/mainTabsModel";
 import {
   TabLargeTitle,
@@ -12,7 +11,6 @@ import {
   useTabStackHeader,
 } from "../../navigation/tabs/TabScreenChrome";
 import { readMobileHostedConfig } from "../../platform/config";
-import { exactNodeRouteParams } from "../e2ee/exactNodeRouteModel";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
@@ -30,7 +28,6 @@ import {
  */
 export function SettingsTabScreen() {
   const navigation = useNavigation();
-  const selectedNode = useHostedHubStore((state) => state.selectedNode);
   const environments = useHomeEnvironments();
   // Follows the saved Hub profile: the tab stays mounted while Hub and account changes it.
   const cachedHub = useSyncExternalStore(subscribeMobileHubProfile, readCachedMobileHubProfile);
@@ -51,21 +48,7 @@ export function SettingsTabScreen() {
   const { collapsed, onScroll } = useLargeTitleCollapse();
   useTabStackHeader({ title: collapsed ? MAIN_TABS.Settings.title : "" });
 
-  const open = (target: SettingsListTarget) => {
-    if (target === "Connections") {
-      navigation.navigate("Connections");
-    } else if (target === "SettingsMachines" && environments.length === 1 && environments[0]) {
-      // One machine: its own page, without a list of one in between.
-      navigation.navigate("SettingsMachine", { environmentId: environments[0].environmentId });
-    } else if (target === "NodeSecurity") {
-      // Without a selected Hub node there is no node to inspect: Machines lists them.
-      if (selectedNode) {
-        navigation.dispatch(
-          StackActions.push("SettingsNodeSecurity", exactNodeRouteParams(selectedNode)),
-        );
-      } else navigation.navigate("Connections");
-    } else navigation.navigate(target as never);
-  };
+  const open = (target: SettingsListTarget) => navigation.navigate(target as never);
 
   return (
     <ScrollView
@@ -84,6 +67,8 @@ export function SettingsTabScreen() {
           detail={summary.hubDetail ?? undefined}
           onPress={() => open("SettingsHub")}
         />
+        {/* The one way into machines: each machine's page holds its connection, its own
+            settings, its access and security. */}
         <SettingsRow
           icon="desktopcomputer"
           label="Machines"

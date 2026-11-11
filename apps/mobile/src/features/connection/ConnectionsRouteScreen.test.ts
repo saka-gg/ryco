@@ -1,8 +1,31 @@
-vi.mock("../nodes/DeviceIconPicker", () => ({ DeviceIconPicker: () => null }));
+vi.mock("../nodes/DeviceIconPicker", () => ({
+  DeviceIconPickerSheet: () => null,
+  deviceIconChoiceLabel: () => "Automatic",
+  useDeviceIconEditable: () => ({ editable: false, choice: null }),
+}));
 vi.mock("../../components/DeviceIcon", () => ({
+  DeviceAvatar: () => null,
   DeviceIcon: () => null,
   EnvironmentMachineIcon: () => null,
 }));
+vi.mock("../../components/AppSymbol", () => ({ SymbolView: () => null }));
+vi.mock("../settings/machine/useMachineSettings", () => ({
+  useMachineSettings: () => ({ config: null, readOnlyReason: null }),
+}));
+vi.mock("react-native-reanimated", () => {
+  const Animated = { View: "AnimatedView", ScrollView: "AnimatedScrollView" };
+  return {
+    default: Animated,
+    ...Animated,
+    Easing: { bezier: () => (value: number) => value },
+    runOnJS: (fn: unknown) => fn,
+    useAnimatedStyle: () => ({}),
+    useAnimatedScrollHandler: () => undefined,
+    useReducedMotion: () => false,
+    useSharedValue: (value: unknown) => ({ get: () => value, set: () => undefined }),
+    withTiming: (value: unknown) => value,
+  };
+});
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -44,11 +67,15 @@ const threadsStoreMock = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
+  BackHandler: { addEventListener: () => ({ remove: () => undefined }) },
+  Modal: "Modal",
   Pressable: "Pressable",
   ScrollView: "ScrollView",
+  Switch: "Switch",
   View: "View",
   Text: "Text",
   TextInput: "TextInput",
+  useColorScheme: () => "dark",
 }));
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
@@ -185,6 +212,26 @@ function buttons(element: unknown): ReadonlyArray<{ label: string; press: () => 
     }));
 }
 
+/** A control by its accessible name, as VoiceOver reads it. */
+function control(element: unknown, name: string): ReactElement<Record<string, unknown>> {
+  const found = render(element).find((candidate) => candidate.props.accessibilityLabel === name);
+  if (!found) throw new Error(`no control named ${name}`);
+  return found;
+}
+
+function press(element: unknown, name: string): void {
+  const found = control(element, name);
+  expect(found.props.disabled, name).not.toBe(true);
+  (found.props.onPress as () => void)();
+}
+
+/** The sheet opened on one machine's page, as `connections?environmentId=…` does. */
+function machinePage(environmentId = "env-1") {
+  return ConnectionsRouteScreen({ route: { params: { environmentId } } } as never);
+}
+
+const machines = () => ConnectionsRouteScreen({ route: { params: undefined } } as never);
+
 beforeEach(() => {
   navigationMock.navigate.mockClear();
   actionsMock.reconnectSavedEnvironment.mockClear();
@@ -205,127 +252,124 @@ beforeEach(() => {
   rowsMock.rows = [savedRow("env-1", "Studio Mac")];
 });
 
-describe("Machines — direct plane", () => {
+describe("Machines — the list", () => {
   it("holds directory presence demand while focused", () => {
-    ConnectionsRouteScreen();
+    machines();
     expect(directoryDemandMock).toHaveBeenCalledWith(true);
   });
 
   it("labels both planes as separate sections", () => {
-    const rendered = texts(ConnectionsRouteScreen());
+    const rendered = texts(machines());
     expect(rendered).toContain("Paired directly");
     expect(rendered).toContain("Hub nodes");
   });
 
   it("keeps the direct pairing CTA", () => {
-    buttons(ConnectionsRouteScreen())
+    buttons(machines())
       .find((button) => button.label === "Pair directly")
       ?.press();
     expect(navigationMock.navigate).toHaveBeenCalledWith("ConnectionsNew");
   });
 
-  it("selects, disconnects, and forgets a saved environment through direct actions", () => {
-    const tree = ConnectionsRouteScreen();
-    buttons(tree)
-      .find((button) => button.label === "Use")
-      ?.press();
-    buttons(tree)
-      .find((button) => button.label === "Disconnect")
-      ?.press();
-    buttons(tree)
-      .find((button) => button.label === "Forget")
-      ?.press();
-    expect(threadsStoreMock.setActiveEnvironmentId).toHaveBeenCalledWith("env-1");
-    expect(actionsMock.disconnectSavedEnvironment).toHaveBeenCalledWith("env-1");
-    expect(confirmMock).toHaveBeenCalledTimes(1);
-    expect(actionsMock.removeSavedEnvironment).toHaveBeenCalledWith("env-1");
-  });
-
-  it("retries a failed direct connection", () => {
-    rowsMock.rows = [savedRow("env-1", "Studio Mac", "error")];
-    buttons(ConnectionsRouteScreen())
-      .find((button) => button.label === "Retry")
-      ?.press();
-    expect(actionsMock.reconnectSavedEnvironment).toHaveBeenCalledWith("env-1");
-  });
-
-  it("switches a machine off without forgetting it", () => {
-    const tree = ConnectionsRouteScreen();
-    expect(render(tree).some((node) => String(node.props.className).includes("opacity-45"))).toBe(
-      false,
-    );
-    buttons(tree)
-      .find((button) => button.label === "Switch off")
-      ?.press();
-    expect(actionsMock.setSavedEnvironmentEnabled).toHaveBeenCalledWith("env-1", false);
-    expect(actionsMock.removeSavedEnvironment).not.toHaveBeenCalled();
-  });
-
-  it("lists a switched-off machine dimmed, offering only to switch it on, rename or forget it", () => {
-    rowsMock.rows = [savedRow("env-1", "Studio Mac", "disconnected", true)];
-    const tree = ConnectionsRouteScreen();
-    expect(texts(tree)).toContain("Switched off");
-    expect(render(tree).some((node) => String(node.props.className).includes("opacity-45"))).toBe(
-      true,
-    );
-    expect(
-      buttons(tree)
-        .map((button) => button.label)
-        .filter((label) => label !== "Pair directly"),
-    ).toEqual(["Switch on", "Rename", "Access", "Forget"]);
-    buttons(tree)
-      .find((button) => button.label === "Switch on")
-      ?.press();
-    expect(actionsMock.setSavedEnvironmentEnabled).toHaveBeenCalledWith("env-1", true);
+  it("lists a machine as one row that only opens its page", () => {
+    const tree = machines();
+    const row = control(tree, "Studio Mac, Connected · LAN · mac.local:44342");
+    expect(row.props.accessibilityHint).toBe("Opens the machine's page");
+    (row.props.onPress as () => void)();
+    // No action button in the list itself: everything else is on the machine's page.
+    expect(buttons(tree).map((button) => button.label)[0]).toBe("Pair directly");
+    expect(buttons(tree)).toHaveLength(2);
+    expect(threadsStoreMock.setActiveEnvironmentId).not.toHaveBeenCalled();
+    expect(actionsMock.disconnectSavedEnvironment).not.toHaveBeenCalled();
   });
 
   it("still renders the empty state with no saved environments", () => {
     rowsMock.rows = [];
-    const rendered = texts(ConnectionsRouteScreen());
+    const rendered = texts(machines());
     expect(rendered).toContain("No machines paired directly");
     expect(rendered).toContain("Pair directly");
   });
 });
 
-describe("Machines — hosted mode absent", () => {
-  it("opens a machine's access screen from its row", () => {
-    const tree = ConnectionsRouteScreen();
-    buttons(tree)
-      .find((button) => button.label === "Access")
-      ?.press();
+describe("Machines — a machine's page", () => {
+  it("uses, disconnects and forgets a machine from its buttons, Forget asking first", () => {
+    const tree = machinePage();
+    expect(control(tree, "Back to Machines").props.accessibilityRole).toBe("button");
+    press(tree, "Use Studio Mac");
+    press(tree, "Disconnect Studio Mac");
+    press(tree, "Forget Studio Mac");
+    expect(threadsStoreMock.setActiveEnvironmentId).toHaveBeenCalledWith("env-1");
+    expect(actionsMock.disconnectSavedEnvironment).toHaveBeenCalledWith("env-1");
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+    expect(confirmMock.mock.calls[0]?.[0]).toMatchObject({
+      title: "Forget Studio Mac?",
+      confirmText: "Forget",
+      destructive: true,
+    });
+    expect(actionsMock.removeSavedEnvironment).toHaveBeenCalledWith("env-1");
+  });
+
+  it("retries a failed direct connection", () => {
+    rowsMock.rows = [savedRow("env-1", "Studio Mac", "error")];
+    press(machinePage(), "Retry Studio Mac");
+    expect(actionsMock.reconnectSavedEnvironment).toHaveBeenCalledWith("env-1");
+  });
+
+  it("switches a machine off without forgetting it", () => {
+    const toggle = control(machinePage(), "Switched on");
+    expect(toggle.props.value).toBe(true);
+    (toggle.props.onValueChange as () => void)();
+    expect(actionsMock.setSavedEnvironmentEnabled).toHaveBeenCalledWith("env-1", false);
+    expect(actionsMock.removeSavedEnvironment).not.toHaveBeenCalled();
+  });
+
+  it("offers a switched-off machine only Switch on, Rename and Access among its buttons", () => {
+    rowsMock.rows = [savedRow("env-1", "Studio Mac", "disconnected", true)];
+    const tree = machinePage();
+    expect(texts(tree)).toContain("Switched off");
+    expect(control(tree, "Disconnect Studio Mac").props.disabled).toBe(true);
+    press(tree, "Switch on Studio Mac");
+    expect(actionsMock.setSavedEnvironmentEnabled).toHaveBeenCalledWith("env-1", true);
+    press(tree, "Rename Studio Mac");
+    press(tree, "Access Studio Mac");
     expect(navigationMock.navigate).toHaveBeenCalledWith("MachineAccess", {
       environmentId: "env-1",
     });
   });
 
-  it("keeps direct actions isolated from the unavailable Hub section", () => {
-    const tree = ConnectionsRouteScreen();
-    expect(texts(tree)).toContain("Studio Mac");
-    const labels = buttons(tree).map((button) => button.label);
-    // Settings is no longer here — it moved to the Home header gear. The row
-    // verbs stay in the transport register; only the CTA took wave 4's noun.
-    expect(labels).toEqual([
-      "Pair directly",
-      "Use",
-      "Disconnect",
-      "Switch off",
-      "Rename",
-      "Access",
-      "Forget",
-    ]);
-    expect(texts(tree)).toContain("Hub nodes unavailable");
+  it("leads to the machine's own settings and access", () => {
+    const tree = machinePage();
+    press(tree, "Providers");
+    press(tree, "System");
+    press(tree, "Pairing links & clients");
+    expect(navigationMock.navigate).toHaveBeenCalledWith("SettingsMachineProviders", {
+      environmentId: "env-1",
+    });
+    expect(navigationMock.navigate).toHaveBeenCalledWith("SettingsMachineSystem", {
+      environmentId: "env-1",
+    });
+    expect(navigationMock.navigate).toHaveBeenCalledWith("MachineAccess", {
+      environmentId: "env-1",
+    });
+  });
+
+  it("dims the device icon with its reason unless a connected owner may change it", () => {
+    const tree = machinePage();
+    expect(control(tree, "Device icon, Automatic").props.disabled).toBe(true);
+    expect(texts(tree)).toContain("Connect as the device owner to change its icon.");
   });
 });
 
 describe("two-plane isolation (direct → hosted)", () => {
-  it("never calls a hosted controller method while using the directly paired section", () => {
+  it("never calls a hosted controller method while using a directly paired machine", () => {
     for (const available of [false, true]) {
       hostedMock.available = available;
-      const tree = ConnectionsRouteScreen();
-      for (const label of ["Pair directly", "Use", "Disconnect", "Forget"]) {
-        buttons(tree)
-          .find((button) => button.label === label)
-          ?.press();
+      const tree = machinePage();
+      buttons(tree)
+        .find((button) => button.label === "Pair directly")
+        ?.press();
+      for (const name of ["Use Studio Mac", "Disconnect Studio Mac", "Forget Studio Mac"]) {
+        press(tree, name);
       }
     }
     expect(threadsStoreMock.setActiveEnvironmentId).toHaveBeenCalledTimes(2);

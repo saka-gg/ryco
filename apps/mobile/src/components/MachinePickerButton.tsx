@@ -7,14 +7,12 @@ import Animated, {
   Easing,
   FadeIn,
   FadeOut,
-  interpolateColor,
   LayoutAnimationConfig,
   runOnJS,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
   withDelay,
-  withRepeat,
   withTiming,
 } from "react-native-reanimated";
 
@@ -31,26 +29,13 @@ import { useMachinePickerFacts } from "../features/home/useMachinePickerFacts";
 import { appMotion } from "../lib/motion";
 import { useThemeColor } from "../lib/useThemeColor";
 import { type AppSymbolName, SymbolView } from "./AppSymbol";
+import { MachineAvatar, RING_PULSE_WIDTH, TONE_COLOR } from "./MachineAvatar";
 import { AppText as Text } from "./AppText";
 import { OverlayPortal } from "./OverlayPortal";
 
 // The approved mockup's numbers ("Machine picker", "Icon + name"): a 30 pt
 // machine avatar with a status ring and dot, a popover that drops from the top
 // left with an overshooting scale and fade, and rows that stagger in.
-
-const TONE_COLOR: Readonly<Record<MachineTone, string>> = {
-  connected: "#34c759",
-  connecting: "#ffb43c",
-  offline: "#6e6e78",
-};
-const RING_COLOR: Readonly<Record<MachineTone, string>> = {
-  connected: "rgba(52,199,89,0.85)",
-  connecting: "rgba(255,180,60,0.85)",
-  offline: "rgba(142,142,152,0.4)",
-};
-const RING_PULSE_FADED = "rgba(255,180,60,0.18)";
-const RING_WIDTH = 1.5;
-const RING_PULSE_WIDTH = 4;
 
 const PALETTE = {
   dark: {
@@ -89,13 +74,10 @@ const POPOVER_GAP = 4;
 const POPOVER_INSET_X = -2;
 const SCREEN_MARGIN = 12;
 
-const CSS_EASE = Easing.bezier(0.25, 0.1, 0.25, 1);
-const CSS_EASE_IN_OUT = Easing.bezier(0.42, 0, 0.58, 1);
 const DROP = { duration: 260, easing: Easing.bezier(0.2, 0.9, 0.25, 1.15) };
+const CSS_EASE = Easing.bezier(0.25, 0.1, 0.25, 1);
 const ROW_IN = { duration: 300, easing: CSS_EASE };
 const ROW_STAGGER_MS = 35;
-const TONE_FADE = { duration: 350, easing: CSS_EASE };
-const PULSE_HALF = { duration: 650, easing: CSS_EASE_IN_OUT };
 const FACE_FADE_MS = 300;
 /** Room around the clipped avatar slot for the ring and its pulse. */
 const SLOT_BLEED = RING_PULSE_WIDTH;
@@ -117,112 +99,6 @@ const NAME_ENTERING = slideIn(0);
 
 function usePalette(): Palette {
   return useColorScheme() === "light" ? PALETTE.light : PALETTE.dark;
-}
-
-/** The machine's ring: steady, or pulsing amber while it connects. */
-function ToneRing(props: { readonly tone: MachineTone; readonly size: number }) {
-  const reduceMotion = useReducedMotion();
-  const pulsing = props.tone === "connecting" && !reduceMotion;
-  const pulse = useSharedValue(0);
-  const color = useSharedValue(RING_COLOR[props.tone]);
-  useEffect(() => {
-    color.set(withTiming(RING_COLOR[props.tone], reduceMotion ? { duration: 0 } : TONE_FADE));
-  }, [color, props.tone, reduceMotion]);
-  useEffect(() => {
-    if (!pulsing) {
-      cancelAnimation(pulse);
-      pulse.set(0);
-      return;
-    }
-    pulse.set(withRepeat(withTiming(1, PULSE_HALF), -1, true));
-    return () => cancelAnimation(pulse);
-  }, [pulse, pulsing]);
-  const radius = props.size / 2;
-  const style = useAnimatedStyle(() => {
-    const progress = pulse.get();
-    const spread = RING_WIDTH + (RING_PULSE_WIDTH - RING_WIDTH) * progress;
-    return {
-      top: -spread,
-      left: -spread,
-      right: -spread,
-      bottom: -spread,
-      borderWidth: spread,
-      borderRadius: radius + spread,
-      borderColor: pulsing
-        ? interpolateColor(progress, [0, 1], [RING_COLOR.connecting, RING_PULSE_FADED])
-        : color.get(),
-    };
-  });
-  return <Animated.View pointerEvents="none" style={[{ position: "absolute" }, style]} />;
-}
-
-function ToneDot(props: { readonly tone: MachineTone; readonly cutout: string }) {
-  const reduceMotion = useReducedMotion();
-  const color = useSharedValue(TONE_COLOR[props.tone]);
-  useEffect(() => {
-    color.set(withTiming(TONE_COLOR[props.tone], reduceMotion ? { duration: 0 } : TONE_FADE));
-  }, [color, props.tone, reduceMotion]);
-  const style = useAnimatedStyle(() => ({ backgroundColor: color.get() }));
-  return (
-    <Animated.View
-      pointerEvents="none"
-      style={[
-        {
-          position: "absolute",
-          right: -1,
-          bottom: -1,
-          width: 10,
-          height: 10,
-          borderRadius: 5,
-          borderWidth: 2,
-          borderColor: props.cutout,
-        },
-        style,
-      ]}
-    />
-  );
-}
-
-/** A round machine avatar: its kind's symbol, a status ring and, optionally, a status dot. */
-export function MachineAvatar(props: {
-  readonly symbol: AppSymbolName;
-  readonly tone: MachineTone | null;
-  readonly size: number;
-  readonly iconSize?: number;
-  readonly dot?: boolean;
-  /** A screen-colored rim, so stacked avatars read as separate discs. */
-  readonly rim?: boolean;
-}) {
-  const palette = usePalette();
-  const cutout = useThemeColor("--color-screen") as string;
-  return (
-    <View
-      style={{ width: props.size, height: props.size }}
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-    >
-      {props.tone === null ? null : <ToneRing tone={props.tone} size={props.size} />}
-      <View
-        style={{
-          position: "absolute",
-          inset: 0,
-          borderRadius: props.size / 2,
-          backgroundColor: palette.avatar,
-          alignItems: "center",
-          justifyContent: "center",
-          ...(props.rim ? { borderWidth: 2, borderColor: cutout } : {}),
-        }}
-      >
-        <SymbolView
-          name={props.symbol}
-          size={props.iconSize ?? 17}
-          tintColor={palette.icon}
-          type="monochrome"
-        />
-      </View>
-      {props.dot && props.tone !== null ? <ToneDot tone={props.tone} cutout={cutout} /> : null}
-    </View>
-  );
 }
 
 function stackWidth(count: number): number {

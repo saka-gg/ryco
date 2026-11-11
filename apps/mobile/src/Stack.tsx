@@ -570,7 +570,7 @@ export const ROOT_STACK_SCREENS = {
   SettingsMachines: createNativeStackScreen({
     screen: SettingsMachinesRouteScreen,
     linking: MVP_SETTINGS_ROUTES.SettingsMachines.linking,
-    options: routeOptions("SettingsMachines", { title: "Machine settings" }),
+    options: routeOptions("SettingsMachines", { title: "Machines" }),
   }),
   SettingsMachine: createNativeStackScreen({
     screen: SettingsMachineRouteScreen,
@@ -600,7 +600,7 @@ export const ROOT_STACK_SCREENS = {
   SettingsMachineSystem: createNativeStackScreen({
     screen: SettingsMachineSystemRouteScreen,
     linking: MVP_SETTINGS_ROUTES.SettingsMachineSystem.linking,
-    options: routeOptions("SettingsMachineSystem", { title: "Machine" }),
+    options: routeOptions("SettingsMachineSystem", { title: "System" }),
   }),
   SettingsMachineUsagePrices: createNativeStackScreen({
     screen: SettingsMachineUsagePricesRouteScreen,
