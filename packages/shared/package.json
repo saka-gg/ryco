@@ -646,6 +646,10 @@
       "types": "./src/computerUseHelperApp.ts",
       "import": "./src/computerUseHelperApp.ts"
     },
+    "./appIcon": {
+      "types": "./src/appIcon.ts",
+      "import": "./src/appIcon.ts"
+    },
     "./desktopFlavor": {
       "types": "./src/desktopFlavor.ts",
       "import": "./src/desktopFlavor.ts"

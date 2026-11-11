@@ -3,7 +3,7 @@ import {
   REMOVED_PROJECT_MEMORY_MESSAGE,
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
-import { isChatProject, projectKindOf } from "@ryco/shared/projectKind";
+import { isChatProject, isChatsAutomationScope, projectKindOf } from "@ryco/shared/projectKind";
 import {
   CARRIED_FORK_SOURCE_ID_SUFFIX,
   forkContextHandoffPending,
@@ -866,6 +866,13 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
   }
   switch (command.type) {
     case "project.create": {
+      // Automations without a project use this id as their scope; no project may take it.
+      if (isChatsAutomationScope(command.projectId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project id '${command.projectId}' is reserved.`,
+        });
+      }
       yield* requireProjectAbsent({
         readModel,
         command,

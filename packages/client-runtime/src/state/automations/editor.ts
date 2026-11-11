@@ -21,7 +21,13 @@ import {
   REASONING_DESCRIPTOR_IDS,
 } from "@ryco/shared/model";
 
-import { envWords, EXISTING_CHAT_WORDS, type ScheduleDraft } from "../agentControl/index.ts";
+import { isChatsAutomationScope } from "@ryco/shared/projectKind";
+import {
+  envWords,
+  EXISTING_CHAT_WORDS,
+  NEW_CHAT_WORDS,
+  type ScheduleDraft,
+} from "../agentControl/index.ts";
 
 /**
  * The model a new schedule starts with on a device: the first provider that
@@ -151,7 +157,11 @@ export function sentenceWords(
   const ends = endWords(draft.start, draft.endsAt, nowMs);
   // A heartbeat runs in its chat: the checkout of a new chat does not apply.
   const env =
-    draft.target === null && !chat.choosingChat ? envWords(draft.envMode) : EXISTING_CHAT_WORDS;
+    draft.target !== null || chat.choosingChat
+      ? EXISTING_CHAT_WORDS
+      : isChatsAutomationScope(draft.projectId)
+        ? NEW_CHAT_WORDS
+        : envWords(draft.envMode);
   const chatWords = draft.target === null ? null : chat.words;
   return {
     interval,

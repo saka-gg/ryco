@@ -1,6 +1,8 @@
 export const BRAND_ASSET_PATHS = {
   productionMacIconPng: "assets/prod/ryco-macos-1024.png",
   productionMacIconset: "assets/prod/ryco-macos.iconset",
+  /** The Liquid Glass app icon, compiled by scripts/generate-app-icon-variants.py. */
+  productionMacAssetCatalog: "assets/prod/ryco-macos-Assets.car",
   productionLinuxIconPng: "assets/prod/ryco-linux-1024.png",
   productionWindowsIconIco: "assets/prod/ryco-windows.ico",
   productionWebFaviconIco: "assets/prod/favicon/favicon.ico",

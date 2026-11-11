@@ -2,10 +2,12 @@ import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import * as FS from "node:fs";
 import * as Path from "node:path";
 import type {
+  AppIconVariant,
   DesktopKeepAwakeMode,
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
 } from "@ryco/contracts";
+import { DEFAULT_APP_ICON_VARIANT, normalizeAppIconVariant } from "@ryco/shared/appIcon";
 import { type RycoDesktopFlavor, rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
@@ -54,6 +56,8 @@ export interface DesktopSettings {
    * tries it first. `null` until a launch has served.
    */
   readonly backendPort: number | null;
+  /** The Dock icon (macOS) or window and taskbar icon (Windows, Linux) this desktop shows. */
+  readonly appIconVariant: AppIconVariant;
 }
 
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
@@ -125,6 +129,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   keepAwakeMode: DEFAULT_DESKTOP_KEEP_AWAKE_MODE,
   backendPort: null,
+  appIconVariant: DEFAULT_APP_ICON_VARIANT,
 };
 
 /**
@@ -455,6 +460,7 @@ export function readDesktopSettings(
       readonly hubNodeName?: unknown;
       readonly hubAllowFileSecretStore?: unknown;
       readonly backendPort?: unknown;
+      readonly appIconVariant?: unknown;
     };
 
     let hubNodeName: string | null = null;
@@ -500,6 +506,7 @@ export function readDesktopSettings(
       hubNodeName,
       hubAllowFileSecretStore: parsed.hubAllowFileSecretStore === true,
       backendPort: normalizeDesktopBackendPort(parsed.backendPort),
+      appIconVariant: normalizeAppIconVariant(parsed.appIconVariant),
     };
   } catch (error) {
     // A corrupt file must not silently revert to defaults: the next write would

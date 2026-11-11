@@ -101,7 +101,7 @@ import {
   type ServerSettings,
   type ServerSettingsError,
 } from "@ryco/contracts";
-import { projectKindOf } from "@ryco/shared/projectKind";
+import { automationScopeOfProject, projectKindOf } from "@ryco/shared/projectKind";
 import { Clock, Effect, Option, Schema } from "effect";
 
 import {
@@ -895,7 +895,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeAutomationCreate,
     description:
-      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request. A calendar schedule runs at localTime (HH:MM) on weekdays (0 = Sunday) in an IANA timeZone. Each run starts a new thread, or with targetThreadId queues its prompt in that existing thread of the same project (a heartbeat; sent like the thread's other follow-ups, with its current model and modes).",
+      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request. A calendar schedule runs at localTime (HH:MM) on weekdays (0 = Sunday) in an IANA timeZone. Each run starts a new thread, or with targetThreadId queues its prompt in that existing thread of the same project (a heartbeat; sent like the thread's other follow-ups, with its current model and modes). In a chat without a project, pass its projectId with envMode local: each run then starts a new chat without a project, or with targetThreadId (this chat) continues this one.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1691,6 +1691,30 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       ),
     );
 
+  /**
+   * The session's automation scope: its project's, or for a chat without a project the node's
+   * one "No project" scope. `projectIds` are the ids an agent may name for it.
+   */
+  const automationScope = (session: AgentControlSessionRecord) =>
+    sessionScope(session).pipe(
+      Effect.flatMap((scope) =>
+        deps.projections.getProjectShellById(scope.projectId).pipe(
+          Effect.mapError(() => new ToolFailure("Project scope is unavailable.")),
+          Effect.map((project) => {
+            const projectId = automationScopeOfProject(
+              scope.projectId,
+              Option.getOrUndefined(project),
+            );
+            return {
+              projectId,
+              providerInstanceId: scope.providerInstanceId,
+              projectIds: [scope.projectId, projectId] as ReadonlyArray<string>,
+            };
+          }),
+        ),
+      ),
+    );
+
   const requireDevice = () => {
     if (deps.deviceService === undefined || !deps.deviceService.supported) {
       return failTool("simulator or emulator device control is unavailable.");
@@ -2065,13 +2089,14 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (deps.automations === undefined)
         return yield* failTool("Automation reads are unavailable.");
       const input = yield* decodeArgs(AgentControlMcpListAutomationsInput, args);
-      const scope = yield* sessionScope(session);
-      if (input.projectId !== undefined && input.projectId !== scope.projectId) {
+      const scope = yield* automationScope(session);
+      if (input.projectId !== undefined && !scope.projectIds.includes(input.projectId)) {
         return yield* failTool("Project scope denied.");
       }
       const automations = yield* deps.automations
         .list({
-          ...scope,
+          projectId: scope.projectId,
+          providerInstanceId: scope.providerInstanceId,
           includeDisabled: input.includeDisabled ?? false,
           limit: clampLimit(
             input.limit,
@@ -2096,7 +2121,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (deps.automations === undefined)
         return yield* failTool("Automation reads are unavailable.");
       const input = yield* decodeArgs(AgentControlMcpReadAutomationInput, args);
-      const scope = yield* sessionScope(session);
+      const scope = yield* automationScope(session);
       const automation = yield* deps.automations
         .get(input.automationId, scope)
         .pipe(Effect.mapError(automationFailure));
@@ -2110,7 +2135,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (deps.automations === undefined)
         return yield* failTool("Automation reads are unavailable.");
       const input = yield* decodeArgs(AgentControlMcpListAutomationRunsInput, args);
-      const scope = yield* sessionScope(session);
+      const scope = yield* automationScope(session);
       const limit = clampLimit(
         input.limit,
         AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
@@ -2132,6 +2157,11 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
   ) =>
     Effect.gen(function* () {
       const input = yield* decodeArgs(AgentControlMcpProposeAutomationCreateInput, args);
+      // A chat without a project names its own project; its schedules live in "No project".
+      const scope = yield* automationScope(session);
+      const projectId = scope.projectIds.includes(input.projectId)
+        ? scope.projectId
+        : input.projectId;
       const automationId = AgentControlAutomationId.make(
         `automation-${createHash("sha256")
           .update(`${session.threadId}:${input.requestId}`)
@@ -2145,7 +2175,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         plan: {
           kind: "createAutomation",
           automationId,
-          definition: automationDefinitionFromCreateInput(input),
+          definition: automationDefinitionFromCreateInput({ ...input, projectId }),
         },
       });
     });
@@ -2160,7 +2190,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         return yield* failTool("Automation proposal creation is unavailable.");
       }
       const input = yield* decodeArgs(AgentControlMcpProposeAutomationUpdateInput, args);
-      const scope = yield* sessionScope(session);
+      const scope = yield* automationScope(session);
       const current = yield* deps.automations
         .get(input.automationId, scope)
         .pipe(Effect.mapError(automationFailure));
@@ -2195,7 +2225,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         return yield* failTool("Automation proposal creation is unavailable.");
       }
       const input = yield* decodeArgs(AgentControlMcpProposeAutomationCancelInput, args);
-      const scope = yield* sessionScope(session);
+      const scope = yield* automationScope(session);
       const current = yield* deps.automations
         .get(input.automationId, scope)
         .pipe(Effect.mapError(automationFailure));

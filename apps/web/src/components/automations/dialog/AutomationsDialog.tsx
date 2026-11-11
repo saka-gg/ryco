@@ -52,6 +52,8 @@ import {
   useProjectAutomations,
   type ProjectAutomationsCheckout,
 } from "../data/useProjectAutomations";
+import { useChatsAutomationSnapshot } from "../data/useChatsAutomationSnapshot";
+import { isChatsAutomationSnapshot } from "../data/chatsAutomationScope.logic";
 import { AutomationsDialogHeader } from "./AutomationsDialogHeader";
 import { EMPTY_NEW_SELECTOR, EmptyProjectState, UnavailableState, UndoBar } from "./DialogPanes";
 import { ScheduleDetail } from "./ScheduleDetail";
@@ -193,7 +195,13 @@ interface ContentProps {
 }
 
 function AutomationsDialogContent(props: ContentProps) {
-  const { snapshots } = useLogicalProjectSnapshots();
+  const { snapshots: projectSnapshots } = useLogicalProjectSnapshots();
+  // "No project" comes last: schedules whose runs start or continue chats without a project.
+  const chatsSnapshot = useChatsAutomationSnapshot();
+  const snapshots = useMemo(
+    () => (chatsSnapshot ? [...projectSnapshots, chatsSnapshot] : projectSnapshots),
+    [chatsSnapshot, projectSnapshots],
+  );
   if (snapshots.length === 0) return <NoProjects />;
   return <AutomationsDialogBody {...props} snapshots={snapshots} />;
 }
@@ -923,6 +931,7 @@ function AutomationsDialogBody(
             path={displayProjectPath(primary.cwd)}
             newOff={limit.allFull}
             newOffReason={newOffReason}
+            withoutProject={isChatsAutomationSnapshot(snapshot)}
             onNew={(origin) => openNew(origin)}
           />
         )}

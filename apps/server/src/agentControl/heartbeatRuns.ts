@@ -3,6 +3,7 @@
  * run's prompt there as an `automation` follow-up instead of creating a chat. The chat's queue
  * holds and sends it like the person's own follow-ups, with the chat's current model and modes,
  * never above the run's runtime mode. The chat is not the run's: nothing undoes or archives it.
+ * In the "No project" scope the chat is one without a project (its own `chat` project).
  *
  * Loaded by the executor on a heartbeat's first run or recovery; it imports no boot values (the
  * executor passes its own in), so the server's boot path carries none of it.
@@ -17,6 +18,7 @@ import type {
   ThreadId,
   ThreadQueueAddCommand,
 } from "@ryco/contracts";
+import { isChatsAutomationScope } from "@ryco/shared/projectKind";
 import { Effect, Option } from "effect";
 
 /** Ends the message id of every run a heartbeat schedule queues, so its runs can coalesce. */
@@ -37,6 +39,10 @@ export interface HeartbeatRunDeps<E> {
   readonly messageId: (step: string) => MessageId;
   readonly commandId: (step: string) => CommandId;
   readonly loadThread: (threadId: ThreadId) => Effect.Effect<OrchestrationThreadShell, E>;
+  /** Whether a project is a chat without a project's (the "No project" scope's chats). */
+  readonly isChatProjectId: (
+    projectId: OrchestrationThreadShell["projectId"],
+  ) => Effect.Effect<boolean, E>;
   /** The chat's queued follow-ups as the engine holds them now. */
   readonly queuedIn: (threadId: ThreadId) => Effect.Effect<ReadonlyArray<QueuedFollowUp>, E>;
   /** Records that the run coalesced into the schedule's waiting entry. */
@@ -58,7 +64,10 @@ export const runHeartbeat = <E>(deps: HeartbeatRunDeps<E>, plan: HeartbeatRunPla
     const threadId = plan.execution.target?.threadId;
     if (threadId === undefined) return;
     const current = yield* deps.loadThread(threadId);
-    if (current.archivedAt !== null || current.projectId !== plan.execution.projectId) {
+    const inScope = isChatsAutomationScope(plan.execution.projectId)
+      ? yield* deps.isChatProjectId(current.projectId)
+      : current.projectId === plan.execution.projectId;
+    if (current.archivedAt !== null || !inScope) {
       return yield* Effect.fail(new Error("The automation's chat is archived or moved."));
     }
     const suffix = heartbeatMessageIdSuffix(plan.automationId);

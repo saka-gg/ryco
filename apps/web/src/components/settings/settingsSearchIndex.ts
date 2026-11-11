@@ -18,6 +18,7 @@ import {
 } from "./settingsSections.logic";
 
 export type SettingsDesktopCapability =
+  | "appIcon"
   | "cliCommand"
   | "computerUse"
   | "quitShortcut"
@@ -375,6 +376,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     desktopCapability: "windowTranslucencySupported",
     description: "Let the desktop show through the app window, blurred.",
     keywords: "vibrancy glass transparency translucent see-through wallpaper blur opacity macos",
+  },
+  {
+    section: "appearance",
+    storage: "app",
+    title: "App icon",
+    desktopCapability: "appIcon",
+    description: "Light, Dark, Ember or Ignition icon in the Dock or taskbar.",
+    keywords: "dock taskbar logo icon black white orange alternate",
   },
   {
     section: "appearance",

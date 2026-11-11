@@ -31,6 +31,7 @@ import {
   type AgentControlProposalView,
 } from "@ryco/contracts/agent-control";
 import { calendarDaysWords } from "@ryco/shared/automationCalendar";
+import { isChatsAutomationScope } from "@ryco/shared/projectKind";
 
 export type AgentControlStatusTone = "pending" | "info" | "success" | "danger" | "muted";
 
@@ -203,6 +204,12 @@ export function completionReturnPresentation(
   return COMPLETION_RETURN_PRESENTATION[status];
 }
 
+/** An automation's scope as an approval card line: its project, or "No project". */
+const automationProjectLine = (projectId: string): string =>
+  isChatsAutomationScope(projectId)
+    ? "Project: none (chats without a project)"
+    : `Project: ${projectId}`;
+
 const shortId = (value: string): string => (value.length > 10 ? `${value.slice(0, 8)}…` : value);
 
 const riskLabelFromTag = (tag: string): string => tag.replaceAll("-", " ");
@@ -272,11 +279,13 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
   const executionLines = (
     execution: Extract<AgentControlProposalView["plan"], { kind: "automationRun" }>["execution"],
   ) => [
-    `Project: ${execution.projectId}`,
+    automationProjectLine(execution.projectId),
     `Provider: ${execution.modelSelection.instanceId} · ${execution.modelSelection.model}`,
     `Runtime: ${execution.runtimeMode} · ${execution.envMode}`,
     ...(execution.target === undefined
-      ? []
+      ? isChatsAutomationScope(execution.projectId)
+        ? ["Runs in: a new chat without a project each time"]
+        : []
       : [`Runs in: the follow-up queue of thread ${execution.target.threadId}`]),
     ...(execution.tokenMode === undefined ? [] : [`Token mode: ${execution.tokenMode}`]),
     ...(execution.baseRef === undefined ? [] : [`Base ref: ${execution.baseRef}`]),
@@ -646,7 +655,7 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
             heading: `Expected revision ${plan.expected.revision}`,
             lines: [
               ...scheduleLines(plan.expected.definition.schedule),
-              `Project: ${plan.expected.definition.execution.projectId}`,
+              automationProjectLine(plan.expected.definition.execution.projectId),
               `Provider: ${plan.expected.definition.execution.modelSelection.instanceId}`,
               "Cancellation prevents future run proposals and cancels a pending, unaccepted run.",
               "It does not delete project/thread data or interrupt an accepted/executing run.",

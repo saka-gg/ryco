@@ -1296,7 +1296,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         ...(config.workspaceAccessRoot !== undefined
           ? { workspaceAccessRoot: config.workspaceAccessRoot }
           : {}),
-        ...(chats !== undefined ? { chats } : {}),
+        ...(chats !== undefined ? { chats, chatAutomations: true as const } : {}),
         ...(Option.isSome(pullRequestWatch) ? { pullRequestWatch: { available: true } } : {}),
         ...(Option.isSome(nodeBrowser) ? { nodeBrowser: yield* nodeBrowser.value.capability } : {}),
         usageContractVersion: USAGE_CONTRACT_VERSION,

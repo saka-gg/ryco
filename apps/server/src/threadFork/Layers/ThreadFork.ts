@@ -1546,16 +1546,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
           case "new-chat": {
             const prepared = yield* prepareChatProject(chatDeps(row.forkKey), {
               chat: { projectId: plan.projectId, titleSeed: plan.titleSeed },
-              createThread: {
-                projectId: plan.projectId,
-                title: row.plan.command.title,
-                modelSelection: row.plan.command.modelSelection,
-                runtimeMode: row.plan.command.runtimeMode,
-                interactionMode: row.plan.command.interactionMode,
-                branch: null,
-                worktreePath: null,
-                createdAt: row.plan.command.createdAt,
-              },
+              createThread: { worktreePath: null, createdAt: row.plan.command.createdAt },
             }).pipe(
               Effect.catch((error) =>
                 error.reason === "chat-project-retired"

@@ -61,6 +61,11 @@ const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknow
 interface DesktopBuildIconAssets {
   readonly macIconPng: string;
   readonly macIconset: string | undefined;
+  /**
+   * An asset catalog holding the app icon as `MAC_APP_ICON_NAME`: macOS 11 and later draw it
+   * (macOS 26 with Liquid Glass) instead of the `.icns`, which older systems keep using.
+   */
+  readonly macAssetCatalog: string | undefined;
   readonly linuxIconPng: string;
   readonly windowsIconIco: string;
 }
@@ -574,6 +579,7 @@ function stageMacIcons(
   stageResourcesDir: string,
   sourcePng: string,
   sourceIconset: string | undefined,
+  sourceAssetCatalog: string | undefined,
   verbose: boolean,
 ) {
   return Effect.gen(function* () {
@@ -583,6 +589,14 @@ function stageMacIcons(
       return yield* new BuildScriptError({
         message: `Desktop macOS icon source is missing at ${sourcePng}`,
       });
+    }
+    if (sourceAssetCatalog) {
+      if (!(yield* fs.exists(sourceAssetCatalog))) {
+        return yield* new BuildScriptError({
+          message: `Desktop macOS icon asset catalog is missing at ${sourceAssetCatalog}`,
+        });
+      }
+      yield* fs.copyFile(sourceAssetCatalog, path.join(stageResourcesDir, MAC_ASSET_CATALOG_NAME));
     }
 
     const iconPngPath = path.join(stageResourcesDir, "icon.png");
@@ -657,6 +671,32 @@ function stageLinuxIconSize(
       ),
     ),
   );
+}
+
+const APP_ICON_VARIANT_SUFFIX: Readonly<Record<typeof BuildPlatform.Type, string>> = {
+  mac: "-macos.png",
+  linux: "-linux.png",
+  win: "-windows.ico",
+};
+
+/**
+ * Drops the other platforms' alternate app icons (`resources/app-icons`, see
+ * `apps/desktop/src/appIcon.ts`): each package switches only between its own.
+ */
+export function pruneForeignAppIconVariants(
+  stageResourcesDir: string,
+  platform: typeof BuildPlatform.Type,
+) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const iconsDir = path.join(stageResourcesDir, "app-icons");
+    if (!(yield* fs.exists(iconsDir))) return;
+    const suffix = APP_ICON_VARIANT_SUFFIX[platform];
+    for (const entry of yield* fs.readDirectory(iconsDir)) {
+      if (!entry.endsWith(suffix)) yield* fs.remove(path.join(iconsDir, entry));
+    }
+  });
 }
 
 function stageWindowsIcons(stageResourcesDir: string, sourceIco: string) {
@@ -791,6 +831,7 @@ export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIcon
     return {
       macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
       macIconset: BRAND_ASSET_PATHS.nightlyMacIconset,
+      macAssetCatalog: undefined,
       linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
       windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     };
@@ -799,6 +840,7 @@ export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIcon
   return {
     macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
     macIconset: BRAND_ASSET_PATHS.productionMacIconset,
+    macAssetCatalog: BRAND_ASSET_PATHS.productionMacAssetCatalog,
     linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
     windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
   };
@@ -838,6 +880,10 @@ export function resolveComputerUseHelperIdentity(
 /** Where the stage keeps the assembled helper bundle before electron-builder copies it. */
 export const COMPUTER_USE_HELPER_STAGE_DIR = "apps/desktop/computer-use-app";
 
+/** The app icon's asset catalog in the bundle's Resources, and the icon's name in it. */
+const MAC_ASSET_CATALOG_NAME = "Assets.car";
+const MAC_APP_ICON_NAME = "AppIcon";
+
 export const DESKTOP_BUILD_FILES = [
   "**/*",
   // Ryco Computer Use ships as its own bundle in Contents/Helpers (extraFiles).
@@ -847,6 +893,9 @@ export const DESKTOP_BUILD_FILES = [
   "!apps/desktop/resources/ryco-desktop-security-helper",
   "!apps/desktop/prod-resources/ryco-desktop-security-helper",
   "!apps/desktop/resources/ryco-window-material.node",
+  // The app icon's asset catalog belongs in Contents/Resources (extraResources), not app.asar.
+  `!apps/desktop/resources/${MAC_ASSET_CATALOG_NAME}`,
+  `!apps/desktop/prod-resources/${MAC_ASSET_CATALOG_NAME}`,
   // Shipped as extraResources and run from there; binaries inside app.asar
   // cannot execute. prod-resources only needs to carry the icons.
   "!apps/desktop/prod-resources/cua-driver/**",
@@ -1015,6 +1064,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   nightlyIdentity: DesktopNightlyIdentityMode = "legacy",
 ) {
   const flavor = rycoDesktopFlavorIdentity(resolveDesktopBuildFlavor(version, nightlyIdentity));
+  // Staged beside the other resources by stageMacIcons when this build's artwork has one.
+  const macAssetCatalog = resolveDesktopBuildIconAssets(version).macAssetCatalog !== undefined;
   const buildConfig: Record<string, unknown> = {
     // NSIS derives the installer GUID from the appId, so Ryco Nightly gets its own entry.
     appId: flavor.appId,
@@ -1068,6 +1119,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         to: "ryco-desktop-security-helper",
       },
       { from: "apps/desktop/resources/ryco-window-material.node", to: "ryco-window-material.node" },
+      ...(macAssetCatalog
+        ? [{ from: `apps/desktop/resources/${MAC_ASSET_CATALOG_NAME}`, to: MAC_ASSET_CATALOG_NAME }]
+        : []),
       {
         from: "apps/server/dist/device-helper",
         to: "device-helper",
@@ -1086,6 +1140,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       target: target === "dmg" ? [target, "zip"] : [target],
       minimumSystemVersion: "13.0",
       icon: "icon.icns",
+      // The asset catalog's icon wins over icon.icns wherever macOS reads catalogs.
+      ...(macAssetCatalog ? { extendInfo: { CFBundleIconName: MAC_APP_ICON_NAME } } : {}),
       category: "public.app-category.developer-tools",
       // A renamed Electron bundle's linker signature does not bind Ryco's Info.plist.
       // Even non-notarized builds need a complete signature for macOS TCC attribution.
@@ -1226,8 +1282,15 @@ const assertPlatformBuildResources = Effect.fn("assertPlatformBuildResources")(f
   iconAssets: DesktopBuildIconAssets,
   verbose: boolean,
 ) {
+  yield* pruneForeignAppIconVariants(stageResourcesDir, platform);
   if (platform === "mac") {
-    yield* stageMacIcons(stageResourcesDir, iconAssets.macIconPng, iconAssets.macIconset, verbose);
+    yield* stageMacIcons(
+      stageResourcesDir,
+      iconAssets.macIconPng,
+      iconAssets.macIconset,
+      iconAssets.macAssetCatalog,
+      verbose,
+    );
     return;
   }
 
@@ -1435,6 +1498,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     {
       macIconPng: path.join(repoRoot, iconAssets.macIconPng),
       macIconset: iconAssets.macIconset ? path.join(repoRoot, iconAssets.macIconset) : undefined,
+      macAssetCatalog: iconAssets.macAssetCatalog
+        ? path.join(repoRoot, iconAssets.macAssetCatalog)
+        : undefined,
       linuxIconPng: path.join(repoRoot, iconAssets.linuxIconPng),
       windowsIconIco: path.join(repoRoot, iconAssets.windowsIconIco),
     },
