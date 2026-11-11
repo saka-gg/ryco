@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -48,6 +49,7 @@ import {
   resolveMacUnsignedInstallAssetPaths,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
+  pruneForeignAppIconVariants,
   stageLinuxIcons,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
@@ -272,6 +274,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17"), {
       macIconPng: BRAND_ASSET_PATHS.productionMacIconPng,
       macIconset: BRAND_ASSET_PATHS.productionMacIconset,
+      macAssetCatalog: BRAND_ASSET_PATHS.productionMacAssetCatalog,
       linuxIconPng: BRAND_ASSET_PATHS.productionLinuxIconPng,
       windowsIconIco: BRAND_ASSET_PATHS.productionWindowsIconIco,
     });
@@ -279,6 +282,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.17-nightly.20260413.42"), {
       macIconPng: BRAND_ASSET_PATHS.nightlyMacIconPng,
       macIconset: BRAND_ASSET_PATHS.nightlyMacIconset,
+      macAssetCatalog: undefined,
       linuxIconPng: BRAND_ASSET_PATHS.nightlyLinuxIconPng,
       windowsIconIco: BRAND_ASSET_PATHS.nightlyWindowsIconIco,
     });
@@ -319,6 +323,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       undefined,
     );
   });
+
+  it.effect("keeps only the packaged platform's alternate app icons", () =>
+    Effect.gen(function* () {
+      const tempRoot = mkdtempSync(path.join(tmpdir(), "ryco-app-icons-"));
+      try {
+        const iconsDir = path.join(tempRoot, "app-icons");
+        mkdirSync(iconsDir, { recursive: true });
+        const files = ["dark-macos.png", "dark-linux.png", "dark-windows.ico"];
+        for (const file of files) writeFileSync(path.join(iconsDir, file), file);
+
+        yield* pruneForeignAppIconVariants(tempRoot, "win");
+
+        assert.deepStrictEqual(readdirSync(iconsDir), ["dark-windows.ico"]);
+      } finally {
+        rmSync(tempRoot, { recursive: true, force: true });
+      }
+    }),
+  );
 
   it.effect("stages standard Linux AppImage icon sizes with ImageMagick", () =>
     Effect.gen(function* () {
@@ -484,6 +506,39 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("gives the stable Mac app its Liquid Glass icon from the asset catalog", () =>
+    Effect.gen(function* () {
+      const catalog = { from: "apps/desktop/resources/Assets.car", to: "Assets.car" };
+      const stable = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.47",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = stable.mac as { readonly icon: string; readonly extendInfo?: unknown };
+      assert.equal(mac.icon, "icon.icns");
+      assert.deepStrictEqual(mac.extendInfo, { CFBundleIconName: "AppIcon" });
+      assert.deepInclude(stable.extraResources as ReadonlyArray<unknown>, catalog);
+      assert.ok(DESKTOP_BUILD_FILES.includes("!apps/desktop/resources/Assets.car"));
+
+      // Nightly keeps its own artwork, which has no catalog.
+      const nightly = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.47-nightly.20261111.1",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      assert.equal((nightly.mac as { readonly extendInfo?: unknown }).extendInfo, undefined);
+      assert.notDeepInclude(nightly.extraResources as ReadonlyArray<unknown>, catalog);
+    }),
+  );
+
   it.effect("ships Ryco Computer Use as its own flavor-named bundle in Contents/Helpers", () =>
     Effect.gen(function* () {
       const stable = yield* createBuildConfig(
@@ -588,6 +643,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           target: ["dmg", "zip"],
           minimumSystemVersion: "13.0",
           icon: "icon.icns",
+          extendInfo: { CFBundleIconName: "AppIcon" },
           category: "public.app-category.developer-tools",
           identity: "-",
           hardenedRuntime: false,
@@ -740,6 +796,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "!apps/desktop/resources/ryco-desktop-security-helper",
       "!apps/desktop/prod-resources/ryco-desktop-security-helper",
       "!apps/desktop/resources/ryco-window-material.node",
+      "!apps/desktop/resources/Assets.car",
+      "!apps/desktop/prod-resources/Assets.car",
       "!apps/desktop/prod-resources/cua-driver/**",
       "!apps/desktop/prod-resources/ryco-computer-use-helper",
       "!apps/desktop/prod-resources/ryco-computer-use-helper.exe",
@@ -813,6 +871,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           from: "apps/desktop/resources/ryco-window-material.node",
           to: "ryco-window-material.node",
         },
+        { from: "apps/desktop/resources/Assets.car", to: "Assets.car" },
         {
           from: "apps/server/dist/device-helper",
           to: "device-helper",

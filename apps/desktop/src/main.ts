@@ -1,5 +1,10 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
+import {
+  desktopAppIconResourceName,
+  isDesktopAppIconPlatform,
+  macDockIconAction,
+} from "./appIcon.ts";
 import type { DesktopCliCommandEnvironment } from "./desktopCliCommand.ts";
 import type { ExpectedTeamId, NightlyHandoffEnvironment } from "./nightlyHandoff.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
@@ -80,6 +85,7 @@ import {
 import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
+import { isAppIconVariant } from "@ryco/shared/appIcon";
 import { rycoDesktopFlavorIdentity, updateFilesBelongToFlavor } from "@ryco/shared/desktopFlavor";
 import {
   flavorImportAllowedSourceHome,
@@ -2840,20 +2846,58 @@ function configureAppIdentity(): void {
   }
 }
 
+/** The chosen icon variant's file for this platform; null for the app's own icon. */
+function resolveAppIconVariantPath(): string | null {
+  if (!isDesktopAppIconPlatform(process.platform)) return null;
+  const name = desktopAppIconResourceName(desktopSettings.appIconVariant, process.platform);
+  return name === null ? null : resolveResourcePath(name);
+}
+
+/** Whether this run already gave the Dock an icon other than the bundle's. */
+let dockIconChangedThisRun = false;
+
+/**
+ * The Dock icon for the chosen variant. A packaged build's bundle icon
+ * (icon.icns) already carries the default artwork, so it skips the synchronous
+ * decode on every launch; a development build sets its own artwork.
+ */
+function applyDockIcon(): void {
+  if (process.platform !== "darwin" || !app.dock) return;
+  const action = macDockIconAction({
+    variantPath: resolveAppIconVariantPath(),
+    defaultIconPath: resolveIconPath("png"),
+    isPackaged: app.isPackaged,
+    changedThisRun: dockIconChangedThisRun,
+  });
+  if (action === null) return;
+  if (action.kind === "restore") {
+    // `null` hands the Dock back the bundle's icon (`[NSApp setApplicationIconImage:nil]`);
+    // Electron accepts it although its typings do not say so.
+    (app.dock.setIcon as (image: string | null) => void)(null);
+    dockIconChangedThisRun = false;
+    return;
+  }
+  app.dock.setIcon(action.path);
+  dockIconChangedThisRun = true;
+}
+
+/** Windows and Linux draw each window's own icon in the taskbar and title bar. */
+function applyWindowIcons(): void {
+  if (process.platform === "darwin") return;
+  const option = getIconOption();
+  if (!("icon" in option)) return;
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.setIcon(option.icon);
+  }
+}
+
 /**
  * The parts of the app identity that need `ready`: the name again (the macOS
- * menu bar picks it up only then) and, in development, the Dock icon. A
- * packaged build's bundle icon (icon.icns) already carries the same artwork,
- * so it skips the synchronous decode on every launch.
+ * menu bar picks it up only then) and the Dock icon.
  */
 function configureAppIdentityAfterReady(): void {
   app.setName(APP_DISPLAY_NAME);
-  if (process.platform === "darwin" && app.dock && !app.isPackaged) {
-    const iconPath = resolveIconPath("png");
-    if (iconPath) {
-      app.dock.setIcon(iconPath);
-    }
-  }
+  applyDockIcon();
 }
 
 function registerDesktopAuthorizationProtocol(): void {
@@ -4540,6 +4584,21 @@ function registerIpcHandlers(): void {
     const handoff = await import("./nightlyHandoff.ts");
     await handoff.switchBackToRyco(await nightlyHandoffEnvironment());
   });
+  ipcMain.removeHandler("desktop:app-icon-get");
+  ipcMain.handle("desktop:app-icon-get", () => desktopSettings.appIconVariant);
+  ipcMain.removeHandler("desktop:app-icon-set");
+  ipcMain.handle("desktop:app-icon-set", (event, variant: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || event.senderFrame !== event.sender.mainFrame)
+      throw new Error("Invalid app icon sender.");
+    if (!isAppIconVariant(variant)) throw new Error("Invalid app icon.");
+    if (variant === desktopSettings.appIconVariant) return;
+    const next: DesktopSettings = { ...desktopSettings, appIconVariant: variant };
+    writeDesktopSettings(DESKTOP_SETTINGS_PATH, next);
+    desktopSettings = next;
+    applyDockIcon();
+    applyWindowIcons();
+  });
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
   ipcMain.removeHandler("desktop:quit-shortcut-set");
@@ -5427,7 +5486,7 @@ function registerIpcHandlers(): void {
 function getIconOption(): { icon: string } | Record<string, never> {
   if (process.platform === "darwin") return {}; // macOS uses .icns from app bundle
   const ext = process.platform === "win32" ? "ico" : "png";
-  const iconPath = resolveIconPath(ext);
+  const iconPath = resolveAppIconVariantPath() ?? resolveIconPath(ext);
   return iconPath ? { icon: iconPath } : {};
 }
 

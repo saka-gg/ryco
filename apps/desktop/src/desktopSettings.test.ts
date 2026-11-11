@@ -67,6 +67,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 
@@ -85,6 +86,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
 
     expect(readDesktopSettings(settingsPath, "0.0.17")).toEqual({
@@ -99,6 +101,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 
@@ -117,6 +120,7 @@ describe("desktopSettings", () => {
           hubNodeName: null,
           hubAllowFileSecretStore: false,
           backendPort: null,
+          appIconVariant: "light",
         },
         "network-accessible",
       ),
@@ -132,6 +136,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 
@@ -150,6 +155,7 @@ describe("desktopSettings", () => {
           hubNodeName: null,
           hubAllowFileSecretStore: false,
           backendPort: null,
+          appIconVariant: "light",
         },
         { enabled: true, port: 8443 },
       ),
@@ -165,6 +171,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 
@@ -183,6 +190,7 @@ describe("desktopSettings", () => {
           hubNodeName: null,
           hubAllowFileSecretStore: false,
           backendPort: null,
+          appIconVariant: "light",
         },
         { enabled: true },
       ),
@@ -198,6 +206,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 
@@ -341,6 +350,7 @@ describe("desktopSettings", () => {
       hubNodeName: "Build node",
       hubAllowFileSecretStore: true,
       backendPort: null,
+      appIconVariant: "light",
     });
     expect(readDesktopSettings(settingsPath, "0.0.17")).toMatchObject({
       hubConnectorEnabled: true,
@@ -675,6 +685,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 
@@ -701,6 +712,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
+      appIconVariant: "light",
     });
   });
 });
@@ -730,6 +742,19 @@ describe("desktop backend port persistence", () => {
 
     fs.writeFileSync(settingsPath, JSON.stringify({ backendPort: "7927" }), "utf8");
     expect(readDesktopSettings(settingsPath, "0.0.17").backendPort).toBeNull();
+  });
+});
+
+describe("desktop app icon persistence", () => {
+  it("remembers the chosen icon and reads anything else as the app's own", () => {
+    const settingsPath = makeSettingsPath();
+    writeDesktopSettings(settingsPath, { ...DEFAULT_DESKTOP_SETTINGS, appIconVariant: "ember" });
+    expect(readDesktopSettings(settingsPath, "0.1.46").appIconVariant).toBe("ember");
+
+    for (const value of [{}, { appIconVariant: "neon" }, { appIconVariant: 3 }]) {
+      fs.writeFileSync(settingsPath, JSON.stringify(value), "utf8");
+      expect(readDesktopSettings(settingsPath, "0.1.46").appIconVariant).toBe("light");
+    }
   });
 });
 

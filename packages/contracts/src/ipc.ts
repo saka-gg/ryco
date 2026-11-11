@@ -885,6 +885,12 @@ export type DesktopHubOriginValidation =
 
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
+/**
+ * Which Ryco app icon this device shows (`@ryco/shared/appIcon`). `light` is the app's own icon;
+ * the others are generated alternates.
+ */
+export type AppIconVariant = "light" | "dark" | "ember" | "ignition";
+
 /** Where the desktop app's `ryco` terminal command stands (`desktopCliCommand.ts`). */
 export interface DesktopCliCommandState {
   /** macOS and Linux, installed app only. */
@@ -1034,6 +1040,14 @@ export interface DesktopBridge {
     open(input: { readonly copyData: boolean }): Promise<void>;
     /** Ryco Nightly only. Opens Ryco; nothing is copied back. */
     switchBack(): Promise<void>;
+  };
+  /**
+   * The Dock icon on macOS, the window and taskbar icon on Windows and Linux. Absent in desktop
+   * builds that predate it.
+   */
+  appIcon?: {
+    getVariant(): Promise<AppIconVariant>;
+    setVariant(variant: AppIconVariant): Promise<void>;
   };
   quitShortcut?: {
     getMode(): Promise<DesktopQuitShortcutMode>;

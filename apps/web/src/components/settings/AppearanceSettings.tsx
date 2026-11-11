@@ -85,6 +85,12 @@ import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
 import { ThemeEditor } from "./ThemeEditor";
 import { TimeFormatSetting } from "./TimeFormatSetting";
+import { AppIconSettings } from "./AppIconSettings";
+import {
+  APPEARANCE_TILE_CLASS,
+  APPEARANCE_TILE_IDLE_CLASS,
+  APPEARANCE_TILE_SELECTED_CLASS,
+} from "./appearanceTiles";
 
 export function AppearanceSettingsPanel({
   surface = "phone",
@@ -747,6 +753,7 @@ export function AppearanceSettingsPanel({
           />
         ) : null}
       </SettingsSection>
+      {isSettingsPage ? <AppIconSettings /> : null}
 
       <AlertDialog
         open={pendingDeleteId !== null}
@@ -777,11 +784,6 @@ export function AppearanceSettingsPanel({
 
 /** The Dark mode palette choice that keeps the active theme for both modes. */
 const SAME_AS_LIGHT = "__same-as-light";
-
-const APPEARANCE_TILE_CLASS =
-  "min-w-0 rounded-[min(var(--radius-xl),0.875rem)] border bg-card text-left outline-none transition-[background-color,border-color,box-shadow] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring";
-const APPEARANCE_TILE_SELECTED_CLASS = "border-primary/70 shadow-[0_0_0_1px_var(--color-primary)]";
-const APPEARANCE_TILE_IDLE_CLASS = "border-border/70 hover:border-foreground/20 hover:bg-muted/30";
 
 const PREFERENCE_TILE_CLASS =
   "min-h-12 min-w-0 rounded-[min(var(--radius-md),0.5rem)] border px-2.5 py-1.5 text-left outline-none transition-[background-color,border-color,color,box-shadow] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring";
