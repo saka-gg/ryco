@@ -11,6 +11,7 @@ import {
   createSavedSessionRenewal,
   isSavedEnvironmentAwaitingRepair,
   createDeviceFrameSource,
+  describeSavedEnvironmentFailure,
   isSavedEnvironmentCredentialRejection,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
   SavedEnvironmentConnectionCancelledError,
@@ -268,12 +269,12 @@ export function createMobileEnvironmentDriver(
     patch: Partial<SavedEnvironmentRuntimeState>,
   ) => catalog.runtimeStore.getState().patch(environmentId, patch);
 
+  // A retry keeps the failure it is retrying: a machine that is out of reach
+  // stays shown as offline while the backoff tries it again, rather than
+  // flashing between connecting and failed on every attempt and every return
+  // to the foreground. A connect that lands clears it.
   const setRuntimeConnecting = (environmentId: EnvironmentId) =>
-    patchRuntime(environmentId, {
-      connectionState: "connecting",
-      lastError: null,
-      lastErrorAt: null,
-    });
+    patchRuntime(environmentId, { connectionState: "connecting" });
   const setRuntimeConnected = (environmentId: EnvironmentId) => {
     const connectedAt = nowIso();
     patchRuntime(environmentId, {
@@ -283,6 +284,7 @@ export function createMobileEnvironmentDriver(
       disconnectedAt: null,
       lastError: null,
       lastErrorAt: null,
+      lastErrorKind: null,
     });
     catalog.registryStore.getState().markConnected(environmentId, connectedAt);
   };
@@ -292,12 +294,23 @@ export function createMobileEnvironmentDriver(
       disconnectedAt: nowIso(),
       ...(reason && reason.trim().length > 0 ? { lastError: reason, lastErrorAt: nowIso() } : {}),
     });
-  const setRuntimeError = (environmentId: EnvironmentId, error: unknown) =>
+  // Only the plain sentence of the failure's kind reaches the screen; the
+  // platform's text (a URL, a native file name) goes to the log.
+  const setRuntimeError = (environmentId: EnvironmentId, error: unknown) => {
+    const failure = describeSavedEnvironmentFailure(error);
+    if (failure.kind === "failed") {
+      console.warn("Saved environment connect failed", {
+        environmentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     patchRuntime(environmentId, {
       connectionState: "error",
-      lastError: error instanceof Error ? error.message : String(error),
+      lastError: failure.message,
       lastErrorAt: nowIso(),
+      lastErrorKind: failure.kind,
     });
+  };
   const setRuntimeRequiresAuth = (environmentId: EnvironmentId) =>
     patchRuntime(environmentId, savedEnvironmentRequiresAuthState(nowIso()));
 
@@ -415,7 +428,7 @@ export function createMobileEnvironmentDriver(
         patchRuntime(record.environmentId, {
           authState: "requires-auth",
           connectionState: "disconnected",
-          lastError: "Saved environment is missing its saved credential. Pair it again.",
+          lastError: "This phone no longer has the pairing for this machine. Pair it again.",
           lastErrorAt: nowIso(),
         });
       }

@@ -607,6 +607,13 @@ export const MVP_SETTINGS_ROUTES = {
   SettingsClientStorage: { linking: `${SETTINGS}/client-storage`, ...SETTINGS_PAGE },
   SettingsAbout: { linking: `${SETTINGS}/about`, ...SETTINGS_PAGE },
   SettingsDiagnostics: { linking: `${SETTINGS}/diagnostics`, ...SETTINGS_PAGE },
+  /** Every third-party package and native library the app ships, searchable. */
+  SettingsOpenSourceLicenses: { linking: `${SETTINGS}/open-source-licenses`, ...SETTINGS_PAGE },
+  /** One of them: its license and notice text. */
+  SettingsOpenSourceLicense: {
+    linking: `${SETTINGS}/open-source-licenses/:entryKey`,
+    ...SETTINGS_PAGE,
+  },
 } as const satisfies Record<string, MvpRouteDescriptor>;
 
 export type MvpSettingsRouteName = keyof typeof MVP_SETTINGS_ROUTES;

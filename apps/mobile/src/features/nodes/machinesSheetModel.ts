@@ -7,6 +7,11 @@
 // `directNodeActions` for a machine paired directly, `deriveHubNodeSectionModel` for a Hub
 // node. This model only places those actions.
 
+import {
+  isSavedEnvironmentOutOfReach,
+  type SavedEnvironmentFailureKind,
+} from "@ryco/client-runtime/connection/connectFailure";
+
 import type { AppSymbolName } from "../../components/AppSymbol";
 import type { MachineTone } from "../home/machinePickerModel";
 import {
@@ -17,6 +22,18 @@ import {
 } from "./nodesModel";
 
 export type DirectConnectionState = "connecting" | "connected" | "disconnected" | "error";
+
+/**
+ * The state the sheet works from. A machine out of reach that the backoff is trying again reads
+ * as failed, so its page offers Retry, as its "Offline" status says, rather than Connect and
+ * Disconnect for an attempt that will not land.
+ */
+export function directMachineConnectionState(
+  state: DirectConnectionState,
+  failureKind: SavedEnvironmentFailureKind | null | undefined,
+): DirectConnectionState {
+  return state === "connecting" && isSavedEnvironmentOutOfReach(failureKind) ? "error" : state;
+}
 
 /** What the sheet knows about a machine paired directly (`ConnectionRow`). */
 export interface DirectMachineFacts {
@@ -29,6 +46,11 @@ export interface DirectMachineFacts {
   readonly connectionState: DirectConnectionState;
   /** The status as the connection rows word it: "Connected", "Needs re-pair", "Switched off". */
   readonly statusLabel: string;
+  /**
+   * Why it is not connected, in one plain sentence (`ConnectionRow.statusDetail`): "Can't reach
+   * this machine. It may be off, asleep or on another network." Never the platform's error text.
+   */
+  readonly statusDetail: string | null;
   readonly needsRepair: boolean;
   readonly switchedOff: boolean;
   readonly selected: boolean;
@@ -114,6 +136,8 @@ export interface MachineListRowModel {
   readonly detailRest: string;
   /** Why the machine just dropped or which part of the way fails, in the warning colour. */
   readonly notice: string | null;
+  /** Why a machine is not connected, said calmly in the muted colour (out of reach, refused). */
+  readonly hint: string | null;
   readonly dimmed: boolean;
   readonly accessibilityLabel: string;
 }
@@ -123,6 +147,8 @@ export interface MachineDetailModel {
   readonly dimmed: boolean;
   /** Under the name: "Connected · LAN · Direct", "Offline since 14:02". */
   readonly statusLine: string;
+  /** Under the status line, muted: why the machine is not connected. */
+  readonly hint: string | null;
   readonly notices: ReadonlyArray<string>;
   /** The 4 buttons under the header, always 4, in this order. */
   readonly actions: readonly [MachineAction, MachineAction, MachineAction, MachineAction];
@@ -176,6 +202,11 @@ function directTone(facts: DirectMachineFacts): MachineTone {
   return "offline";
 }
 
+/** A switched-off machine is not trying to connect, so it has nothing to explain. */
+function directHint(facts: DirectMachineFacts): string | null {
+  return facts.switchedOff || facts.statusLabel === "Connected" ? null : facts.statusDetail;
+}
+
 function directReach(facts: DirectMachineFacts): string {
   return facts.transport === "Direct" ? "Direct" : `${facts.transport} · Direct`;
 }
@@ -209,8 +240,13 @@ export function machineListRow(facts: MachineFacts): MachineListRowModel {
       statusConnecting: connecting,
       detailRest,
       notice: facts.freezeNotice,
+      hint: directHint(facts),
       dimmed: facts.switchedOff,
-      accessibilityLabel: accessibilityLabel(facts.label, `${status}${detailRest}`, facts),
+      accessibilityLabel: accessibilityLabel(
+        facts.label,
+        [`${status}${detailRest}`, directHint(facts)].filter(Boolean).join(", "),
+        facts,
+      ),
     };
   }
   const connecting = facts.tone === "connecting";
@@ -225,6 +261,7 @@ export function machineListRow(facts: MachineFacts): MachineListRowModel {
     statusConnecting: connecting,
     detailRest,
     notice: facts.routeNotice ?? facts.freezeNotice,
+    hint: null,
     dimmed: false,
     accessibilityLabel: accessibilityLabel(facts.label, `${lead}${status}${detailRest}`, facts),
   };
@@ -354,6 +391,7 @@ export function machineDetail(
       tone,
       dimmed: facts.switchedOff,
       statusLine: `${statusWord(facts.statusLabel, tone === "connecting")} · ${directReach(facts)}`,
+      hint: directHint(facts),
       notices: facts.freezeNotice ? [facts.freezeNotice] : [],
       actions: directActions(facts, allowed),
       connection,
@@ -372,6 +410,7 @@ export function machineDetail(
   return {
     tone: facts.tone,
     dimmed: false,
+    hint: null,
     statusLine: [
       facts.trustDetail,
       statusWord(status, facts.tone === "connecting"),

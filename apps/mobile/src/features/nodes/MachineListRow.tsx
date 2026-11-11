@@ -77,6 +77,11 @@ export function MachineListRow(props: {
           </Text>
           {row.detailRest}
         </Text>
+        {row.hint ? (
+          <Text numberOfLines={2} style={{ fontSize: 13, marginTop: 2, color: look.muted }}>
+            {row.hint}
+          </Text>
+        ) : null}
         {row.notice ? (
           <Text numberOfLines={2} style={{ fontSize: 13, marginTop: 2, color: look.amber }}>
             {row.notice}

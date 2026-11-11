@@ -207,6 +207,34 @@ the medians. A turn that has not ended `--turn-timeout` seconds after the window
 stops the measurement: the CLI cannot stop it, and the app re-renders for every
 thread, so later windows would record its stream as well.
 
+## Open source licenses
+
+Settings > About > Open source licenses lists every third-party package and native library the
+app ships, with its license text. `metro.config.js` runs
+`scripts/generate-third-party-licenses.mts` before Metro starts (dev server, `bundle:check`, Xcode
+and EAS bundles), which writes the ignored `.generated/third-party-licenses/` package; the app
+requires it only when a license screen opens. The script skips the work while `bun.lock` and the
+config are unchanged and never touches the network.
+
+The list is the production dependency closure of `package.json` (workspace packages' dependencies
+included, `@ryco/*` omitted), plus what the repository-level `third-party-licenses.config.json`
+adds:
+
+- `buildOnlyDependencies`: tooling (Expo CLI, Babel, codegen, config plugins) the walk skips. A
+  production bundle fails if one of them is bundled after all.
+- `bundledDevDependencies`: dev dependencies inlined into shipped artifacts (xterm.js in the
+  terminal renderer, the Pierre file icons).
+- `customNotices`: native libraries outside npm (React Native's C++ dependencies, Hermes, expo-image's
+  SDWebImage stack, Android libraries) and adapted code, each with the `nativeDependencies` it covers.
+- `nativeDependencyExclusions`, `packageOverrides`, `reviewedLicenses` (weak copyleft such as
+  MPL-2.0 needs an entry with a reason; GPL-family and unknown licenses always fail).
+
+Generated notices use the SPDX templates committed under `third-party-licenses/spdx/`; after naming a
+new license id, run `node scripts/sync-third-party-license-notices.ts` from the repository root and
+commit the file it adds. `scripts/generate-third-party-licenses.test.ts` fails when a license is
+not allowed, a notice is missing, an autolinked package is not listed, or a pod, Swift package or
+Maven artifact of a linked module is neither covered nor excluded.
+
 ## React Compiler
 
 `experiments.reactCompiler` in `app.config.ts` turns on babel-preset-expo's React

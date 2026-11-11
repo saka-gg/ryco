@@ -185,6 +185,11 @@ export function MachineDetailPage(props: MachineDetailPageProps) {
           <Text style={{ fontSize: 13, marginTop: 4, textAlign: "center", color: look.muted }}>
             {detail.statusLine}
           </Text>
+          {detail.hint ? (
+            <Text style={{ fontSize: 13, marginTop: 4, textAlign: "center", color: look.muted }}>
+              {detail.hint}
+            </Text>
+          ) : null}
           {detail.notices.map((notice) => (
             <Text
               key={notice}

@@ -22,6 +22,9 @@ expo-env.d.ts
 # Metro
 .metro-health-check*
 
+# Build outputs metro.config.js writes (the open source license manifest)
+.generated/
+
 # debug
 npm-debug.*
 yarn-debug.*

@@ -1,0 +1,826 @@
+{
+  "$comment": "Hand-maintained inputs of the phone app's open source license manifest; see 'Open source licenses' in apps/mobile/README.md.",
+  "buildOnlyDependencies": [
+    {
+      "from": "@expo/cli",
+      "names": ["*"],
+      "reason": "Expo's CLI and dev server. Only its module loader (build/metro-require/require.js) is bundled, and it imports nothing."
+    },
+    {
+      "from": "expo",
+      "names": [
+        "@expo/config",
+        "@expo/config-plugins",
+        "@expo/fingerprint",
+        "@expo/local-build-cache-provider",
+        "@expo/metro",
+        "@expo/metro-config",
+        "babel-preset-expo",
+        "expo-modules-autolinking",
+        "pretty-format",
+        "react-refresh"
+      ],
+      "reason": "Bundler, Babel, fingerprint, config and autolinking tooling; runs while building."
+    },
+    {
+      "from": "react-native",
+      "names": [
+        "@react-native/codegen",
+        "@react-native/community-cli-plugin",
+        "@react-native/gradle-plugin",
+        "babel-plugin-syntax-hermes-parser",
+        "commander",
+        "hermes-compiler",
+        "metro-runtime",
+        "metro-source-map",
+        "pretty-format",
+        "react-devtools-core",
+        "react-refresh",
+        "tinyglobby",
+        "ws",
+        "yargs"
+      ],
+      "reason": "CLI, codegen, Gradle plugin, Hermes compiler and development tools; none of them is bundled."
+    },
+    {
+      "from": "expo-updates",
+      "names": [
+        "@expo/code-signing-certificates",
+        "@expo/plist",
+        "@expo/spawn-async",
+        "arg",
+        "chalk",
+        "debug",
+        "getenv",
+        "glob",
+        "ignore",
+        "resolve-from"
+      ],
+      "reason": "Dependencies of expo-updates' command-line tools and config plugin, which run while building."
+    },
+    {
+      "from": "react-native-worklets",
+      "names": ["@babel/*", "convert-source-map"],
+      "reason": "Dependencies of the worklets Babel plugin, which runs while bundling."
+    },
+    {
+      "from": "uniwind",
+      "names": ["@tailwindcss/*", "lightningcss", "tailwindcss"],
+      "reason": "Dependencies of uniwind's Metro plugin, which compiles the Tailwind styles while bundling."
+    },
+    {
+      "from": "*",
+      "names": [
+        "@expo/config-plugins",
+        "@expo/config-types",
+        "@expo/image-utils",
+        "@expo/plist",
+        "@expo/prebuild-config",
+        "xml2js"
+      ],
+      "reason": "Config plugins run during prebuild, not in the app."
+    },
+    {
+      "from": "@ryco/mobile",
+      "names": ["expo-build-properties"],
+      "reason": "A config plugin only: it sets native build properties during prebuild."
+    }
+  ],
+  "bundledDevDependencies": [
+    {
+      "bundle": "mobile",
+      "packageManifest": "apps/mobile/package.json",
+      "names": ["@pierre/trees", "@xterm/addon-fit", "@xterm/xterm"],
+      "reason": "Inlined into checked-in artifacts the app ships: xterm.js and its fit addon into the terminal WebView document (scripts/build-terminal-renderer.mts), the Pierre file icons into the markdown module's assets (modules/ryco-markdown-text/scripts/sync-pierre-file-icons.mjs)."
+    }
+  ],
+  "reviewedLicenses": [],
+  "customNotices": [
+    {
+      "name": "T3 Code",
+      "license": "MIT",
+      "bundles": ["mobile"],
+      "sourceUrl": "https://github.com/pingdotgg/t3code",
+      "noticeFile": "apps/mobile/modules/ryco-native-controls/LICENSE"
+    },
+    {
+      "name": "Synara",
+      "license": "MIT",
+      "bundles": ["mobile"],
+      "sourceUrl": "https://github.com/Emanuele-web04/synara",
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": [
+            "Copyright (c) 2026 T3 Tools Inc.",
+            "Copyright (c) 2026 Emanuele Di Pietro"
+          ],
+          "preamble": ["Portions of Ryco's shared device and browser code are adapted from Synara."]
+        }
+      ]
+    },
+    {
+      "name": "react-native-uitextview",
+      "version": "2.2.0",
+      "license": "MIT",
+      "bundles": ["ios", "mobile"],
+      "sourceUrl": "https://github.com/bluesky-social/react-native-uitextview",
+      "noticeFile": "apps/mobile/modules/ryco-markdown-text/LICENSE"
+    },
+    {
+      "name": "Expo module template",
+      "license": "MIT",
+      "bundles": ["mobile"],
+      "sourceUrl": "https://github.com/expo/expo/tree/main/packages/create-expo-module",
+      "noticeFile": "apps/mobile/modules/ryco-composer-editor/LICENSE"
+    },
+    {
+      "name": "Hermes",
+      "version": "250829098.0.17",
+      "license": "MIT",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/facebook/hermes",
+      "nativeDependencies": ["pod:hermes-engine", "maven:com.facebook.hermes:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+        }
+      ]
+    },
+    {
+      "name": "Folly",
+      "version": "2024.11.18.00",
+      "license": "Apache-2.0",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/facebook/folly",
+      "nativeDependencies": ["pod:RCT-Folly", "pod:ReactNativeDependencies"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+        }
+      ]
+    },
+    {
+      "name": "Boost",
+      "version": "1.84.0",
+      "license": "BSL-1.0",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://www.boost.org",
+      "nativeDependencies": ["pod:boost"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSL-1.0"
+        }
+      ]
+    },
+    {
+      "name": "double-conversion",
+      "version": "1.1.6",
+      "license": "BSD-3-Clause",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/google/double-conversion",
+      "nativeDependencies": ["pod:DoubleConversion"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-3-Clause",
+          "copyrights": ["Copyright 2006-2011, the V8 project authors. All rights reserved."]
+        }
+      ]
+    },
+    {
+      "name": "fast_float",
+      "version": "8.0.0",
+      "license": "Apache-2.0 OR BSL-1.0 OR MIT",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/fastfloat/fast_float",
+      "nativeDependencies": ["pod:fast_float"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2021 The fast_float authors"]
+        }
+      ]
+    },
+    {
+      "name": "fmt",
+      "version": "12.1.0",
+      "license": "MIT",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/fmtlib/fmt",
+      "nativeDependencies": ["pod:fmt"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors"]
+        }
+      ]
+    },
+    {
+      "name": "glog",
+      "version": "0.3.5",
+      "license": "BSD-3-Clause",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/google/glog",
+      "nativeDependencies": ["pod:glog"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-3-Clause",
+          "copyrights": ["Copyright (c) 2008, Google Inc. All rights reserved."]
+        }
+      ]
+    },
+    {
+      "name": "SocketRocket",
+      "version": "0.7.1",
+      "license": "BSD-3-Clause",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/facebookincubator/SocketRocket",
+      "nativeDependencies": ["pod:SocketRocket"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-3-Clause",
+          "copyrights": [
+            "Copyright (c) 2016-present, Facebook, Inc. All rights reserved.",
+            "Portions Copyright 2012 Square Inc."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "SDWebImage",
+      "version": "5.21.6",
+      "license": "MIT",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/SDWebImage/SDWebImage",
+      "nativeDependencies": ["pod:SDWebImage", "spm:https://github.com/SDWebImage/SDWebImage"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2009-2020 Olivier Poitrey rs@dailymotion.com"]
+        }
+      ]
+    },
+    {
+      "name": "SDWebImageAVIFCoder",
+      "version": "0.12.0",
+      "license": "MIT",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/SDWebImage/SDWebImageAVIFCoder",
+      "nativeDependencies": [
+        "pod:SDWebImageAVIFCoder",
+        "spm:https://github.com/SDWebImage/SDWebImageAVIFCoder"
+      ],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2019 lizhuoli1126@126.com <lizhuoli1126@126.com>"]
+        }
+      ]
+    },
+    {
+      "name": "SDWebImageSVGCoder",
+      "version": "1.8.0",
+      "license": "MIT",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/SDWebImage/SDWebImageSVGCoder",
+      "nativeDependencies": [
+        "pod:SDWebImageSVGCoder",
+        "spm:https://github.com/SDWebImage/SDWebImageSVGCoder"
+      ],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2018 lizhuoli1126@126.com <lizhuoli1126@126.com>"]
+        }
+      ]
+    },
+    {
+      "name": "SDWebImageWebPCoder",
+      "version": "0.15.0",
+      "license": "MIT",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/SDWebImage/SDWebImageWebPCoder",
+      "nativeDependencies": [
+        "pod:SDWebImageWebPCoder",
+        "spm:https://github.com/SDWebImage/SDWebImageWebPCoder"
+      ],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2018 Bogdan Poplauschi"]
+        }
+      ]
+    },
+    {
+      "name": "libwebp",
+      "license": "BSD-3-Clause",
+      "bundles": ["ios"],
+      "sourceUrl": "https://chromium.googlesource.com/webm/libwebp",
+      "nativeDependencies": ["pod:libwebp"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-3-Clause",
+          "copyrights": ["Copyright (c) 2010, Google Inc. All rights reserved."],
+          "preamble": [
+            "libwebp is linked into SDWebImageWebPCoder. Google also grants a patent license for it: https://chromium.googlesource.com/webm/libwebp/+/refs/heads/main/PATENTS"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "libavif",
+      "version": "1.0.0",
+      "license": "BSD-2-Clause",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/AOMediaCodec/libavif",
+      "nativeDependencies": ["pod:libavif", "spm:https://github.com/SDWebImage/libavif-Xcode"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-2-Clause",
+          "copyrights": ["Copyright 2019 Joe Drago. All rights reserved."],
+          "preamble": ["Built for iOS through SDWebImage's libavif-Xcode package (MIT)."]
+        }
+      ]
+    },
+    {
+      "name": "libaom",
+      "license": "BSD-2-Clause",
+      "bundles": ["ios"],
+      "sourceUrl": "https://aomedia.googlesource.com/aom",
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-2-Clause",
+          "copyrights": ["Copyright (c) 2016, Alliance for Open Media. All rights reserved."],
+          "preamble": [
+            "libaom is linked into libavif. The Alliance for Open Media also grants a patent license for it: https://aomedia.org/license/patent-license/"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dav1d",
+      "license": "BSD-2-Clause",
+      "bundles": ["ios"],
+      "sourceUrl": "https://code.videolan.org/videolan/dav1d",
+      "nativeDependencies": ["pod:libdav1d"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-2-Clause",
+          "copyrights": [
+            "Copyright (c) 2018-2019, VideoLAN and dav1d authors. All rights reserved."
+          ],
+          "preamble": ["expo-image links dav1d into libavif when it is built from source."]
+        }
+      ]
+    },
+    {
+      "name": "ZXingObjC",
+      "version": "3.6.9",
+      "license": "Apache-2.0",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/zxingify/zxingify-objc",
+      "nativeDependencies": ["pod:ZXingObjC", "spm:https://github.com/zxingify/zxingify-objc"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2012 ZXing authors"]
+        }
+      ]
+    },
+    {
+      "name": "Reachability.swift",
+      "license": "MIT",
+      "bundles": ["ios"],
+      "sourceUrl": "https://github.com/ashleymills/Reachability.swift",
+      "nativeDependencies": ["pod:ReachabilitySwift"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2016 Ashley Mills"]
+        }
+      ]
+    },
+    {
+      "name": "SQLite",
+      "license": "blessing",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://sqlite.org",
+      "nativeDependencies": ["pod:sqlite3"],
+      "generatedNotices": [
+        {
+          "licenseId": "blessing",
+          "preamble": [
+            "SQLite is in the public domain. expo-sqlite compiles its amalgamation into the app."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Oniguruma",
+      "license": "BSD-2-Clause",
+      "bundles": ["android", "ios"],
+      "sourceUrl": "https://github.com/kkos/oniguruma",
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-2-Clause",
+          "copyrights": [
+            "Copyright (c) 2002-2021 K.Kosako <kkosako0@gmail.com> All rights reserved."
+          ],
+          "preamble": ["react-native-shiki-engine ships Oniguruma as a prebuilt library."]
+        }
+      ]
+    },
+    {
+      "name": "bzip2",
+      "license": "bzip2-1.0.6",
+      "bundles": ["android"],
+      "sourceUrl": "https://sourceware.org/bzip2/",
+      "generatedNotices": [
+        {
+          "licenseId": "bzip2-1.0.6",
+          "preamble": ["expo-updates compiles bzip2 into its Android patch support."]
+        }
+      ]
+    },
+    {
+      "name": "AndroidX and Material Components",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://developer.android.com/jetpack/androidx",
+      "nativeDependencies": ["maven:androidx.*", "maven:com.google.android.material:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright The Android Open Source Project"]
+        }
+      ]
+    },
+    {
+      "name": "Kotlin standard library and coroutines",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/JetBrains/kotlin",
+      "nativeDependencies": ["maven:org.jetbrains.kotlin:*", "maven:org.jetbrains.kotlinx:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": [
+            "Copyright 2010-2026 JetBrains s.r.o. and Kotlin Programming Language contributors."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OkHttp and Okio",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://square.github.io/okhttp/",
+      "nativeDependencies": ["maven:com.squareup.okhttp3:*", "maven:com.squareup.okio:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2019 Square, Inc."]
+        }
+      ]
+    },
+    {
+      "name": "zstd-kmp",
+      "license": "Apache-2.0 AND BSD-3-Clause",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/square/zstd-kmp",
+      "nativeDependencies": ["maven:com.squareup.zstd:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2024 Square, Inc."]
+        },
+        {
+          "licenseId": "BSD-3-Clause",
+          "copyrights": ["Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved."],
+          "preamble": ["zstd-kmp bundles Zstandard."]
+        }
+      ]
+    },
+    {
+      "name": "Glide",
+      "version": "5.0.5",
+      "license": "BSD-2-Clause AND Apache-2.0 AND MIT",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/bumptech/glide",
+      "nativeDependencies": ["maven:com.github.bumptech.glide:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "BSD-2-Clause",
+          "copyrights": ["Copyright 2014 Google, Inc. All rights reserved."]
+        },
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": [
+            "third_party/disklrucache: Copyright 2012 Jake Wharton, Copyright 2011 The Android Open Source Project"
+          ]
+        },
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2013 Xcellent Creations, Inc."],
+          "preamble": ["third_party/gif_decoder"]
+        }
+      ]
+    },
+    {
+      "name": "AndroidSVG",
+      "version": "1.4",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/BigBadaboom/androidsvg",
+      "nativeDependencies": ["maven:com.caverock:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2013 Paul LeBeau, Cave Rock Software Ltd."]
+        }
+      ]
+    },
+    {
+      "name": "APNG4Android",
+      "version": "3.0.5",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/penfeizhou/APNG4Android",
+      "nativeDependencies": ["maven:com.github.penfeizhou.android.animation:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2019 Zhou Pengfei"]
+        }
+      ]
+    },
+    {
+      "name": "Glide Transformations",
+      "version": "4.3.0",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/wasabeef/glide-transformations",
+      "nativeDependencies": ["maven:jp.wasabeef:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright (C) 2020 Wasabeef"]
+        }
+      ]
+    },
+    {
+      "name": "Fresco",
+      "license": "MIT",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/facebook/fresco",
+      "nativeDependencies": ["maven:com.facebook.fresco:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+        }
+      ]
+    },
+    {
+      "name": "fbjni",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/facebookincubator/fbjni",
+      "nativeDependencies": ["maven:com.facebook.fbjni:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+        }
+      ]
+    },
+    {
+      "name": "SoLoader",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/facebook/SoLoader",
+      "nativeDependencies": ["maven:com.facebook.soloader:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright (c) Meta Platforms, Inc. and affiliates."]
+        }
+      ]
+    },
+    {
+      "name": "BlurView",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/Dimezis/BlurView",
+      "nativeDependencies": ["maven:com.github.Dimezis:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2016 Dmytro Saviuk"]
+        }
+      ]
+    },
+    {
+      "name": "Gson",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/google/gson",
+      "nativeDependencies": ["maven:com.google.code.gson:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2008 Google Inc."]
+        }
+      ]
+    },
+    {
+      "name": "Firebase Cloud Messaging",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/firebase/firebase-android-sdk",
+      "nativeDependencies": ["maven:com.google.firebase:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright Google LLC"]
+        }
+      ]
+    },
+    {
+      "name": "Android Image Cropper",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/vanniktech/Android-Image-Cropper",
+      "nativeDependencies": ["maven:com.vanniktech:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": [
+            "Copyright 2016 Arthur Teplitzki, 2013 Edmodo, Inc., 2021 CanHub, 2023 Vanniktech"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Apache Commons Codec and IO",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://commons.apache.org",
+      "nativeDependencies": ["maven:commons-codec:*", "maven:commons-io:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": [
+            "Apache Commons Codec and Apache Commons IO\nCopyright The Apache Software Foundation\n\nThis product includes software developed at The Apache Software Foundation (https://www.apache.org/)."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Pika",
+      "version": "0.3.2",
+      "license": "MIT",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/lukmccall/pika",
+      "nativeDependencies": ["maven:io.github.lukmccall.pika:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2026 Lukasz Kosmaty"]
+        }
+      ]
+    },
+    {
+      "name": "ShortcutBadger",
+      "version": "1.1.22",
+      "license": "Apache-2.0",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/leolin310148/ShortcutBadger",
+      "nativeDependencies": ["maven:me.leolin:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "Apache-2.0",
+          "preamble": ["Copyright 2014 Leo Lin"]
+        }
+      ]
+    },
+    {
+      "name": "Bouncy Castle",
+      "license": "MIT",
+      "bundles": ["android"],
+      "sourceUrl": "https://www.bouncycastle.org",
+      "nativeDependencies": ["maven:org.bouncycastle:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": [
+            "Copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Brotli",
+      "license": "MIT",
+      "bundles": ["android"],
+      "sourceUrl": "https://github.com/google/brotli",
+      "nativeDependencies": ["maven:org.brotli:*"],
+      "generatedNotices": [
+        {
+          "licenseId": "MIT",
+          "copyrights": ["Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors."]
+        }
+      ]
+    }
+  ],
+  "nativeDependencyExclusions": [
+    {
+      "id": "maven:com.facebook.react:*",
+      "reason": "React Native's own Android artifacts, listed with the react-native package."
+    },
+    {
+      "id": "maven:com.google.android.gms:*",
+      "reason": "Google Play services SDKs, used under the Android Software Development Kit License; they are not open source and carry no notice to reproduce."
+    },
+    {
+      "id": "maven:com.google.mlkit:*",
+      "reason": "ML Kit, used under the ML Kit Terms of Service; not open source."
+    },
+    {
+      "id": "maven:com.android.installreferrer:*",
+      "reason": "Play Install Referrer library, used under the Android Software Development Kit License; not open source."
+    },
+    {
+      "id": "pod:ExpoModulesTestCore",
+      "reason": "Only in podspec test specs, never linked into the app."
+    },
+    {
+      "id": "pod:Nimble",
+      "reason": "Only in podspec test specs, never linked into the app."
+    },
+    {
+      "id": "pod:OHHTTPStubs",
+      "reason": "Only in podspec test specs, never linked into the app."
+    },
+    {
+      "id": "pod:Quick",
+      "reason": "Only in podspec test specs, never linked into the app."
+    },
+    {
+      "id": "pod:React-jsc",
+      "reason": "Only with the JavaScriptCore engine; Ryco builds use Hermes."
+    },
+    {
+      "id": "pod:React-Codegen",
+      "reason": "Generated during pod install by React Native's codegen from the linked modules' specs; covered by react-native and those packages."
+    },
+    {
+      "id": "pod:ReactAppDependencyProvider",
+      "reason": "Generated during pod install by React Native's codegen; covered by react-native."
+    }
+  ],
+  "packageOverrides": [
+    {
+      "name": "react-native-nitro-modules",
+      "sourceUrl": "https://github.com/mrousavy/nitro",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2024 Marc Rousavy"]
+      }
+    },
+    {
+      "name": "lru_map",
+      "sourceUrl": "https://github.com/rsms/js-lru",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2010-2016 Rasmus Andersson <https://rsms.me/>"]
+      }
+    },
+    {
+      "name": "standard-navigation",
+      "sourceUrl": "https://github.com/react-navigation/standard-navigation",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2026 React Navigation Contributors"]
+      }
+    },
+    {
+      "name": "badgin",
+      "sourceUrl": "https://github.com/jaulz/badgin",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2019 Julian Hundeloh"]
+      }
+    },
+    {
+      "name": "boolbase",
+      "sourceUrl": "https://github.com/fb55/boolbase",
+      "generatedNotice": {
+        "licenseId": "ISC",
+        "copyrights": ["Copyright (c) 2014-2015, Felix Boehm <me@feedic.com>"]
+      }
+    }
+  ]
+}

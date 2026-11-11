@@ -757,6 +757,10 @@
     "./releaseVersion": {
       "types": "./src/releaseVersion.ts",
       "import": "./src/releaseVersion.ts"
+    },
+    "./thirdPartyLicenses": {
+      "types": "./src/thirdPartyLicenses.ts",
+      "import": "./src/thirdPartyLicenses.ts"
     }
   },
   "scripts": {

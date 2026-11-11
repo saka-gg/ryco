@@ -119,6 +119,15 @@ navigator on the pull request screen (`pullRequestStackModel.ts`, after upstream
 run, 60 s otherwise; `pullRequestLiveChecksIntervalMs`, from upstream's client-runtime
 `pullRequestChecks.ts`).
 
+The open source licenses screens (2026-11) port the same upstream's mechanism at `ade473018d`,
+re-themed for Ryco: the manifest generated before Metro starts into the ignored
+`.generated/third-party-licenses/` package and loaded only when a license screen opens
+(`metro.config.js`, `scripts/generate-third-party-licenses.mts`,
+`src/features/settings/mobileThirdPartyLicenses.ts`, from upstream's `metro.config.js` and
+`features/settings/mobileThirdPartyLicenses.ts`), and the searchable list with a notice screen
+(`src/features/settings/SettingsOpenSourceLicensesRouteScreen.tsx`, after upstream's
+`SettingsOpenSourceLicensesRouteScreen.tsx`).
+
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
 License; that notice is retained below as required. The four vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices

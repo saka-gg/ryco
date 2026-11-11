@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { HttpClientService } from "../platform/index.ts";
+import { RemoteEnvironmentUnreachableError } from "./connectFailure.ts";
 import { createRemoteEnvironmentApi } from "./remoteApi.ts";
 
 const issuesToken: HttpClientService = {
@@ -36,5 +37,23 @@ describe("remote environment api", () => {
         bearerToken: "bearer",
       }),
     ).resolves.toBe("https://app.example.com/ws?wsToken=ws-token");
+  });
+
+  it("reports a machine that never answered in plain words, keeping the URL off the message", async () => {
+    const unreachable: HttpClientService = {
+      fetch: async () => {
+        throw new TypeError("The Internet connection appears to be offline.");
+      },
+    };
+    const api = createRemoteEnvironmentApi(unreachable, "");
+    const failure = await api
+      .fetchRemoteSessionState({ httpBaseUrl: "http://192.168.68.99:14024", bearerToken: "b" })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(RemoteEnvironmentUnreachableError);
+    expect((failure as Error).message).not.toContain("14024");
+    expect((failure as RemoteEnvironmentUnreachableError).requestUrl).toBe(
+      "http://192.168.68.99:14024/api/auth/session",
+    );
   });
 });

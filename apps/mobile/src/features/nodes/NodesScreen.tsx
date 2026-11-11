@@ -40,6 +40,7 @@ import { useMachinesLook } from "./machinesSheetLook";
 import { MACHINE_PAGE_SLIDE } from "./machinePageMotion";
 import {
   type DirectMachineFacts,
+  directMachineConnectionState,
   forgetMachineConfirm,
   MACHINES_SHEET_FOOTER,
   type MachineActionId,
@@ -82,8 +83,12 @@ export function directMachineFacts(input: {
     host: endpointLabel(row.record.httpBaseUrl),
     transport: transportWord(row.record.httpBaseUrl),
     role: row.runtime.role,
-    connectionState: row.runtime.connectionState,
+    connectionState: directMachineConnectionState(
+      row.runtime.connectionState,
+      row.runtime.lastErrorKind,
+    ),
     statusLabel: row.statusLabel,
+    statusDetail: row.statusDetail,
     needsRepair: row.runtime.authState === "requires-auth",
     switchedOff: row.switchedOff,
     selected: input.selected,

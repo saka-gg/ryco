@@ -1,4 +1,9 @@
-import type { ModelCapabilities, ModelSelection, ServerConfig } from "@ryco/contracts";
+import type {
+  ModelCapabilities,
+  ModelSelection,
+  ServerConfig,
+  ServerProvider,
+} from "@ryco/contracts";
 import {
   buildProviderOptionSelectionsFromDescriptors,
   getModelSelectionBooleanOptionValue,
@@ -54,9 +59,17 @@ export function buildModelOptions(
   config: ServerConfig | null | undefined,
   fallbackModelSelection: ModelSelection | null,
 ): ReadonlyArray<ModelOption> {
+  return buildModelOptionsFromProviders(config?.providers ?? [], fallbackModelSelection);
+}
+
+/** `buildModelOptions` over a chosen set of providers (a schedule offers only ready ones). */
+export function buildModelOptionsFromProviders(
+  providers: ReadonlyArray<ServerProvider>,
+  fallbackModelSelection: ModelSelection | null,
+): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
 
-  for (const provider of config?.providers ?? []) {
+  for (const provider of providers) {
     if (!provider.enabled || !provider.installed || provider.auth.status === "unauthenticated") {
       continue;
     }

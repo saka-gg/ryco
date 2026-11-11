@@ -52,6 +52,8 @@ import {
   SettingsHubRouteScreen,
   SettingsInboxRouteScreen,
   SettingsNotificationsRouteScreen,
+  SettingsOpenSourceLicenseRouteScreen,
+  SettingsOpenSourceLicensesRouteScreen,
   SettingsProviderAccountsRouteScreen,
   GlobalSearchRouteScreen,
   ArchivedThreadsRouteScreen,
@@ -636,6 +638,16 @@ export const ROOT_STACK_SCREENS = {
     screen: SettingsDiagnosticsRouteScreen,
     linking: MVP_SETTINGS_ROUTES.SettingsDiagnostics.linking,
     options: routeOptions("SettingsDiagnostics", { title: "Diagnostics" }),
+  }),
+  SettingsOpenSourceLicenses: createNativeStackScreen({
+    screen: SettingsOpenSourceLicensesRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsOpenSourceLicenses.linking,
+    options: routeOptions("SettingsOpenSourceLicenses", { title: "Open source licenses" }),
+  }),
+  SettingsOpenSourceLicense: createNativeStackScreen({
+    screen: SettingsOpenSourceLicenseRouteScreen,
+    linking: MVP_SETTINGS_ROUTES.SettingsOpenSourceLicense.linking,
+    options: routeOptions("SettingsOpenSourceLicense", { title: "License" }),
   }),
   SettingsAbout: createNativeStackScreen({
     screen: SettingsAboutRouteScreen,

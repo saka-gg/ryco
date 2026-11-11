@@ -159,7 +159,7 @@ export function savedEnvironmentRequiresAuthState(
   nowIso: string,
 ): Pick<
   SavedEnvironmentRuntimeState,
-  "authState" | "connectionState" | "role" | "lastError" | "lastErrorAt"
+  "authState" | "connectionState" | "role" | "lastError" | "lastErrorAt" | "lastErrorKind"
 > {
   return {
     authState: "requires-auth",
@@ -167,5 +167,6 @@ export function savedEnvironmentRequiresAuthState(
     role: null,
     lastError: SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
     lastErrorAt: nowIso,
+    lastErrorKind: null,
   };
 }

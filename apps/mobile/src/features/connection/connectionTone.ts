@@ -1,4 +1,8 @@
 import type { SavedEnvironmentConnectionState } from "@ryco/client-runtime/connection";
+import {
+  isSavedEnvironmentOutOfReach,
+  type SavedEnvironmentFailureKind,
+} from "@ryco/client-runtime/connection/connectFailure";
 import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
 
 import type { StatusTone } from "../../components/StatusPill";
@@ -58,11 +62,24 @@ export function resolveConnectionTone(state: ConnectionToneState): StatusTone {
   }
 }
 
+/**
+ * A machine out of reach (off, asleep, on another network) is offline, not a
+ * failed connection: it reads "Offline" while it fails and while the backoff
+ * tries it again (`failureKind` is kept until a connect lands), so a dead
+ * machine does not flash between connecting and failed on every retry.
+ */
 export function connectionToneForEnvironment(
   connectionState: SavedEnvironmentConnectionState,
   wsUiState: WsConnectionUiState,
+  failureKind?: SavedEnvironmentFailureKind | null,
 ): StatusTone {
   if (wsUiState === "offline") return resolveConnectionTone("offline");
+  if (
+    (connectionState === "error" || connectionState === "connecting") &&
+    isSavedEnvironmentOutOfReach(failureKind)
+  ) {
+    return resolveConnectionTone("offline");
+  }
   if (wsUiState === "reconnecting" && connectionState === "connected") {
     return resolveConnectionTone("reconnecting");
   }

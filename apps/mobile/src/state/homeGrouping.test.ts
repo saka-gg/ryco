@@ -144,4 +144,59 @@ describe("workspace connection status", () => {
 
     expect(shouldShowWorkspaceConnectionStatus(state)).toBe(false);
   });
+
+  it("leaves a machine out of reach to its row while another one works", () => {
+    const shellSummary = {
+      hasSnapshot: true,
+      hasSynchronizingShell: false,
+      firstError: null,
+      latestSnapshotUpdatedAt: null,
+    };
+    const deadDevNode = {
+      environmentId: "envDev" as never,
+      environmentLabel: "Dev node",
+      connectionState: "error" as const,
+      connectionError: "Can't reach this machine. It may be off, asleep or on another network.",
+      connectionErrorKind: "unreachable" as const,
+    };
+    const working = projectWorkspaceState({
+      isReady: true,
+      networkStatus: "online",
+      environments: [
+        deadDevNode,
+        {
+          environmentId: "envA" as never,
+          environmentLabel: "Studio",
+          connectionState: "connected",
+          connectionError: null,
+        },
+      ],
+      shellSummary,
+    });
+    expect(working.connectionError).toBeNull();
+    expect(shouldShowWorkspaceConnectionStatus(working)).toBe(false);
+
+    const alone = projectWorkspaceState({
+      isReady: true,
+      networkStatus: "online",
+      environments: [deadDevNode],
+      shellSummary,
+    });
+    expect(workspaceConnectionStatusLabel(alone)).toBe(
+      "Can't reach Dev node. It may be off, asleep or on another network.",
+    );
+
+    const both = projectWorkspaceState({
+      isReady: true,
+      networkStatus: "online",
+      environments: [
+        deadDevNode,
+        { ...deadDevNode, environmentId: "envB" as never, environmentLabel: "Laptop" },
+      ],
+      shellSummary,
+    });
+    expect(workspaceConnectionStatusLabel(both)).toBe(
+      "Can't reach your machines. They may be off, asleep or on another network.",
+    );
+  });
 });

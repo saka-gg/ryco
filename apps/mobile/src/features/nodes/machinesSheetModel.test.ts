@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   type DirectMachineFacts,
+  directMachineConnectionState,
   forgetMachineConfirm,
   type HubMachineFacts,
   ICON_FOOTER,
@@ -20,6 +21,7 @@ function direct(overrides: Partial<DirectMachineFacts> = {}): DirectMachineFacts
     role: "owner",
     connectionState: "connected",
     statusLabel: "Connected",
+    statusDetail: null,
     needsRepair: false,
     switchedOff: false,
     selected: false,
@@ -256,5 +258,59 @@ describe("Machine page groups", () => {
         "This removes the saved direct pairing and its local credential. You can pair the machine again later. Switch it off instead to keep the pairing.",
       confirmText: "Forget",
     });
+  });
+});
+
+describe("a machine paired directly that cannot be reached", () => {
+  const SENTENCE = "Can't reach this machine. It may be off, asleep or on another network.";
+  // What `deriveConnectionRows` gives the sheet for an unreachable machine: "Offline" and the
+  // sentence, both while it failed and while the backoff tries it again.
+  const unreachable = (connectionState: "error" | "connecting") =>
+    direct({
+      connectionState: directMachineConnectionState(connectionState, "unreachable"),
+      statusLabel: "Offline",
+      statusDetail: SENTENCE,
+    });
+
+  it("shows Offline, the plain sentence and Retry in its row and on its page", () => {
+    for (const facts of [unreachable("error"), unreachable("connecting")]) {
+      const row = machineListRow(facts);
+      expect(row).toMatchObject({ tone: "offline", status: "Offline", hint: SENTENCE });
+      expect(row.notice).toBeNull();
+      expect(row.accessibilityLabel).toContain(SENTENCE);
+      const page = machineDetail(facts, { iconEditable: false });
+      expect(page.statusLine).toBe("Offline · LAN · Direct");
+      expect(page.hint).toBe(SENTENCE);
+      expect(page.notices).toEqual([]);
+      expect(buttons(facts)).toEqual(["Retry", "(Disconnect)", "Rename", "Access"]);
+    }
+  });
+
+  it("keeps a retry that is not about reach a plain connect attempt", () => {
+    expect(directMachineConnectionState("connecting", "refused")).toBe("connecting");
+    expect(directMachineConnectionState("connecting", null)).toBe("connecting");
+    expect(directMachineConnectionState("connected", "unreachable")).toBe("connected");
+  });
+
+  it("says the sentence in every state the sheet knows, except connected and switched off", () => {
+    const states: ReadonlyArray<[Partial<DirectMachineFacts>, boolean]> = [
+      [{ connectionState: "connected", statusLabel: "Connected" }, false],
+      [{ connectionState: "connecting", statusLabel: "Connecting" }, true],
+      [{ connectionState: "disconnected", statusLabel: "Disconnected" }, true],
+      [{ connectionState: "error", statusLabel: "Offline" }, true],
+      [{ connectionState: "error", statusLabel: "Needs re-pair", needsRepair: true }, true],
+      [{ connectionState: "disconnected", statusLabel: "Switched off", switchedOff: true }, false],
+    ];
+    for (const [state, says] of states) {
+      const facts = direct({ ...state, statusDetail: SENTENCE });
+      const expected = says ? SENTENCE : null;
+      expect(machineListRow(facts).hint, state.statusLabel).toBe(expected);
+      expect(machineDetail(facts, { iconEditable: true }).hint, state.statusLabel).toBe(expected);
+    }
+    for (const [state] of states) {
+      const facts = direct({ ...state, statusDetail: null });
+      expect(machineListRow(facts).hint).toBeNull();
+      expect(machineDetail(facts, { iconEditable: true }).hint).toBeNull();
+    }
   });
 });
