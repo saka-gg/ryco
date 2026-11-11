@@ -152,4 +152,58 @@ describe("deriveConnectionRows", () => {
       ["disconnected", "Disconnected"],
     ]);
   });
+
+  it("shows a machine out of reach as offline with a plain sentence, also while it is retried", () => {
+    const sentence = "Can't reach this machine. It may be off, asleep or on another network.";
+    const unreachable = runtime({
+      connectionState: "error",
+      lastError: sentence,
+      lastErrorKind: "unreachable",
+    });
+    const statuses = new Map([
+      [STUDIO, status("connecting")],
+      [LAPTOP, status("connected")],
+    ]);
+    const failed = deriveConnectionRows({
+      records,
+      runtimeById: { [STUDIO]: unreachable, [LAPTOP]: runtime({}) },
+      statuses,
+    });
+    expect(failed.map((row) => [row.record.label, row.statusLabel, row.statusDetail])).toEqual([
+      ["laptop", "Connected", null],
+      ["Studio", "Offline", sentence],
+    ]);
+
+    // The backoff tries again: the row stays offline instead of flashing.
+    const retrying = deriveConnectionRows({
+      records,
+      runtimeById: {
+        [STUDIO]: { ...unreachable, connectionState: "connecting" },
+        [LAPTOP]: runtime({}),
+      },
+      statuses,
+    });
+    expect(retrying.map((row) => [row.statusLabel, row.statusDetail])).toEqual([
+      ["Connected", null],
+      ["Offline", sentence],
+    ]);
+  });
+
+  it("keeps a socket close reason and unsorted errors out of the row", () => {
+    const rows = deriveConnectionRows({
+      records,
+      runtimeById: {
+        [STUDIO]: runtime({ connectionState: "disconnected", lastError: "1006 abnormal" }),
+        [LAPTOP]: runtime({ connectionState: "error", lastError: "raw", lastErrorKind: "failed" }),
+      },
+      statuses: new Map([
+        [STUDIO, status("disconnected")],
+        [LAPTOP, status("disconnected")],
+      ]),
+    });
+    expect(rows.map((row) => [row.record.label, row.statusLabel, row.statusDetail])).toEqual([
+      ["laptop", "Connection failed", "raw"],
+      ["Studio", "Disconnected", null],
+    ]);
+  });
 });

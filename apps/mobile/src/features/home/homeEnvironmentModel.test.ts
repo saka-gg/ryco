@@ -12,6 +12,26 @@ import {
 import type { NodeTrust } from "./nodeTrustModel";
 
 describe("Home environments", () => {
+  it("keeps a machine out of reach offline while it is retried", () => {
+    const retried = (failureKind: "unreachable" | "refused" | null) =>
+      buildHomeEnvironments({
+        direct: [
+          {
+            environmentId: "direct-dev" as EnvironmentId,
+            label: "Dev node",
+            connectionState: "connecting",
+            role: "owner",
+            failureKind,
+          },
+        ],
+        hosted: [],
+      })[0]?.connectionState;
+
+    expect(retried("unreachable")).toBe("offline");
+    expect(retried("refused")).toBe("reconnecting");
+    expect(retried(null)).toBe("reconnecting");
+  });
+
   it("maps direct and hosted readiness into bounded presentation state", () => {
     const environments = buildHomeEnvironments({
       direct: [

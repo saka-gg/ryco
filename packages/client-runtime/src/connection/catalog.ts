@@ -9,6 +9,7 @@ import type {
 import { persistedSavedEnvironmentRecordFields } from "@ryco/shared/savedEnvironmentRecord";
 
 import type { SecretKVService } from "../platform/index.ts";
+import type { SavedEnvironmentFailureKind } from "./connectFailure.ts";
 
 export interface SavedEnvironmentRecord {
   readonly environmentId: EnvironmentId;
@@ -85,6 +86,12 @@ export interface SavedEnvironmentRuntimeState {
   readonly authState: SavedEnvironmentAuthState;
   readonly lastError: string | null;
   readonly lastErrorAt: string | null;
+  /**
+   * What kind of failure `lastError` describes, when the client sorted it
+   * (`classifySavedEnvironmentFailure`). A machine out of reach shows as
+   * offline, not as an error. Absent where a client does not sort failures.
+   */
+  readonly lastErrorKind?: SavedEnvironmentFailureKind | null;
   readonly role: AuthSessionRole | null;
   readonly descriptor: ExecutionEnvironmentDescriptor | null;
   readonly serverConfig: ServerConfig | null;

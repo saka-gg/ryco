@@ -1,3 +1,8 @@
+import {
+  isSavedEnvironmentOutOfReach,
+  savedEnvironmentFailureMessageFor,
+  type SavedEnvironmentFailureKind,
+} from "@ryco/client-runtime/connection/connectFailure";
 import type { EnvironmentId } from "@ryco/contracts";
 
 // Mobile-local workspace model (§3-1). Upstream sourced these from the atom
@@ -20,7 +25,10 @@ export interface WorkspaceEnvironment {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly connectionState: EnvironmentConnectionPhase;
+  /** A plain sentence about why it is not connected; never the platform's error text. */
   readonly connectionError: string | null;
+  /** The sorted kind behind `connectionError`, when the driver sorted it. */
+  readonly connectionErrorKind?: SavedEnvironmentFailureKind | null;
 }
 
 export interface WorkspaceShellSummary {
@@ -88,6 +96,33 @@ function overallConnectionState(
   return "available";
 }
 
+/**
+ * The workspace-wide sentence about machines that could not be connected.
+ * While any machine is connected the workspace works, so a machine that is out
+ * of reach is left to its own row in the machines list and says nothing here;
+ * only when none is connected does the workspace say why.
+ */
+export function workspaceConnectionError(
+  environments: ReadonlyArray<WorkspaceEnvironment>,
+  networkStatus: NetworkStatus,
+): string | null {
+  if (networkStatus === "offline") return null;
+  if (environments.some((environment) => environment.connectionState === "connected")) return null;
+  const failing = environments.filter((environment) => environment.connectionError !== null);
+  const [only] = failing;
+  if (only === undefined) return null;
+  if (failing.length === 1) {
+    return only.connectionErrorKind == null
+      ? only.connectionError
+      : savedEnvironmentFailureMessageFor(only.connectionErrorKind, only.environmentLabel);
+  }
+  return failing.every((environment) =>
+    isSavedEnvironmentOutOfReach(environment.connectionErrorKind),
+  )
+    ? "Can't reach your machines. They may be off, asleep or on another network."
+    : "Couldn't connect to your machines.";
+}
+
 export function projectWorkspaceState(input: {
   readonly isReady: boolean;
   readonly networkStatus: NetworkStatus;
@@ -111,9 +146,7 @@ export function projectWorkspaceState(input: {
     hasConnectingEnvironment: connectingEnvironments.length > 0,
     connectingEnvironments,
     connectionState: overallConnectionState(input.environments, input.networkStatus),
-    connectionError:
-      input.environments.find((environment) => environment.connectionError !== null)
-        ?.connectionError ?? null,
+    connectionError: workspaceConnectionError(input.environments, input.networkStatus),
     shellSnapshotError: input.shellSummary.firstError,
     latestCachedSnapshotReceivedAt: input.shellSummary.latestSnapshotUpdatedAt,
     networkStatus: input.networkStatus,

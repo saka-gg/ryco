@@ -102,6 +102,7 @@ export function useHomeEnvironments(options?: {
             descriptorCapabilities: row.runtime.descriptor?.capabilities ?? null,
             shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
             apiAvailable: environmentsWithApi.has(row.record.environmentId),
+            failureKind: row.runtime.lastErrorKind ?? null,
           })),
         hosted: hosted.selectedNodes
           .filter((connection) => eligibleHostedEnvironmentIds.has(connection.environmentId))

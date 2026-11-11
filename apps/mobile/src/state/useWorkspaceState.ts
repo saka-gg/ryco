@@ -1,10 +1,16 @@
 import { useShallow } from "zustand/react/shallow";
 
 import { getWsConnectionUiState } from "@ryco/client-runtime/rpc";
-import type { SavedEnvironmentConnectionState } from "@ryco/client-runtime/connection";
+import {
+  isSavedEnvironmentSwitchedOff,
+  type SavedEnvironmentConnectionState,
+} from "@ryco/client-runtime/connection";
 
 import { useWsConnectionStatus } from "../rpc/wsConnectionState";
-import { savedEnvironmentUiState } from "../features/connection/connectionRows";
+import {
+  connectionRowStatusDetail,
+  savedEnvironmentUiState,
+} from "../features/connection/connectionRows";
 import { useSavedEnvironmentSnapshots } from "../features/connection/useSavedEnvironmentSnapshots";
 import {
   hostedState,
@@ -72,7 +78,12 @@ export function useWorkspaceState(): WorkspaceState {
       environmentId: record.environmentId,
       environmentLabel: record.label,
       connectionState: phase,
-      connectionError: runtime?.lastError ?? null,
+      // A switched-off machine is not trying to connect, so it has nothing to report.
+      connectionError:
+        runtime === undefined || isSavedEnvironmentSwitchedOff(record)
+          ? null
+          : connectionRowStatusDetail(runtime),
+      connectionErrorKind: runtime?.lastErrorKind ?? null,
     };
   });
 

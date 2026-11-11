@@ -6,6 +6,7 @@ import type {
 } from "@ryco/contracts";
 
 import type { HttpClientService } from "../platform/index.ts";
+import { RemoteEnvironmentUnreachableError } from "./connectFailure.ts";
 import { fetchWithDeadline, REMOTE_CONTROL_PLANE_REQUEST_TIMEOUT_MS } from "./fetchWithDeadline.ts";
 
 export class RemoteEnvironmentAuthHttpError extends Error {
@@ -79,12 +80,9 @@ export async function fetchRemoteJson<T>(
       REMOTE_CONTROL_PLANE_REQUEST_TIMEOUT_MS,
     );
   } catch (error) {
-    throw new Error(
-      `Failed to fetch remote auth endpoint ${requestUrl} (${(error as Error).message}).`,
-      {
-        cause: error,
-      },
-    );
+    // The request never got an answer. The thrown message is what a machine's
+    // row shows; the URL and the platform's text stay on the error.
+    throw new RemoteEnvironmentUnreachableError(requestUrl, error);
   }
   if (!response.ok) {
     throw new RemoteEnvironmentAuthHttpError(

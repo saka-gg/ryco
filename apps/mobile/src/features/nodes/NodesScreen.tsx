@@ -294,7 +294,10 @@ export function NodesScreen(props: {
                   row.runtime.connectionState === "connected" && row.runtime.role === "owner"
                 }
                 label={row.record.label}
-                detail={`${directRoleLabel(row.runtime.role)} · ${endpointLabel(row.record.httpBaseUrl)}`}
+                detail={
+                  row.statusDetail ??
+                  `${directRoleLabel(row.runtime.role)} · ${endpointLabel(row.record.httpBaseUrl)}`
+                }
                 freezeNotice={describeHostFreeze(
                   serverConfigs.get(row.record.environmentId)?.lastEventLoopStall,
                   { nowMs: freezeNowMs },

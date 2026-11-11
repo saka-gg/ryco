@@ -6,6 +6,11 @@ import {
 import type { EnvironmentId, ExecutionEnvironmentCapabilities } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 
+import {
+  isSavedEnvironmentOutOfReach,
+  type SavedEnvironmentFailureKind,
+} from "@ryco/client-runtime/connection/connectFailure";
+
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import type { NodeTrust } from "./nodeTrustModel";
 
@@ -21,6 +26,8 @@ export interface DirectHomeEnvironmentInput {
   > | null;
   readonly shellCurrent?: boolean;
   readonly apiAvailable?: boolean;
+  /** The sorted kind of its last failure, kept while a retry runs. */
+  readonly failureKind?: SavedEnvironmentFailureKind | null;
 }
 
 export interface HostedHomeEnvironmentInput {
@@ -67,7 +74,10 @@ export interface CachedHubNodeHomeEnvironmentInput {
 
 function directState(input: DirectHomeEnvironmentInput): InboxEnvironment["connectionState"] {
   if (input.connectionState === "connected") return "connected";
-  if (input.connectionState === "connecting") return "reconnecting";
+  // A machine out of reach stays offline while the backoff tries it again.
+  if (input.connectionState === "connecting" && !isSavedEnvironmentOutOfReach(input.failureKind)) {
+    return "reconnecting";
+  }
   return "offline";
 }
 

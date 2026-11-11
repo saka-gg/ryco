@@ -18,6 +18,12 @@ export interface ConnectionRow {
   readonly runtime: SavedEnvironmentRuntimeState;
   readonly tone: StatusTone;
   readonly statusLabel: string;
+  /**
+   * One plain sentence about why the machine is not connected (out of reach,
+   * turned the connection down), for its row; `null` when there is nothing to
+   * say. Never the platform's error text.
+   */
+  readonly statusDetail: string | null;
   /** The user switched the node off: it stays listed, dimmed, and never connects. */
   readonly switchedOff: boolean;
 }
@@ -33,6 +39,15 @@ export function savedEnvironmentUiState(
 ): WsConnectionUiState {
   const status = statuses.get(environmentId);
   return status ? wsUiStateForEnvironment(status) : "connecting";
+}
+
+/** The sentence a machine's row shows under its name while it is not connected. */
+export function connectionRowStatusDetail(runtime: SavedEnvironmentRuntimeState): string | null {
+  if (runtime.connectionState === "connected") return null;
+  if (runtime.authState === "requires-auth") return runtime.lastError;
+  // Only a failure the driver sorted carries a sentence written for people; a
+  // socket's close reason stays out of the row.
+  return runtime.lastErrorKind == null ? null : runtime.lastError;
 }
 
 /**
@@ -61,15 +76,24 @@ export function deriveConnectionRows(input: {
           runtime: DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE,
           tone,
           statusLabel: tone.label,
+          statusDetail: null,
           switchedOff: true,
         };
       }
       const tone = connectionToneForEnvironment(
         runtime.connectionState,
         savedEnvironmentUiState(input.statuses, record.environmentId),
+        runtime.lastErrorKind,
       );
       const statusLabel = runtime.authState === "requires-auth" ? "Needs re-pair" : tone.label;
-      return { record, runtime, tone, statusLabel, switchedOff: false };
+      return {
+        record,
+        runtime,
+        tone,
+        statusLabel,
+        statusDetail: connectionRowStatusDetail(runtime),
+        switchedOff: false,
+      };
     })
     .toSorted((left, right) =>
       left.record.label.localeCompare(right.record.label, undefined, { sensitivity: "base" }),
