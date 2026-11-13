@@ -47,6 +47,7 @@ import {
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { readPromptSuggestionsSetting } from "../promptSuggestionsSetting.ts";
 import {
   codexContinuationIdentity,
   codexProcessEnvironment,
@@ -233,6 +234,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         environment: codexEnvironment,
         storedThreadReader,
         processPriority,
+        promptSuggestionsEnabled: readPromptSuggestionsSetting(serverSettings),
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });

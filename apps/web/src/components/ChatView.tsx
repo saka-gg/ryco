@@ -7936,6 +7936,7 @@ export default function ChatView(props: ChatViewProps) {
                     activeThreadModelSelection={activeThread?.modelSelection}
                     cliProxyHubsEnabled={cliProxyHubsEnabled}
                     activeThreadActivities={threadActivities}
+                    activeLatestTurn={activeLatestTurn}
                     compactNow={compactNow}
                     phoneThreadDock={phoneThreadDock}
                     delegationDock={delegationDock}

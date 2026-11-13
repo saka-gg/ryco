@@ -82,6 +82,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   changeRequestTemplates: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
+  /** The `promptSuggestions` setting and its `prompt.suggestion` activities; absent on older servers. */
+  promptSuggestions: Schema.optionalKey(Schema.Boolean),
   /**
    * The `responseStreamingMode` setting (turn, paragraph, token); absent on older servers,
    * which drop the key from settings patches and only know the legacy token switch.

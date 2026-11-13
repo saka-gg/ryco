@@ -106,6 +106,10 @@ class FakeRuntime implements CodexSessionRuntimeShape {
     } satisfies ProviderTurnStartResult);
   }
 
+  sampleThread() {
+    return Effect.succeed(null);
+  }
+
   steerTurn(input: CodexSessionRuntimeSteerTurnInput) {
     return Effect.succeed({
       threadId: this.options.threadId,

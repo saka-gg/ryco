@@ -119,7 +119,7 @@ import {
   shouldUseCompactComposerPrimaryActions,
   shouldUseCompactComposerFooter,
 } from "@ryco/client-runtime/state/composer/footerLayout";
-import { type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import { type ComposerCommandKey, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { useLiveThreadModelSelection } from "./liveThreadModelSelection";
@@ -137,6 +137,8 @@ import {
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
+import { readPromptSuggestionKey } from "./promptSuggestionKey";
+import { usePromptSuggestion } from "./usePromptSuggestion";
 import { ComposerTaskChip } from "../tasks/ComposerTaskChip";
 import { describeRunningFollowUp, resolveComposerEnter } from "./composerFollowUp";
 import { useSendShortcut } from "./useSendShortcut";
@@ -426,6 +428,8 @@ export interface ChatComposerProps {
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
+  /** The thread's latest turn; a completed one may carry the provider's predicted next prompt. */
+  activeLatestTurn: Pick<NonNullable<Thread["latestTurn"]>, "turnId" | "state"> | null;
   /** Compact now in the context meter; absent when the thread's provider cannot compact on request. */
   compactNow?: ContextWindowCompactNow | undefined;
 
@@ -632,6 +636,7 @@ export const ChatComposer = memo(
       activeThreadModelSelection,
       cliProxyHubsEnabled,
       activeThreadActivities,
+      activeLatestTurn,
       compactNow,
       phoneThreadDock,
       delegationDock,
@@ -1315,6 +1320,29 @@ export const ChatComposer = memo(
       // The independent primary-action and dispatch gates still require fresh authority.
       (!isHostedHubMode() &&
         (isConnecting || (environmentUnavailable !== null && activePendingProgress === null)));
+
+    // The provider's predicted next prompt, offered only where the default placeholder would show:
+    // never over a question, an approval, plan feedback or a reconnecting machine. Tab fills it,
+    // Escape dismisses it.
+    const { suggestion: promptSuggestion, dismiss: dismissPromptSuggestion } = usePromptSuggestion({
+      environmentId,
+      threadId: activeThreadId,
+      activities: activeThreadActivities,
+      latestTurn: activeLatestTurn,
+    });
+    const offeredPromptSuggestion =
+      promptSuggestion !== null &&
+      phase !== "running" &&
+      !isSendBusy &&
+      !isConnecting &&
+      !isMobileViewport &&
+      !isComposerApprovalState &&
+      pendingUserInputs.length === 0 &&
+      !(showPlanFollowUpPrompt && activeProposedPlan !== null) &&
+      environmentUnavailable === null &&
+      composerTerminalContexts.length === 0
+        ? promptSuggestion.text
+        : null;
 
     const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
     // Refine or Implement: reference chips (file lines, page elements) refine
@@ -2165,16 +2193,31 @@ export const ChatComposer = memo(
     // ------------------------------------------------------------------
     // Callbacks: command key
     // ------------------------------------------------------------------
-    const onComposerCommandKey = (
-      key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
-      event: KeyboardEvent,
-    ) => {
+    const onComposerCommandKey = (key: ComposerCommandKey, event: KeyboardEvent) => {
       if (key === "Tab" && event.shiftKey) {
         toggleInteractionMode();
         return true;
       }
       const { trigger } = resolveActiveComposerTrigger();
       const menuIsActive = composerMenuOpenRef.current || trigger !== null;
+      const suggestionKey = readPromptSuggestionKey({
+        key,
+        event,
+        suggestion: offeredPromptSuggestion,
+        promptEmpty: promptRef.current.length === 0,
+        menuIsActive,
+      });
+      if (suggestionKey === "dismiss") {
+        dismissPromptSuggestion();
+        return true;
+      }
+      if (suggestionKey === "accept" && offeredPromptSuggestion !== null) {
+        // Filled like a typed draft, so whatever reacts to typing (approval redirects, intents)
+        // sees it.
+        onComposerIntent?.("type");
+        return applyPromptReplacement(0, 0, offeredPromptSuggestion);
+      }
+      if (key === "Escape") return false;
       if (menuIsActive) {
         const currentItems = composerMenuItemsRef.current;
         const selectedItem = activeComposerMenuItemRef.current ?? currentItems[0];
@@ -3427,6 +3470,7 @@ export const ChatComposer = memo(
               environmentUnavailable={environmentUnavailable}
               phase={phase}
               runningFollowUpPlaceholder={runningFollowUpPlaceholder}
+              promptSuggestion={offeredPromptSuggestion}
               isConnecting={isConnecting}
               isEditorDisabled={isComposerEditorDisabled}
               showCollapsedSendAction={showCollapsedMobileSendAction}

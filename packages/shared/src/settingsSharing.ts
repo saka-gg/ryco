@@ -49,6 +49,7 @@ export const SERVER_SETTING_SHARING = {
   deviceHosts: "device-only",
   autoResumeLimitedThreads: "shareable",
   snoozeLimitedThreads: "shareable",
+  promptSuggestions: "shareable",
   storageRetention: "shareable",
   projectStorageRetention: "device-only",
   lifecycleSuggestions: "shareable",
@@ -136,6 +137,7 @@ export const SHAREABLE_SETTING_SINCE_VERSION = {
   threadAutoSettleAfterDays: 1,
   usagePriceOverrides: 1,
   agentControl: 1,
+  promptSuggestions: 2,
 } as const satisfies Record<ShareableServerSettingKey, number>;
 
 /** This build's sharing version: the highest version of any key it shares. */

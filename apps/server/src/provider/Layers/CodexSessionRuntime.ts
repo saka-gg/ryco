@@ -293,6 +293,15 @@ export interface CodexSessionRuntimeShape {
    * a turn runs or starts.
    */
   readonly compactThread: () => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
+  /**
+   * One low-effort response to `prompt` on a hidden fork of the thread that shares its prompt
+   * cache (Codex's experimental `thread/sample`, 0.165+), after the completed turn `turnId`.
+   * Codex rejects it once a newer turn started. Null when the reply has no text.
+   */
+  readonly sampleThread: (input: {
+    readonly turnId: TurnId;
+    readonly prompt: string;
+  }) => Effect.Effect<string | null, CodexSessionRuntimeError>;
   readonly steerTurn: (
     input: CodexSessionRuntimeSteerTurnInput,
   ) => Effect.Effect<ProviderTurnSteerResult, CodexSessionRuntimeError>;
@@ -1308,6 +1317,10 @@ function toCodexUserInputAnswers(
     { concurrency: 1 },
   ).pipe(Effect.map((entries) => Object.fromEntries(entries)));
 }
+
+const CodexThreadSampleResponse = Schema.Struct({
+  text: Schema.optional(Schema.NullOr(Schema.String)),
+});
 
 function toProtocolParseError(
   detail: string,
@@ -2711,6 +2724,24 @@ export const makeCodexSessionRuntime = (
           // The `turn/started` that named this turn already set the session running on it.
           // Setting it again here could mark a compaction that already finished as running.
           return yield* turnStartResult(turnId);
+        }),
+      sampleThread: (input) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          const rawResponse = yield* client.raw.request("thread/sample", {
+            threadId: providerThreadId,
+            expectedTurnId: input.turnId,
+            prompt: input.prompt,
+            effort: "low",
+          });
+          const response = yield* Schema.decodeUnknownEffect(CodexThreadSampleResponse)(
+            rawResponse,
+          ).pipe(
+            Effect.mapError((error) =>
+              toProtocolParseError("Invalid thread/sample response payload", error),
+            ),
+          );
+          return response.text ?? null;
         }),
       steerTurn: (input) =>
         Effect.gen(function* () {

@@ -2,6 +2,7 @@ export * from "./activityPayload.ts";
 export * from "./messageText.ts";
 export * from "./contextHandoff.ts";
 export * from "./fastModeNotice.ts";
+export * from "./promptSuggestion.ts";
 export * from "./forkOrigin.ts";
 export * from "./liveWorkSteps.ts";
 export * from "./dispatchAck.ts";

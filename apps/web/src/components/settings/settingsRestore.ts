@@ -24,6 +24,7 @@ const RESTORABLE_SETTINGS = {
   continueThreadsAfterRestart: "Continue after restart",
   autoResumeLimitedThreads: "Auto-resume limited threads",
   snoozeLimitedThreads: "Snooze limited threads",
+  promptSuggestions: "Suggest next prompt",
   defaultThreadEnvMode: "New thread mode",
   addProjectBaseDirectory: "Add project base directory",
   confirmThreadArchive: "Archive confirmation",

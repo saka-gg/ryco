@@ -10,6 +10,7 @@ import {
   TurnId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
+import { PROMPT_SUGGESTION_ACTIVITY_KIND } from "@ryco/shared/promptSuggestion";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeAcpToolCallEvent } from "../../provider/acp/AcpCoreRuntimeEvents.ts";
@@ -639,5 +640,36 @@ describe("runtimeEventToActivities MCP elicitation", () => {
       summary: "Question cancelled",
       payload: { requestId: "req-elicitation", answers: {}, cancelled: true },
     });
+  });
+});
+
+describe("runtimeEventToActivities prompt suggestion", () => {
+  const suggested = (extra: Record<string, unknown>) =>
+    runtimeEventToActivities({
+      ...base,
+      type: "turn.prompt-suggestion",
+      eventId: EventId.make("evt-suggestion"),
+      payload: { suggestion: "run the tests again" },
+      ...extra,
+    } satisfies ProviderRuntimeEvent);
+
+  it("projects the thread's one suggestion activity, tied to the completed turn", () => {
+    expect(suggested({ turnId: TurnId.make("turn-2"), sessionSequence: 7 })).toEqual([
+      {
+        id: "prompt-suggestion:thread-1:latest",
+        createdAt: base.createdAt,
+        tone: "info",
+        // The ingestion spells the kind out (boot path); clients read it through the constant.
+        kind: PROMPT_SUGGESTION_ACTIVITY_KIND,
+        summary: "Suggested next prompt",
+        payload: { suggestion: "run the tests again" },
+        turnId: "turn-2",
+        sequence: 7,
+      },
+    ]);
+  });
+
+  it("projects nothing for a suggestion that names no turn", () => {
+    expect(suggested({})).toEqual([]);
   });
 });

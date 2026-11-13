@@ -103,3 +103,21 @@ the composer shows an unedited recalled prompt, with the caret on the first visu
 prompt turns it into a normal draft. A composer that holds an attachment or context chip does not
 count as empty, and while an approval or a question waits, the arrows stay with it. Nothing is
 stored for recall: it reads the thread's own messages.
+
+## Suggested next prompt
+
+Turn on **Suggest next prompt** in Settings > Chat (a machine setting, shared across your devices
+like the other shared settings). After a Claude or Codex turn completes, the empty composer shows
+the message you are likely to send next, with a `Tab` hint. Press `Tab` to fill it in, then edit or
+send it. Press `Escape` to hide it for that turn in every open composer. Typing anything, sending,
+or a new turn starting replaces it.
+
+The suggestion comes from the provider itself: Claude Code's prompt suggestions, and Codex's
+`thread/sample` request (Codex 0.165 or later). Each suggestion is one extra model request that
+reuses the turn's prompt cache, so it still counts toward your plan. Claude skips some turns (the
+first one, plan mode, near your usage limit). Claude chats that are already open pick up a change of
+the setting when their session restarts; Codex reads it after every turn.
+
+Suggestions are kept with the thread, so they survive a reload and show on every device that opens
+it. They never show while a turn runs, over an approval or a question, or on devices without a
+keyboard and mouse or trackpad.

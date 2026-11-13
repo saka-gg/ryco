@@ -66,6 +66,7 @@ import {
   type ModelUsage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@ryco/shared/cliArgs";
+import { normalizePromptSuggestion } from "@ryco/shared/promptSuggestion";
 import {
   parseClaudeAutoCompactWindow,
   resolveClaudeAutoCompactMode,
@@ -86,6 +87,7 @@ import {
   ProviderItemId,
   type ProviderRuntimeEvent,
   type ProviderRuntimeTurnStatus,
+  PROMPT_SUGGESTION_MAX_CHARS,
   type RuntimeErrorClass,
   type ProviderSendTurnInput,
   type ProviderSession,
@@ -635,6 +637,11 @@ interface ClaudeSessionContext {
   wakeSignalDeferred: boolean;
   /** Serializes SDK frame handling against Stop bookkeeping and steer registration. */
   readonly turnLock: Semaphore.Semaphore;
+  /**
+   * The turn this runtime finished last and how it ended. Claude sends a turn's
+   * `prompt_suggestion` after its result, when the turn is already detached.
+   */
+  lastFinishedTurn?: { readonly turnId: TurnId; readonly status: ProviderRuntimeTurnStatus };
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
@@ -673,6 +680,11 @@ export interface ClaudeAdapterLiveOptions {
   readonly runtimeEventQueueCapacity?: number;
   /** Runs each session's Claude Code through `nice`; undefined keeps the SDK's own spawn. */
   readonly processPriority?: AgentProcessPriorityShape | undefined;
+  /**
+   * The node's `promptSuggestions` setting, read when a session opens: Claude Code then predicts
+   * the next prompt after each turn. Undefined keeps it off.
+   */
+  readonly promptSuggestionsEnabled?: Effect.Effect<boolean> | undefined;
   /** Reads a session's main transcript chain. Defaults to the SDK's `getSessionMessages`. */
   readonly readSessionMessages?: (
     sessionId: string,
@@ -3298,6 +3310,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* sealTurnSegment(context, turnState, status, result);
 
     context.completedTurnIds.push(turnState.turnId);
+    context.lastFinishedTurn = {
+      turnId: turnState.turnId,
+      status: options?.abortReason !== undefined ? "interrupted" : status,
+    };
     if (turnState.lastChainUuid !== undefined) {
       context.turnHeads.push({ turnId: turnState.turnId, head: turnState.lastChainUuid });
       if (context.turnHeads.length > CLAUDE_TURN_HEADS_CAP) context.turnHeads.shift();
@@ -5711,6 +5727,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (open && rootContent) open.rootContentObserved = true;
   });
 
+  /**
+   * Claude Code's predicted next prompt, sent after a turn's result. Offered only for a turn that
+   * completed and while no newer turn is open: a suggestion that arrives once the next turn
+   * started (a wake turn, a quick send) predicts a reply the user has not seen yet.
+   */
+  const handlePromptSuggestion = Effect.fnUntraced(function* (
+    context: ClaudeSessionContext,
+    text: string,
+  ) {
+    const finished = context.lastFinishedTurn;
+    const suggestion = normalizePromptSuggestion(text, PROMPT_SUGGESTION_MAX_CHARS);
+    if (
+      context.probing ||
+      context.turnState !== undefined ||
+      finished === undefined ||
+      finished.status !== "completed" ||
+      suggestion === undefined
+    ) {
+      return;
+    }
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "turn.prompt-suggestion",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      turnId: finished.turnId,
+      payload: { suggestion },
+      providerRefs: nativeProviderRefs(context),
+    });
+  });
+
   const routeSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -5736,6 +5785,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "auth_status":
       case "rate_limit_event":
         yield* handleSdkTelemetryMessage(context, message);
+        return;
+      case "prompt_suggestion":
+        yield* handlePromptSuggestion(context, message.suggestion);
         return;
       default:
         yield* emitRuntimeWarning(
@@ -6532,6 +6584,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
     const sessionEnvironment = withThreadAttribution(claudeEnvironment, threadId);
     // Only when agent priority changes the argv; otherwise the SDK spawns Claude Code itself.
+    // Read per session: open sessions follow a change once they restart.
+    const promptSuggestions =
+      options?.promptSuggestionsEnabled === undefined
+        ? false
+        : yield* options.promptSuggestionsEnabled;
     const claudeCodeSpawn = yield* prepareClaudeCodeSpawn(options?.processPriority, {
       binaryPath: claudeBinaryPath,
       env: sessionEnvironment,
@@ -6568,6 +6625,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : {}),
       ...(newSessionId ? { sessionId: newSessionId } : {}),
       includePartialMessages: true,
+      ...(promptSuggestions ? { promptSuggestions: true } : {}),
       canUseTool,
       hooks: {
         PreToolUse: [

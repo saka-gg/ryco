@@ -71,6 +71,7 @@ describe("pre-auth server environment descriptor", () => {
       "projectPreferences",
       "projectReadFileChunk",
       "projectSearchEmptyQuery",
+      "promptSuggestions",
       "providerProjectCommands",
       "providerSessionPrewarm",
       "pullRequestOptions",

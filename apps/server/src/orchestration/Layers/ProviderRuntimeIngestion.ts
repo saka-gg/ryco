@@ -62,6 +62,7 @@ import {
   type LatestStateActivityGroup,
   claudeContextUsageActivityId,
   claudeFastModeActivityId,
+  promptSuggestionActivityId,
   subagentMessageActivityId,
   taskProgressActivityId,
   taskUsageActivityId,
@@ -1241,6 +1242,27 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "turn.prompt-suggestion": {
+      // One per thread: each completed turn's suggestion replaces the last. Clients offer it only
+      // while its turn is still the thread's latest.
+      const turnId = toTurnId(event.turnId);
+      if (turnId === undefined) return [];
+      return [
+        {
+          id: promptSuggestionActivityId(event.threadId),
+          createdAt: event.createdAt,
+          tone: "info",
+          // `PROMPT_SUGGESTION_ACTIVITY_KIND` (`@ryco/shared/promptSuggestion`), spelled out:
+          // importing that module here put it on the server boot path.
+          kind: "prompt.suggestion",
+          summary: "Suggested next prompt",
+          payload: { suggestion: event.payload.suggestion },
+          turnId,
           ...maybeSequence,
         },
       ];

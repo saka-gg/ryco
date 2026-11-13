@@ -36,6 +36,7 @@ import {
   KEY_ARROW_UP_COMMAND,
   KEY_DOWN_COMMAND,
   KEY_ENTER_COMMAND,
+  KEY_ESCAPE_COMMAND,
   KEY_TAB_COMMAND,
   PASTE_COMMAND,
   CLEAR_HISTORY_COMMAND,
@@ -66,6 +67,7 @@ import {
   useState,
   type ClipboardEventHandler,
   type ReactElement,
+  type ReactNode,
   type Ref,
 } from "react";
 
@@ -1044,6 +1046,9 @@ function collectTerminalContextIds(node: LexicalNode): string[] {
   return [];
 }
 
+/** Keys the editor offers its owner before handling them itself. */
+export type ComposerCommandKey = "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Escape";
+
 export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
@@ -1100,6 +1105,8 @@ interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  /** Rendered after the placeholder text, such as a key hint. */
+  placeholderSuffix?: ReactNode;
   ariaLabel?: string;
   /**
    * Phone-tier collapsed presentation. The editor stays mounted and focusable
@@ -1117,10 +1124,7 @@ interface ComposerPromptEditorProps {
     cursorAdjacentToMention: boolean,
     terminalContextIds: string[],
   ) => void;
-  onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
-    event: KeyboardEvent,
-  ) => boolean;
+  onCommandKeyDown?: (key: ComposerCommandKey, event: KeyboardEvent) => boolean;
   onPaste: ClipboardEventHandler<HTMLElement>;
   /**
    * Offered every text paste first (file pastes go to `onPaste`). Unless it leaves the paste
@@ -1134,18 +1138,12 @@ interface ComposerPromptEditorInnerProps extends ComposerPromptEditorProps {
 }
 
 function ComposerCommandKeyPlugin(props: {
-  onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
-    event: KeyboardEvent,
-  ) => boolean;
+  onCommandKeyDown?: (key: ComposerCommandKey, event: KeyboardEvent) => boolean;
 }) {
   const [editor] = useLexicalComposerContext();
 
   useEffect(() => {
-    const handleCommand = (
-      key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
-      event: KeyboardEvent | null,
-    ): boolean => {
+    const handleCommand = (key: ComposerCommandKey, event: KeyboardEvent | null): boolean => {
       if (!props.onCommandKeyDown || !event) {
         return false;
       }
@@ -1177,12 +1175,18 @@ function ComposerCommandKeyPlugin(props: {
       (event) => handleCommand("Tab", event),
       COMMAND_PRIORITY_HIGH,
     );
+    const unregisterEscape = editor.registerCommand(
+      KEY_ESCAPE_COMMAND,
+      (event) => handleCommand("Escape", event),
+      COMMAND_PRIORITY_HIGH,
+    );
 
     return () => {
       unregisterArrowDown();
       unregisterArrowUp();
       unregisterEnter();
       unregisterTab();
+      unregisterEscape();
     };
   }, [editor, props]);
 
@@ -1759,6 +1763,7 @@ function ComposerPromptEditorInner({
   skills,
   disabled,
   placeholder,
+  placeholderSuffix,
   ariaLabel,
   collapsed,
   className,
@@ -2083,6 +2088,7 @@ function ComposerPromptEditorInner({
                 )}
               >
                 {placeholder}
+                {placeholderSuffix}
               </div>
             )
           }
@@ -2116,6 +2122,7 @@ export const ComposerPromptEditor = forwardRef<
     skills,
     disabled,
     placeholder,
+    placeholderSuffix,
     ariaLabel,
     collapsed,
     className,
@@ -2166,6 +2173,7 @@ export const ComposerPromptEditor = forwardRef<
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
+        {...(placeholderSuffix !== undefined ? { placeholderSuffix } : {})}
         {...(ariaLabel ? { ariaLabel } : {})}
         collapsed={collapsed}
         onRemoveTerminalContext={onRemoveTerminalContext}

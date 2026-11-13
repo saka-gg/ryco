@@ -38,6 +38,7 @@ import {
   ProviderSendTurnInput,
   ProviderSteerTurnInput,
   DEFAULT_AGENT_TOKEN_MODE,
+  PROMPT_SUGGESTION_MAX_CHARS,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   ThreadGoal as ThreadGoalSchema,
@@ -65,6 +66,7 @@ import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { isNativeCompactionCommand, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
+import { normalizePromptSuggestion } from "@ryco/shared/promptSuggestion";
 import {
   resolveHtmlRenderToolPresentation,
   withoutHtmlRenderMarkup,
@@ -169,7 +171,16 @@ export interface CodexAdapterLiveOptions {
   readonly storedThreadReaderIdleTimeout?: Duration.Input;
   /** Lowers each session's `codex app-server`; undefined spawns it unchanged. */
   readonly processPriority?: AgentProcessPriorityShape | undefined;
+  /**
+   * The node's `promptSuggestions` setting, read after each completed turn: Codex then samples the
+   * next prompt on a hidden fork of the thread. Undefined keeps it off.
+   */
+  readonly promptSuggestionsEnabled?: Effect.Effect<boolean> | undefined;
 }
+
+/** The `thread/sample` prompt that predicts the user's next message. */
+export const CODEX_PROMPT_SUGGESTION_PROMPT =
+  "Predict the next message the user will send in this conversation. Reply with only that message, written as the user would type it, in under 20 words. Do not use tools. If there is no clear next step, reply with nothing.";
 
 interface CodexAdapterSessionContext {
   readonly threadId: ThreadId;
@@ -179,6 +190,8 @@ interface CodexAdapterSessionContext {
   readonly eventFiber: Fiber.Fiber<void, never>;
   /** Unique Agent Control lease id for this exact runtime, when issued. */
   readonly agentControl?: AgentControlRuntimeLease;
+  /** Turns `/compact` started; nothing predicts a next prompt after them. */
+  readonly compactionTurnIds: Set<string>;
   stopped: boolean;
 }
 
@@ -2123,6 +2136,45 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           const current = sessions.get(input.threadId);
           if (current?.runtime === runtime) yield* stopSessionInternal(current);
         });
+        // Best effort, after the turn's own events: Codex before 0.165 has no `thread/sample`, and
+        // a sample fails once the user sends again. Forked into the session scope, so a closed
+        // session never publishes a late suggestion.
+        const promptSuggestionsEnabled = options?.promptSuggestionsEnabled;
+        const compactionTurnIds = new Set<string>();
+        const samplePromptSuggestion = (turnId: TurnId) =>
+          Effect.gen(function* () {
+            if (compactionTurnIds.delete(turnId)) return;
+            if (promptSuggestionsEnabled === undefined || !(yield* promptSuggestionsEnabled)) {
+              return;
+            }
+            const suggestion = normalizePromptSuggestion(
+              yield* runtime.sampleThread({ turnId, prompt: CODEX_PROMPT_SUGGESTION_PROMPT }),
+              PROMPT_SUGGESTION_MAX_CHARS,
+            );
+            if (suggestion === undefined) return;
+            yield* Queue.offer(runtimeEventQueue, {
+              eventId: EventId.make(crypto.randomUUID()),
+              provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
+              runtimeSessionId,
+              threadId: input.threadId,
+              turnId,
+              createdAt: new Date().toISOString(),
+              type: "turn.prompt-suggestion",
+              payload: { suggestion },
+            });
+            yield* runtimeEventQueueMetrics.recordEnqueued(1);
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.void
+                : Effect.logDebug("Codex prompt suggestion failed", {
+                    threadId: input.threadId,
+                    turnId,
+                    cause,
+                  }),
+            ),
+          );
         // Per-session: the rate-limit snapshot and limited turns belong to this runtime.
         const usageLimits = makeCodexUsageLimitTracker();
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
@@ -2168,6 +2220,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
             yield* runtimeEventQueueMetrics.recordEnqueued(runtimeEvents.length);
+            for (const runtimeEvent of runtimeEvents) {
+              if (
+                runtimeEvent.type === "turn.completed" &&
+                runtimeEvent.payload.state === "completed" &&
+                runtimeEvent.turnId !== undefined
+              ) {
+                yield* samplePromptSuggestion(runtimeEvent.turnId).pipe(
+                  Effect.forkIn(sessionScope),
+                );
+              }
+            }
             if (runtimeEvents.some((runtimeEvent) => runtimeEvent.type === "session.exited")) {
               runtimeExited = true;
               yield* retireRuntime.pipe(Effect.forkIn(adapterScope));
@@ -2254,6 +2317,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           runtime,
           eventFiber,
           ...(agentControl ? { agentControl } : {}),
+          compactionTurnIds,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -2421,6 +2485,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             mapCodexRuntimeError(input.threadId, "thread/compact/start", cause),
           ),
         );
+      session.compactionTurnIds.add(result.turnId);
       yield* bindAgentControlTurn(session, result.turnId);
       return result;
     }

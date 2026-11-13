@@ -76,6 +76,7 @@ export const SHARED_SETTING_DISPLAY: {
     format: onOff,
   },
   snoozeLimitedThreads: { section: "usage", title: "Snooze limited threads", format: onOff },
+  promptSuggestions: { section: "chat", title: "Suggest next prompt", format: onOff },
   storageRetention: {
     section: "data",
     title: "Retention policy",

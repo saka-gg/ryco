@@ -64,6 +64,7 @@ import {
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { makeUsageReadGate } from "../usageReadGate.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { readPromptSuggestionsSetting } from "../promptSuggestionsSetting.ts";
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
@@ -203,6 +204,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         instanceId,
         environment: processEnv,
         processPriority,
+        promptSuggestionsEnabled: readPromptSuggestionsSetting(serverSettings),
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         resolveAutoModeSupport: (model: string) =>

@@ -93,6 +93,15 @@ export const LATEST_STATE_ACTIVITY_GROUPS = {
     liveCoalescing: "always",
     logCompaction: true,
   },
+  "prompt-suggestion": {
+    // `PROMPT_SUGGESTION_ACTIVITY_KIND`: the provider's predicted next prompt, one per thread,
+    // replaced after each completed turn.
+    kind: "prompt.suggestion",
+    idPrefixes: ["prompt-suggestion:"],
+    writeIntervalMs: null,
+    liveCoalescing: "always",
+    logCompaction: true,
+  },
 } as const satisfies Record<string, LatestStateActivityGroupDefinition>;
 
 export type LatestStateActivityGroup = keyof typeof LATEST_STATE_ACTIVITY_GROUPS;
@@ -161,6 +170,11 @@ export function claudeContextUsageActivityId(threadId: string): EventId {
 /** Claude's Fast mode serving state, one per thread. */
 export function claudeFastModeActivityId(threadId: string): EventId {
   return EventId.make(`claude-fast-mode:${threadId}:state`);
+}
+
+/** The provider's predicted next prompt, one per thread (the newest completed turn's). */
+export function promptSuggestionActivityId(threadId: string): EventId {
+  return EventId.make(`prompt-suggestion:${threadId}:latest`);
 }
 
 // ---------------------------------------------------------------------------

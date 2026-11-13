@@ -986,6 +986,9 @@ function shouldIncludeActivityInWorkLog(
     // `FAST_MODE_STATE_ACTIVITY_KIND` (`@ryco/shared/claudeFastMode`), spelled out: importing it
     // here put that module, parser included, on the web boot path.
     activity.kind !== "fast-mode.state" &&
+    // `PROMPT_SUGGESTION_ACTIVITY_KIND` (`@ryco/shared/promptSuggestion`): the composer's
+    // predicted next prompt, never a timeline row.
+    activity.kind !== "prompt.suggestion" &&
     activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND &&
     activity.kind !== THREAD_FORKED_ACTIVITY_KIND &&
     !isContextCompactionActivity(activity) &&

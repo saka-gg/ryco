@@ -816,7 +816,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // 7.314 MB on 2026-11-11 with automations without a project (+4.7 KB, measured 7.312885 MB):
     // the "No project" scope's checks in the validator, the executor's chat-project step, the
     // MCP tools' scope mapping, the centre's scope read and the decider's reserved id.
-    expect(bytes).toBeLessThan(7_314_000);
+    // 7.316 MB on 2026-11-13 with prompt suggestions (+1.5 KB, measured 7.314409 MB): the
+    // setting, its capability and sharing entry, the `turn.prompt-suggestion` runtime event and
+    // the ingestion case and latest-state group that project it. The Claude and Codex code stays
+    // in the driver chunks, with `@ryco/shared/promptSuggestion` in a chunk of its own.
+    expect(bytes).toBeLessThan(7_316_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
