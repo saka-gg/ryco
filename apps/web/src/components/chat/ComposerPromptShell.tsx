@@ -25,6 +25,7 @@ import type { ComposerTrigger } from "../../composer-logic";
 import type { TerminalContextDraft } from "../../lib/terminalContext";
 import type { SessionPhase, Thread } from "../../types";
 import {
+  type ComposerCommandKey,
   type ComposerPromptEditorHandle,
   type ComposerTextPaste,
   type ComposerTextPasteResult,
@@ -39,6 +40,7 @@ import { ComposerReferenceChip } from "./FileReferenceChip";
 import { SendGlyph } from "./SendGlyph";
 import { SourceControlContextChip } from "./SourceControlContextChip";
 import { Button } from "../ui/button";
+import { Kbd } from "../ui/kbd";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 
@@ -118,10 +120,7 @@ export interface ComposerPromptShellProps {
     cursorAdjacentToMention: boolean,
     terminalContextIds: string[],
   ) => void;
-  onComposerCommandKey: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
-    event: KeyboardEvent,
-  ) => boolean;
+  onComposerCommandKey: (key: ComposerCommandKey, event: KeyboardEvent) => boolean;
   onComposerPaste: (event: React.ClipboardEvent<HTMLElement>) => void;
   onComposerPasteText: (paste: ComposerTextPaste) => ComposerTextPasteResult;
 
@@ -136,6 +135,11 @@ export interface ComposerPromptShellProps {
   phase: SessionPhase;
   /** While a turn runs: the effective Enter action and its alternate shortcut. */
   runningFollowUpPlaceholder: string | null;
+  /**
+   * The provider's predicted next prompt, shown as the placeholder with a Tab hint. The composer
+   * offers it only where the default placeholder would show.
+   */
+  promptSuggestion: string | null;
   isConnecting: boolean;
   /**
    * A disabled editor is not editable, so it cannot take the activating tap.
@@ -212,6 +216,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     environmentUnavailable,
     phase,
     runningFollowUpPlaceholder,
+    promptSuggestion,
     isConnecting,
     isEditorDisabled,
     showCollapsedSendAction,
@@ -377,39 +382,53 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             onCommandKeyDown={onComposerCommandKey}
             onPaste={onComposerPaste}
             onPasteText={onComposerPasteText}
+            {...(promptSuggestion !== null
+              ? {
+                  placeholderSuffix: (
+                    <Kbd
+                      className="ml-2 align-[1px] border border-b-2 border-foreground/15 bg-transparent px-1.5"
+                      data-testid="composer-prompt-suggestion-hint"
+                    >
+                      Tab
+                    </Kbd>
+                  ),
+                }
+              : {})}
             placeholder={
-              isApprovalLocked
-                ? // The full approval detail renders as a scrollable block in the
-                  // pending-approval panel; the clipped placeholder only carries
-                  // the generic hint.
-                  "Resolve this approval request to continue"
-                : activePendingProgress
-                  ? // Collapsed keeps its own shorter wording: the one-line
-                    // presentation cannot show the expanded hint.
-                    isComposerCollapsedMobile
-                    ? "Write custom answer"
-                    : "Type your own answer, or leave this blank to use the selected option"
-                  : showPlanFollowUpPrompt && activeProposedPlan
-                    ? isComposerCollapsedMobile
-                      ? "Add plan feedback"
-                      : "Add feedback to refine the plan, or leave this blank to implement it"
-                    : environmentUnavailable
-                      ? `${environmentUnavailable.label} is ${
-                          environmentUnavailable.connectionState === "connecting"
-                            ? "connecting"
-                            : environmentUnavailable.connectionState === "switched-off"
-                              ? "switched off"
-                              : "disconnected"
-                        }`
-                      : phase === "disconnected"
-                        ? "Ask for follow-up changes or attach images"
-                        : phase === "running" &&
-                            !isComposerCollapsedMobile &&
-                            runningFollowUpPlaceholder !== null
-                          ? runningFollowUpPlaceholder
-                          : isComposerCollapsedMobile
-                            ? "Ask anything..."
-                            : "Ask anything, @tag files/folders, or use / to show available commands"
+              promptSuggestion !== null
+                ? promptSuggestion
+                : isApprovalLocked
+                  ? // The full approval detail renders as a scrollable block in the
+                    // pending-approval panel; the clipped placeholder only carries
+                    // the generic hint.
+                    "Resolve this approval request to continue"
+                  : activePendingProgress
+                    ? // Collapsed keeps its own shorter wording: the one-line
+                      // presentation cannot show the expanded hint.
+                      isComposerCollapsedMobile
+                      ? "Write custom answer"
+                      : "Type your own answer, or leave this blank to use the selected option"
+                    : showPlanFollowUpPrompt && activeProposedPlan
+                      ? isComposerCollapsedMobile
+                        ? "Add plan feedback"
+                        : "Add feedback to refine the plan, or leave this blank to implement it"
+                      : environmentUnavailable
+                        ? `${environmentUnavailable.label} is ${
+                            environmentUnavailable.connectionState === "connecting"
+                              ? "connecting"
+                              : environmentUnavailable.connectionState === "switched-off"
+                                ? "switched off"
+                                : "disconnected"
+                          }`
+                        : phase === "disconnected"
+                          ? "Ask for follow-up changes or attach images"
+                          : phase === "running" &&
+                              !isComposerCollapsedMobile &&
+                              runningFollowUpPlaceholder !== null
+                            ? runningFollowUpPlaceholder
+                            : isComposerCollapsedMobile
+                              ? "Ask anything..."
+                              : "Ask anything, @tag files/folders, or use / to show available commands"
             }
             disabled={isEditorDisabled}
           />

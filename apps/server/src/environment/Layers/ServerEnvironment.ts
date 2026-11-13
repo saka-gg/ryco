@@ -115,6 +115,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       environmentIcon: true,
       projectPreferences: true,
       usageLimitRecovery: true,
+      promptSuggestions: true,
       responseStreamingModes: true,
       worktreeNotes: true,
       localTasks: true,

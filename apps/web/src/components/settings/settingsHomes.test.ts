@@ -66,6 +66,7 @@ const SERVER_SETTING_HOMES = {
   continueThreadsAfterRestart: "projects",
   autoResumeLimitedThreads: "usage",
   snoozeLimitedThreads: "usage",
+  promptSuggestions: "chat",
   storageRetention: "data",
   projectStorageRetention: "data",
   lifecycleSuggestions: "data",

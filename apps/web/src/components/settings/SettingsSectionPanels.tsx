@@ -34,6 +34,7 @@ import { OpenChatTabsSetting } from "./OpenChatTabsSetting";
 import { DeviceAutoShowFloatingSetting } from "./DeviceAutoShowFloatingSetting";
 import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
+import { PromptSuggestionSettings } from "./PromptSuggestionSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
 import { SessionImportSettings } from "./SessionImportSettings";
 import {
@@ -417,6 +418,7 @@ function SectionBody({
           </AppPart>
           <DevicePart>
             <ResponseStreamingSettings />
+            <PromptSuggestionSettings />
           </DevicePart>
           <AppPart>
             <SettingsSection title="Tabs">

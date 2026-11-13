@@ -217,6 +217,16 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     targetId: "shared-setting-responseStreamingMode",
   },
   {
+    section: "chat",
+    storage: "device",
+    title: "Suggest next prompt",
+    description:
+      "Show the predicted next message in the empty composer after a turn; Tab fills it in.",
+    keywords:
+      "tab autocomplete completion suggestion predict next message prompt ghost text claude codex",
+    targetId: "shared-setting-promptSuggestions",
+  },
+  {
     section: "updates",
     storage: "device",
     title: "Provider update checks",

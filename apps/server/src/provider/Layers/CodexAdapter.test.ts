@@ -24,7 +24,7 @@ import {
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { it, vi } from "@effect/vitest";
+import { describe, it, vi } from "@effect/vitest";
 
 import { Context, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Scope, Stream } from "effect";
 import { TestClock } from "effect/testing";
@@ -48,7 +48,7 @@ import {
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
-import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { CODEX_PROMPT_SUGGESTION_PROMPT, makeCodexAdapter } from "./CodexAdapter.ts";
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
 class CodexAdapter extends Context.Service<CodexAdapter, CodexAdapterShape>()(
@@ -164,6 +164,15 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   compactThread() {
     return this.compactThreadEffect ?? Effect.promise(() => this.compactThreadImpl());
+  }
+
+  public readonly sampleThreadImpl = vi.fn(
+    (_input: { readonly turnId: TurnId; readonly prompt: string }): Promise<string | null> =>
+      Promise.resolve(null),
+  );
+
+  sampleThread(input: { readonly turnId: TurnId; readonly prompt: string }) {
+    return Effect.promise(() => this.sampleThreadImpl(input));
   }
 
   public steerTurnEffect: ReturnType<CodexSessionRuntimeShape["steerTurn"]> | null = null;
@@ -2454,3 +2463,132 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
     }
   }),
 );
+
+describe("CodexAdapter prompt suggestions", () => {
+  const completedTurn = (status: "completed" | "failed", turnId: string): ProviderEvent => ({
+    id: asEventId(`evt-turn-${turnId}-${status}`),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    threadId: asThreadId("thread-suggest"),
+    createdAt: new Date().toISOString(),
+    method: "turn/completed",
+    turnId: asTurnId(turnId),
+    payload: {
+      threadId: "thread-suggest",
+      turn: {
+        id: turnId,
+        status,
+        items: [],
+        ...(status === "failed" ? { error: { message: "boom" } } : {}),
+      },
+    },
+  });
+
+  const run = (input: {
+    readonly enabled: boolean;
+    readonly status: "completed" | "failed";
+    readonly sample: string | null;
+    /** Start the turn with `/compact` first, so the completion is the compaction's. */
+    readonly compaction?: boolean;
+  }) => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        return yield* makeCodexAdapter(Schema.decodeSync(CodexSettings)({}), {
+          makeRuntime: runtimeFactory.factory,
+          promptSuggestionsEnabled: Effect.succeed(input.enabled),
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-codex-suggest-" })),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make(`runtime-codex-suggest-${input.status}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-suggest"),
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.sampleThreadImpl.mockResolvedValue(input.sample);
+      const turnId = input.compaction ? "turn-compact" : "turn-7";
+      if (input.compaction) {
+        yield* adapter.sendTurn({
+          threadId: asThreadId("thread-suggest"),
+          input: "/compact",
+          attachments: [],
+        });
+      }
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) => event.type === "turn.completed" || event.type === "turn.prompt-suggestion",
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.timeout("1 second"),
+        Effect.option,
+        Effect.forkChild,
+      );
+      yield* runtime.emit(completedTurn(input.status, turnId));
+      const events = yield* Fiber.join(eventsFiber);
+      yield* adapter.stopSession(asThreadId("thread-suggest"));
+      return { events, sampleCalls: runtime.sampleThreadImpl.mock.calls };
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  };
+
+  it.effect("samples the next prompt after a completed turn and publishes it for that turn", () =>
+    Effect.gen(function* () {
+      const { events, sampleCalls } = yield* run({
+        enabled: true,
+        status: "completed",
+        sample: '  "commit it"  ',
+      });
+      assert.deepEqual(sampleCalls, [
+        [{ turnId: "turn-7", prompt: CODEX_PROMPT_SUGGESTION_PROMPT }],
+      ]);
+      assert.equal(events._tag, "Some");
+      if (events._tag !== "Some") return;
+      const suggestion = Array.from(events.value).find(
+        (event) => event.type === "turn.prompt-suggestion",
+      );
+      assert.equal(suggestion?.turnId, "turn-7");
+      assert.equal(suggestion?.threadId, "thread-suggest");
+      assert.deepEqual(suggestion?.payload, { suggestion: "commit it" });
+    }),
+  );
+
+  it.effect("publishes nothing when the sample has no text", () =>
+    Effect.gen(function* () {
+      const { events, sampleCalls } = yield* run({
+        enabled: true,
+        status: "completed",
+        sample: "  ",
+      });
+      assert.equal(sampleCalls.length, 1);
+      // Only the completion arrives, so two events never do.
+      assert.equal(events._tag, "None");
+    }),
+  );
+
+  it.effect("never samples after a failed turn or while the setting is off", () =>
+    Effect.gen(function* () {
+      const failed = yield* run({ enabled: true, status: "failed", sample: "x" });
+      assert.equal(failed.sampleCalls.length, 0);
+      const off = yield* run({ enabled: false, status: "completed", sample: "x" });
+      assert.equal(off.sampleCalls.length, 0);
+      const compacted = yield* run({
+        enabled: true,
+        status: "completed",
+        sample: "x",
+        compaction: true,
+      });
+      assert.equal(compacted.sampleCalls.length, 0);
+    }),
+  );
+});

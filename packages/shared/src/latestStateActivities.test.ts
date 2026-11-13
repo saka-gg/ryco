@@ -10,6 +10,7 @@ import {
   type LatestStateEventRow,
   liveCoalescingActivityKey,
   LOG_COMPACTION_ACTIVITY_KINDS,
+  promptSuggestionActivityId,
   reasoningActivityId,
   selectSupersededLatestStateEvents,
   subagentMessageActivityId,
@@ -18,22 +19,27 @@ import {
   toolProgressActivityId,
 } from "./latestStateActivities.ts";
 import { FAST_MODE_STATE_ACTIVITY_KIND } from "./claudeFastMode.ts";
+import { PROMPT_SUGGESTION_ACTIVITY_KIND } from "./promptSuggestion.ts";
 import { inheritedItemId } from "./threadFork.ts";
 
 const THREAD = "thread-a";
 const OTHER = "thread-b";
 
 describe("latest-state groups", () => {
-  it("compacts exactly the five replace-by-id kinds, never the context-window gauge", () => {
+  it("compacts exactly the six replace-by-id kinds, never the context-window gauge", () => {
     expect(LOG_COMPACTION_ACTIVITY_KINDS).toEqual([
       "task.progress",
       "tool.progress",
       "agent.message",
       "reasoning",
       "fast-mode.state",
+      "prompt.suggestion",
     ]);
     expect(LATEST_STATE_ACTIVITY_GROUPS["context-window"].logCompaction).toBe(false);
     expect(LATEST_STATE_ACTIVITY_GROUPS["fast-mode"].kind).toBe(FAST_MODE_STATE_ACTIVITY_KIND);
+    expect(LATEST_STATE_ACTIVITY_GROUPS["prompt-suggestion"].kind).toBe(
+      PROMPT_SUGGESTION_ACTIVITY_KIND,
+    );
   });
 
   it("classifies every writer's id into its stream, and nothing else", () => {
@@ -52,6 +58,7 @@ describe("latest-state groups", () => {
       { kind: "reasoning", id: reasoningActivityId(THREAD, "turn-1", "segment-1") },
       { kind: "reasoning", id: reasoningActivityId(THREAD, null, "segment-1") },
       { kind: "fast-mode.state", id: claudeFastModeActivityId(THREAD) },
+      { kind: "prompt.suggestion", id: promptSuggestionActivityId(THREAD) },
     ] as const;
     for (const activity of cases) {
       expect(latestStateCompactionKey(THREAD, activity)).toBe(`${THREAD}\u0000${activity.id}`);

@@ -47,6 +47,7 @@ export const DEVICE_SETTINGS_FILE_SCOPE = {
   continueThreadsAfterRestart: true,
   autoResumeLimitedThreads: true,
   snoozeLimitedThreads: true,
+  promptSuggestions: true,
   storageRetention: true,
   lifecycleSuggestions: true,
   worktreeRoot: false,

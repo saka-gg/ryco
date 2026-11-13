@@ -992,6 +992,10 @@ export const ServerSettings = Schema.Struct({
   // reset and/or snooze it until then. Both off by default; limits are account-wide.
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Opt-in: after a Claude or Codex turn completes, the provider predicts the user's next message
+  // and the empty composer offers it (Tab accepts). Each prediction is one extra cached model
+  // request on the account. Codex reads it before each sample; Claude when its session opens.
+  promptSuggestions: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   storageRetention: StorageRetentionPolicy.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_STORAGE_RETENTION_POLICY)),
   ),
@@ -1225,6 +1229,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
+  promptSuggestions: Schema.optionalKey(Schema.Boolean),
   storageRetention: Schema.optionalKey(StorageRetentionPolicyInput),
   projectStorageRetention: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicyInput)),

@@ -177,6 +177,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "turn.proposed.delta",
   "turn.proposed.completed",
   "turn.diff.updated",
+  "turn.prompt-suggestion",
   "item.started",
   "item.updated",
   "item.completed",
@@ -237,6 +238,7 @@ const TurnPlanUpdatedType = Schema.Literal("turn.plan.updated");
 const TurnProposedDeltaType = Schema.Literal("turn.proposed.delta");
 const TurnProposedCompletedType = Schema.Literal("turn.proposed.completed");
 const TurnDiffUpdatedType = Schema.Literal("turn.diff.updated");
+const TurnPromptSuggestionType = Schema.Literal("turn.prompt-suggestion");
 const ItemStartedType = Schema.Literal("item.started");
 const ItemUpdatedType = Schema.Literal("item.updated");
 const ItemCompletedType = Schema.Literal("item.completed");
@@ -809,6 +811,19 @@ const ToolProgressPayload = Schema.Struct({
 });
 export type ToolProgressPayload = typeof ToolProgressPayload.Type;
 
+/** Longest predicted next prompt kept; adapters cut longer ones (they are a sentence or two). */
+export const PROMPT_SUGGESTION_MAX_CHARS = 1000;
+
+/**
+ * The provider's prediction of the user's next message after the turn `turnId` completed
+ * (Claude's `prompt_suggestion`, Codex's `thread/sample`). Never persisted as a message: the
+ * composer offers it while that turn is still the thread's latest.
+ */
+const TurnPromptSuggestionPayload = Schema.Struct({
+  suggestion: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(PROMPT_SUGGESTION_MAX_CHARS)),
+});
+export type TurnPromptSuggestionPayload = typeof TurnPromptSuggestionPayload.Type;
+
 const ToolSummaryPayload = Schema.Struct({
   summary: TrimmedNonEmptyStringSchema,
   precedingToolUseIds: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
@@ -1261,6 +1276,14 @@ const ProviderRuntimeToolProgressEvent = Schema.Struct({
 });
 export type ProviderRuntimeToolProgressEvent = typeof ProviderRuntimeToolProgressEvent.Type;
 
+const ProviderRuntimeTurnPromptSuggestionEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: TurnPromptSuggestionType,
+  payload: TurnPromptSuggestionPayload,
+});
+export type ProviderRuntimeTurnPromptSuggestionEvent =
+  typeof ProviderRuntimeTurnPromptSuggestionEvent.Type;
+
 const ProviderRuntimeToolSummaryEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: ToolSummaryType,
@@ -1392,6 +1415,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeTurnProposedDeltaEvent,
   ProviderRuntimeTurnProposedCompletedEvent,
   ProviderRuntimeTurnDiffUpdatedEvent,
+  ProviderRuntimeTurnPromptSuggestionEvent,
   ProviderRuntimeItemStartedEvent,
   ProviderRuntimeItemUpdatedEvent,
   ProviderRuntimeItemCompletedEvent,

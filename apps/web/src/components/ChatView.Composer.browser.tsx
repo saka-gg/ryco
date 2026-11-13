@@ -67,6 +67,7 @@ import {
   pushThreadModelSelection,
   createBrowserComposerImage,
   createDraftOnlySnapshot,
+  createLifecycleSnapshot,
   createPromptStashEntry,
   createSnapshotForTargetUser,
   createSnapshotWithPendingUserInput,
@@ -103,6 +104,7 @@ import {
   waitForServerConfigToApply,
   wsRequests,
 } from "./ChatView.browser.helpers";
+import { resetDismissedPromptSuggestionsForTests } from "./chat/usePromptSuggestion";
 
 // Hoisted per suite: a mock registered from the shared helpers runs after this file's static imports.
 vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
@@ -1095,6 +1097,104 @@ describe("ChatView Composer (full app)", () => {
         { timeout: 8_000, interval: 16 },
       );
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("offers the predicted next prompt after a completed turn: Tab fills it, Escape hides it", async () => {
+    const SUGGESTION = "now add a test for the empty case";
+    const snapshotWithSuggestion = (): OrchestrationReadModel => {
+      const snapshot = createLifecycleSnapshot();
+      const thread = snapshot.threads[0]!;
+      return {
+        ...snapshot,
+        threads: [
+          {
+            ...thread,
+            activities: [
+              {
+                id: `prompt-suggestion:${THREAD_ID}:latest` as EventId,
+                tone: "info",
+                kind: "prompt.suggestion",
+                summary: "Suggested next prompt",
+                payload: { suggestion: SUGGESTION },
+                turnId: thread.latestTurn!.turnId,
+                createdAt: NOW_ISO,
+              },
+            ],
+          },
+        ],
+      };
+    };
+    const enablePromptSuggestions = (
+      nextFixture: Parameters<
+        NonNullable<Parameters<typeof mountChatView>[0]["configureFixture"]>
+      >[0],
+    ) => {
+      nextFixture.serverConfig = {
+        ...nextFixture.serverConfig,
+        settings: { ...nextFixture.serverConfig.settings, promptSuggestions: true },
+      };
+    };
+    const placeholderShowsSuggestion = () =>
+      vi.waitFor(
+        () => {
+          expect(document.body.textContent ?? "").toContain(SUGGESTION);
+          expect(
+            document.querySelector('[data-testid="composer-prompt-suggestion-hint"]'),
+          ).not.toBeNull();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    const pressKey = (editor: HTMLElement, key: string) =>
+      editor.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+
+    let mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithSuggestion(),
+      configureFixture: enablePromptSuggestions,
+    });
+    try {
+      await placeholderShowsSuggestion();
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      pressKey(editor, "Tab");
+      await waitForComposerText(SUGGESTION);
+      await vi.waitFor(
+        () => {
+          expect(
+            document.querySelector('[data-testid="composer-prompt-suggestion-hint"]'),
+          ).toBeNull();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+
+    useComposerDraftStore.getState().setPrompt(THREAD_REF, "");
+    mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithSuggestion(),
+      configureFixture: enablePromptSuggestions,
+    });
+    try {
+      await placeholderShowsSuggestion();
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      pressKey(editor, "Escape");
+      await vi.waitFor(
+        () => {
+          expect(document.body.textContent ?? "").not.toContain(SUGGESTION);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      // Dismissed: Tab no longer fills anything.
+      pressKey(editor, "Tab");
+      await waitForLayout();
+      expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt ?? "").toBe("");
+    } finally {
+      resetDismissedPromptSuggestionsForTests();
       await mounted.cleanup();
     }
   });

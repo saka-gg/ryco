@@ -233,6 +233,8 @@ function makeHarness(config?: {
   /** What the transcript check before a resume finds; defaults to `present`. */
   readonly transcriptPresence?: ClaudeTranscriptPresence;
   readonly resolveAutoModeSupport?: ClaudeAdapterLiveOptions["resolveAutoModeSupport"];
+  /** The node's `promptSuggestions` setting; undefined passes no reader. */
+  readonly promptSuggestions?: boolean;
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -251,6 +253,9 @@ function makeHarness(config?: {
       : {}),
     ...(config?.resolveAutoModeSupport
       ? { resolveAutoModeSupport: config.resolveAutoModeSupport }
+      : {}),
+    ...(config?.promptSuggestions !== undefined
+      ? { promptSuggestionsEnabled: Effect.succeed(config.promptSuggestions) }
       : {}),
     createQuery: (input) => {
       createInput = input;
@@ -13049,4 +13054,100 @@ describe("ClaudeAdapterLive agent process priority", () => {
       }).pipe(Effect.ensuring(Effect.sync(() => rmSync(root, { recursive: true, force: true }))));
     },
   );
+});
+
+describe("ClaudeAdapterLive prompt suggestions", () => {
+  it.effect("asks Claude Code for prompt suggestions only while the setting is on", () =>
+    Effect.gen(function* () {
+      for (const enabled of [true, false, undefined]) {
+        const harness = makeHarness(enabled === undefined ? {} : { promptSuggestions: enabled });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            runtimeSessionId: RuntimeSessionId.make(`runtime-claude-suggestions-${enabled}`),
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          assert.strictEqual(
+            harness.getLastCreateQueryInput()?.options.promptSuggestions,
+            enabled === true ? true : undefined,
+          );
+          yield* adapter.stopSession(THREAD_ID);
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      }
+    }),
+  );
+
+  it.effect("ties a suggestion to the turn it followed and drops one that lands mid-turn", () => {
+    const harness = makeHarness({ promptSuggestions: true });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const nextEvent = (type: ProviderRuntimeEvent["type"]) =>
+        adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === type),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.map((events) => Array.from(events)[0]),
+          Effect.forkChild,
+        );
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("runtime-claude-suggestion-turns"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const firstCompleted = yield* nextEvent("turn.completed");
+      const first = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "fix the bug",
+        attachments: [],
+      });
+      emitClaudeSuccessfulResult(harness.query, { id: "suggestion", usedTokens: 10 });
+      yield* Fiber.join(firstCompleted);
+      const firstSuggestion = yield* nextEvent("turn.prompt-suggestion");
+      harness.query.emit({
+        type: "prompt_suggestion",
+        suggestion: "  run the tests  ",
+        uuid: "suggestion-1",
+        session_id: "sdk-session-suggestion",
+      } as unknown as SDKMessage);
+      const suggested = yield* Fiber.join(firstSuggestion);
+      assert.strictEqual(suggested?.turnId, first.turnId);
+      assert.deepStrictEqual(suggested?.payload, { suggestion: "run the tests" });
+
+      const secondCompleted = yield* nextEvent("turn.completed");
+      const secondSuggestion = yield* nextEvent("turn.prompt-suggestion");
+      const second = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "run the tests",
+        attachments: [],
+      });
+      // Late: the next turn is already open, so it predicts a reply nobody has seen yet.
+      harness.query.emit({
+        type: "prompt_suggestion",
+        suggestion: "stale guess",
+        uuid: "suggestion-late",
+        session_id: "sdk-session-suggestion",
+      } as unknown as SDKMessage);
+      emitClaudeSuccessfulResult(harness.query, { id: "suggestion", usedTokens: 20 });
+      yield* Fiber.join(secondCompleted);
+      harness.query.emit({
+        type: "prompt_suggestion",
+        suggestion: "commit it",
+        uuid: "suggestion-2",
+        session_id: "sdk-session-suggestion",
+      } as unknown as SDKMessage);
+      const next = yield* Fiber.join(secondSuggestion);
+      assert.strictEqual(next?.turnId, second.turnId);
+      assert.deepStrictEqual(next?.payload, { suggestion: "commit it" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 });

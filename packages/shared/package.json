@@ -46,6 +46,10 @@
       "types": "./src/claudeFastMode.ts",
       "import": "./src/claudeFastMode.ts"
     },
+    "./promptSuggestion": {
+      "types": "./src/promptSuggestion.ts",
+      "import": "./src/promptSuggestion.ts"
+    },
     "./restartContinuation": {
       "types": "./src/restartContinuation.ts",
       "import": "./src/restartContinuation.ts"

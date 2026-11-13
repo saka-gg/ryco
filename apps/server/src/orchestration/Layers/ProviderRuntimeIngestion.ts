@@ -56,12 +56,14 @@ import {
   parseClaudeFastModeReport,
 } from "@ryco/shared/claudeFastMode";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
+import { PROMPT_SUGGESTION_ACTIVITY_KIND } from "@ryco/shared/promptSuggestion";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import {
   LATEST_STATE_ACTIVITY_GROUPS,
   type LatestStateActivityGroup,
   claudeContextUsageActivityId,
   claudeFastModeActivityId,
+  promptSuggestionActivityId,
   subagentMessageActivityId,
   taskProgressActivityId,
   taskUsageActivityId,
@@ -1241,6 +1243,25 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "turn.prompt-suggestion": {
+      // One per thread: each completed turn's suggestion replaces the last. Clients offer it only
+      // while its turn is still the thread's latest.
+      const turnId = toTurnId(event.turnId);
+      if (turnId === undefined) return [];
+      return [
+        {
+          id: promptSuggestionActivityId(event.threadId),
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: PROMPT_SUGGESTION_ACTIVITY_KIND,
+          summary: "Suggested next prompt",
+          payload: { suggestion: event.payload.suggestion },
+          turnId,
           ...maybeSequence,
         },
       ];
