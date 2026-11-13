@@ -901,29 +901,56 @@ function capHistory(history: string, maxLines: number): string {
   return hasTrailingNewline ? `${capped}\n` : capped;
 }
 
+// The rules below follow the parser of xterm.js, the terminal every Ryco client replays history
+// into. Its parser reads decoded code points, so U+0080-U+009F are C1 controls there.
+
 function isCsiFinalByte(codePoint: number): boolean {
   return codePoint >= 0x40 && codePoint <= 0x7e;
 }
 
+// CAN and SUB cancel an unfinished sequence.
+function isControlSequenceCancel(codePoint: number): boolean {
+  return codePoint === 0x18 || codePoint === 0x1a;
+}
+
+// C0 controls run even in the middle of an escape or control sequence, as they would in plain
+// text, so they never join the sequence's parameters.
+function isExecutedControl(codePoint: number): boolean {
+  return codePoint < 0x20 && codePoint !== 0x1b && !isControlSequenceCancel(codePoint);
+}
+
+// ESC and C1 controls abandon an unfinished escape or control sequence: the abandoned part has
+// no effect and parsing starts again at them.
+function abandonsSequence(codePoint: number): boolean {
+  return codePoint === 0x1b || (codePoint >= 0x80 && codePoint <= 0x9f);
+}
+
+function executedControlsIn(value: string): string {
+  // oxlint-disable-next-line no-control-regex -- keeps exactly the controls that run
+  return value.replace(/[^\u0000-\u0017\u0019\u001c-\u001f]/g, "");
+}
+
+// Parameters may use ":" as well as ";" as a separator.
 function shouldStripCsiSequence(body: string, finalByte: string): boolean {
   if (finalByte === "n") {
     return true;
   }
-  if (finalByte === "R" && /^[0-9;?]*$/.test(body)) {
+  if (finalByte === "R" && /^[0-9:;?]*$/.test(body)) {
     return true;
   }
-  if (finalByte === "c" && /^[>0-9;?]*$/.test(body)) {
+  // Primary (c, ?c), secondary (>c) and tertiary (=c) Device Attributes.
+  if (finalByte === "c" && /^[>=0-9:;?]*$/.test(body)) {
     return true;
   }
   // DECRQM mode queries (…$p) and DECRPM replies (…$y): replaying a stored
   // query makes the terminal answer again, and the shell echoes the answer as
   // junk at the prompt. The `$` guard keeps setters like DECSTR (!p) and
   // DECSCL ("p) intact.
-  if ((finalByte === "p" || finalByte === "y") && /^[0-9;?]*\$$/.test(body)) {
+  if ((finalByte === "p" || finalByte === "y") && /^[0-9:;?]*\$$/.test(body)) {
     return true;
   }
   // XTVERSION query (>q). DECSCUSR (space-intermediate q) stays.
-  if (finalByte === "q" && /^>[0-9;]*$/.test(body)) {
+  if (finalByte === "q" && /^>[0-9:;]*$/.test(body)) {
     return true;
   }
   // Kitty keyboard protocol query/reply (?u). Restore-cursor (bare u) stays.
@@ -933,59 +960,137 @@ function shouldStripCsiSequence(body: string, finalByte: string): boolean {
   return false;
 }
 
-// DECRQSS ($q) and XTGETTCAP (+q) queries plus their replies ([01]$r / [01]+r):
+// DECRQSS ($q) and XTGETTCAP (+q) queries plus their replies ($r / +r):
 // pure request/response traffic with no visual value, and replaying a stored
-// query triggers a fresh reply.
+// query triggers a fresh reply. The terminal answers DECRQSS whatever its
+// parameters, and ignores controls and DEL in the header (everything up to the
+// final byte).
 function shouldStripDcsSequence(content: string): boolean {
-  return /^[01]?[$+][qr]/.test(content);
+  let header = "";
+  for (let index = 0; index < content.length; index += 1) {
+    const codePoint = content.charCodeAt(index);
+    if (codePoint < 0x20 || codePoint === 0x7f) continue;
+    header += content[index];
+    if (codePoint >= 0x40) break;
+  }
+  return /^[0-9:;]*[$+][qr]$/.test(header);
 }
 
+// OSC 10/11/12 color queries and replies. Controls in OSC data are ignored; DEL is data.
 function shouldStripOscSequence(content: string): boolean {
-  return /^(10|11|12);(?:\?|rgb:)/.test(content);
+  let data = "";
+  for (let index = 0; index < content.length && data.length < 7; index += 1) {
+    if (content.charCodeAt(index) >= 0x20) {
+      data += content[index];
+    }
+  }
+  return /^(10|11|12);(?:\?|rgb:)/.test(data);
 }
 
-function stripStringTerminator(value: string): string {
-  if (value.endsWith("\u001b\\")) {
-    return value.slice(0, -2);
-  }
-  const lastCharacter = value.at(-1);
-  if (lastCharacter === "\u0007" || lastCharacter === "\u009c") {
-    return value.slice(0, -1);
-  }
-  return value;
+interface StringSequenceEnd {
+  /** Past the terminator, or at the ESC or C1 control that ended the string without one. */
+  readonly end: number;
+  /**
+   * What a kept string needs appended to end on replay as it did live, since the ESC or C1
+   * control that ended it starts the next sequence, which may be stripped. An ESC that does
+   * not start ST makes the terminal dispatch the string, as ST does; a C1 control makes it
+   * drop the string, as CAN does.
+   */
+  readonly closing: "" | "\u001b\\" | "\u0018";
 }
 
-function findStringTerminatorIndex(input: string, start: number): number | null {
+// ST (ESC \ or 0x9C) ends every string sequence; BEL ends only OSC and is payload inside DCS,
+// PM and APC. CAN and SUB cancel the string. Any other ESC or C1 control ends it too and starts
+// the next sequence. Null means the input ends first.
+function findStringSequenceEnd(
+  input: string,
+  start: number,
+  isOsc: boolean,
+): StringSequenceEnd | null {
   for (let index = start; index < input.length; index += 1) {
     const codePoint = input.charCodeAt(index);
-    if (codePoint === 0x07 || codePoint === 0x9c) {
-      return index + 1;
+    if (codePoint === 0x9c || (isOsc && codePoint === 0x07) || isControlSequenceCancel(codePoint)) {
+      return { end: index + 1, closing: "" };
     }
-    if (codePoint === 0x1b && input.charCodeAt(index + 1) === 0x5c) {
-      return index + 2;
+    if (codePoint === 0x1b) {
+      if (index + 1 >= input.length) return null;
+      return input.charCodeAt(index + 1) === 0x5c
+        ? { end: index + 2, closing: "" }
+        : { end: index, closing: "\u001b\\" };
+    }
+    if (abandonsSequence(codePoint)) {
+      return { end: index, closing: "\u0018" };
     }
   }
   return null;
 }
 
-function isEscapeIntermediateByte(codePoint: number): boolean {
-  return codePoint >= 0x20 && codePoint <= 0x2f;
+interface ControlSequenceScan {
+  /** Past the final byte, CAN/SUB or rejected code point; at an abandoning ESC or C1 control. */
+  readonly end: number;
+  /** dropped: an ESC or C1 control abandoned it, or the parser rejected a code point in it. */
+  readonly outcome: "dispatched" | "cancelled" | "dropped";
+  /** Parameters and intermediates, without the controls the terminal ran on the way. */
+  readonly body: string;
+  readonly executedControls: string;
 }
 
-function isEscapeFinalByte(codePoint: number): boolean {
-  return codePoint >= 0x30 && codePoint <= 0x7e;
+// Scans a CSI from its first parameter byte. Null means the input ends first.
+function scanControlSequence(input: string, start: number): ControlSequenceScan | null {
+  let executedControls = "";
+  let sawControlOrDelete = false;
+  // A parameter after an intermediate, or a private marker after a parameter, makes the parser
+  // ignore the rest of the sequence up to its final byte, non-ASCII included. Otherwise it
+  // rejects a non-ASCII code point, dropping it with the sequence.
+  let sawParameter = false;
+  let sawIntermediate = false;
+  let ignoring = false;
+  for (let cursor = start; cursor < input.length; cursor += 1) {
+    const codePoint = input.charCodeAt(cursor);
+    let outcome: ControlSequenceScan["outcome"] | null = null;
+    let end = cursor + 1;
+    if (isCsiFinalByte(codePoint)) {
+      outcome = "dispatched";
+    } else if (isControlSequenceCancel(codePoint)) {
+      outcome = "cancelled";
+    } else if (abandonsSequence(codePoint)) {
+      outcome = "dropped";
+      end = cursor;
+    } else if (codePoint >= 0xa0 && !ignoring) {
+      outcome = "dropped";
+      // A high surrogate: the rejected code point takes two code units.
+      if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+        if (end >= input.length) return null;
+        end += 1;
+      }
+    }
+    if (outcome !== null) {
+      const body = input.slice(start, cursor);
+      return {
+        end,
+        outcome,
+        // oxlint-disable-next-line no-control-regex -- drops the controls the terminal skipped
+        body: sawControlOrDelete ? body.replace(/[\u0000-\u001f\u007f]/g, "") : body,
+        executedControls,
+      };
+    }
+    if (isExecutedControl(codePoint) || codePoint === 0x7f) {
+      sawControlOrDelete = true;
+      if (codePoint !== 0x7f) executedControls += input[cursor];
+    } else if (codePoint <= 0x2f) {
+      sawIntermediate = true;
+    } else if (codePoint <= 0x3f) {
+      if (sawIntermediate || (codePoint >= 0x3c && sawParameter)) ignoring = true;
+      sawParameter = true;
+    }
+  }
+  return null;
 }
 
-function findEscapeSequenceEndIndex(input: string, start: number): number | null {
-  let cursor = start;
-  while (cursor < input.length && isEscapeIntermediateByte(input.charCodeAt(cursor))) {
-    cursor += 1;
-  }
-  if (cursor >= input.length) {
-    return null;
-  }
-  return isEscapeFinalByte(input.charCodeAt(cursor)) ? cursor + 1 : start + 1;
-}
+// ESC, or an 8-bit CSI, OSC, DCS, PM or APC introducer: each of those stands for ESC and its
+// code point minus 0x40.
+// oxlint-disable-next-line no-control-regex -- every sequence starts with ESC or a C1 control
+const SEQUENCE_START = /[\u001b\u0090\u009b\u009d-\u009f]/g;
 
 function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string,
@@ -995,112 +1100,103 @@ function sanitizeTerminalHistoryChunk(
   let visibleText = "";
   let index = 0;
 
-  const append = (value: string) => {
-    visibleText += value;
-  };
-
   while (index < input.length) {
+    // One slice per run of text: every chunk of coloured output passes through here.
+    SEQUENCE_START.lastIndex = index;
+    const sequenceStart = SEQUENCE_START.exec(input)?.index ?? input.length;
+    visibleText += input.slice(index, sequenceStart);
+    index = sequenceStart;
+    if (index >= input.length) break;
+
     const codePoint = input.charCodeAt(index);
-
+    let introducerIndex = index;
     if (codePoint === 0x1b) {
-      const nextCodePoint = input.charCodeAt(index + 1);
-      if (Number.isNaN(nextCodePoint)) {
-        return { visibleText, pendingControlSequence: input.slice(index) };
+      // Controls between ESC and the byte that names the sequence run as they arrive.
+      introducerIndex += 1;
+      while (introducerIndex < input.length) {
+        const introducerCodePoint = input.charCodeAt(introducerIndex);
+        if (!isExecutedControl(introducerCodePoint) && introducerCodePoint !== 0x7f) break;
+        introducerIndex += 1;
       }
-
-      if (nextCodePoint === 0x5b) {
-        let cursor = index + 2;
-        while (cursor < input.length) {
-          if (isCsiFinalByte(input.charCodeAt(cursor))) {
-            const sequence = input.slice(index, cursor + 1);
-            const body = input.slice(index + 2, cursor);
-            if (!shouldStripCsiSequence(body, input[cursor] ?? "")) {
-              append(sequence);
-            }
-            index = cursor + 1;
-            break;
-          }
-          cursor += 1;
-        }
-        if (cursor >= input.length) {
-          return { visibleText, pendingControlSequence: input.slice(index) };
-        }
-        continue;
-      }
-
-      if (
-        nextCodePoint === 0x5d ||
-        nextCodePoint === 0x50 ||
-        nextCodePoint === 0x5e ||
-        nextCodePoint === 0x5f
-      ) {
-        const terminatorIndex = findStringTerminatorIndex(input, index + 2);
-        if (terminatorIndex === null) {
-          return { visibleText, pendingControlSequence: input.slice(index) };
-        }
-        const sequence = input.slice(index, terminatorIndex);
-        const content = stripStringTerminator(input.slice(index + 2, terminatorIndex));
-        const strip =
-          (nextCodePoint === 0x5d && shouldStripOscSequence(content)) ||
-          (nextCodePoint === 0x50 && shouldStripDcsSequence(content));
-        if (!strip) {
-          append(sequence);
-        }
-        index = terminatorIndex;
-        continue;
-      }
-
-      const escapeSequenceEndIndex = findEscapeSequenceEndIndex(input, index + 1);
-      if (escapeSequenceEndIndex === null) {
-        return { visibleText, pendingControlSequence: input.slice(index) };
-      }
-      append(input.slice(index, escapeSequenceEndIndex));
-      index = escapeSequenceEndIndex;
-      continue;
+      if (introducerIndex >= input.length) break;
     }
+    const introducer = codePoint === 0x1b ? input.charCodeAt(introducerIndex) : codePoint - 0x40;
+    // A stripped or abandoned sequence leaves only the controls the terminal ran inside it.
+    let output =
+      introducerIndex > index + 1
+        ? executedControlsIn(input.slice(index + 1, introducerIndex))
+        : "";
+    let end: number | null = null;
 
-    if (codePoint === 0x9b) {
-      let cursor = index + 1;
+    if (abandonsSequence(introducer)) {
+      end = introducerIndex;
+    } else if (introducer === 0x5b) {
+      const scan = scanControlSequence(input, introducerIndex + 1);
+      if (scan !== null) {
+        end = scan.end;
+        const keep =
+          scan.outcome === "cancelled" ||
+          (scan.outcome === "dispatched" &&
+            !shouldStripCsiSequence(scan.body, input.charAt(end - 1)));
+        output = keep ? input.slice(index, end) : output + scan.executedControls;
+      }
+    } else if (
+      // OSC, DCS, PM, APC.
+      introducer === 0x5d ||
+      introducer === 0x50 ||
+      introducer === 0x5e ||
+      introducer === 0x5f
+    ) {
+      const stringEnd = findStringSequenceEnd(input, introducerIndex + 1, introducer === 0x5d);
+      if (stringEnd !== null) {
+        end = stringEnd.end;
+        // Both checks read only the start of the string, before any terminator.
+        const content = input.slice(introducerIndex + 1, end);
+        const strip =
+          (introducer === 0x5d && shouldStripOscSequence(content)) ||
+          (introducer === 0x50 && shouldStripDcsSequence(content));
+        if (!strip) output = input.slice(index, end) + stringEnd.closing;
+      }
+    } else if (introducer === 0x5a) {
+      // ESC Z (DECID) is the legacy primary Device Attributes query.
+      end = introducerIndex + 1;
+    } else {
+      // A plain escape: intermediates (0x20-0x2F, with controls that run and DEL) and a final
+      // byte (0x30-0x7E). CAN and SUB cancel it; a byte the parser rejects ends it unconsumed.
+      let cursor = introducerIndex;
       while (cursor < input.length) {
-        if (isCsiFinalByte(input.charCodeAt(cursor))) {
-          const sequence = input.slice(index, cursor + 1);
-          const body = input.slice(index + 1, cursor);
-          if (!shouldStripCsiSequence(body, input[cursor] ?? "")) {
-            append(sequence);
-          }
-          index = cursor + 1;
+        const cursorCodePoint = input.charCodeAt(cursor);
+        if (
+          (cursorCodePoint < 0x20 || cursorCodePoint > 0x2f) &&
+          !isExecutedControl(cursorCodePoint) &&
+          cursorCodePoint !== 0x7f
+        )
           break;
-        }
         cursor += 1;
       }
-      if (cursor >= input.length) {
-        return { visibleText, pendingControlSequence: input.slice(index) };
+      if (cursor < input.length) {
+        const finalCodePoint = input.charCodeAt(cursor);
+        if (abandonsSequence(finalCodePoint)) {
+          end = cursor;
+          output += executedControlsIn(input.slice(introducerIndex, end));
+        } else {
+          end =
+            (finalCodePoint >= 0x30 && finalCodePoint <= 0x7e) ||
+            isControlSequenceCancel(finalCodePoint)
+              ? cursor + 1
+              : cursor;
+          output = input.slice(index, end);
+        }
       }
-      continue;
     }
 
-    if (codePoint === 0x9d || codePoint === 0x90 || codePoint === 0x9e || codePoint === 0x9f) {
-      const terminatorIndex = findStringTerminatorIndex(input, index + 1);
-      if (terminatorIndex === null) {
-        return { visibleText, pendingControlSequence: input.slice(index) };
-      }
-      const sequence = input.slice(index, terminatorIndex);
-      const content = stripStringTerminator(input.slice(index + 1, terminatorIndex));
-      const strip =
-        (codePoint === 0x9d && shouldStripOscSequence(content)) ||
-        (codePoint === 0x90 && shouldStripDcsSequence(content));
-      if (!strip) {
-        append(sequence);
-      }
-      index = terminatorIndex;
-      continue;
-    }
-
-    append(input[index] ?? "");
-    index += 1;
+    // The input ends before the sequence does: keep it pending for the next chunk.
+    if (end === null) break;
+    visibleText += output;
+    index = end;
   }
 
-  return { visibleText, pendingControlSequence: "" };
+  return { visibleText, pendingControlSequence: input.slice(index) };
 }
 
 function legacySafeThreadId(threadId: string): string {
