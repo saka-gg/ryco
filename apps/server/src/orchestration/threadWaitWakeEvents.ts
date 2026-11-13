@@ -69,6 +69,7 @@ const THREAD_WAIT_ROUTES = {
   "thread.usage-limit-set": "ignore",
   "thread.usage-limit-cleared": "ignore",
   "thread.meta-updated": "ignore",
+  "thread.project-moved": "ignore",
   "thread.runtime-mode-set": "ignore",
   "thread.interaction-mode-set": "ignore",
   "thread.token-mode-set": "ignore",

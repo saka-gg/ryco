@@ -1,6 +1,11 @@
 import { useLocalChanges } from "../rpc/useLocalChanges";
 import { DiffStagingActions } from "./DiffStagingActions";
 import type { GitLocalChangesScope } from "@ryco/contracts";
+import {
+  CHECKPOINT_BEFORE_MOVE_MESSAGE,
+  isTurnDiffBeforeThreadMove,
+  threadMoveCheckpointFloor,
+} from "@ryco/shared/threadMove";
 import { DiffLineBlame } from "./DiffLineBlame";
 import { DiffComparisonControls } from "./DiffComparisonControls";
 import { DiffImagePreview } from "./DiffImagePreview";
@@ -337,15 +342,24 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   const selectedCheckpointTurnCount =
     selectedTurn &&
     (selectedTurn.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[selectedTurn.turnId]);
+  // Checkpoints from before a project move live in the old checkout's repository: their turns
+  // show no diff here, and the conversation diff starts at the move.
+  const checkpointFloor = useMemo(
+    () => threadMoveCheckpointFloor(activeThread?.activities ?? []),
+    [activeThread?.activities],
+  );
+  const selectedTurnBeforeMove =
+    typeof selectedCheckpointTurnCount === "number" &&
+    isTurnDiffBeforeThreadMove(selectedCheckpointTurnCount, checkpointFloor);
   const selectedCheckpointRange = useMemo(
     () =>
-      typeof selectedCheckpointTurnCount === "number"
+      typeof selectedCheckpointTurnCount === "number" && !selectedTurnBeforeMove
         ? {
             fromTurnCount: Math.max(0, selectedCheckpointTurnCount - 1),
             toTurnCount: selectedCheckpointTurnCount,
           }
         : null,
-    [selectedCheckpointTurnCount],
+    [selectedCheckpointTurnCount, selectedTurnBeforeMove],
   );
   const conversationCheckpointTurnCount = useMemo(() => {
     const turnCounts = orderedTurnDiffSummaries
@@ -362,13 +376,15 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   }, [inferredCheckpointTurnCountByTurnId, orderedTurnDiffSummaries]);
   const conversationCheckpointRange = useMemo(
     () =>
-      !selectedTurn && typeof conversationCheckpointTurnCount === "number"
+      !selectedTurn &&
+      typeof conversationCheckpointTurnCount === "number" &&
+      conversationCheckpointTurnCount > (checkpointFloor ?? 0)
         ? {
-            fromTurnCount: 0,
+            fromTurnCount: checkpointFloor ?? 0,
             toTurnCount: conversationCheckpointTurnCount,
           }
         : null,
-    [conversationCheckpointTurnCount, selectedTurn],
+    [checkpointFloor, conversationCheckpointTurnCount, selectedTurn],
   );
   const activeCheckpointRange = selectedTurn
     ? selectedCheckpointRange
@@ -1355,7 +1371,20 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               </div>
             )}
             {!renderablePatch ? (
-              isLoadingCheckpointDiff || parsingOffThread ? (
+              !comparing &&
+              !reviewingLocal &&
+              (selectedTurnBeforeMove ||
+                (!selectedTurn &&
+                  checkpointFloor !== null &&
+                  conversationCheckpointRange === null)) ? (
+                <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+                  <p>
+                    {selectedTurnBeforeMove
+                      ? CHECKPOINT_BEFORE_MOVE_MESSAGE
+                      : "No turns since this thread moved to another project."}
+                  </p>
+                </div>
+              ) : isLoadingCheckpointDiff || parsingOffThread ? (
                 <DiffPanelLoadingState
                   label={
                     reviewingLocal

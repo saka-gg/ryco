@@ -2314,6 +2314,34 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 /**
+ * "Move to project": the thread changes project on the same node (see `threadMove.ts`). The
+ * decider refuses it while the thread works or waits on the user, and for a stale client: the
+ * move applies only while the thread is still in `expectedProjectId`, so a replayed or late
+ * command never moves it twice or back.
+ */
+const ThreadProjectMoveCommand = Schema.Struct({
+  type: Schema.Literal("thread.project.move"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  expectedProjectId: ProjectId,
+  projectId: ProjectId,
+  /**
+   * Moving to "No project": the server first creates this chat (a new folder under its chats
+   * root, as a chat's first send does), then moves the thread into it. `projectId` must name it.
+   */
+  createChatProject: Schema.optional(ThreadTurnStartBootstrapCreateChatProject),
+  createdAt: IsoDateTime,
+}).check(
+  Schema.makeFilter((command) =>
+    command.createChatProject !== undefined &&
+    command.createChatProject.projectId !== command.projectId
+      ? "A move to a new chat must move the thread into that chat"
+      : undefined,
+  ),
+);
+export type ThreadProjectMoveCommand = typeof ThreadProjectMoveCommand.Type;
+
+/**
  * What a server wake (a queued turn start the server sends on its own) delivers: a delegated
  * result, a pull request watch update, or the next turn toward the thread's goal. Only the
  * wording of its rejections and restart notices depends on it; all pass the same fence.
@@ -2997,6 +3025,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadMetaUpdateCommand,
+  ThreadProjectMoveCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadTokenModeSetCommand,
@@ -3054,6 +3083,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadSettleCommand,
   ThreadUnsettleCommand,
   ThreadMetaUpdateCommand,
+  ThreadProjectMoveCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadTokenModeSetCommand,
@@ -3445,6 +3475,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.usage-limit-set",
   "thread.usage-limit-cleared",
   "thread.meta-updated",
+  "thread.project-moved",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.token-mode-set",
@@ -4033,6 +4064,22 @@ export const WorktreeRelocatedPayload = Schema.Struct({
   relocatedAt: IsoDateTime,
 });
 
+/**
+ * A thread moved to another project (`thread.project.move`): it now works in that project's
+ * shared checkout, so its own worktree, branch and sidebar position are cleared. The `previous`
+ * fields record where it came from; nothing of the old project is deleted.
+ */
+export const ThreadProjectMovedPayload = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  previousProjectId: ProjectId,
+  previousWorktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  previousWorktreeId: Schema.NullOr(WorktreeId),
+  previousBranch: Schema.NullOr(TrimmedNonEmptyString),
+  movedAt: IsoDateTime,
+});
+export type ThreadProjectMovedPayload = typeof ThreadProjectMovedPayload.Type;
+
 export const ThreadAttachedToWorktreePayload = Schema.Struct({
   threadId: ThreadId,
   worktreeId: WorktreeId,
@@ -4178,6 +4225,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.meta-updated"),
     payload: ThreadMetaUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.project-moved"),
+    payload: ThreadProjectMovedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

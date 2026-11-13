@@ -40,6 +40,7 @@ import type {
   ThreadMenuActionId,
   ThreadMenuActionItem,
 } from "../sidebar/hooks/useThreadMenuActions";
+import { MOVE_TO_PROJECT_ACTION_ID } from "../sidebar/threadMenuInventory";
 import {
   MenuItem,
   MenuSeparator,
@@ -66,7 +67,12 @@ type ActionGroup = "organize" | "session" | "copy" | "workspace" | "remove";
 type ActionPresentation = { readonly icon: LucideIcon; readonly group: ActionGroup };
 
 const ACTION_PRESENTATION: Record<
-  Exclude<ThreadMenuActionId, `chat-extension:${string}`>,
+  Exclude<
+    ThreadMenuActionId,
+    | `chat-extension:${string}`
+    | typeof MOVE_TO_PROJECT_ACTION_ID
+    | `${typeof MOVE_TO_PROJECT_ACTION_ID}:${string}`
+  >,
   ActionPresentation
 > = {
   "open-in-split": { icon: Columns2Icon, group: "organize" },
@@ -98,10 +104,21 @@ const ACTION_PRESENTATION: Record<
 /** Chat menu extensions ("Turn into project…") sit with the folder actions. */
 const CHAT_EXTENSION_PRESENTATION: ActionPresentation = { icon: FolderInputIcon, group: "copy" };
 
+/** "Move to project" sits with the organizing actions; its entries are folders. */
+const MOVE_TO_PROJECT_PRESENTATION: ActionPresentation = {
+  icon: FolderInputIcon,
+  group: "organize",
+};
+const MOVE_TO_PROJECT_ENTRY_PRESENTATION: ActionPresentation = {
+  icon: FolderIcon,
+  group: "organize",
+};
+
 function actionPresentation(id: ThreadMenuActionId): ActionPresentation {
-  return id.startsWith("chat-extension:")
-    ? CHAT_EXTENSION_PRESENTATION
-    : ACTION_PRESENTATION[id as keyof typeof ACTION_PRESENTATION];
+  if (id.startsWith("chat-extension:")) return CHAT_EXTENSION_PRESENTATION;
+  if (id === MOVE_TO_PROJECT_ACTION_ID) return MOVE_TO_PROJECT_PRESENTATION;
+  if (id.startsWith(`${MOVE_TO_PROJECT_ACTION_ID}:`)) return MOVE_TO_PROJECT_ENTRY_PRESENTATION;
+  return ACTION_PRESENTATION[id as keyof typeof ACTION_PRESENTATION];
 }
 
 /** Actions that change server state; disabled when this connection cannot mutate. */
@@ -257,7 +274,9 @@ export function InboxThreadMenuItems(props: {
       <MenuItem
         key={item.id}
         variant={item.destructive ? "destructive" : "default"}
-        disabled={!row.mutationEnabled && !READ_ONLY_ACTIONS.has(item.id)}
+        disabled={
+          item.disabled === true || (!row.mutationEnabled && !READ_ONLY_ACTIONS.has(item.id))
+        }
         onClick={() =>
           void props.threadActions?.performThreadMenuAction(
             scopeThreadRef(row.environmentId, row.threadId),

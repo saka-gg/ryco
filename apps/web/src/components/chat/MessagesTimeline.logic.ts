@@ -892,6 +892,7 @@ export function deriveRevertTurnCountByUserMessageId(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   inferredCheckpointTurnCountByTurnId: Readonly<Partial<Record<TurnDiffSummary["turnId"], number>>>;
+  checkpointFloor?: number | null | undefined;
 }): Map<MessageId, number> {
   return deriveRevertTurnCountForMessages({
     messages: input.timelineEntries.flatMap((entry) =>
@@ -899,6 +900,7 @@ export function deriveRevertTurnCountByUserMessageId(input: {
     ),
     turnDiffSummaryByAssistantMessageId: input.turnDiffSummaryByAssistantMessageId,
     inferredCheckpointTurnCountByTurnId: input.inferredCheckpointTurnCountByTurnId,
+    checkpointFloor: input.checkpointFloor,
   });
 }
 

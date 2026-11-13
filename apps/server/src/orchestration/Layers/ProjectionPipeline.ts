@@ -130,6 +130,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.archived": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.unarchived": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.meta-updated": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.project-moved": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.runtime-mode-set": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.interaction-mode-set": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.token-mode-set": [ORCHESTRATION_PROJECTOR_NAMES.threads],
@@ -1092,6 +1093,24 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
               ? { worktreePath: event.payload.worktreePath }
               : {}),
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.project-moved": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            projectId: event.payload.projectId,
+            worktreePath: null,
+            worktreeId: null,
+            branch: null,
+            updatedAt: event.payload.movedAt,
           });
           return;
         }

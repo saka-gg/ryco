@@ -360,6 +360,23 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
       ),
     );
 
+  const listActiveTitlesTargetingThread: AgentControlAutomationRepositoryShape["listActiveTitlesTargetingThread"] =
+    (threadId) =>
+      sql<{ readonly title: string | null }>`
+        SELECT json_extract(definition_json, '$.execution.title') AS title
+        FROM agent_control_automations
+        WHERE enabled = 1 AND cancelled = 0
+          AND json_extract(definition_json, '$.execution.target.threadId') = ${threadId}
+          AND (next_run_at IS NOT NULL OR json_extract(definition_json, '$.schedule.kind') = 'webhook')
+        ORDER BY updated_at DESC
+        LIMIT 20
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => row.title ?? "An automation")),
+        Effect.mapError(
+          toPersistenceSqlError("AgentControlAutomationRepository.listActiveTitlesTargetingThread"),
+        ),
+      );
+
   const countActiveAutomations: AgentControlAutomationRepositoryShape["countActiveAutomations"] = (
     projectId,
   ) =>
@@ -720,6 +737,7 @@ const makeAgentControlAutomationRepository = Effect.gen(function* () {
     insertAutomation,
     getAutomation,
     listAutomations,
+    listActiveTitlesTargetingThread,
     listCentreAutomations,
     countActiveAutomations,
     replaceAutomation,

@@ -300,6 +300,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   );
   const threadActions = useSidebarThreadActions({
     router,
+    includeMoveToProject: true,
     isMobile,
     setOpenMobile,
     clearSelection,

@@ -89,6 +89,7 @@ export const SidebarChatList = memo(function SidebarChatList(props: SidebarChatL
   }, []);
   const actions = useSidebarThreadActions({
     router,
+    includeMoveToProject: true,
     isMobile,
     setOpenMobile,
     clearSelection,

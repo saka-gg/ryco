@@ -296,6 +296,11 @@
       "import": "./src/terminal.ts",
       "require": "./src/terminal.ts"
     },
+    "./thread-move": {
+      "types": "./src/threadMove.ts",
+      "import": "./src/threadMove.ts",
+      "require": "./src/threadMove.ts"
+    },
     "./thread-fork": {
       "types": "./src/threadFork.ts",
       "import": "./src/threadFork.ts",

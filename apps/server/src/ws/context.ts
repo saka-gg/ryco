@@ -122,6 +122,8 @@ import {
   prepareChatProject,
   releasePreparedChatFolder,
 } from "./context/chatBootstrap.ts";
+import { dispatchThreadProjectMove } from "./context/threadProjectMove.ts";
+import { AgentControlAutomationRepository } from "../persistence/Services/AgentControlAutomations.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { OrchestrationCommandReceiptRepository } from "../persistence/Services/OrchestrationCommandReceipts.ts";
@@ -381,6 +383,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       dispatch: orchestrationEngine.dispatch,
       serverCommandId,
     };
+    const agentControlAutomations = Option.getOrUndefined(
+      yield* Effect.serviceOption(AgentControlAutomationRepository),
+    );
     const linkedSourceControlRefreshAtByProject = new Map<string, number>();
     const LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY = 2;
     // Refreshes rerun on every source-control read: one stack per workspace, then summaries.
@@ -1211,16 +1216,33 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       const dispatchEffect =
         normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
           ? dispatchBootstrapTurnStart(normalizedCommand)
-          : orchestrationEngine.dispatch(normalizedCommand).pipe(
-              Effect.tap(({ sequence }) =>
-                normalizedCommand.type === "thread.create"
-                  ? threadDeletionReactor.drainThrough(sequence)
-                  : Effect.void,
-              ),
-              Effect.mapError((cause) =>
-                toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-              ),
-            );
+          : normalizedCommand.type === "thread.project.move"
+            ? dispatchThreadProjectMove(
+                {
+                  chatBootstrap,
+                  terminals: terminalManager,
+                  automations: agentControlAutomations,
+                  dispatch: (command) =>
+                    orchestrationEngine
+                      .dispatch(command)
+                      .pipe(
+                        Effect.mapError((cause) =>
+                          toDispatchCommandError(cause, "Failed to move the thread"),
+                        ),
+                      ),
+                },
+                normalizedCommand,
+              )
+            : orchestrationEngine.dispatch(normalizedCommand).pipe(
+                Effect.tap(({ sequence }) =>
+                  normalizedCommand.type === "thread.create"
+                    ? threadDeletionReactor.drainThrough(sequence)
+                    : Effect.void,
+                ),
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                ),
+              );
 
       return refused.pipe(
         Effect.andThen(

@@ -128,7 +128,11 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.queue-entry-added"], [
     ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 63);
+  // A project move rewrites the thread row only.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.project-moved"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threads,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 64);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {

@@ -10,6 +10,7 @@ import type {
 } from "@ryco/contracts";
 import { CHECKPOINT_REVERT_ACTIVITY_KIND } from "@ryco/contracts/orchestration";
 import { latestCheckpointRevertActivity } from "@ryco/shared/threadActivity";
+import { isCheckpointBeforeThreadMove } from "@ryco/shared/threadMove";
 
 import { isDefiniteDispatchFailure } from "../../rpc/protocol.ts";
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
@@ -602,6 +603,8 @@ export function deriveRevertTurnCountByUserMessageId(input: {
     Pick<TurnDiffSummary, "turnId" | "checkpointTurnCount">
   >;
   readonly inferredCheckpointTurnCountByTurnId: Readonly<Partial<Record<TurnId, number>>>;
+  /** `threadMoveCheckpointFloor`: messages from before a project move offer no revert. */
+  readonly checkpointFloor?: number | null | undefined;
 }): Map<MessageId, number> {
   const byUserMessageId = new Map<MessageId, number>();
   let pendingUserMessageId: MessageId | null = null;
@@ -616,7 +619,10 @@ export function deriveRevertTurnCountByUserMessageId(input: {
     const turnCount =
       summary.checkpointTurnCount ?? input.inferredCheckpointTurnCountByTurnId[summary.turnId];
     if (typeof turnCount === "number") {
-      byUserMessageId.set(pendingUserMessageId, Math.max(0, turnCount - 1));
+      const target = Math.max(0, turnCount - 1);
+      if (!isCheckpointBeforeThreadMove(target, input.checkpointFloor ?? null)) {
+        byUserMessageId.set(pendingUserMessageId, target);
+      }
     }
     pendingUserMessageId = null;
   }

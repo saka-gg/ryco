@@ -382,7 +382,7 @@ import {
   applicableUsageLimit,
   deriveThreadSnoozeEligibility,
   deriveUndoTurnCountByTurnId,
-  isMaterializableCheckpointSummary,
+  isForkableCheckpointSummary,
   resolveThreadReferenceCopyTarget,
   resolveThreadWorkspacePullRequestLink,
   selectLatestForkableReply,
@@ -393,6 +393,7 @@ import {
   type ThreadReferenceCopyTarget,
 } from "@ryco/client-runtime/state/threads";
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
+import { threadMoveCheckpointFloor } from "@ryco/shared/threadMove";
 import {
   LazyAgentControlApprovals,
   LazySecretRequestCards,
@@ -3085,19 +3086,31 @@ export default function ChatView(props: ChatViewProps) {
     }
     return byMessageId;
   }, [turnDiffSummaries]);
+  // Checkpoints from before a project move live in the old checkout: no revert or undo to them.
+  const checkpointFloor = useMemo(
+    () => threadMoveCheckpointFloor(threadActivities),
+    [threadActivities],
+  );
   const revertTurnCountByUserMessageId = useMemo(() => {
     return deriveRevertTurnCountByUserMessageId({
       timelineEntries,
       turnDiffSummaryByAssistantMessageId,
       inferredCheckpointTurnCountByTurnId,
+      checkpointFloor,
     });
-  }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  }, [
+    checkpointFloor,
+    inferredCheckpointTurnCountByTurnId,
+    timelineEntries,
+    turnDiffSummaryByAssistantMessageId,
+  ]);
   const undoTurnCountByTurnId = useMemo(() => {
     return deriveUndoTurnCountByTurnId({
       turnDiffSummaries,
       inferredCheckpointTurnCountByTurnId,
+      checkpointFloor,
     });
-  }, [inferredCheckpointTurnCountByTurnId, turnDiffSummaries]);
+  }, [checkpointFloor, inferredCheckpointTurnCountByTurnId, turnDiffSummaries]);
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -6945,8 +6958,9 @@ export default function ChatView(props: ChatViewProps) {
         sourceTurnId: reply.turnId,
         // A page-only turn, or a blank reply under a page, quotes what the turn published.
         boundaryText: threadForkBoundaryQuote(thread.messages, reply.messageId),
-        checkpointAvailable: isMaterializableCheckpointSummary(
+        checkpointAvailable: isForkableCheckpointSummary(
           summaries.find((summary) => summary.turnId === reply.turnId),
+          threadMoveCheckpointFloor(thread.activities),
         ),
         draftSeed,
         origin: trigger,

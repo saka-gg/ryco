@@ -21,17 +21,33 @@ import {
   type ChatRowMenuSubject,
 } from "../chatRowMenu";
 import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
-import { newCommandId } from "../../../lib/utils";
+import { newCommandId, newProjectId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
 import { readLocalApi } from "../../../localApi";
 import { useComposerDraftStore, type DraftId } from "../../../composerDraftStore";
 import { resolveThreadRouteTarget } from "../../../threadRoutes";
 import { useUiStateStore } from "../../../uiStateStore";
-import { selectSidebarWorktreesForProjectRef, useStore } from "../../../store";
+import {
+  selectProjectsAcrossEnvironments,
+  selectSidebarWorktreesForProjectRef,
+  useStore,
+} from "../../../store";
+import {
+  listMoveTargetProjects,
+  threadMoveConfirmation,
+  threadMoveNotices,
+  threadProjectMoveCommand,
+  threadSummaryMoveBlocker,
+} from "@ryco/client-runtime/state/threads";
+import { resolveChatsAvailability } from "@ryco/client-runtime/state/composer";
+import { isChatProject } from "@ryco/shared/projectKind";
+import { threadProjectMoveBlockerMessage } from "@ryco/shared/threadMove";
+import { readEnvironmentServerConfig } from "../../../hooks/useChatsAvailability";
 import { renameThread } from "../../../threadMutations";
 import { buildWorkspaceLocation, runWorkspaceLifecycleAction } from "../../../workspaceLifecycle";
 import {
   buildThreadMenuInventory,
+  moveToProjectTargetOf,
   type ThreadMenuActionId,
   type ThreadMenuActionItem,
 } from "../threadMenuInventory";
@@ -68,6 +84,11 @@ export function useThreadMenuActions(params: {
    */
   includeWorkspaceSubmenu?: boolean;
   /**
+   * Offer "Move to project" (the project sidebar, chats and the Inbox). The frozen phone tier
+   * leaves it out.
+   */
+  includeMoveToProject?: boolean;
+  /**
    * "No project" chat rows: folder actions and chat menu extensions replace the
    * project/workspace items for threads this resolves to a chat.
    */
@@ -97,6 +118,7 @@ export function useThreadMenuActions(params: {
     projectCwd,
     openProjectSettings,
     includeWorkspaceSubmenu = false,
+    includeMoveToProject = false,
     chat,
   } = params;
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
@@ -235,6 +257,107 @@ export function useThreadMenuActions(params: {
     [],
   );
 
+  /** The thread's node's projects, and whether that node can hold chats without a project. */
+  const readMoveContext = useCallback((thread: SidebarThreadSummary) => {
+    const projects = selectProjectsAcrossEnvironments(useStore.getState()).filter(
+      (project) => project.environmentId === thread.environmentId,
+    );
+    const config = readEnvironmentServerConfig(thread.environmentId);
+    return {
+      projects,
+      source: projects.find((project) => project.id === thread.projectId) ?? null,
+      chatsAvailable: config !== null && resolveChatsAvailability(config).available,
+    };
+  }, []);
+
+  const moveToProjectMenu = useCallback(
+    (thread: SidebarThreadSummary) => {
+      const { projects, source, chatsAvailable } = readMoveContext(thread);
+      const blocker = threadSummaryMoveBlocker(thread);
+      return {
+        targets: listMoveTargetProjects(projects, thread.projectId).map((project) => ({
+          id: project.id,
+          name: project.name,
+        })),
+        // A chat already is "No project"; a node without chat support has no such place.
+        offerNoProject: chatsAvailable && !isChatProject(source),
+        blockedReason: blocker === null ? null : threadProjectMoveBlockerMessage(blocker),
+      };
+    },
+    [readMoveContext],
+  );
+
+  const moveThreadToProject = useCallback(
+    async (threadRef: ScopedThreadRef, actionId: ThreadMenuActionId): Promise<boolean> => {
+      const target = moveToProjectTargetOf(actionId);
+      if (target === null) return false;
+      const thread = sidebarThreadByKeyRef.current.get(scopedThreadKey(threadRef)) ?? null;
+      const api = readEnvironmentApi(threadRef.environmentId);
+      if (!thread || !api) return true;
+      const { projects, source } = readMoveContext(thread);
+      const targetProject =
+        target.kind === "project"
+          ? projects.find((project) => project.id === target.projectId)
+          : null;
+      if (target.kind === "project" && !targetProject) return true;
+      const targetName = targetProject?.name ?? "No project";
+      const sourceIsChat = isChatProject(source);
+      const delegatedTaskCount = [...sidebarThreadByKeyRef.current.values()].filter(
+        (other) =>
+          other.environmentId === thread.environmentId &&
+          other.lineage?.parentThreadId === thread.id &&
+          other.archivedAt === null,
+      ).length;
+      const confirmation = threadMoveConfirmation({
+        threadTitle: thread.title,
+        targetName,
+        notices: threadMoveNotices({
+          sourceProjectName: source?.name ?? "the old project",
+          worktreePath: thread.worktreePath,
+          chatFolderPath: sourceIsChat ? (source?.cwd ?? null) : null,
+          activePullRequestWatches: thread.pullRequestWatches?.active.length ?? 0,
+          commandWatchCount: thread.commandWatchCount ?? 0,
+          delegatedTaskCount,
+          // A chat folder records no checkpoints; a project thread with turns has some.
+          hasFileChanges: !sourceIsChat && thread.latestTurn !== null,
+        }),
+      });
+      if (confirmation !== null) {
+        const localApi = readLocalApi();
+        const confirmed = localApi
+          ? await localApi.dialogs.confirm(confirmation)
+          : window.confirm(confirmation);
+        if (!confirmed) return true;
+      }
+      try {
+        await api.orchestration.dispatchCommand(
+          threadProjectMoveCommand({
+            commandId: newCommandId(),
+            threadId: thread.id,
+            threadTitle: thread.title,
+            currentProjectId: thread.projectId,
+            target:
+              target.kind === "project"
+                ? { kind: "project", projectId: targetProject!.id }
+                : { kind: "new-chat", projectId: newProjectId() },
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        toastManager.add(stackedThreadToast({ type: "success", title: `Moved to ${targetName}` }));
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to move thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+      return true;
+    },
+    [readMoveContext, sidebarThreadByKeyRef],
+  );
+
   // The single thread action inventory, as data. Every presenter — the DOM
   // context menu, the Inbox menu, the native menu and the phone bottom sheet —
   // renders this inventory and dispatches through `performThreadMenuAction`, so
@@ -246,6 +369,7 @@ export function useThreadMenuActions(params: {
       const draftId = (thread as SidebarThreadSummary & { draftId?: DraftId | undefined }).draftId;
       const panes = useChatPanesStore.getState();
       const chatSubject = chat?.resolveSubject(thread) ?? null;
+      const moveToProject = includeMoveToProject && !draftId ? moveToProjectMenu(thread) : null;
       return buildThreadMenuInventory({
         thread,
         isDraft: Boolean(draftId),
@@ -277,12 +401,15 @@ export function useThreadMenuActions(params: {
                   .map((extension) => ({ id: extension.id, label: extension.label })),
               }
             : null,
+        moveToProject,
       });
     },
     [
       chat,
+      includeMoveToProject,
       includeWorkspaceSubmenu,
       memberProjectByScopedKey,
+      moveToProjectMenu,
       openProjectSettings,
       resolveThreadWorkspace,
       sidebarThreadByKeyRef,
@@ -336,6 +463,7 @@ export function useThreadMenuActions(params: {
       const threadWorkspacePath = thread.worktreePath ?? threadProject?.cwd ?? projectCwd ?? null;
 
       if (await performChatMenuAction(thread, actionId)) return;
+      if (await moveThreadToProject(threadRef, actionId)) return;
       if (actionId === "project-settings") {
         if (threadProject)
           openProjectSettings?.(scopeProjectRef(thread.environmentId, thread.projectId));
@@ -466,6 +594,7 @@ export function useThreadMenuActions(params: {
       copyThreadIdToClipboard,
       markThreadUnread,
       memberProjectByScopedKey,
+      moveThreadToProject,
       openProjectSettings,
       performChatMenuAction,
       projectCwd,

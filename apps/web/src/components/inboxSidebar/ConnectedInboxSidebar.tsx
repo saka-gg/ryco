@@ -101,6 +101,7 @@ export function ConnectedInboxSidebar(
     interruptThreadTurn,
     includeWorkspaceSubmenu: true,
     chat,
+    includeMoveToProject: true,
     ...clipboard,
     appSettingsConfirmThreadDelete,
     appSettingsConfirmThreadArchive,

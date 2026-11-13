@@ -2,6 +2,7 @@ import {
   AgentControlAutomationId,
   ProviderInstanceId,
   ProjectId,
+  ThreadId,
   type AgentControlAutomation,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
@@ -89,6 +90,55 @@ layer("AgentControlAutomationRepository", (it) => {
         // The claimed run is in flight: nothing is due until it ends.
         assert.strictEqual(yield* repository.nextDueAt!(), null);
       }),
+  );
+
+  it.effect("lists the active automations that continue a thread", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlAutomationRepository;
+      const threadId = ThreadId.make("thread-continued");
+      const continuing = (id: string, title: string, enabled = true) => {
+        const base = automationAt({
+          id,
+          start: "2026-11-01T08:00:00.000Z",
+          end: "2026-11-10T00:00:00.000Z",
+        });
+        return {
+          ...base,
+          enabled,
+          definition: {
+            ...base.definition,
+            enabled,
+            execution: {
+              ...base.definition.execution,
+              title,
+              target: { kind: "thread", threadId },
+            },
+          },
+        } as AgentControlAutomation;
+      };
+      assert.isTrue(
+        yield* repository.insertAutomation(continuing("automation-heartbeat", "Heartbeat")),
+      );
+      assert.isTrue(
+        yield* repository.insertAutomation(continuing("automation-paused", "Paused", false)),
+      );
+      assert.isTrue(
+        yield* repository.insertAutomation(
+          automationAt({
+            id: "automation-new-threads",
+            start: "2026-11-01T08:00:00.000Z",
+            end: "2026-11-10T00:00:00.000Z",
+          }),
+        ),
+      );
+      assert.deepStrictEqual(yield* repository.listActiveTitlesTargetingThread(threadId), [
+        "Heartbeat",
+      ]);
+      assert.deepStrictEqual(
+        yield* repository.listActiveTitlesTargetingThread(ThreadId.make("thread-other")),
+        [],
+      );
+    }),
   );
 
   it.effect("reports the earliest occurrence a claim could take", () =>

@@ -602,6 +602,10 @@
       "types": "./src/carriedFork.ts",
       "import": "./src/carriedFork.ts"
     },
+    "./threadMove": {
+      "types": "./src/threadMove.ts",
+      "import": "./src/threadMove.ts"
+    },
     "./threadFork": {
       "types": "./src/threadFork.ts",
       "import": "./src/threadFork.ts"

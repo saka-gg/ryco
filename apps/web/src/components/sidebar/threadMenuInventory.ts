@@ -30,12 +30,35 @@ export type ThreadMenuActionId =
   | "chat-reveal-folder"
   | "chat-open-folder-in-editor"
   | "chat-copy-folder-path"
-  | `chat-extension:${string}`;
+  | `chat-extension:${string}`
+  | typeof MOVE_TO_PROJECT_ACTION_ID
+  | `${typeof MOVE_TO_PROJECT_ACTION_ID}:${string}`;
+
+/** "Move to project" and its entries: `move-to-project:project:<id>`, `…:no-project`. */
+export const MOVE_TO_PROJECT_ACTION_ID = "move-to-project";
+const MOVE_TO_PROJECT_ENTRY_PREFIX = `${MOVE_TO_PROJECT_ACTION_ID}:project:`;
+const MOVE_TO_NO_PROJECT_ID = `${MOVE_TO_PROJECT_ACTION_ID}:no-project` as const;
+
+/** The target a "Move to project" entry names, or null for any other action. */
+export function moveToProjectTargetOf(
+  actionId: ThreadMenuActionId,
+):
+  | { readonly kind: "project"; readonly projectId: string }
+  | { readonly kind: "no-project" }
+  | null {
+  if (actionId === MOVE_TO_NO_PROJECT_ID) return { kind: "no-project" };
+  if (actionId.startsWith(MOVE_TO_PROJECT_ENTRY_PREFIX)) {
+    return { kind: "project", projectId: actionId.slice(MOVE_TO_PROJECT_ENTRY_PREFIX.length) };
+  }
+  return null;
+}
 
 export interface ThreadMenuActionItem {
   readonly id: ThreadMenuActionId;
   readonly label: string;
   readonly destructive?: boolean;
+  /** Shown but not choosable; its label says why (DOM, native and phone presenters). */
+  readonly disabled?: boolean;
   /** Rendered as a submenu (DOM, native and phone presenters all support nesting). */
   readonly children?: ReadonlyArray<ThreadMenuActionItem>;
 }
@@ -65,6 +88,16 @@ export interface ThreadMenuInventoryInput {
     /** Label of the platform file manager ("Finder", "Explorer", "Files"). */
     readonly fileManagerLabel: string;
     readonly extensions: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+  } | null;
+  /**
+   * "Move to project": the node's other projects by name, whether "No project" is offered (not
+   * for a thread already in a chat), and why the thread cannot move now (null: it can).
+   * Absent where the presenter does not offer moves.
+   */
+  readonly moveToProject?: {
+    readonly targets: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+    readonly offerNoProject: boolean;
+    readonly blockedReason: string | null;
   } | null;
 }
 
@@ -106,6 +139,13 @@ export function buildThreadMenuInventory(input: ThreadMenuInventoryInput): Threa
     items.push({ id: "copy-path", label: "Copy Path" });
   }
   items.push({ id: "copy-thread-id", label: "Copy Thread ID" });
+  const move = input.moveToProject ?? null;
+  if (move)
+    items.push({
+      id: MOVE_TO_PROJECT_ACTION_ID,
+      label: "Move to project",
+      children: moveToProjectEntries(move),
+    });
   // A chat folder is not a Git workspace, and a deleted workspace is gone.
   if (
     input.workspace &&
@@ -135,6 +175,24 @@ export function buildThreadMenuInventory(input: ThreadMenuInventoryInput): Threa
     });
   }
   return items;
+}
+
+function moveToProjectEntries(
+  move: NonNullable<ThreadMenuInventoryInput["moveToProject"]>,
+): ThreadMenuActionItem[] {
+  if (move.blockedReason !== null) {
+    return [
+      { id: `${MOVE_TO_PROJECT_ACTION_ID}:blocked`, label: move.blockedReason, disabled: true },
+    ];
+  }
+  const entries: ThreadMenuActionItem[] = move.targets.map((target) => ({
+    id: `${MOVE_TO_PROJECT_ENTRY_PREFIX}${target.id}`,
+    label: target.name,
+  }));
+  if (move.offerNoProject) entries.push({ id: MOVE_TO_NO_PROJECT_ID, label: "No project" });
+  return entries.length > 0
+    ? entries
+    : [{ id: `${MOVE_TO_PROJECT_ACTION_ID}:none`, label: "No other projects", disabled: true }];
 }
 
 /** Flattened lookup of every actionable id in an inventory, including submenu entries. */

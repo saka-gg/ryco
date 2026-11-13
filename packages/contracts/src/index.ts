@@ -37,6 +37,7 @@ export * from "./atlassian.ts";
 export * from "./workItems.ts";
 export * from "./threadGoal.ts";
 export * from "./orchestration.ts";
+export * from "./threadMove.ts";
 export * from "./agentControl.ts";
 export * from "./agentControlMcp.ts";
 export * from "./editor.ts";

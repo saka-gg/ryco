@@ -16,6 +16,11 @@ import {
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
 import { latestCheckpointRevertActivity } from "@ryco/shared/threadActivity";
+import {
+  CHECKPOINT_BEFORE_MOVE_MESSAGE,
+  isCheckpointBeforeThreadMove,
+  threadMoveCheckpointFloor,
+} from "@ryco/shared/threadMove";
 import { hasQueuedTurnStart, type ThreadSettlementInput } from "@ryco/shared/threadSettlement";
 import { Effect, Option, Schema } from "effect";
 
@@ -270,6 +275,12 @@ export function requireThreadReadyForCheckpointRevert(input: {
   }
   if (isCheckpointRevertPending(thread.activities, input.nowMs)) {
     return fail("A revert is already in progress for this thread.");
+  }
+  // Checkpoints from before a project move live in the old checkout's repository.
+  if (
+    isCheckpointBeforeThreadMove(command.turnCount, threadMoveCheckpointFloor(thread.activities))
+  ) {
+    return fail(CHECKPOINT_BEFORE_MOVE_MESSAGE);
   }
   return Effect.void;
 }

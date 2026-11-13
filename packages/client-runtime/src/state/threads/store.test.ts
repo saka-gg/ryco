@@ -819,6 +819,37 @@ describe("incremental orchestration updates", () => {
     expect(localEnvironmentStateOf(next).bootstrapComplete).toBe(false);
   });
 
+  it("moves a thread to another project's list when it moves project", () => {
+    const state = makeState(
+      makeThread({ worktreePath: "/tmp/project-worktree", branch: "feature/x" }),
+    );
+    const moved = applyOrchestrationEvent(
+      state,
+      makeEvent("thread.project-moved", {
+        threadId: ThreadId.make("thread-1"),
+        projectId: ProjectId.make("project-2"),
+        previousProjectId: ProjectId.make("project-1"),
+        previousWorktreePath: "/tmp/project-worktree",
+        previousWorktreeId: null,
+        previousBranch: "feature/x",
+        movedAt: "2026-02-27T00:00:01.000Z",
+      }),
+      localEnvironmentId,
+    );
+    const environment = localEnvironmentStateOf(moved);
+    expect(environment.threadIdsByProjectId[ProjectId.make("project-1")]).toBeUndefined();
+    expect(environment.threadIdsByProjectId[ProjectId.make("project-2")]).toEqual([
+      ThreadId.make("thread-1"),
+    ]);
+    expect(threadsOf(moved)[0]).toMatchObject({
+      projectId: "project-2",
+      worktreePath: null,
+      branch: null,
+    });
+    // History stays with the thread.
+    expect(threadsOf(moved)[0]?.messages).toEqual(threadsOf(state)[0]?.messages);
+  });
+
   it("applies goal updates and clears to the thread shell", () => {
     const state = makeState(makeThread());
     const goal = {
