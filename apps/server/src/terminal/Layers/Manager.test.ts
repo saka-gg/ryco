@@ -2028,6 +2028,128 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
+  // Each row is what xterm.js, the terminal history is replayed into, does with the live output:
+  // a query it answered must not survive, and the text and controls it ran must.
+  it.effect.each([
+    // Tertiary Device Attributes (DA3) and the legacy DECID query.
+    { name: "DA3", data: "A\u001b[=cB", history: "AB" },
+    { name: "DA3 with a parameter", data: "A\u001b[=0cB", history: "AB" },
+    { name: "8-bit DA3", data: "A\u009b=cB", history: "AB" },
+    { name: "DECID", data: "A\u001bZB", history: "AB" },
+    { name: "DA with a sub-parameter", data: "A\u001b[:8;;cB", history: "AB" },
+    { name: "DECRQM with a sub-parameter", data: "A\u001b[?2026:1$pB", history: "AB" },
+    // BEL is payload inside a DCS; only ST ends it.
+    { name: "DECRQSS with BEL", data: "A\u001bP$qm\u0007hidden\u001b\\B", history: "AB" },
+    { name: "XTGETTCAP with BEL", data: "A\u001bP+q544e\u0007hidden\u001b\\B", history: "AB" },
+    { name: "8-bit DECRQSS with BEL", data: "A\u0090$qm\u0007hidden\u009cB", history: "AB" },
+    // Controls inside a CSI run and do not join its parameters; DEL is ignored.
+    { name: "NUL in DA", data: "A\u001b[0\u0000cB", history: "A\u0000B" },
+    { name: "DEL in DA", data: "A\u001b[0\u007fcB", history: "AB" },
+    { name: "NUL in DECRQM", data: "A\u001b[?2026\u0000$pB", history: "A\u0000B" },
+    { name: "CR in DSR", data: "AB\u001b[5\rnC", history: "AB\rC" },
+    { name: "DLE in DSR", data: "AB\u001b[5\u0010nC", history: "AB\u0010C" },
+    { name: "NUL in 8-bit DA", data: "A\u009b0\u0000cB", history: "A\u0000B" },
+    // CAN cancels a CSI, so its final byte is printed.
+    { name: "CAN in DSR", data: "A\u001b[6\u0018nB", history: "A\u001b[6\u0018nB" },
+    // ESC and C1 controls abandon a CSI and start the next sequence.
+    { name: "ESC in CSI", data: "A\u001b[5\u001b[6nC", history: "AC" },
+    { name: "C1 CSI in CSI", data: "A\u001b[1\u009b=cB", history: "AB" },
+    { name: "ESC after ESC", data: "A\u001b\u001b[6nB", history: "AB" },
+    { name: "C1 CSI after ESC", data: "A\u001b\u009b6nB", history: "AB" },
+    { name: "ESC in ESC (", data: "A\u001b(\u001b[6nB", history: "AB" },
+    // A non-ASCII code point ends a CSI unless the parser is already ignoring the sequence.
+    { name: "non-ASCII in DSR", data: "A\u001b[é6nB", history: "A6nB" },
+    { name: "non-ASCII in ignored CSI", data: "A\u001b[1?énB", history: "AB" },
+    // DECRQSS is answered whatever its parameters.
+    { name: "DECRQSS with parameters", data: "A\u001bP6;0$qm\u001b\\B", history: "AB" },
+    // Controls between ESC and the byte naming the sequence run first.
+    { name: "NUL in DECID", data: "A\u001b\u0000ZB", history: "A\u0000B" },
+    { name: "CR before CSI", data: "A\u001b\r[6nB", history: "A\rB" },
+    { name: "NUL before OSC", data: "A\u001b\u0000]11;?\u0007B", history: "A\u0000B" },
+    // Controls inside OSC data and a DCS header are ignored.
+    { name: "NUL in OSC 11", data: "A\u001b]11;\u0000?\u0007B", history: "AB" },
+    { name: "NUL in DECRQSS", data: "A\u001bP$\u0000qm\u001b\\B", history: "AB" },
+    // An ESC that does not start ST, CAN, SUB and C1 controls end a string sequence.
+    // A string ended by a stray ESC was dispatched, so it gets the ST it lacked. One cut off by
+    // a C1 control was dropped, so it gets CAN, which drops it on replay too.
+    {
+      name: "ESC after OSC title",
+      data: "A\u001b]0;x\u001b[6nB",
+      history: "A\u001b]0;x\u001b\\B",
+    },
+    {
+      name: "ESC after sixel",
+      data: "A\u001bPq#0~\u001b[6nB",
+      history: "A\u001bPq#0~\u001b\\B",
+    },
+    {
+      name: "ESC between OSC title and SGR",
+      data: "A\u001b]0;x\u001b[31mB",
+      history: "A\u001b]0;x\u001b\\\u001b[31mB",
+    },
+    { name: "C1 CSI in OSC title", data: "A\u001b]0;x\u009b6nB", history: "A\u001b]0;x\u0018B" },
+    { name: "CAN in OSC 11", data: "A\u001b]11;?\u0018B", history: "AB" },
+    { name: "SUB in DECRQSS", data: "A\u001bP$qm\u001aB", history: "AB" },
+    { name: "C1 CSI in APC", data: "A\u001b_x\u009b6nB", history: "A\u001b_x\u0018B" },
+    // xterm.js rejects this DCS at the non-ASCII code point and prints "("; CAN keeps that so.
+    {
+      name: "C1 CSI after a rejected DCS header",
+      data: "A\u0090é(\u009b6nB",
+      history: "A\u0090é(\u0018B",
+    },
+    // xterm.js ends an OSC at a decoded U+009C, so the text after it is shown live.
+    {
+      name: "U+009C in OSC 11",
+      data: "A\u001b]11;?\u009cSHOWN\u001b\\B",
+      history: "ASHOWN\u001b\\B",
+    },
+    {
+      name: "U+009C in DECRQSS",
+      data: "A\u001bP$qm\u009cSHOWN\u001b\\B",
+      history: "ASHOWN\u001b\\B",
+    },
+  ])("strips replayable queries the way xterm.js parses them ($name)", ({ data, history }) =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.emitData(data);
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      assert.equal(reopened.history, history);
+    }),
+  );
+
+  it.effect("preserves styles, cursor moves, OSC titles and links, and DCS payloads", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      const output = [
+        "\u001b[1;32mok\u001b[0m\u001b[2;5H\u001b[3A\u001b[K",
+        "\u001b7\u001b8\u001b(B\u001b=\u001b>\u0007",
+        "\u001b]0;title\u0007\u001b]2;title\u001b\\\u009d0;title\u0007",
+        "\u001b]8;;https://example.com\u001b\\link\u001b]8;;\u001b\\",
+        "\u001b]52;c;aGk=\u0007",
+        "\u001bPq#0;2;0;0;0#0~\u0007~\u001b\\\u0090q#0~\u009c",
+        "\u001b_payload\u0007more\u001b\\\u001b^pm\u001b\\",
+        "done\n",
+      ].join("");
+      process.emitData(output);
+      yield* manager.close({ threadId: "thread-1" });
+
+      const reopened = yield* manager.open(openInput());
+      assert.equal(reopened.history, output);
+    }),
+  );
+
   it.effect("strips CSI and DCS query traffic split across output chunks", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

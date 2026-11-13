@@ -820,7 +820,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // setting, its capability and sharing entry, the `turn.prompt-suggestion` runtime event and
     // the ingestion case and latest-state group that project it. The Claude and Codex code stays
     // in the driver chunks, with `@ryco/shared/promptSuggestion` in a chunk of its own.
-    expect(bytes).toBeLessThan(7_316_000);
+    // 7.333 MB on 2026-11-13 for five changes that merged together (measured 7.332355 MB with
+    // all of them): the terminal history sanitizer's xterm.js rules (+1.5 KB), the long-thread
+    // reads by activity kind (+1.2 KB), Statistics for the whole machine (+2.6 KB) and "Move to
+    // project" (+12.7 KB). The last two list their shares above.
+    expect(bytes).toBeLessThan(7_333_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
