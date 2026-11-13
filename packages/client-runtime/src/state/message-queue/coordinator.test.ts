@@ -734,3 +734,50 @@ describe("message queue drain coordinator usage limits", () => {
     expect(f.sent).toEqual(["q-1"]);
   });
 });
+
+describe("entries sent while their attachments uploaded", () => {
+  it("sends a held entry after its last upload, and the entry behind it never first", async () => {
+    const f = setup();
+    f.queue.getState().enqueue(KEY, {
+      ...entry("held"),
+      uploadHold: { awaiting: ["file-1", "file-2"], sentAs: "send" },
+    });
+    f.queue.getState().enqueue(KEY, entry("later"));
+    await flush();
+    expect(f.sent).toEqual([]);
+
+    f.queue.getState().update(KEY, "held", (current) => ({
+      ...current,
+      uploadHold: { awaiting: ["file-2"], sentAs: "send" },
+    }));
+    await flush();
+    expect(f.sent).toEqual([]);
+
+    f.queue.getState().update(KEY, "held", (current) => ({
+      ...current,
+      uploadHold: { awaiting: [], sentAs: "send" },
+    }));
+    await flush();
+    expect(f.sent).toEqual(["held"]);
+    // Sent once: the next head waits for the held message's turn to start.
+    await flush();
+    expect(f.sent).toEqual(["held"]);
+  });
+
+  it("refuses to send or steer an entry still waiting for uploads", () => {
+    const f = setup();
+    f.queue.getState().enqueue(KEY, {
+      ...entry("held"),
+      uploadHold: { awaiting: ["file-1"], sentAs: "steer" },
+    });
+    expect(f.queue.getState().beginSend(KEY, "held")).toBe(false);
+    expect(
+      f.queue.getState().beginSteer(KEY, "held", {
+        commandId: "cmd",
+        expectedTurnId: TurnId.make("turn-1"),
+        startedAt: "2026-10-01T10:00:01.000Z",
+        explicit: false,
+      }),
+    ).toBe(false);
+  });
+});

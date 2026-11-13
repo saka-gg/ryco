@@ -7,6 +7,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { isHostedHubMode } from "./env";
+import { readHeldSendAttachmentIds } from "./heldSendRecords";
 import { createMemoryStorage, createWriteScheduler, type StateStorage } from "./lib/storage";
 import {
   type ComposerAttachmentBytesStore,
@@ -65,8 +66,12 @@ export const composerDraftStorage: ComposerDraftStorage = {
       }
     : {}),
   releaseAttachments: (attachmentIds) => {
-    for (const id of attachmentIds) storedAttachmentIds.delete(id);
-    void composerAttachmentBytes?.deleteMany(attachmentIds).catch(() => undefined);
+    // A message sent while its uploads ran still needs its images' bytes after a reload.
+    const held = new Set(readHeldSendAttachmentIds());
+    const released = attachmentIds.filter((id) => !held.has(id));
+    if (released.length === 0) return;
+    for (const id of released) storedAttachmentIds.delete(id);
+    void composerAttachmentBytes?.deleteMany(released).catch(() => undefined);
   },
   onWriteError: (key, error) => {
     console.warn("A composer draft could not be saved.", { key, error });
@@ -387,7 +392,7 @@ export async function collectComposerAttachmentBytes(input: {
   readonly now?: () => number;
 }): Promise<number> {
   if (input.bytes === null) return 0;
-  const keep = new Set(storedAttachmentIds);
+  const keep = new Set([...storedAttachmentIds, ...readHeldSendAttachmentIds()]);
   for (const draft of Object.values(input.readDrafts())) {
     for (const attachment of draft.persistedAttachments) keep.add(attachment.id);
     for (const image of draft.images) keep.add(image.id);

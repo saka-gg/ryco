@@ -1,3 +1,4 @@
+import type { QueuedMessageUploadHold } from "./uploadHold.ts";
 import type {
   AgentTokenMode,
   CommandId,
@@ -29,6 +30,8 @@ export interface QueuedMessage<Composer = unknown, Settings = unknown> {
   readonly deliveryStatus?: "sending" | "failed";
   readonly composer: Composer;
   readonly settings: Settings;
+  /** Sent while attachments were still uploading: it waits for them (`uploadHold.ts`). */
+  readonly uploadHold?: QueuedMessageUploadHold | undefined;
 }
 
 /**

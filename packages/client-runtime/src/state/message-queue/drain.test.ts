@@ -677,3 +677,38 @@ describe("restart holds", () => {
     expect(state.hold?.causeKeys).toEqual(["interrupt:turn-1"]);
   });
 });
+
+describe("a head sent while its attachments uploaded", () => {
+  const held = { id: "q-1", uploadHold: { awaiting: ["file-1"], sentAs: "send" as const } };
+
+  it("waits for its uploads on an idle thread and goes out once they finished", () => {
+    expect(resolveQueueDrainStep(input({ queue: [held, { id: "q-2" }] }))).toEqual({
+      kind: "wait",
+      reason: "uploads",
+    });
+    expect(
+      resolveQueueDrainStep(
+        input({ queue: [{ ...held, uploadHold: { ...held.uploadHold, awaiting: [] } }] }),
+      ),
+    ).toEqual({ kind: "send", messageId: "q-1", sender: "background" });
+  });
+
+  it("waits as a draft's first message", () => {
+    expect(
+      resolveQueueDrainStep(
+        input({ view: null, draft: true, sender: "foreground", queue: [held] }),
+      ),
+    ).toEqual({ kind: "wait", reason: "uploads" });
+  });
+
+  it("does not move to the node's queue before its uploads finished", () => {
+    const step = resolveQueueDrainStep(
+      input({
+        view: viewOf(RUNNING_THREAD),
+        environment: { shellLive: true, mutationReady: true, serverQueue: true },
+        queue: [{ ...held, uploadHold: { ...held.uploadHold, sentAs: "queue" } }, { id: "q-2" }],
+      }),
+    );
+    expect(step).toEqual({ kind: "wait", reason: "uploads" });
+  });
+});

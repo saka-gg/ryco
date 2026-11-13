@@ -80,11 +80,12 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { webAttachmentCodec } from "../../platform/attachmentCodec";
 import {
-  deriveComposerFileUploadSendBlock,
+  deriveComposerFileUploadSendState,
   releaseUnusedComposerFileUploads,
   useComposerFileUploadRecords,
 } from "../../composerFileUpload";
 import { useComposerImagePreparationSendBlock } from "../../composerImagePreparation";
+import { collectQueuedAttachmentIds } from "../../heldSends";
 import {
   deriveComposerFooterActionLayoutKey,
   deriveComposerSendState,
@@ -365,6 +366,11 @@ export interface ChatComposerProps {
    */
   sendsQueueUntilReady?: string | null;
   /**
+   * The send in progress cannot wait for running uploads (saving the node's queued message):
+   * Send stays held back until they finished, as it always was.
+   */
+  sendCannotWaitForUploads?: boolean;
+  /**
    * Why actions that must reach the node now (stop, answers, plan follow-ups,
    * draft-local controls gated like them) are unavailable, worded for this
    * environment; `null` when they are available.
@@ -608,6 +614,7 @@ export const ChatComposer = memo(
       isConnecting,
       isSendBusy,
       sendsQueueUntilReady = null,
+      sendCannotWaitForUploads = false,
       mutationUnavailableReason = null,
       isPreparingWorktree,
       isWorktreeSetupRunning = false,
@@ -1198,11 +1205,23 @@ export const ChatComposer = memo(
     // useComposerFileUploadRecords re-renders the composer as uploads progress,
     // and passing that snapshot makes it a visible input of the compiled
     // memoization. Token expiry is re-checked with a fresh clock at send time.
-    const composerFileUploadSendBlock = deriveComposerFileUploadSendBlock({
+    const composerFileUploadSendState = deriveComposerFileUploadSendState({
       attachments: composerImages,
       nowMs: Date.now(),
       records: fileUploadRecords,
     });
+    // A plain send (a turn, a follow-up, a steer) is accepted while uploads run and goes out
+    // once they finished. Answers, plan refinements and edits of the node's queued message
+    // cannot wait, so they still hold Send back.
+    const sendWaitsForUploads =
+      composerFileUploadSendState.kind === "uploading" &&
+      !sendCannotWaitForUploads &&
+      pendingUserInputs.length === 0 &&
+      !(showPlanFollowUpPrompt && activeProposedPlan !== null);
+    const composerFileUploadSendBlock =
+      composerFileUploadSendState.kind === "ready" || sendWaitsForUploads
+        ? null
+        : composerFileUploadSendState.reason;
     // An oversized image being shrunk is not in the draft yet: sent now, the message would go
     // without it and the image would land in the next draft.
     const composerImagePreparationSendBlock =
@@ -1244,7 +1263,8 @@ export const ChatComposer = memo(
       );
       // A mounted composer may change threads while the previous draft keeps
       // uploading. Its records still belong to that draft, even while hidden.
-      const retainedIds = new Set([...liveIds, ...stashedIds]);
+      // A message sent while its uploads ran waits in its thread's queue with them.
+      const retainedIds = new Set([...liveIds, ...stashedIds, ...collectQueuedAttachmentIds()]);
       for (const draft of Object.values(useComposerDraftStore.getState().draftsByThreadKey)) {
         for (const image of draft.images) retainedIds.add(image.id);
       }
@@ -2303,6 +2323,14 @@ export const ChatComposer = memo(
     const runningFollowUpPlaceholder = runningFollowUp?.placeholder ?? null;
     // Sending now declines the waiting approvals and steers the message into the turn.
     const sendRedirectsApproval = runningFollowUp?.redirectsApproval === true;
+    // Declining cannot be undone, so a redirect waits for its uploads before it is offered.
+    const redirectWaitsForUploads =
+      sendRedirectsApproval && composerFileUploadSendState.kind === "uploading";
+    const primarySendBlockedReason = redirectWaitsForUploads
+      ? composerFileUploadSendState.reason
+      : composerSendBlockedReason;
+    const primaryCaption =
+      sendsQueueUntilReady ?? (sendWaitsForUploads ? "Sends when the uploads finish" : null);
 
     // ------------------------------------------------------------------
     // Callbacks: images / file attachments / drag / paste
@@ -3562,10 +3590,10 @@ export const ChatComposer = memo(
                 isConnecting={isConnecting}
                 isEnvironmentUnavailable={environmentUnavailable !== null}
                 isPreparingWorktree={isPreparingWorktree}
-                hasSendableContent={composerHasSendableContent}
+                hasSendableContent={composerHasSendableContent && !redirectWaitsForUploads}
                 sendRedirectsApproval={sendRedirectsApproval}
-                sendDisabledReason={composerSendBlockedReason}
-                sendsQueueUntilReady={sendsQueueUntilReady}
+                sendDisabledReason={primarySendBlockedReason}
+                sendsQueueUntilReady={primaryCaption}
                 mutationUnavailableReason={mutationUnavailableReason}
                 onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                 onInterrupt={handleInterruptPrimaryAction}

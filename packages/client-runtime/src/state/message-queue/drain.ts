@@ -14,6 +14,7 @@ import {
   type QueuedMessageSteerRejection,
 } from "./logic.ts";
 import type { QueueThreadView } from "./threadView.ts";
+import { awaitsUploads, type UploadHeldEntry } from "./uploadHold.ts";
 
 export type QueueDrainWaitReason =
   | "environment"
@@ -27,7 +28,9 @@ export type QueueDrainWaitReason =
   | "in-flight"
   | "steering"
   /** The node is about to send its own queue's head, which goes first. */
-  | "server-queue";
+  | "server-queue"
+  /** The head was sent while its attachments uploaded; it goes out once they finished. */
+  | "uploads";
 
 /**
  * A device hold recorded because moving an entry to the node failed. It waits for Resume
@@ -41,10 +44,12 @@ export function queueMigrationFailedCauseKey(messageId: string): string {
 
 export interface QueueDrainInput {
   readonly nowIso: string;
-  readonly queue: ReadonlyArray<{
-    readonly id: string;
-    readonly deliveryStatus?: "sending" | "failed";
-  }>;
+  readonly queue: ReadonlyArray<
+    {
+      readonly id: string;
+      readonly deliveryStatus?: "sending" | "failed";
+    } & UploadHeldEntry
+  >;
   /** Live steer attempts by message id. An entry with one is never sent as a turn. */
   readonly steerAttempts: Readonly<Record<string, QueuedMessageSteerAttempt>>;
   readonly hold: QueueHold | null;
@@ -117,6 +122,7 @@ function headWaitReason(
   if (head.deliveryStatus === "failed") return "failed-head";
   if (head.deliveryStatus === "sending") return "in-flight";
   if (steerAttempts[head.id] !== undefined) return "steering";
+  if (awaitsUploads(head)) return "uploads";
   return null;
 }
 
@@ -238,6 +244,8 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     if (!environment.mutationReady) return wait("environment");
     if (queue.some((entry) => entry.deliveryStatus === "sending")) return wait("in-flight");
     if (Object.keys(input.steerAttempts).length > 0) return wait("steering");
+    // Its add needs the upload tokens; the entries behind it keep their place.
+    if (awaitsUploads(head)) return wait("uploads");
     return MIGRATE;
   }
 

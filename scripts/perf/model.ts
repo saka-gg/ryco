@@ -497,8 +497,11 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * route's own importers of it (about 9.8 KiB with its Base UI parts) count
  * here; the capsule toasts and the composer dock are in that figure. A first
  * load of boot, shell and a thread is about the same size as before.
+ * 788 KiB on 2026-11-13 (route 782.7 → 787.1 KiB): Send while attachments
+ * upload (`heldSends`, its reload recovery, the pending message's status line
+ * and the composer's send path; +4.4 KiB). The watcher stays out of the shell.
  */
-const CHAT_ROUTE_GZIP_BUDGET = 783 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 788 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
