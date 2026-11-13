@@ -10,6 +10,7 @@ export * from "./threadInbox.ts";
 export * from "./threadSort.ts";
 export * from "./threadLineage.ts";
 export * from "./threadFork.ts";
+export * from "./threadProjectMove.ts";
 export * from "./threadForkAttempt.ts";
 export * from "./threadForkAttemptController.ts";
 export * from "./checkpointSummary.ts";

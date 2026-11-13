@@ -66,6 +66,8 @@ export function useSidebarThreadActions(params: {
   openProjectSettings?: (projectRef: ScopedProjectRef) => void;
   /** See `useThreadMenuActions`: chat rows get folder actions and chat menu extensions. */
   chat?: Parameters<typeof useThreadMenuActions>[0]["chat"];
+  /** See `useThreadMenuActions`: the sidebars offer "Move to project", the phone tier does not. */
+  includeMoveToProject?: boolean;
 }) {
   const {
     router,
@@ -327,6 +329,7 @@ export function useSidebarThreadActions(params: {
         id: item.id,
         label: item.label,
         ...(item.destructive ? { destructive: true } : {}),
+        ...(item.disabled ? { disabled: true } : {}),
         ...(item.children ? { children: item.children.map(toNativeItem) } : {}),
       });
       const clicked = await api.contextMenu.show(items.map(toNativeItem), position);

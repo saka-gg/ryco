@@ -10,6 +10,7 @@ import {
   isCarriedForkSourceThreadId,
 } from "@ryco/shared/threadFork";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
+import { threadProjectMoveBlocker, threadProjectMoveBlockerMessage } from "@ryco/shared/threadMove";
 import type {
   AgentTokenMode,
   CommandId,
@@ -37,6 +38,8 @@ import {
   EventId,
   NonNegativeInt,
   THREAD_FORKED_ACTIVITY_KIND,
+  THREAD_MOVED_ACTIVITY_KIND,
+  type ThreadMovedActivityPayload,
 } from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { threadSettlementInput } from "./threadSettlementInput.ts";
@@ -138,6 +141,7 @@ import {
 } from "./threadLineage.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
+import { latestCheckpointTurnCount, threadMoveIdleInput } from "./threadProjectMove.ts";
 
 const nowIso = () => new Date().toISOString();
 const defaultMetadata: Omit<OrchestrationEvent, "sequence" | "type" | "payload"> = {
@@ -634,7 +638,7 @@ const commandWatchEvent = (
 const watchesEnded = Effect.fnUntraced(function* (
   command: OrchestrationCommand,
   thread: OrchestrationReadModel["threads"][number],
-  reason: "settled" | "archived" | "trashed" | "stopped",
+  reason: "settled" | "archived" | "trashed" | "stopped" | "scope-changed",
   occurredAt: string,
 ) {
   return [
@@ -1820,6 +1824,118 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           updatedAt: occurredAt,
         },
       };
+    }
+
+    case "thread.project.move": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const refuse = (detail: string) =>
+        new OrchestrationCommandInvariantError({ commandType: command.type, detail });
+      // A stale or replayed client sees another project than the thread is in now: never move
+      // it a second time, or back.
+      if (thread.projectId !== command.expectedProjectId) {
+        return yield* refuse(
+          "This thread was moved to another project meanwhile. Check where it is now, then try again.",
+        );
+      }
+      if (command.projectId === thread.projectId) {
+        return yield* refuse("The thread is already in this project.");
+      }
+      const occurredAt = nowIso();
+      const blocker = threadProjectMoveBlocker({
+        archived: thread.archivedAt !== null,
+        deleted: !isThreadLive(thread),
+        ...threadMoveIdleInput(readModel, thread, occurredAt),
+        // Liveness is not in the read model; clients refuse while background work runs.
+        backgroundWorking: false,
+      });
+      if (blocker !== null) {
+        return yield* refuse(`${threadProjectMoveBlockerMessage(blocker)}, then move the thread.`);
+      }
+      const source = yield* requireProject({ readModel, command, projectId: thread.projectId });
+      const target = yield* requireActiveProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      // A chat holds one conversation in its own folder: a move into "No project" goes to a new,
+      // empty chat the server created for it (`createChatProject`).
+      if (
+        isChatProject(target) &&
+        listThreadsByProjectId(readModel, target.id).some((other) => other.id !== thread.id)
+      ) {
+        return yield* refuse(
+          "A chat without a project holds one conversation. Move it to a new chat.",
+        );
+      }
+      const movedEvent: PlannedOrchestrationEvent = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.project-moved",
+        payload: {
+          threadId: command.threadId,
+          projectId: target.id,
+          previousProjectId: source.id,
+          previousWorktreePath: thread.worktreePath,
+          previousWorktreeId: thread.worktreeId ?? null,
+          previousBranch: thread.branch,
+          movedAt: occurredAt,
+        },
+      };
+      const activityEvent: PlannedOrchestrationEvent = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        causationEventId: movedEvent.eventId,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.make(`thread-moved:${command.commandId}`),
+            tone: "info",
+            kind: THREAD_MOVED_ACTIVITY_KIND,
+            summary: `Moved to ${target.title}`,
+            payload: {
+              schemaVersion: 1,
+              fromProjectId: source.id,
+              fromProjectTitle: source.title,
+              toProjectId: target.id,
+              toProjectTitle: target.title,
+              fromWorktreePath: thread.worktreePath,
+              checkpointTurnCount: latestCheckpointTurnCount(thread),
+            } satisfies ThreadMovedActivityPayload,
+            turnId: null,
+            createdAt: occurredAt,
+          },
+        },
+      };
+      // The idle session ran in the old directory; the next turn starts one in the new one.
+      const sessionStopEvent: PlannedOrchestrationEvent | null =
+        thread.session !== null && thread.session.status !== "stopped"
+          ? {
+              ...withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt,
+                commandId: command.commandId,
+              }),
+              type: "thread.session-stop-requested",
+              payload: { threadId: command.threadId, createdAt: occurredAt },
+            }
+          : null;
+      // Watches read the old project's pull request and run in its checkout.
+      return withWatchesEnded(
+        sessionStopEvent === null
+          ? [movedEvent, activityEvent]
+          : [movedEvent, activityEvent, sessionStopEvent],
+        yield* watchesEnded(command, thread, "scope-changed", occurredAt),
+      );
     }
 
     case "thread.runtime-mode.set": {

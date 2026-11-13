@@ -3156,6 +3156,72 @@ describe("ProviderCommandReactor", () => {
       expect((await threadOf(harness))?.modelSelection).toEqual(CLAUDE);
     });
 
+    // "Move to project": the thread now works in another project's shared checkout.
+    const moveToOtherProject = async (harness: Harness, workspaceRoot: string) => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-create-other-project"),
+          projectId: asProjectId("project-2"),
+          title: "Other project",
+          workspaceRoot,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.project.move",
+          commandId: CommandId.make("cmd-move-to-project"),
+          threadId: T,
+          expectedProjectId: asProjectId("project-1"),
+          projectId: asProjectId("project-2"),
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    };
+
+    it("starts the first turn after a project move in the new project with the conversation handed off", async () => {
+      const harness = await createHarness({ threadModelSelection: CLAUDE });
+      await sendMessage(harness, "in-old-project");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await stopRuntime(harness, { completedTurn: true });
+
+      await moveToOtherProject(harness, "/tmp/other-project");
+      expect((await threadOf(harness))?.projectId).toBe("project-2");
+      await sendMessage(harness, "in-new-project");
+      await waitFor(() => harness.processContextHandoff.mock.calls.length === 1);
+      await harness.drain();
+
+      // The old native conversation is not resumed: a fresh session receives the conversation.
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      const [event] = harness.processContextHandoff.mock.calls[0]!;
+      expect(event.payload.contextHandoff?.targetMessageId).toBe("in-new-project");
+      const handoffs = await handoffActivities(harness);
+      expect(handoffs.map((handoff) => handoff.payload?.reason)).toEqual(["cwd-relocation"]);
+      expect(await failuresOf(harness)).toEqual([]);
+    });
+
+    it("resumes in the new project's checkout when the provider keeps conversations across directories", async () => {
+      const harness = await createHarness({ resumeSurvivesCwdChange: true });
+      await sendMessage(harness, "in-old-project");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await stopRuntime(harness, {
+        completedTurn: true,
+        selection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      });
+
+      await moveToOtherProject(harness, "/tmp/other-project");
+      await sendMessage(harness, "in-new-project");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+
+      expect(harness.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
+        cwd: "/tmp/other-project",
+      });
+      expect(harness.processContextHandoff).not.toHaveBeenCalled();
+    });
+
     it("detects a move from the persisted binding while the session is stopped", async () => {
       const harness = await createHarness({ threadModelSelection: CLAUDE });
       await sendMessage(harness, "in-chat-folder");

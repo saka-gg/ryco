@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildThreadMenuInventory,
+  moveToProjectTargetOf,
   threadMenuActionIds,
   type ThreadMenuInventoryInput,
 } from "./threadMenuInventory";
@@ -139,5 +140,72 @@ describe("thread menu inventory", () => {
     expect(ids).toContain("chat-copy-folder-path");
     expect(ids).not.toContain("chat-reveal-folder");
     expect(ids).not.toContain("chat-open-folder-in-editor");
+  });
+
+  describe("Move to project", () => {
+    const move = (moveToProject: ThreadMenuInventoryInput["moveToProject"]) =>
+      buildThreadMenuInventory({
+        ...base,
+        ...(moveToProject === undefined ? {} : { moveToProject }),
+      }).find((item) => item.id === "move-to-project");
+
+    it("lists the node's other projects, then No project, in a submenu", () => {
+      const item = move({
+        targets: [
+          { id: "project-b", name: "Beta" },
+          { id: "project-c", name: "Gamma" },
+        ],
+        offerNoProject: true,
+        blockedReason: null,
+      });
+      expect(item?.label).toBe("Move to project");
+      expect(item?.children?.map((entry) => [entry.label, entry.disabled ?? false])).toEqual([
+        ["Beta", false],
+        ["Gamma", false],
+        ["No project", false],
+      ]);
+      expect(item?.children?.map((entry) => moveToProjectTargetOf(entry.id))).toEqual([
+        { kind: "project", projectId: "project-b" },
+        { kind: "project", projectId: "project-c" },
+        { kind: "no-project" },
+      ]);
+      // It sits with the thread's own actions, before the lifecycle ones.
+      const ids = buildThreadMenuInventory({
+        ...base,
+        moveToProject: { targets: [], offerNoProject: true, blockedReason: null },
+      }).map((entry) => entry.id);
+      expect(ids.indexOf("move-to-project")).toBe(ids.indexOf("copy-thread-id") + 1);
+    });
+
+    it("says why the thread cannot move now, as a disabled entry that moves nothing", () => {
+      const item = move({
+        targets: [{ id: "project-b", name: "Beta" }],
+        offerNoProject: true,
+        blockedReason: "Wait for the turn to finish, or stop it",
+      });
+      expect(item?.children).toEqual([
+        {
+          id: "move-to-project:blocked",
+          label: "Wait for the turn to finish, or stop it",
+          disabled: true,
+        },
+      ]);
+      expect(moveToProjectTargetOf("move-to-project:blocked")).toBeNull();
+    });
+
+    it("says when there is nowhere to go, and is absent where moves are not offered", () => {
+      expect(move({ targets: [], offerNoProject: false, blockedReason: null })?.children).toEqual([
+        { id: "move-to-project:none", label: "No other projects", disabled: true },
+      ]);
+      expect(move(null)).toBeUndefined();
+      expect(move(undefined)).toBeUndefined();
+      expect(
+        buildThreadMenuInventory({
+          ...base,
+          isDraft: true,
+          moveToProject: { targets: [], offerNoProject: true, blockedReason: null },
+        }).some((entry) => entry.id === "move-to-project"),
+      ).toBe(false);
+    });
   });
 });

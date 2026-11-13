@@ -5,6 +5,7 @@ import {
   type OrchestrationThreadActivity,
 } from "@ryco/contracts/orchestration";
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
+import { THREAD_MOVED_ACTIVITY_KIND } from "@ryco/contracts/thread-move";
 import {
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
@@ -86,6 +87,8 @@ export function isThreadActivityMilestone(
     isContextCompactionActivity(activity) ||
     isTerminalContextHandoffActivity(activity) ||
     isThreadForkedActivity(activity) ||
+    // A move's record marks where the thread's usable checkpoints start, so it is never dropped.
+    activity.kind === THREAD_MOVED_ACTIVITY_KIND ||
     // Rare, small and long-lived (a request waits up to a day): the cap never drops a pending
     // secret request's card or the answer that closed it.
     activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||

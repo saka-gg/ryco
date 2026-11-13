@@ -925,6 +925,15 @@ describe("Inbox sidebar rendering and settlement", () => {
             listThreadMenuActions: () => [
               { id: "pin", label: "Pin thread" },
               { id: "rename", label: "Rename thread" },
+              {
+                id: "move-to-project",
+                label: "Move to project",
+                children: [
+                  { id: "move-to-project:project:project-beta", label: "Beta" },
+                  { id: "move-to-project:no-project", label: "No project" },
+                  { id: "move-to-project:none", label: "No other projects", disabled: true },
+                ],
+              },
               { id: "delete", label: "Delete…", destructive: true },
             ],
             performThreadMenuAction,
@@ -1033,6 +1042,20 @@ describe("Inbox sidebar rendering and settlement", () => {
           "pin",
         );
         expect(onOpenThread).not.toHaveBeenCalled();
+        await vi.waitFor(() =>
+          expect(document.querySelector('[data-slot="context-menu-popup"]')).toBeNull(),
+        );
+        // "Move to project": a submenu of the node's projects; an entry that says why not is inert.
+        await row.click({ button: "right" });
+        await page.getByRole("menuitem", { name: "Move to project", exact: true }).hover();
+        await expect
+          .element(page.getByRole("menuitem", { name: "No other projects", exact: true }))
+          .toHaveAttribute("aria-disabled", "true");
+        await page.getByRole("menuitem", { name: "Beta", exact: true }).click();
+        expect(performThreadMenuAction).toHaveBeenLastCalledWith(
+          { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID },
+          "move-to-project:project:project-beta",
+        );
         await vi.waitFor(() =>
           expect(document.querySelector('[data-slot="context-menu-popup"]')).toBeNull(),
         );

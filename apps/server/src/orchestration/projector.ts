@@ -56,6 +56,7 @@ import {
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
+  ThreadProjectMovedPayload,
   ThreadRuntimeModeSetPayload,
   ThreadHiddenPayload,
   ThreadSettleDeferredPayload,
@@ -726,6 +727,22 @@ export function projectEvent(
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
             updatedAt: payload.updatedAt,
           }),
+        })),
+      );
+
+    case "thread.project-moved":
+      return decodeForEvent(ThreadProjectMovedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          // The target project's shared checkout; the old worktree stays with the old project.
+          threads: updateThreadInArray(nextBase.threads, payload.threadId, (thread) => ({
+            ...thread,
+            projectId: payload.projectId,
+            worktreePath: null,
+            worktreeId: null,
+            branch: null,
+            updatedAt: payload.movedAt,
+          })),
         })),
       );
 

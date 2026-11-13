@@ -1,4 +1,5 @@
 import type { TurnId } from "@ryco/contracts";
+import { isCheckpointBeforeThreadMove, isTurnDiffBeforeThreadMove } from "@ryco/shared/threadMove";
 
 import type { TurnDiffSummary } from "./types.ts";
 
@@ -26,6 +27,23 @@ export function isMaterializableCheckpointSummary(
 }
 
 /**
+ * Whether a fork's new worktree can start from this turn's checkpoint: a materializable one
+ * captured after the thread's last project move (`threadMoveCheckpointFloor`). Earlier snapshots
+ * belong to the old checkout.
+ */
+export function isForkableCheckpointSummary(
+  summary:
+    | Pick<TurnDiffSummary, "status" | "checkpointRef" | "checkpointTurnCount">
+    | null
+    | undefined,
+  checkpointFloor: number | null,
+): boolean {
+  if (!isMaterializableCheckpointSummary(summary)) return false;
+  const turnCount = summary?.checkpointTurnCount;
+  return turnCount === undefined || !isTurnDiffBeforeThreadMove(turnCount, checkpointFloor);
+}
+
+/**
  * Rollback target for each turn whose edits can still be undone, keyed by turn.
  *
  * A turn is undoable only when its checkpoint is real and reachable — the
@@ -39,6 +57,8 @@ export function deriveUndoTurnCountByTurnId(input: {
   readonly inferredCheckpointTurnCountByTurnId: Readonly<
     Partial<Record<TurnDiffSummary["turnId"], number>>
   >;
+  /** `threadMoveCheckpointFloor`: turns from before a project move are never undone. */
+  readonly checkpointFloor?: number | null | undefined;
 }): Map<TurnId, number> {
   const byTurnId = new Map<TurnId, number>();
   for (const summary of input.turnDiffSummaries) {
@@ -46,7 +66,9 @@ export function deriveUndoTurnCountByTurnId(input: {
     const turnCount =
       summary.checkpointTurnCount ?? input.inferredCheckpointTurnCountByTurnId[summary.turnId];
     if (typeof turnCount === "number") {
-      byTurnId.set(summary.turnId, Math.max(0, turnCount - 1));
+      const target = Math.max(0, turnCount - 1);
+      if (isCheckpointBeforeThreadMove(target, input.checkpointFloor ?? null)) continue;
+      byTurnId.set(summary.turnId, target);
     }
   }
   return byTurnId;

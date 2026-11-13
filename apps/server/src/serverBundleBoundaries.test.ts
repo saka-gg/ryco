@@ -824,6 +824,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // the request's scope, the session-file status and bucket source schemas, the setting and
     // its capability, and the RPC's machine branch. The session-file reader, the attribution
     // and its database queries load through import().
+    // 7.328 MB on 2026-11-13 with "Move to project" (+12.7 KB, measured 7.327115 MB): the
+    // decider's move case and the move rule it shares with clients (4.5 KB), the move command,
+    // event and provenance activity schemas, the projections that apply the event, the revert
+    // guard for checkpoints from before a move and the dispatch step's automation, terminal and
+    // new-chat checks (1.8 KB). Loading the dispatch step through import() measured 0.6 KB more.
     // 7.333 MB on 2026-11-13 for five changes that merged together (measured 7.332355 MB with
     // all of them): the terminal history sanitizer's xterm.js rules (+1.5 KB), the long-thread
     // reads by activity kind (+1.2 KB), Statistics for the whole machine (+2.6 KB) and "Move to

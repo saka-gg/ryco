@@ -3101,6 +3101,17 @@ function applyEnvironmentOrchestrationEvent(
         updatedAt: event.payload.updatedAt,
       }));
 
+    case "thread.project-moved":
+      // The shell stream's next upsert carries the same; the thread index follows `projectId`.
+      return updateThreadState(state, event.payload.threadId, (thread) => ({
+        ...thread,
+        projectId: event.payload.projectId,
+        worktreePath: null,
+        worktreeId: null,
+        branch: null,
+        updatedAt: event.payload.movedAt,
+      }));
+
     case "thread.runtime-mode-set":
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,

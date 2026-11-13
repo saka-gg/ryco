@@ -128,6 +128,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.unarchive":
     case "thread.snooze":
     case "thread.unsnooze":
+    case "thread.project.move":
     case "thread.hide":
     case "thread.unhide":
     case "thread.settle-when-idle":

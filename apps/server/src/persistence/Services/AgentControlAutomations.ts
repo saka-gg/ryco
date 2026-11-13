@@ -8,6 +8,7 @@ import type {
   IsoDateTime,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
 } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect, Option } from "effect";
@@ -79,6 +80,14 @@ export interface AgentControlAutomationRepositoryShape {
     readonly projectId: ProjectId;
     readonly limit: number;
   }) => Effect.Effect<ReadonlyArray<AgentControlAutomation>, AgentControlAutomationRepositoryError>;
+  /**
+   * Titles of the active automations (enabled, not cancelled, still due to run) whose runs
+   * continue this thread (`execution.target.threadId`). A thread such a schedule depends on
+   * does not move to another project (`thread.project.move`).
+   */
+  readonly listActiveTitlesTargetingThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<string>, AgentControlAutomationRepositoryError>;
   readonly countActiveAutomations: (
     projectId: ProjectId,
   ) => Effect.Effect<number, AgentControlAutomationRepositoryError>;
