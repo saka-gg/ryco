@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   aggregateByModel,
   aggregateCost,
+  aggregateTokenCostByOrigin,
+  aggregateTokenCostRows,
   buildTimeSeries,
   filterBuckets,
   previousTotals,
@@ -242,11 +244,107 @@ describe("node-priced costs", () => {
         makeBucket("2026-06-26", { model: "b", inputTokens: 10, totalTokens: 10 }),
         makeBucket("2026-06-27", { model: "c" }),
       ]),
-    ).toEqual({ usd: 1.5, hasUnpriced: true, priced: true });
+    ).toEqual({ usd: 1.5, hasUnpriced: true, priced: true, unpricedTokens: 10 });
     expect(aggregateCost([makeBucket("2026-06-27", { model: "c" })])).toEqual({
       usd: 0,
       hasUnpriced: false,
       priced: false,
+      unpricedTokens: 0,
     });
+  });
+});
+
+describe("tokens and cost by origin", () => {
+  const FOLDER = ProjectId.make("folder:scratch");
+  const buckets = [
+    // Ryco's own turn records: tokens and turns.
+    makeBucket("2026-06-26", {
+      provider: "codex",
+      model: "gpt-5.4",
+      totalTokens: 100,
+      inputTokens: 100,
+      turns: 2,
+      costUsd: 1,
+    }),
+    // Subagents of a session Ryco ran count as Ryco's.
+    makeBucket("2026-06-26", {
+      provider: "claudeAgent",
+      model: "claude-opus-5-5",
+      source: "ryco-subagent",
+      totalTokens: 50,
+      inputTokens: 50,
+      costUsd: 2,
+    }),
+    // Outside Ryco, in a Ryco project and in a folder.
+    makeBucket("2026-06-27", {
+      provider: "claudeAgent",
+      model: "claude-opus-5-5",
+      source: "outside",
+      totalTokens: 300,
+      inputTokens: 300,
+      costUsd: 4,
+    }),
+    makeBucket("2026-06-27", {
+      projectId: FOLDER,
+      provider: "codex",
+      model: "gpt-5.4-unpriced",
+      source: "outside",
+      totalTokens: 40,
+      inputTokens: 40,
+    }),
+    // Turns alone: no tokens, no row.
+    makeBucket("2026-06-27", { provider: "cursor", model: "auto", turns: 3 }),
+  ];
+
+  it("splits Ryco's usage (subagents included) from sessions outside Ryco", () => {
+    const split = aggregateTokenCostByOrigin(buckets);
+    expect(split.all.totalTokens).toBe(490);
+    expect(split.all.cost).toEqual({
+      usd: 7,
+      hasUnpriced: true,
+      priced: true,
+      unpricedTokens: 40,
+    });
+    expect(split.ryco).toEqual({
+      totalTokens: 150,
+      cost: { usd: 3, hasUnpriced: false, priced: true, unpricedTokens: 0 },
+    });
+    expect(split.outside).toEqual({
+      totalTokens: 340,
+      cost: { usd: 4, hasUnpriced: true, priced: true, unpricedTokens: 40 },
+    });
+  });
+
+  it("breaks tokens and cost down by provider, model and project with each origin's tokens", () => {
+    expect(
+      aggregateTokenCostRows(buckets, "provider").map((row) => ({
+        provider: row.provider,
+        tokens: row.totalTokens,
+        usd: row.cost.usd,
+        ryco: row.rycoTokens,
+        outside: row.outsideTokens,
+      })),
+    ).toEqual([
+      { provider: "claudeAgent", tokens: 350, usd: 6, ryco: 50, outside: 300 },
+      { provider: "codex", tokens: 140, usd: 1, ryco: 100, outside: 40 },
+    ]);
+
+    const models = aggregateTokenCostRows(buckets, "model");
+    expect(models.map((row) => [row.provider, row.model, row.totalTokens])).toEqual([
+      ["claudeAgent", "claude-opus-5-5", 350],
+      ["codex", "gpt-5.4", 100],
+      ["codex", "gpt-5.4-unpriced", 40],
+    ]);
+    expect(models[2]?.cost.unpricedTokens).toBe(40);
+    expect(models[2]?.cost.priced).toBe(false);
+
+    const projects = aggregateTokenCostRows(buckets, "project");
+    expect(projects.map((row) => [row.projectId, row.rycoTokens, row.outsideTokens])).toEqual([
+      [PROJECT, 150, 300],
+      [FOLDER, 0, 40],
+    ]);
+    expect(projects.every((row) => row.provider === undefined && row.model === undefined)).toBe(
+      true,
+    );
   });
 });

@@ -535,7 +535,10 @@ export interface WsRpcClient {
     readonly getDiagnosticsMetrics: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverGetDiagnosticsMetrics
     >;
-    readonly getStatistics: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetStatistics>;
+    /** No input: Ryco's own threads (`scope: "ryco"`). */
+    readonly getStatistics: (
+      input?: RpcInput<typeof WS_METHODS.serverGetStatistics>,
+    ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.serverGetStatistics>>;
     /** Aborting `signal` withdraws the request; the node stops a scan nobody else awaits. */
     readonly getUsageSummary: (
       input: RpcInput<typeof WS_METHODS.serverGetUsageSummary>,
@@ -1313,8 +1316,8 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.authIssueLinkedDirectAccess](input)),
       getDiagnosticsMetrics: () =>
         transport.request((client) => client[WS_METHODS.serverGetDiagnosticsMetrics]({})),
-      getStatistics: () =>
-        transport.request((client) => client[WS_METHODS.serverGetStatistics]({})),
+      getStatistics: (input) =>
+        transport.request((client) => client[WS_METHODS.serverGetStatistics](input ?? {})),
       getUsageSummary: async (input, options) => {
         assertUsageContractVersion(input.contractVersion);
         const signal = options?.signal;

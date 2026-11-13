@@ -95,6 +95,7 @@ const SERVER_SETTING_HOMES = {
   providerEventLogs: null,
   cliProxyHubs: "providers",
   usagePriceOverrides: "usage",
+  statisticsOutsideSessions: "usage",
   observability: "diagnostics",
   agentControl: "agent-control",
   // Bookkeeping for shared device settings, written with the values it describes.

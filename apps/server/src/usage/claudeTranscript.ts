@@ -61,5 +61,9 @@ export function parseClaudeTranscriptLine(line: string): UsageRecord | null {
         ? reportedCost
         : null,
     dedupeKey,
+    ...(typeof record["cwd"] === "string" && record["cwd"].length > 0
+      ? { cwd: record["cwd"] }
+      : {}),
+    ...(record["isSidechain"] === true ? { sidechain: true } : {}),
   };
 }

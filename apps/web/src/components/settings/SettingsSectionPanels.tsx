@@ -52,6 +52,7 @@ import {
   useSettingsRestore,
 } from "./SettingsPanels";
 import { DiffDisplaySettings, PullRequestPreferenceSettings } from "./SourceControlPreferences";
+import { StatisticsOutsideSessionsSetting } from "./StatisticsOutsideSessionsSetting";
 import { StorageSettings } from "./StorageSettings";
 import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
@@ -331,6 +332,7 @@ function StatisticsLinkSection() {
           </Button>
         }
       />
+      <StatisticsOutsideSessionsSetting />
     </SettingsSection>
   );
 }

@@ -148,6 +148,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       automaticUpdates: true,
       ...(desktopAppUpdates === null ? {} : { desktopAppUpdates }),
       usagePriceOverrides: true,
+      statisticsMachineScope: true,
       serverFollowUpQueue: true,
       liveThreadModelSelection: true,
       // Cross-node project copy: path hints, folder search, destination preview, export,

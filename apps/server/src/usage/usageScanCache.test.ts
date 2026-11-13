@@ -143,11 +143,71 @@ describe("usage scan cache", () => {
   });
 
   it("folds record caches written by earlier versions", () => {
-    const records = [record(), record({ dedupeKey: null, timestampMs: 5_000_000 })];
+    const opencode = (overrides: Partial<UsageRecord> = {}) =>
+      record({ provider: "opencode", ...overrides });
+    const records = [opencode(), opencode({ dedupeKey: null, timestampMs: 5_000_000 })];
     const decoded = decodeUsageScanCache(
-      legacyDocument(5, { file: { provider: "claude", records } }),
+      legacyDocument(5, { file: { provider: "opencode", records } }),
     );
     expect(decoded.get("file")?.aggregate).toEqual(buildUsageFileAggregate(records));
+  });
+
+  it("reads Claude and Codex files again when their cache predates session dimensions", () => {
+    for (const provider of ["claude", "codex"] as const) {
+      const records = [record({ provider })];
+      const legacy = legacyDocument(5, { file: { provider, records } });
+      expect(decodeUsageScanCache(legacy).size).toBe(0);
+      const v6 = { ...encodeUsageScanCache(new Map([["file", entryOf(records)]])), version: 6 };
+      expect(decodeUsageScanCache(v6).size).toBe(0);
+    }
+  });
+
+  it("round-trips session dimensions and resume points", () => {
+    const records = [
+      record({ cwd: "/work/app", sidechain: true }),
+      record({
+        provider: "codex",
+        dedupeKey: null,
+        cwd: "/work/other",
+        sidechain: true,
+        ownerSessionId: "parent-hash",
+        rycoClient: true,
+      }),
+    ];
+    const claude = entryOf([records[0]!], {
+      resume: { offset: 120, guard: "abc", codexState: null },
+    });
+    const codex = entryOf([records[1]!], {
+      resume: {
+        offset: 77,
+        guard: "def",
+        codexState: {
+          model: "gpt-6.1-sol",
+          speed: "fast",
+          sessionId: "session-hash",
+          lastUsageSignature: null,
+          sawSessionMeta: true,
+          suppressingForkCopies: false,
+          forkCopyAnchorMs: 0,
+          cwd: "/work/other",
+          parentSessionId: "parent-hash",
+          rycoClient: true,
+        },
+      },
+    });
+    const cache: UsageScanCache = new Map([
+      ["claude", claude],
+      ["codex", codex],
+    ]);
+    const decoded = decodeUsageScanCache(JSON.parse(JSON.stringify(encodeUsageScanCache(cache))));
+    expect(decoded.get("claude")).toEqual(claude);
+    expect(decoded.get("codex")).toEqual(codex);
+    expect(decoded.get("codex")?.aggregate.slots[0]).toMatchObject({
+      cwd: "/work/other",
+      sidechain: true,
+      ownerSessionId: "parent-hash",
+      rycoClient: true,
+    });
   });
 
   it("deduplicates repeated responses within one file", () => {
@@ -204,18 +264,18 @@ it("invalidates transcript caches without speed and round-trips recorded tiers",
   const encoded = encodeUsageScanCache(new Map([["file", entryOf(records)]]));
   expect(decodeUsageScanCache(encoded).get("file")?.aggregate.slots[0]?.speed).toBe("fast");
   const legacy = legacyDocument(5, { file: { provider: "codex", records } });
-  expect(decodeUsageScanCache(legacy).get("file")?.aggregate.slots[0]?.speed).toBe("fast");
-  for (const version of [2, 3]) expect(decodeUsageScanCache({ ...legacy, version }).size).toBe(0);
+  for (const version of [2, 3, 5])
+    expect(decodeUsageScanCache({ ...legacy, version }).size).toBe(0);
 });
 
 it("compacts identifiers of version 4 caches instead of rescanning them", () => {
-  const full = anonymizeUsageRecord(record({ provider: "codex", speed: "standard" }));
+  const full = anonymizeUsageRecord(record({ provider: "opencode", speed: "standard" }));
   const decoded = decodeUsageScanCache(
-    legacyDocument(4, { file: { provider: "codex", records: [full] } }),
+    legacyDocument(4, { file: { provider: "opencode", records: [full] } }),
   ).get("file")?.aggregate;
   // The compact form is the prefix of the full digest, so fresh parses deduplicate against it.
   expect(decoded?.keys[0]).toBe(
-    anonymizeScanCachedUsageRecord(record({ provider: "codex" })).dedupeKey,
+    anonymizeScanCachedUsageRecord(record({ provider: "opencode" })).dedupeKey,
   );
   expect(decoded?.slots[0]?.sessionId).toBe(full.sessionId.slice(0, 16));
   expect(decoded?.keys[0]).toHaveLength(16);

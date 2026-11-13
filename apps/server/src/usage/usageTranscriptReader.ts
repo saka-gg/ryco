@@ -203,6 +203,18 @@ export async function listUsageTranscriptFiles(
   return { files, skippedEntryCount, errorCount };
 }
 
+/**
+ * Where a later read of a grown file may continue: just past the last newline read, with the
+ * parser state there. The guard is a digest of the bytes right before the offset; a file that
+ * was rewritten or rotated no longer matches it and is read again from the start.
+ */
+export interface UsageTranscriptResumePoint {
+  readonly offset: number;
+  readonly guard: string;
+  /** Codex only: the rollout's session and model context at the offset. */
+  readonly codexState: CodexTranscriptState | null;
+}
+
 export interface UsageTranscriptReadResult {
   readonly records: readonly UsageRecord[];
   readonly skippedLineCount: number;
@@ -210,6 +222,25 @@ export interface UsageTranscriptReadResult {
   readonly limited: boolean;
   /** Complete lines reused after validating their byte prefix. */
   readonly reusedLineCount: number;
+  /**
+   * Where the next read may continue. Absent when the read was limited or the file's last line
+   * has no newline yet (its record is provisional, so the next read starts over).
+   */
+  readonly resume?: UsageTranscriptResumePoint;
+}
+
+/** Bytes before a resume point that must still match for a grown file to continue there. */
+const RESUME_GUARD_BYTES = 64;
+
+function resumeGuardDigest(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex").slice(0, 32);
+}
+
+async function readResumeGuard(file: NodeFSP.FileHandle, offset: number): Promise<string | null> {
+  const length = Math.min(RESUME_GUARD_BYTES, offset);
+  const guard = Buffer.alloc(length);
+  const { bytesRead } = await file.read(guard, 0, length, offset - length);
+  return bytesRead === length ? resumeGuardDigest(guard) : null;
 }
 function isJson(line: string): boolean {
   try {
@@ -296,13 +327,43 @@ export async function readUsageTranscript(
   return readTranscript(filePath, provider, signal);
 }
 
+/**
+ * Only the part of a grown file past `start`: the records of the lines appended since the read
+ * that returned `start`. `"mismatch"` when the file no longer continues from there (rewritten,
+ * truncated or rotated), so the caller reads it from the start; null when it cannot be read.
+ */
+export async function resumeUsageTranscript(
+  filePath: string,
+  provider: UsageProviderKind,
+  start: UsageTranscriptResumePoint,
+  signal?: AbortSignal,
+): Promise<UsageTranscriptReadResult | "mismatch" | null> {
+  return readTranscript(filePath, provider, signal, undefined, undefined, start);
+}
+
 async function readTranscript(
   filePath: string,
   provider: UsageProviderKind,
   signal?: AbortSignal,
   previous?: TranscriptCheckpoint,
   checkpoint?: (value: TranscriptCheckpoint) => void,
-): Promise<UsageTranscriptReadResult | null> {
+): Promise<UsageTranscriptReadResult | null>;
+async function readTranscript(
+  filePath: string,
+  provider: UsageProviderKind,
+  signal: AbortSignal | undefined,
+  previous: undefined,
+  checkpoint: undefined,
+  start: UsageTranscriptResumePoint,
+): Promise<UsageTranscriptReadResult | "mismatch" | null>;
+async function readTranscript(
+  filePath: string,
+  provider: UsageProviderKind,
+  signal?: AbortSignal,
+  previous?: TranscriptCheckpoint,
+  checkpoint?: (value: TranscriptCheckpoint) => void,
+  start?: UsageTranscriptResumePoint,
+): Promise<UsageTranscriptReadResult | "mismatch" | null> {
   if (provider !== "claude" && provider !== "codex") return null;
   let records: UsageRecord[] = [];
   const started = Date.now();
@@ -313,6 +374,7 @@ async function readTranscript(
     lineCount = 0,
     reusedLineCount = 0,
     limited = false;
+  let resume: UsageTranscriptResumePoint | undefined;
   const appendRecord = (record: UsageRecord) => {
     records.push(record);
     // Conservatively budget UTF-16 strings and fixed record/object overhead.
@@ -371,7 +433,16 @@ async function readTranscript(
     let offset = 0;
     let prefixHash = createHash("sha256");
     const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(TRANSCRIPT_CHUNK_BYTES, before.size)));
-    if (
+    if (start !== undefined) {
+      if (
+        start.offset > before.size ||
+        (provider === "codex") !== (start.codexState !== null) ||
+        (await readResumeGuard(file, start.offset)) !== start.guard
+      )
+        return "mismatch";
+      offset = start.offset;
+      if (start.codexState !== null) codexState = { ...start.codexState };
+    } else if (
       previous &&
       previous.provider === provider &&
       previous.device === before.dev &&
@@ -504,7 +575,15 @@ async function readTranscript(
                 codexState.sessionId.length +
                 (codexState.lastUsageSignature?.length ?? 0)),
         };
-    if (pendingLength > 0 && !limited) consume(takeLine(Buffer.alloc(0)));
+    const provisionalTail = pendingLength > 0;
+    if (provisionalTail && !limited) consume(takeLine(Buffer.alloc(0)));
+    const guard = limited || provisionalTail ? null : await readResumeGuard(file, completeOffset);
+    if (guard !== null)
+      resume = {
+        offset: completeOffset,
+        guard,
+        codexState: provider === "codex" ? { ...codexState } : null,
+      };
     const after = await file.stat();
     const pathAfter = await NodeFSP.lstat(filePath);
     if (
@@ -523,5 +602,12 @@ async function readTranscript(
   } finally {
     await file?.close();
   }
-  return { records, skippedLineCount, malformedLineCount, limited, reusedLineCount };
+  return {
+    records,
+    skippedLineCount,
+    malformedLineCount,
+    limited,
+    reusedLineCount,
+    ...(resume === undefined ? {} : { resume }),
+  };
 }

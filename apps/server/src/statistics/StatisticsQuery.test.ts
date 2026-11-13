@@ -181,6 +181,51 @@ statisticsLayer("StatisticsQuery", (it) => {
       }),
   );
 
+  it.effect("lists the provider sessions Ryco ran and every project's directories", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* sql`DELETE FROM provider_session_runtime`;
+      yield* insertProject(sql, "machine-project", "Machine");
+      yield* sql`
+        INSERT INTO projection_worktrees (
+          worktree_id, project_id, branch, worktree_path, origin, created_at, updated_at
+        ) VALUES (
+          'machine-worktree', 'machine-project', 'feature', '/tmp/worktrees/feature', 'branch',
+          '2026-06-05T00:00:00.000Z', '2026-06-05T00:00:00.000Z'
+        )
+      `;
+      const runtime = (thread: string, provider: string, cursor: string) => sql`
+        INSERT INTO provider_session_runtime (
+          thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status,
+          last_seen_at, resume_cursor_json, runtime_payload_json
+        ) VALUES (
+          ${thread}, ${provider}, ${provider}, ${provider}, 'full-access', 'stopped',
+          '2026-06-05T00:00:00.000Z', ${cursor}, NULL
+        )
+      `;
+      yield* runtime(
+        "claude-thread",
+        "claudeAgent",
+        '{"resume":"claude-session","planTasks":{"nativeSessionId":"claude-plan-session"}}',
+      );
+      yield* runtime("codex-thread", "codex", '{"threadId":"codex-thread-id"}');
+      yield* runtime("cursor-thread", "cursor", '{"resume":"not-a-transcript-session"}');
+      yield* runtime("broken-thread", "claudeAgent", "{not json");
+      const attribution = yield* statistics.getMachineAttribution();
+      assert.deepStrictEqual([...attribution.rycoSessionIds.claude].toSorted(), [
+        "claude-plan-session",
+        "claude-session",
+      ]);
+      assert.deepStrictEqual(attribution.rycoSessionIds.codex, ["codex-thread-id"]);
+      assert.deepStrictEqual(attribution.projectRoots, [
+        { path: "/tmp/machine-project", projectId: "machine-project" },
+        { path: "/tmp/worktrees/feature", projectId: "machine-project" },
+      ]);
+    }),
+  );
+
   it.effect("does not cache data inspected in a transaction that rolls back", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

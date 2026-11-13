@@ -48,6 +48,14 @@ export interface UsageSlot extends UsageSlotTotals {
   readonly sessionId: string;
   /** Responses whose cost the provider reported (priced as reported, not from rates). */
   readonly reported: boolean;
+  /** The directory the session ran in; empty when unknown. */
+  readonly cwd: string;
+  /** Subagent work (see `UsageRecord.sidechain`). */
+  readonly sidechain: boolean;
+  /** The session that ran the work when it is not `sessionId`; empty otherwise. */
+  readonly ownerSessionId: string;
+  /** Ryco started the session (see `UsageRecord.rycoClient`). */
+  readonly rycoClient: boolean;
 }
 
 export interface UsageFileAggregate {
@@ -92,30 +100,56 @@ export const emptySlotTotals = (): { -readonly [K in keyof UsageSlotTotals]: num
   reportedCostUsd: 0,
 });
 
+function slotIdentity(slot: Omit<UsageSlot, keyof UsageSlotTotals>): string {
+  return `${slot.slotMs}\0${slot.model}\0${slot.speed ?? ""}\0${slot.sessionId}\0${slot.reported ? 1 : 0}\0${slot.cwd}\0${slot.sidechain ? 1 : 0}\0${slot.ownerSessionId}\0${slot.rycoClient ? 1 : 0}`;
+}
+
 /** Folds one file's (within-file deduplicated) records. */
 export function buildUsageFileAggregate(records: readonly UsageRecord[]): UsageFileAggregate {
-  if (records.length === 0) return EMPTY_USAGE_FILE_AGGREGATE;
-  const slots: MutableSlot[] = [];
+  return appendUsageFileAggregate(EMPTY_USAGE_FILE_AGGREGATE, records);
+}
+
+/**
+ * `base` with more of the same file's records folded in: the records an appended file gained
+ * since `base` was built. A keyed record whose key `base` (or an earlier record) already has is
+ * dropped, as within-file deduplication would have. `base` is not changed.
+ */
+export function appendUsageFileAggregate(
+  base: UsageFileAggregate,
+  records: readonly UsageRecord[],
+): UsageFileAggregate {
+  if (records.length === 0) return base;
+  const slots: MutableSlot[] = base.slots.map((slot) => ({ ...slot }));
   const slotIndexes = new Map<string, number>();
-  const keys: string[] = [];
-  const keySlots: number[] = [];
-  const keyValues: number[] = [];
+  for (const [index, slot] of slots.entries()) slotIndexes.set(slotIdentity(slot), index);
+  const keys: string[] = [...base.keys];
+  const seenKeys = new Set(keys);
+  const keySlots: number[] = Array.from(base.keySlots);
+  const keyValues: number[] = Array.from(base.keyValues);
+  let recordCount = base.recordCount;
   for (const record of records) {
-    const slotMs = Math.floor(record.timestampMs / USAGE_SLOT_MS) * USAGE_SLOT_MS;
-    const reported = record.reportedCostUsd !== null;
-    const id = `${slotMs}\0${record.model}\0${record.speed ?? ""}\0${record.sessionId}\0${reported ? 1 : 0}`;
+    if (record.dedupeKey !== null) {
+      if (seenKeys.has(record.dedupeKey)) continue;
+      seenKeys.add(record.dedupeKey);
+    }
+    recordCount += 1;
+    const identity: Omit<UsageSlot, keyof UsageSlotTotals> = {
+      slotMs: Math.floor(record.timestampMs / USAGE_SLOT_MS) * USAGE_SLOT_MS,
+      model: record.model,
+      speed: record.speed,
+      sessionId: record.sessionId,
+      reported: record.reportedCostUsd !== null,
+      cwd: record.cwd ?? "",
+      sidechain: record.sidechain === true,
+      ownerSessionId: record.ownerSessionId ?? "",
+      rycoClient: record.rycoClient === true,
+    };
+    const id = slotIdentity(identity);
     let index = slotIndexes.get(id);
     if (index === undefined) {
       index = slots.length;
       slotIndexes.set(id, index);
-      slots.push({
-        slotMs,
-        model: record.model,
-        speed: record.speed,
-        sessionId: record.sessionId,
-        reported,
-        ...emptySlotTotals(),
-      });
+      slots.push({ ...identity, ...emptySlotTotals() });
     }
     const totals = record.totals;
     if (record.dedupeKey !== null) {
@@ -145,7 +179,7 @@ export function buildUsageFileAggregate(records: readonly UsageRecord[]): UsageF
     if (record.reportedCostUsd !== null) slot.reportedCostUsd += record.reportedCostUsd;
   }
   return {
-    recordCount: records.length,
+    recordCount,
     slots,
     keys,
     keySlots: Uint32Array.from(keySlots),
@@ -153,7 +187,8 @@ export function buildUsageFileAggregate(records: readonly UsageRecord[]): UsageF
   };
 }
 
-function addKeyedValues(
+/** Adds the keyed response at `offset` of `values` (a `keyValues` array) to `slot`. */
+export function addKeyedValues(
   slot: { -readonly [K in keyof UsageSlotTotals]: number },
   values: Float64Array,
   offset: number,

@@ -17,6 +17,7 @@ import {
   createUsageTranscriptReader,
   listUsageTranscriptFiles,
   readUsageTranscript,
+  resumeUsageTranscript,
   USAGE_TRANSCRIPT_LIMITS,
 } from "./usageTranscriptReader.ts";
 
@@ -177,6 +178,55 @@ describe("incremental transcript parsing", () => {
     expect(appended?.reusedLineCount).toBe(2);
     expect(appended?.records).toHaveLength(2);
     expect(appended?.records).toEqual((await readUsageTranscript(path, "codex"))?.records);
+  });
+
+  it("returns a resume point that reads only appended lines, with the Codex context", async () => {
+    const root = await setup(),
+      path = join(root, "fixture.jsonl");
+    const context = JSON.stringify({ type: "turn_context", payload: { model: "gpt-5" } });
+    const usage = (tokens: number) =>
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-07T04:05:13.944Z",
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { input_tokens: tokens, output_tokens: 3 } },
+        },
+      });
+    await writeFile(path, `${context}\n${usage(2)}\n`);
+    const first = await readUsageTranscript(path, "codex");
+    expect(first?.resume?.offset).toBe((await stat(path)).size);
+    await appendFile(path, `${usage(2)}\n${usage(5)}\n`);
+    const resumed = await resumeUsageTranscript(path, "codex", first!.resume!);
+    if (resumed === "mismatch" || resumed === null) throw new Error("expected a resumed read");
+    // The repeated usage is still recognized: the parser state came with the resume point.
+    expect(resumed.records.map((record) => record.totals.uncachedInputTokens)).toEqual([5]);
+    expect(resumed.records[0]?.model).toBe("gpt-5");
+    expect(resumed.resume?.offset).toBe((await stat(path)).size);
+  });
+
+  it("refuses a resume point the file no longer continues from, and keeps none for a partial tail", async () => {
+    const root = await setup(),
+      path = join(root, "fixture.jsonl");
+    await writeFile(path, `${claude}\n`);
+    const first = await readUsageTranscript(path, "claude");
+    const start = first!.resume!;
+    // Rewritten bytes right before the offset.
+    await writeFile(
+      path,
+      `${claude.replace('"output_tokens":3', '"output_tokens":4')}\n${claude}\n`,
+    );
+    expect(await resumeUsageTranscript(path, "claude", start)).toBe("mismatch");
+    // Truncated below the offset.
+    await writeFile(path, "{}\n");
+    expect(await resumeUsageTranscript(path, "claude", start)).toBe("mismatch");
+    // Gone.
+    await rm(path);
+    expect(await resumeUsageTranscript(path, "claude", start)).toBeNull();
+    // A last line without its newline may still grow: no resume point past it.
+    await writeFile(path, `${claude}\n${claude.slice(0, 40)}`);
+    const partial = await readUsageTranscript(path, "claude");
+    expect(partial?.resume).toBeUndefined();
   });
 
   it("falls back on truncation, replacement, or an edit anywhere in the old prefix", async () => {

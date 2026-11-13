@@ -10,14 +10,19 @@ import {
   type UsageFileAggregate,
   type UsageSlot,
 } from "./usageFileAggregate.ts";
+import type { CodexTranscriptState } from "./codexTranscript.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
 import { withTokenTotal } from "./usageRecord.ts";
+import type { UsageTranscriptResumePoint } from "./usageTranscriptReader.ts";
 
 /**
+ * v7: slots also carry the session's directory, subagent flag, owning session and Ryco-client
+ * flag, and files their resume point. Claude and Codex entries of older versions lack those and
+ * are read again; OpenCode entries are kept.
  * v6: per-file aggregates (15-minute slots plus compact keyed responses) instead of records.
  * v5: session/response hashes are truncated to {@link SCAN_CACHE_IDENTIFIER_LENGTH}.
  */
-export const USAGE_SCAN_CACHE_VERSION = 6 as const;
+export const USAGE_SCAN_CACHE_VERSION = 7 as const;
 
 /**
  * Hex digits kept for anonymized session/response identifiers of scan-cached
@@ -37,6 +42,11 @@ export interface CachedUsageFile {
   readonly provider: UsageProviderKind;
   readonly aggregate: UsageFileAggregate;
   readonly fingerprint?: string;
+  /**
+   * Where a grown transcript continues (see `UsageTranscriptResumePoint`). Its Codex state holds
+   * the anonymized session identifiers, like the aggregate.
+   */
+  readonly resume?: UsageTranscriptResumePoint;
 }
 
 export type UsageScanCache = Map<string, CachedUsageFile>;
@@ -84,8 +94,25 @@ interface SerializedFile {
   readonly a?: readonly SerializedSlot[];
   /** Keyed responses (v6). */
   readonly k?: readonly SerializedKeyed[];
+  /** Resume point (v7): offset, guard and the Codex parser state. */
+  readonly e?: readonly [offset: number, guard: string, codexState: SerializedCodexState | null];
 }
 
+/** `CodexTranscriptState` with anonymized session identifiers. */
+type SerializedCodexState = readonly [
+  model: string,
+  speed: UsageSpeed,
+  sessionId: string,
+  lastUsageSignature: string | null,
+  sawSessionMeta: 0 | 1,
+  suppressingForkCopies: 0 | 1,
+  forkCopyAnchorMs: number,
+  cwd: string,
+  parentSessionId: string,
+  rycoClient: 0 | 1,
+];
+
+/** v6 slots end after `reportedCostUsd`; v7 slots add the session's dimensions. */
 type SerializedSlot = readonly [
   slotIndex: number,
   modelIndex: number,
@@ -102,7 +129,15 @@ type SerializedSlot = readonly [
   reasoningMissingCount: number,
   zeroCachedCount: number,
   reportedCostUsd: number,
+  cwdIndex?: number,
+  /** Bit 0: subagent; bit 1: Ryco client. */
+  flags?: number,
+  /** Index into `sessions`, or -1 when the slot's own session ran it. */
+  ownerIndex?: number,
 ];
+
+const SIDECHAIN_FLAG = 1;
+const RYCO_CLIENT_FLAG = 2;
 
 type SerializedKeyed = readonly [
   dedupeKey: string,
@@ -120,6 +155,8 @@ interface SerializedCache {
   readonly version: number;
   readonly models: readonly string[];
   readonly sessions: readonly string[];
+  /** Session directories (v7). */
+  readonly cwds?: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
 }
 
@@ -143,6 +180,15 @@ function anonymize(record: UsageRecord, identifierLength: number): UsageRecord {
       record.sessionId.length === 0
         ? ""
         : hashPrivateIdentifier(`${record.provider}:session`, record.sessionId, identifierLength),
+    ...(record.ownerSessionId === undefined || record.ownerSessionId.length === 0
+      ? {}
+      : {
+          ownerSessionId: hashPrivateIdentifier(
+            `${record.provider}:session`,
+            record.ownerSessionId,
+            identifierLength,
+          ),
+        }),
     dedupeKey:
       record.dedupeKey === null
         ? null
@@ -163,6 +209,28 @@ export function anonymizeScanCachedUsageRecord(record: UsageRecord): UsageRecord
   return anonymize(record, SCAN_CACHE_IDENTIFIER_LENGTH);
 }
 
+/**
+ * A provider session id as {@link anonymizeScanCachedUsageRecord} stores it, so a known raw id
+ * (one Ryco ran) can be matched against scan-cached slots without keeping raw ids there.
+ */
+export function anonymizeScanCachedSessionId(
+  provider: UsageProviderKind,
+  sessionId: string,
+): string {
+  return sessionId.length === 0
+    ? ""
+    : hashPrivateIdentifier(`${provider}:session`, sessionId, SCAN_CACHE_IDENTIFIER_LENGTH);
+}
+
+/** A Codex resume point's parser state with its session identifiers anonymized for the cache. */
+export function anonymizeCodexResumeState(state: CodexTranscriptState): CodexTranscriptState {
+  return {
+    ...state,
+    sessionId: anonymizeScanCachedSessionId("codex", state.sessionId),
+    parentSessionId: anonymizeScanCachedSessionId("codex", state.parentSessionId),
+  };
+}
+
 export function deduplicateUsageRecordsWithinFile(
   records: readonly UsageRecord[],
 ): readonly UsageRecord[] {
@@ -181,8 +249,10 @@ export function deduplicateUsageRecordsWithinFile(
 export function encodeUsageScanCache(cache: UsageScanCache): SerializedCache {
   const models: string[] = [];
   const sessions: string[] = [];
+  const cwds: string[] = [];
   const modelIndexes = new Map<string, number>();
   const sessionIndexes = new Map<string, number>();
+  const cwdIndexes = new Map<string, number>();
   const intern = (values: string[], indexes: Map<string, number>, value: string): number => {
     const existing = indexes.get(value);
     if (existing !== undefined) return existing;
@@ -235,15 +305,92 @@ export function encodeUsageScanCache(cache: UsageScanCache): SerializedCache {
         slot.reasoningMissingCount,
         slot.zeroCachedCount,
         slot.reportedCostUsd,
+        intern(cwds, cwdIndexes, slot.cwd),
+        (slot.sidechain ? SIDECHAIN_FLAG : 0) | (slot.rycoClient ? RYCO_CLIENT_FLAG : 0),
+        slot.ownerSessionId.length === 0
+          ? -1
+          : intern(sessions, sessionIndexes, slot.ownerSessionId),
       ]),
       k: keyed,
+      ...(entry.resume === undefined
+        ? {}
+        : {
+            e: [
+              entry.resume.offset,
+              entry.resume.guard,
+              entry.resume.codexState === null ? null : encodeCodexState(entry.resume.codexState),
+            ],
+          }),
     };
   }
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
+  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, cwds, files };
 }
 
 function isArray(value: unknown): value is readonly unknown[] {
   return Array.isArray(value);
+}
+
+function encodeCodexState(state: CodexTranscriptState): SerializedCodexState {
+  return [
+    state.model,
+    state.speed,
+    state.sessionId,
+    state.lastUsageSignature,
+    state.sawSessionMeta ? 1 : 0,
+    state.suppressingForkCopies ? 1 : 0,
+    state.forkCopyAnchorMs,
+    state.cwd,
+    state.parentSessionId,
+    state.rycoClient ? 1 : 0,
+  ];
+}
+
+function decodeCodexState(value: unknown): CodexTranscriptState | undefined {
+  if (!isArray(value) || value.length !== 10) return undefined;
+  const [model, speed, sessionId, signature, sawMeta, suppressing, anchor, cwd, parent, ryco] =
+    value as SerializedCodexState;
+  if (
+    typeof model !== "string" ||
+    (speed !== "standard" && speed !== "fast" && speed !== "ultrafast") ||
+    typeof sessionId !== "string" ||
+    (signature !== null && typeof signature !== "string") ||
+    (sawMeta !== 0 && sawMeta !== 1) ||
+    (suppressing !== 0 && suppressing !== 1) ||
+    !nonNegative(anchor) ||
+    typeof cwd !== "string" ||
+    typeof parent !== "string" ||
+    (ryco !== 0 && ryco !== 1)
+  )
+    return undefined;
+  return {
+    model,
+    speed,
+    sessionId,
+    lastUsageSignature: signature,
+    sawSessionMeta: sawMeta === 1,
+    suppressingForkCopies: suppressing === 1,
+    forkCopyAnchorMs: anchor,
+    cwd,
+    parentSessionId: parent,
+    rycoClient: ryco === 1,
+  };
+}
+
+function decodeResume(
+  value: unknown,
+  provider: UsageProviderKind,
+): UsageTranscriptResumePoint | undefined {
+  if (!isArray(value) || value.length !== 3) return undefined;
+  const [offset, guard, rawState] = value as NonNullable<SerializedFile["e"]>;
+  if (!nonNegative(offset) || !Number.isInteger(offset) || typeof guard !== "string")
+    return undefined;
+  if (provider === "codex") {
+    const codexState = decodeCodexState(rawState);
+    return codexState === undefined ? undefined : { offset, guard, codexState };
+  }
+  return provider === "claude" && rawState === null
+    ? { offset, guard, codexState: null }
+    : undefined;
 }
 
 export function decodeUsageScanCache(document: unknown): UsageScanCache {
@@ -255,7 +402,8 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
       root.version !== 2 &&
       root.version !== 3 &&
       root.version !== 4 &&
-      root.version !== 5) ||
+      root.version !== 5 &&
+      root.version !== 6) ||
     !isArray(root.models) ||
     !root.models.every((value) => typeof value === "string") ||
     !isArray(root.sessions) ||
@@ -269,21 +417,27 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
   if (
     root.models.length > 50_000 ||
     root.sessions.length > 250_000 ||
+    (root.cwds !== undefined &&
+      (!isArray(root.cwds) ||
+        root.cwds.length > 250_000 ||
+        !root.cwds.every((value) => typeof value === "string"))) ||
     Object.keys(root.files).length > MAX_DECODED_FILES
   )
     return cache;
   const models = root.models as readonly string[];
   // Before v5 identifiers were full SHA-256 digests; their prefix is the compact form.
   const compact = (value: string) =>
-    root.version === USAGE_SCAN_CACHE_VERSION || root.version === 5
+    root.version === USAGE_SCAN_CACHE_VERSION || root.version === 6 || root.version === 5
       ? value
       : value.slice(0, SCAN_CACHE_IDENTIFIER_LENGTH);
   const sessions = (root.sessions as readonly string[]).map(compact);
+  const cwds = (root.cwds ?? []) as readonly string[];
   for (const [fileKey, rawEntry] of Object.entries(root.files as Record<string, unknown>)) {
     if (typeof rawEntry !== "object" || rawEntry === null) continue;
     const entry = rawEntry as Partial<SerializedFile>;
-    // Old transcript rows did not retain speed; rescan them rather than price as standard.
-    if ((root.version === 2 || root.version === 3) && (entry.p === "codex" || entry.p === "claude"))
+    // Older transcript rows lack the session dimensions Statistics attribute them by (and v2/v3
+    // rows their speed): read those files again.
+    if (root.version !== USAGE_SCAN_CACHE_VERSION && (entry.p === "codex" || entry.p === "claude"))
       continue;
     if (
       typeof entry.o !== "string" ||
@@ -303,9 +457,11 @@ export function decodeUsageScanCache(document: unknown): UsageScanCache {
       mtimeMs: entry.m,
       provider: entry.p as UsageProviderKind,
     };
-    if (root.version === USAGE_SCAN_CACHE_VERSION) {
-      const aggregate = decodeSerializedAggregate(entry, models, sessions);
-      if (aggregate !== null) cache.set(fileKey, { ...header, aggregate });
+    if (root.version === USAGE_SCAN_CACHE_VERSION || root.version === 6) {
+      const aggregate = decodeSerializedAggregate(entry, models, sessions, cwds);
+      if (aggregate === null) continue;
+      const resume = entry.e === undefined ? undefined : decodeResume(entry.e, header.provider);
+      cache.set(fileKey, { ...header, aggregate, ...(resume === undefined ? {} : { resume }) });
       continue;
     }
     if (!isArray(entry.r) || entry.r.length > MAX_RECORDS_PER_FILE) continue;
@@ -399,6 +555,7 @@ function decodeSerializedAggregate(
   entry: Partial<SerializedFile>,
   models: readonly string[],
   sessions: readonly string[],
+  cwds: readonly string[],
 ): UsageFileAggregate | null {
   const { n: recordCount, a: rawSlots, k: rawKeyed } = entry;
   if (
@@ -414,9 +571,33 @@ function decodeSerializedAggregate(
   const slots: UsageSlot[] = [];
   let slotCount = 0;
   for (const rawSlot of rawSlots) {
-    if (!isArray(rawSlot) || rawSlot.length !== 15) return null;
-    const [slotIndex, modelIndex, sessionIndex, speed, reported, ...numbers] =
+    if (!isArray(rawSlot) || (rawSlot.length !== 15 && rawSlot.length !== 18)) return null;
+    const [slotIndex, modelIndex, sessionIndex, speed, reported, ...rest] =
       rawSlot as SerializedSlot;
+    const numbers = rest.slice(0, 10) as [
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+      number,
+    ];
+    const [cwdIndex = -1, flags = 0, ownerIndex = -1] = rest.slice(10) as Array<number | undefined>;
+    const cwd = cwdIndex === -1 ? "" : cwds[cwdIndex];
+    const ownerSessionId = ownerIndex === -1 ? "" : sessions[ownerIndex];
+    if (
+      cwd === undefined ||
+      ownerSessionId === undefined ||
+      typeof flags !== "number" ||
+      !Number.isInteger(flags) ||
+      flags < 0 ||
+      flags > (SIDECHAIN_FLAG | RYCO_CLIENT_FLAG)
+    )
+      return null;
     const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
     const sessionId = typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined;
     if (
@@ -459,6 +640,10 @@ function decodeSerializedAggregate(
       reasoningMissingCount,
       zeroCachedCount,
       reportedCostUsd,
+      cwd,
+      sidechain: (flags & SIDECHAIN_FLAG) !== 0,
+      ownerSessionId,
+      rycoClient: (flags & RYCO_CLIENT_FLAG) !== 0,
     });
   }
   const keys: string[] = [];
