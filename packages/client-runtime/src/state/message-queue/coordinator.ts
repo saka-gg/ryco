@@ -24,6 +24,7 @@ import {
   readQueueThreadView,
   type QueueThreadView,
 } from "./threadView.ts";
+import { awaitsUploads } from "./uploadHold.ts";
 
 export interface QueueSendHooks {
   /** Call immediately before the final `thread.turn.start`. */
@@ -531,6 +532,7 @@ export function createMessageQueueDrainCoordinator<C, S>(
           const entry = (state.queuesByThreadKey[key] ?? [])[0];
           return entry &&
             (platform.isEntryMovable?.(entry) ?? true) &&
+            !awaitsUploads(entry) &&
             entry.deliveryStatus !== "sending" &&
             state.steerAttemptsByThreadKey[key]?.[entry.id] === undefined
             ? entry

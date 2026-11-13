@@ -7,3 +7,5 @@ export * from "./migrate.ts";
 export * from "./store.ts";
 export * from "./threadView.ts";
 export * from "./serverQueue.ts";
+export * from "./uploadHold.ts";
+export * from "./uploadHoldSettle.ts";

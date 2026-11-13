@@ -57,6 +57,7 @@ import {
   nativeCompactionAdvertised,
   nativeCompactionBlockerForSession,
   worktreeSourceIntent,
+  appendReturnedComposerPrompt,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
@@ -148,6 +149,8 @@ import {
   type FollowUpQueueRow,
   type PendingFollowUpAdd,
   type QueuedMessageSteerAttempts,
+  awaitsUploads,
+  queueHasUploadHeldSend,
 } from "@ryco/client-runtime/state/message-queue";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import {
@@ -320,6 +323,7 @@ import { noteComposerModelSelectionPicked } from "./chat/liveThreadModelSelectio
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { HeldSendTimelineContext, type HeldSendTimelineValue } from "./chat/HeldSendStatus";
 import type { ReadingPositionOutcome } from "./chat/useTimelineReadingPosition";
 import {
   type ForkThreadDialogRequest,
@@ -441,6 +445,14 @@ import {
   type SendTurnSettings,
 } from "../hooks/executeChatSendTurn";
 import { useMessageQueueStore } from "../messageQueueStore";
+import {
+  ensureHeldSendWatcher,
+  holdSendForUploads,
+  removeHeldAttachment,
+  retryHeldUpload,
+  takeHeldSend,
+  useHeldSends,
+} from "../heldSends";
 import { TIMELINE_REVEAL_SETTLE_MS, useTimelineRevealStore } from "../timelineRevealStore";
 import {
   buildWebFollowUpContent,
@@ -461,7 +473,7 @@ import {
 import { useServerFollowUpQueueSupported } from "../messageQueueEnvironment";
 import { summarizeQueuedMessage, type QueuedMessage } from "../messageQueue.logic";
 import {
-  deriveComposerFileUploadSendBlock,
+  deriveComposerFileUploadSendState,
   useEnvironmentFileUploadCapability,
 } from "~/composerFileUpload";
 import { getEnvironmentHttpBaseUrl } from "~/environments/runtime/catalog";
@@ -1453,6 +1465,39 @@ export default function ChatView(props: ChatViewProps) {
     () => Object.keys(queuedMessageSteerAttempts),
     [queuedMessageSteerAttempts],
   );
+  // Messages sent while their attachments uploaded. An ordinary send shows in the timeline as
+  // the message about to go out; a follow-up or steer shows in the queue.
+  const heldSends = useHeldSends(activeThreadKey);
+  // Applies finished uploads to held messages and settles what a reload left behind. It keeps
+  // running once started, on every route, so a held message still goes out from elsewhere.
+  useEffect(() => ensureHeldSendWatcher(), []);
+  const heldTimelineMessages = useMemo(() => {
+    const messages: ChatMessage[] = [];
+    for (const held of heldSends.values()) {
+      if (held.hold.sentAs !== "send") continue;
+      const { entry } = held;
+      messages.push({
+        id: MessageId.make(entry.id),
+        role: "user",
+        text: buildOutgoingMessageText({ composer: entry.composer, formatOutgoingPrompt }),
+        ...(entry.composer.images.length > 0
+          ? {
+              attachments: entry.composer.images.map((image) => ({
+                type: image.type,
+                id: image.id,
+                name: image.name,
+                mimeType: image.mimeType,
+                sizeBytes: image.sizeBytes,
+                previewUrl: image.previewUrl,
+              })),
+            }
+          : {}),
+        createdAt: entry.createdAt ?? new Date(0).toISOString(),
+        streaming: false,
+      });
+    }
+    return messages;
+  }, [heldSends]);
   const queueHold = useMessageQueueStore((store) =>
     activeThreadKey ? (store.holdsByThreadKey[activeThreadKey] ?? null) : null,
   );
@@ -1502,13 +1547,20 @@ export default function ChatView(props: ChatViewProps) {
       deriveFollowUpQueueView({
         server: serverFollowUpQueue,
         pending: pendingFollowUps,
-        local: queuedMessages.map((message) => ({
-          id: message.id,
-          summary: summarizeQueuedMessage(message),
-          deliveryStatus: message.deliveryStatus,
-          steering: steeringQueuedMessageIds.includes(message.id),
-          moving: message.id === movingQueuedMessageId,
-        })),
+        // A held ordinary send shows in the timeline instead.
+        local: queuedMessages.flatMap((message) =>
+          message.uploadHold?.sentAs === "send"
+            ? []
+            : [
+                {
+                  id: message.id,
+                  summary: summarizeQueuedMessage(message),
+                  deliveryStatus: message.deliveryStatus,
+                  steering: steeringQueuedMessageIds.includes(message.id),
+                  moving: message.id === movingQueuedMessageId,
+                },
+              ],
+        ),
         localHold: queueHold,
       }),
     [
@@ -2868,16 +2920,25 @@ export default function ChatView(props: ChatViewProps) {
             return changed ? { ...message, attachments } : message;
           });
 
-    if (optimisticUserMessages.length === 0) {
+    if (optimisticUserMessages.length === 0 && heldTimelineMessages.length === 0) {
       return serverMessagesWithPreviewHandoff;
     }
-    const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
-    const pendingMessages = optimisticUserMessages.filter((message) => !serverIds.has(message.id));
-    if (pendingMessages.length === 0) {
+    const shownIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
+    const pendingMessages = optimisticUserMessages.filter((message) => !shownIds.has(message.id));
+    for (const message of pendingMessages) shownIds.add(message.id);
+    // Held sends go last, in the order they were sent; once one starts sending its optimistic
+    // message (same id) takes its place.
+    const heldMessages = heldTimelineMessages.filter((message) => !shownIds.has(message.id));
+    if (pendingMessages.length === 0 && heldMessages.length === 0) {
       return serverMessagesWithPreviewHandoff;
     }
-    return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
-  }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages]);
+    return [...serverMessagesWithPreviewHandoff, ...pendingMessages, ...heldMessages];
+  }, [
+    serverMessages,
+    attachmentPreviewHandoffByMessageId,
+    optimisticUserMessages,
+    heldTimelineMessages,
+  ]);
   // Prompt recall reads the messages on the keypress; a prop would re-render the composer on
   // every streamed delta.
   const timelineMessagesRef = useRef(timelineMessages);
@@ -2924,7 +2985,7 @@ export default function ChatView(props: ChatViewProps) {
     shouldShowNewThreadSurface({
       hasThread: activeThread !== undefined,
       messageCount: activeThread?.messages.length ?? 0,
-      optimisticMessageCount: optimisticUserMessages.length,
+      optimisticMessageCount: optimisticUserMessages.length + heldTimelineMessages.length,
       timelineEntryCount: timelineEntries.length,
       presentationTier,
       historyPending: threadHistoryPending,
@@ -3776,6 +3837,101 @@ export default function ChatView(props: ChatViewProps) {
       setComposerDraftPrompt,
       setComposerDraftTerminalContexts,
     ],
+  );
+
+  /**
+   * Cancels a message held for its uploads: it goes back into the composer, after whatever was
+   * typed since (nothing is overwritten), with its files still uploading or failed as they were.
+   */
+  const handleCancelHeldSend = useCallback(
+    (messageId: string) => {
+      if (!activeThreadKey) return;
+      const entry = takeHeldSend(activeThreadKey, messageId);
+      if (!entry) return;
+      const refs = {
+        promptRef,
+        composerImagesRef,
+        composerTerminalContextsRef,
+        composerFileReferencesRef,
+      };
+      const draft = {
+        composerDraftTarget,
+        setComposerDraftPrompt,
+        addComposerDraftImages,
+        setComposerDraftTerminalContexts,
+        setComposerDraftFileReferences,
+      };
+      const prompt = entry.composer.promptForRestore ?? entry.composer.prompt;
+      const terminalContexts = entry.composer.sendableTerminalContexts;
+      const fileReferences = entry.composer.fileReferences ?? [];
+      // Into the draft first, so its uploads stay with it when the entry leaves the queue.
+      if (composerRefsHaveContent(refs)) {
+        const keptContexts = refs.composerTerminalContextsRef.current;
+        const keptReferences = refs.composerFileReferencesRef.current;
+        restoreComposerContent({
+          refs,
+          composerHandle: { readComposer },
+          draft,
+          append: true,
+          prompt: appendReturnedComposerPrompt(refs.promptRef.current, prompt),
+          images: entry.composer.images,
+        });
+        if (terminalContexts.length > 0) {
+          setComposerDraftTerminalContexts(composerDraftTarget, [
+            ...keptContexts,
+            ...terminalContexts,
+          ]);
+        }
+        if (fileReferences.length > 0) {
+          setComposerDraftFileReferences(composerDraftTarget, [
+            ...keptReferences,
+            ...fileReferences,
+          ]);
+        }
+      } else {
+        restoreComposerContent({
+          refs,
+          composerHandle: { readComposer },
+          draft,
+          prompt,
+          images: entry.composer.images,
+          terminalContexts,
+          fileReferences,
+        });
+      }
+      for (const context of entry.composer.sourceControlContexts) {
+        addComposerDraftSourceControlContext(composerDraftTarget, context);
+      }
+      removeMessageFromQueue(activeThreadKey, messageId);
+      scheduleComposerFocus();
+    },
+    [
+      activeThreadKey,
+      addComposerDraftImages,
+      addComposerDraftSourceControlContext,
+      composerDraftTarget,
+      readComposer,
+      removeMessageFromQueue,
+      scheduleComposerFocus,
+      setComposerDraftFileReferences,
+      setComposerDraftPrompt,
+      setComposerDraftTerminalContexts,
+    ],
+  );
+  const handleSendHeldWithout = useCallback(
+    (messageId: string, attachmentId: string) => {
+      if (activeThreadKey) removeHeldAttachment(activeThreadKey, messageId, attachmentId);
+    },
+    [activeThreadKey],
+  );
+  const heldSendTimeline = useMemo<HeldSendTimelineValue>(
+    () => ({
+      heldSends,
+      onRetryUpload: retryHeldUpload,
+      onSendWithout: handleSendHeldWithout,
+      onCancel: handleCancelHeldSend,
+    }),
+    [handleCancelHeldSend, handleSendHeldWithout, heldSends],
   );
 
   // Points a draft at a new "No project" chat in place, keeping its prompt,
@@ -5119,6 +5275,9 @@ export default function ChatView(props: ChatViewProps) {
     (message: QueuedMessage) => {
       if (hasRetiredProjectMemory(message.composer))
         return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
+      if (awaitsUploads(message)) {
+        return { allowed: false as const, reason: "Its attachments are still uploading." };
+      }
       return getSteerEligibility({
         modelSelection: message.composer.selectedModelSelection,
         runtimeMode: message.settings.runtimeMode,
@@ -5292,6 +5451,24 @@ export default function ChatView(props: ChatViewProps) {
     },
     [queuedMessages, steerQueuedEntry, steerServerQueuedMessage],
   );
+
+  // A steer sent while its uploads ran steers once they finished, while this view shows the
+  // running turn; otherwise (or when the steer is refused) it waits for the turn as queued.
+  const steeredHeldSendIdsRef = useRef(new Set<string>());
+  // Never past an earlier held message: that one goes first.
+  useEffect(() => {
+    for (const held of heldSends.values()) {
+      if (held.hold.sentAs !== "steer" || held.hold.awaiting.length > 0) break;
+      // Steered once already and still queued (refused, or not reconciled yet): it stays first.
+      if (steeredHeldSendIdsRef.current.has(held.entry.id)) break;
+      steeredHeldSendIdsRef.current.add(held.entry.id);
+      if (phase === "running") {
+        void steerQueuedEntry(held.entry, { explicit: false, prepareEditors: false });
+      }
+      // One steer at a time; the next one is looked at once this one left the queue.
+      break;
+    }
+  }, [heldSends, phase, steerQueuedEntry]);
 
   /** A steer on the running turn's provider stops the turn and sends the message next. */
   const followUpSteerRestarts = useMemo(() => {
@@ -5918,20 +6095,22 @@ export default function ChatView(props: ChatViewProps) {
       }
       return;
     }
-    const fileUploadSendBlock = deriveComposerFileUploadSendBlock({
+    const fileUploadSendState = deriveComposerFileUploadSendState({
       attachments: composerImages,
       nowMs: Date.now(),
     });
-    if (fileUploadSendBlock) {
+    const notifyAttachmentsNotReady = (description: string) =>
       toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: "Attachments aren't ready",
-          description: fileUploadSendBlock,
-        }),
+        stackedThreadToast({ type: "warning", title: "Attachments aren't ready", description }),
       );
+    if (fileUploadSendState.kind === "blocked") {
+      notifyAttachmentsNotReady(fileUploadSendState.reason);
       return;
     }
+    // Only uploads still running: the message is accepted now and goes out once they finished
+    // (`holdSendForUploads`), unless the path below cannot wait for them.
+    const awaitingUploads =
+      fileUploadSendState.kind === "uploading" ? fileUploadSendState.attachmentIds : null;
     const composerSnapshot: SendTurnComposerSnapshot = {
       prompt: promptForSend,
       trimmedPrompt: trimmed,
@@ -6013,6 +6192,11 @@ export default function ChatView(props: ChatViewProps) {
 
     // Editing the node's queued entry: the send saves it in place, busy or not.
     if (activeServerQueueEdit !== null) {
+      // The node stores the edit with its upload tokens: it waits for them, as before.
+      if (fileUploadSendState.kind === "uploading") {
+        notifyAttachmentsNotReady(fileUploadSendState.reason);
+        return;
+      }
       const edit = activeServerQueueEdit;
       const composerChangedDuringSave = captureComposerContentGuard();
       // Saving from here on: the attachments it keeps are fixed (no drop replaces the edit
@@ -6063,8 +6247,13 @@ export default function ChatView(props: ChatViewProps) {
     // for a draft that is not open. So does a node about to send its own queue's
     // head (its dispatch leaves the session "ready" while it starts) or an add of
     // this tab still on its way: a turn start would jump ahead of them.
-    if (
-      activeThreadKey &&
+    // A message sent while its uploads ran waits in the queue until it went out; a later send
+    // waits behind it rather than overtaking it.
+    const heldSendAhead =
+      activeThreadKey !== null &&
+      queueHasUploadHeldSend(useMessageQueueStore.getState().queuesByThreadKey[activeThreadKey]);
+    const sendQueuesBehindTurn =
+      activeThreadKey !== null &&
       (phase === "running" ||
         hasOutstandingQueuedDispatch(activeThreadKey) ||
         sendWaitsForEnvironment ||
@@ -6072,8 +6261,8 @@ export default function ChatView(props: ChatViewProps) {
           serverQueueSupported: serverFollowUpQueueSupported && isServerThread,
           queueWaiting: selectServerFollowUpQueueWaiting(useStore.getState(), activeThreadRef),
           pendingAdds: countPendingFollowUpAdds(activeThreadKey),
-        }))
-    ) {
+        }));
+    if (activeThreadKey && (sendQueuesBehindTurn || heldSendAhead)) {
       // Steer = enqueue, then start a steer attempt at once: every failure falls back to the
       // queue. The phone tier is frozen and always queues; slash input never steers.
       const invertFollowUp = options?.invertFollowUp === true;
@@ -6117,6 +6306,11 @@ export default function ChatView(props: ChatViewProps) {
       };
       const preparing = threadSendsPreparing.ref(routeThreadKey);
       if (preparing.current) return;
+      // Declining cannot be undone: a redirect waits for its uploads before it declines.
+      if (redirect.kind === "decline" && fileUploadSendState.kind === "uploading") {
+        notifyAttachmentsNotReady(fileUploadSendState.reason);
+        return;
+      }
       if (
         redirect.kind === "decline" &&
         approvalRedirectTooSoon(redirect, approvalSightingsRef.current)
@@ -6167,6 +6361,24 @@ export default function ChatView(props: ChatViewProps) {
         },
         settings: settingsSnapshot,
       });
+      // Uploads still running, or a held message ahead: it waits in this tab's queue, in its
+      // place. An ordinary send behind a held one keeps showing as a send in the timeline.
+      if (awaitingUploads !== null || heldSendAhead) {
+        holdSendForUploads({
+          threadKey: activeThreadKey,
+          entry: tabQueueEntry(),
+          awaiting: awaitingUploads ?? [],
+          sentAs: !sendQueuesBehindTurn ? "send" : followUpAction === "steer" ? "steer" : "queue",
+          draftTarget: composerDraftTarget,
+        });
+        if (!composerChangedDuringPreparation()) {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          setComposerDraftTokenMode(composerDraftTarget, tokenMode);
+          readComposer()?.resetCursorState();
+        }
+        return;
+      }
       // The node keeps this thread's queue: the message is queued there. Not while this
       // tab still holds entries for it (they move first, in order), nor while the node is
       // not ready (this tab's queue holds it until it is, then moves it).
@@ -6292,6 +6504,36 @@ export default function ChatView(props: ChatViewProps) {
           );
         }
       }
+      if (!composerChangedDuringPreparation()) {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        setComposerDraftTokenMode(composerDraftTarget, tokenMode);
+        readComposer()?.resetCursorState();
+      }
+      return;
+    }
+
+    // An idle thread, uploads still running: the message shows as sent at once and its turn
+    // starts once they finished, through the queue's drain and the same gate as this send.
+    if (awaitingUploads !== null && activeThreadKey) {
+      const composerChangedDuringPreparation = captureComposerContentGuard();
+      if (!(await drainEditorsBeforeSend())) return;
+      holdSendForUploads({
+        threadKey: activeThreadKey,
+        entry: {
+          id: newMessageId(),
+          createdAt: new Date().toISOString(),
+          composer: {
+            ...composerSnapshot,
+            // Clearing the composer revokes its blob previews; the held copy keeps its own.
+            images: composerSnapshot.images.map(cloneComposerImageForRetry),
+          },
+          settings: settingsSnapshot,
+        },
+        awaiting: awaitingUploads,
+        sentAs: "send",
+        draftTarget: composerDraftTarget,
+      });
       if (!composerChangedDuringPreparation()) {
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
@@ -7560,74 +7802,76 @@ export default function ChatView(props: ChatViewProps) {
               !isWorking ? (
               <ThreadHistorySkeleton />
             ) : isActiveThreadIdFresh ? (
-              <MessagesTimeline
-                key={activeThread.id}
-                agentPanelModel={agentPanelModel}
-                onOpenAgents={onOpenAgentsPanel}
-                onOpenAgent={onOpenRuntimeAgentPanel}
-                isWorking={isWorking}
-                activeTurnInProgress={isWorking || !latestTurnSettled}
-                activeTurnId={activeLatestTurn?.turnId ?? null}
-                latestTurn={activeLatestTurn}
-                latestTurnEndedBySession={activeThread.session?.status === "error"}
-                activeTurnStartedAt={activeWorkStartedAt}
-                worktreeSetup={worktreeSetupTimeline}
-                launchTurnDurationStart={
-                  worktreeLaunch?.phase === "handed-off" ? launchWorkStartedAt : null
-                }
-                enteringMessageId={enteringMessageId}
-                listRef={legendListRef}
-                targetMessageId={threadMessageSearchTarget?.messageId ?? linkedMessageId ?? null}
-                targetMessageRequestId={
-                  threadMessageSearchTarget?.requestId ?? timelineReveal?.requestId ?? 0
-                }
-                targetMessageRowHighlight={threadMessageSearchTarget === null}
-                threadMessageSearchQuery={threadMessageSearchOpen ? threadMessageSearchQuery : ""}
-                threadMessageSearchOccurrencesByMessageId={
-                  threadMessageSearchOccurrencesByMessageId
-                }
-                activeThreadMessageSearchOccurrence={
-                  threadMessageSearchOpen ? selectedThreadMessageSearchOccurrence : null
-                }
-                timelineEntries={timelineEntries}
-                turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
-                activeThreadEnvironmentId={activeThread.environmentId}
-                routeThreadKey={routeThreadKey}
-                openDiffTurnId={diffOpen ? (rawSearch.diffTurnId ?? null) : null}
-                onOpenTurnDiff={onOpenTurnDiff}
-                onCloseDiff={onCloseDiff}
-                revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
-                undoTurnCountByTurnId={undoTurnCountByTurnId}
-                onUndoTurn={onUndoTurn}
-                onRevertUserMessage={onRevertUserMessage}
-                isRevertingCheckpoint={isRevertingCheckpoint}
-                onImageExpand={onExpandTimelineImage}
-                // The frozen phone tier has no page tab; its renders open in a dialog.
-                onOpenHtmlRender={
-                  presentationTier !== "phone" && isServerThread ? onOpenHtmlRender : undefined
-                }
-                markdownCwd={gitCwd ?? undefined}
-                resolvedTheme={resolvedTheme}
-                timestampFormat={timestampFormat}
-                workspaceRoot={activeWorkspaceRoot}
-                skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
-                liveFollowEnabled={timelineLiveFollowEnabled}
-                onIsAtEndChange={onIsAtEndChange}
-                onManualNavigation={stopTimelineLiveFollow}
-                onUserReachedEnd={resumeTimelineLiveFollow}
-                readingAnchor={threadOpening.readingAnchor}
-                detailLive={threadDetailState === "live"}
-                onReadingPositionResolved={onReadingPositionResolved}
-                canLoadOlder={activeThreadMessageHistory?.hasMoreBefore ?? false}
-                isLoadingOlder={activeThreadMessageHistoryLoad?.status === "loading"}
-                loadOlderError={activeThreadMessageHistoryLoad?.error ?? null}
-                onLoadOlder={handleLoadOlderMessages}
-                {...(presentationTier !== "phone"
-                  ? { onInspectContextHandoff: openContextHandoffInspection }
-                  : {})}
-                {...(offerThreadFork ? { onForkFromMessage } : {})}
-                providerDriverKind={selectedProvider}
-              />
+              <HeldSendTimelineContext value={heldSendTimeline}>
+                <MessagesTimeline
+                  key={activeThread.id}
+                  agentPanelModel={agentPanelModel}
+                  onOpenAgents={onOpenAgentsPanel}
+                  onOpenAgent={onOpenRuntimeAgentPanel}
+                  isWorking={isWorking}
+                  activeTurnInProgress={isWorking || !latestTurnSettled}
+                  activeTurnId={activeLatestTurn?.turnId ?? null}
+                  latestTurn={activeLatestTurn}
+                  latestTurnEndedBySession={activeThread.session?.status === "error"}
+                  activeTurnStartedAt={activeWorkStartedAt}
+                  worktreeSetup={worktreeSetupTimeline}
+                  launchTurnDurationStart={
+                    worktreeLaunch?.phase === "handed-off" ? launchWorkStartedAt : null
+                  }
+                  enteringMessageId={enteringMessageId}
+                  listRef={legendListRef}
+                  targetMessageId={threadMessageSearchTarget?.messageId ?? linkedMessageId ?? null}
+                  targetMessageRequestId={
+                    threadMessageSearchTarget?.requestId ?? timelineReveal?.requestId ?? 0
+                  }
+                  targetMessageRowHighlight={threadMessageSearchTarget === null}
+                  threadMessageSearchQuery={threadMessageSearchOpen ? threadMessageSearchQuery : ""}
+                  threadMessageSearchOccurrencesByMessageId={
+                    threadMessageSearchOccurrencesByMessageId
+                  }
+                  activeThreadMessageSearchOccurrence={
+                    threadMessageSearchOpen ? selectedThreadMessageSearchOccurrence : null
+                  }
+                  timelineEntries={timelineEntries}
+                  turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
+                  activeThreadEnvironmentId={activeThread.environmentId}
+                  routeThreadKey={routeThreadKey}
+                  openDiffTurnId={diffOpen ? (rawSearch.diffTurnId ?? null) : null}
+                  onOpenTurnDiff={onOpenTurnDiff}
+                  onCloseDiff={onCloseDiff}
+                  revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
+                  undoTurnCountByTurnId={undoTurnCountByTurnId}
+                  onUndoTurn={onUndoTurn}
+                  onRevertUserMessage={onRevertUserMessage}
+                  isRevertingCheckpoint={isRevertingCheckpoint}
+                  onImageExpand={onExpandTimelineImage}
+                  // The frozen phone tier has no page tab; its renders open in a dialog.
+                  onOpenHtmlRender={
+                    presentationTier !== "phone" && isServerThread ? onOpenHtmlRender : undefined
+                  }
+                  markdownCwd={gitCwd ?? undefined}
+                  resolvedTheme={resolvedTheme}
+                  timestampFormat={timestampFormat}
+                  workspaceRoot={activeWorkspaceRoot}
+                  skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
+                  liveFollowEnabled={timelineLiveFollowEnabled}
+                  onIsAtEndChange={onIsAtEndChange}
+                  onManualNavigation={stopTimelineLiveFollow}
+                  onUserReachedEnd={resumeTimelineLiveFollow}
+                  readingAnchor={threadOpening.readingAnchor}
+                  detailLive={threadDetailState === "live"}
+                  onReadingPositionResolved={onReadingPositionResolved}
+                  canLoadOlder={activeThreadMessageHistory?.hasMoreBefore ?? false}
+                  isLoadingOlder={activeThreadMessageHistoryLoad?.status === "loading"}
+                  loadOlderError={activeThreadMessageHistoryLoad?.error ?? null}
+                  onLoadOlder={handleLoadOlderMessages}
+                  {...(presentationTier !== "phone"
+                    ? { onInspectContextHandoff: openContextHandoffInspection }
+                    : {})}
+                  {...(offerThreadFork ? { onForkFromMessage } : {})}
+                  providerDriverKind={selectedProvider}
+                />
+              </HeldSendTimelineContext>
             ) : (
               <div aria-hidden className="flex min-h-0 flex-1" />
             )}
@@ -7843,6 +8087,8 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 onRemove={handleRemoveQueuedMessage}
                 onEdit={handleEditQueuedMessage}
+                heldSends={heldSends}
+                heldSendActions={heldSendTimeline}
                 getEditUnavailableReason={getQueuedEditUnavailableReason}
                 onMove={handleMoveQueuedMessage}
                 onRetry={
@@ -7916,6 +8162,7 @@ export default function ChatView(props: ChatViewProps) {
                       hostedDraftTarget.pending !== null
                     }
                     sendsQueueUntilReady={sendsQueueUntilReady}
+                    sendCannotWaitForUploads={activeServerQueueEdit !== null}
                     mutationUnavailableReason={mutationUnavailableReason}
                     isPreparingWorktree={isPreparingWorktree}
                     isWorktreeSetupRunning={composerWorktreeSetupRunning}

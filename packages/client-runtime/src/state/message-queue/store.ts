@@ -13,6 +13,7 @@ import {
   type QueuedMessage,
   type QueuedMessageSteerAttempt,
 } from "./logic.ts";
+import { awaitsUploads } from "./uploadHold.ts";
 
 export type QueuedMessageSteerAttempts = Readonly<Record<string, QueuedMessageSteerAttempt>>;
 
@@ -66,6 +67,16 @@ export interface MessageQueueState<Composer = unknown, Settings = unknown> {
   readonly epoch: number;
   readonly enqueue: (threadKey: string, message: QueuedMessage<Composer, Settings>) => void;
   readonly remove: (threadKey: string, id: string) => void;
+  /**
+   * Replaces one entry with what `update` makes of it, in its place (an upload hold that
+   * progressed, an attachment removed from a held message). The id never changes; returning the
+   * entry itself is a no-op.
+   */
+  readonly update: (
+    threadKey: string,
+    id: string,
+    update: (entry: QueuedMessage<Composer, Settings>) => QueuedMessage<Composer, Settings>,
+  ) => void;
   readonly move: (threadKey: string, id: string, direction: "up" | "down") => void;
   readonly beginSend: (threadKey: string, id: string) => boolean;
   readonly finishSend: (threadKey: string, id: string, accepted: boolean) => void;
@@ -155,6 +166,18 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
           steerAttemptsByThreadKey: withoutAttempt(state.steerAttemptsByThreadKey, threadKey, id),
         };
       }),
+    update: (threadKey, id, update) =>
+      set((state) => {
+        const current = state.queuesByThreadKey[threadKey];
+        const index = current?.findIndex((entry) => entry.id === id) ?? -1;
+        if (!current || index === -1) return state;
+        const entry = current[index]!;
+        const next = update(entry);
+        if (next === entry) return state;
+        const queue = current.slice();
+        queue[index] = { ...next, id: entry.id };
+        return { queuesByThreadKey: { ...state.queuesByThreadKey, [threadKey]: queue } };
+      }),
     move: (threadKey, id, direction) =>
       set((state) => {
         const current = state.queuesByThreadKey[threadKey];
@@ -174,6 +197,7 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
         if (
           !message ||
           message.deliveryStatus ||
+          awaitsUploads(message) ||
           queue?.some((entry) => entry.deliveryStatus === "sending") ||
           state.steerAttemptsByThreadKey[threadKey]?.[id] !== undefined
         )
@@ -250,7 +274,12 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
       set((state) => {
         const current = state.steerAttemptsByThreadKey[threadKey];
         const message = state.queuesByThreadKey[threadKey]?.find((entry) => entry.id === id);
-        if (!message || message.deliveryStatus === "sending" || current?.[id] !== undefined) {
+        if (
+          !message ||
+          message.deliveryStatus === "sending" ||
+          awaitsUploads(message) ||
+          current?.[id] !== undefined
+        ) {
           return state;
         }
         claimed = true;

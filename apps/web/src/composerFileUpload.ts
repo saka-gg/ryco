@@ -160,23 +160,37 @@ export function getUsableComposerFileUploadToken(
     : null;
 }
 
+/** A composer attachment as the send state reads it. */
+interface ComposerSendAttachment {
+  readonly id: string;
+  readonly type: string;
+  readonly name: string;
+  readonly file: File | null;
+  readonly uploadToken?: string | undefined;
+  readonly expiresAt?: string | undefined;
+  /** A saved draft's attachment whose bytes are still loading. */
+  readonly bytesPending?: true | undefined;
+}
+
 /**
- * Send-block reason across the composer's attachments: uploading, failed,
- * needsReattach, or an expired token all hold the send back. A byte-less file
- * with a still-valid token on the attachment itself (e.g. restored from a
- * stash snapshot) sends fine without an engine record.
+ * Whether the composer's attachments let a send go out. `uploading`: only uploads still running
+ * hold it, so a send can be accepted now and go out once they finish (`attachmentIds`).
+ * `blocked`: a failed upload, a file to attach again, an expired token or bytes still loading
+ * hold it until the user acts.
  */
-export function deriveComposerFileUploadSendBlock(input: {
-  readonly attachments: ReadonlyArray<{
-    readonly id: string;
-    readonly type: string;
-    readonly name: string;
-    readonly file: File | null;
-    readonly uploadToken?: string | undefined;
-    readonly expiresAt?: string | undefined;
-    /** A saved draft's attachment whose bytes are still loading. */
-    readonly bytesPending?: true | undefined;
-  }>;
+export type ComposerFileUploadSendState =
+  | { readonly kind: "ready" }
+  | {
+      readonly kind: "uploading";
+      readonly reason: string;
+      readonly attachmentIds: ReadonlyArray<string>;
+    }
+  | { readonly kind: "blocked"; readonly reason: string };
+
+const READY: ComposerFileUploadSendState = { kind: "ready" };
+
+export function deriveComposerFileUploadSendState(input: {
+  readonly attachments: ReadonlyArray<ComposerSendAttachment>;
   readonly nowMs: number;
   /**
    * The upload records to judge against; defaults to the live engine. Render
@@ -184,11 +198,12 @@ export function deriveComposerFileUploadSendBlock(input: {
    * so a memoized derivation recomputes when uploads progress.
    */
   readonly records?: ReadonlyMap<string, ChatFileUploadRecord>;
-}): string | null {
+}): ComposerFileUploadSendState {
   const records = input.records;
+  let uploading: { reason: string; attachmentIds: string[] } | null = null;
   for (const attachment of input.attachments) {
     if (attachment.bytesPending) {
-      return `Loading '${attachment.name}'…`;
+      return { kind: "blocked", reason: `Loading '${attachment.name}'…` };
     }
     if (attachment.type !== "file") {
       continue;
@@ -198,24 +213,45 @@ export function deriveComposerFileUploadSendBlock(input: {
     )?.status;
     if (status) {
       if (status.kind === "pending" || status.kind === "uploading") {
-        return `Uploading '${attachment.name}'…`;
+        uploading ??= { reason: `Uploading '${attachment.name}'…`, attachmentIds: [] };
+        uploading.attachmentIds.push(attachment.id);
+        continue;
       }
       if (status.kind === "failed") {
-        return `'${attachment.name}' failed to upload. ${status.message} Retry it or remove it.`;
+        return {
+          kind: "blocked",
+          reason: `'${attachment.name}' failed to upload. ${status.message} Retry it or remove it.`,
+        };
       }
       if (
         status.kind === "needsReattach" ||
         (status.kind === "uploaded" && !isFileUploadTokenUsable(status.expiresAt, input.nowMs))
       ) {
-        return `Attach '${attachment.name}' again to send this message.`;
+        return {
+          kind: "blocked",
+          reason: `Attach '${attachment.name}' again to send this message.`,
+        };
       }
       continue;
     }
     if (attachment.file === null && !hasUsableTokenOnAttachment(attachment, input.nowMs)) {
-      return `Attach '${attachment.name}' again to send this message.`;
+      return { kind: "blocked", reason: `Attach '${attachment.name}' again to send this message.` };
     }
   }
-  return null;
+  return uploading === null ? READY : { kind: "uploading", ...uploading };
+}
+
+/**
+ * Send-block reason across the composer's attachments: uploading, failed,
+ * needsReattach, or an expired token all hold the send back. A byte-less file
+ * with a still-valid token on the attachment itself (e.g. restored from a
+ * stash snapshot) sends fine without an engine record.
+ */
+export function deriveComposerFileUploadSendBlock(
+  input: Parameters<typeof deriveComposerFileUploadSendState>[0],
+): string | null {
+  const state = deriveComposerFileUploadSendState(input);
+  return state.kind === "ready" ? null : state.reason;
 }
 
 function hasUsableTokenOnAttachment(

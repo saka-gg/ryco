@@ -284,7 +284,10 @@ const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnS
   onEntryRemoved: revokeQueuedPreviewUrls,
   onSteerRejected: notifySteerRejected,
   moveEntryToServer,
-  isEntryMovable: (entry) => isWebFollowUpMovable(entry.composer, entry.settings),
+  // A message sent (not queued) while its uploads ran keeps a direct send's path: this device
+  // starts its turn once the uploads finished, as the timeline shows it.
+  isEntryMovable: (entry) =>
+    entry.uploadHold?.sentAs !== "send" && isWebFollowUpMovable(entry.composer, entry.settings),
   onServerQueueMigrated: recordServerQueueMigrated,
   isServerQueueAddPending: (threadKey) => countPendingFollowUpAdds(threadKey) > 0,
 };

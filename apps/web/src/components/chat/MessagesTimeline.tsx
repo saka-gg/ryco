@@ -60,6 +60,7 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { MessageAttachments } from "./MessageAttachments";
+import { UserMessageMeta } from "./HeldSendStatus";
 import {
   isWorktreeLaunchSettingUp,
   resolveWorktreeSetupScriptChip,
@@ -1773,10 +1774,12 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                       </Button>
                     )}
                   </div>
-                  <p className="text-right text-[11px] text-muted-foreground/50">
-                    {row.message.dispatchMode === "steer" ? "Steered · " : ""}
-                    {formatTimestamp(row.message.createdAt, ctx.timestampFormat)}
-                  </p>
+                  <UserMessageMeta messageId={row.message.id}>
+                    <p className="text-right text-[11px] text-muted-foreground/50">
+                      {row.message.dispatchMode === "steer" ? "Steered · " : ""}
+                      {formatTimestamp(row.message.createdAt, ctx.timestampFormat)}
+                    </p>
+                  </UserMessageMeta>
                 </div>
               </div>
             </div>

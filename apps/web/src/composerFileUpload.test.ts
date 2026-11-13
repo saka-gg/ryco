@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   composerFileUploadEngine,
   deriveComposerFileUploadSendBlock,
+  deriveComposerFileUploadSendState,
   releaseUnusedComposerFileUploads,
   seedComposerFileNeedsReattach,
   seedComposerFileUploadFromPersisted,
@@ -155,5 +156,59 @@ describe("composer upload cleanup", () => {
     } finally {
       releaseSeeded(ids);
     }
+  });
+});
+
+describe("deriveComposerFileUploadSendState", () => {
+  const file = (id: string) => ({ id, type: "file", name: `${id}.pdf`, file: null });
+  const records = (entries: Array<[string, object]>) =>
+    new Map(entries.map(([id, status]) => [id, { status }])) as never;
+
+  it("lets a send wait for uploads that are still running, listing them", () => {
+    expect(
+      deriveComposerFileUploadSendState({
+        attachments: [
+          file("a"),
+          file("b"),
+          { id: "img", type: "image", name: "x.png", file: null },
+        ],
+        nowMs: NOW,
+        records: records([
+          ["a", { kind: "uploading", progress: 0.3 }],
+          ["b", { kind: "pending" }],
+        ]),
+      }),
+    ).toEqual({ kind: "uploading", reason: "Uploading 'a.pdf'…", attachmentIds: ["a", "b"] });
+  });
+
+  it("blocks when any upload failed, even with others still running", () => {
+    const state = deriveComposerFileUploadSendState({
+      attachments: [file("a"), file("b")],
+      nowMs: NOW,
+      records: records([
+        ["a", { kind: "uploading", progress: 0.3 }],
+        ["b", { kind: "failed", retryable: true, message: "Network error." }],
+      ]),
+    });
+    expect(state.kind).toBe("blocked");
+  });
+
+  it("is ready once every upload finished", () => {
+    expect(
+      deriveComposerFileUploadSendState({
+        attachments: [file("a")],
+        nowMs: NOW,
+        records: records([
+          [
+            "a",
+            {
+              kind: "uploaded",
+              uploadToken: "t",
+              expiresAt: new Date(NOW + 600_000).toISOString(),
+            },
+          ],
+        ]),
+      }),
+    ).toEqual({ kind: "ready" });
   });
 });

@@ -15,7 +15,9 @@ import {
   type QueueHold,
 } from "@ryco/client-runtime/state/message-queue";
 
+import type { HeldSendView } from "../../heldSends";
 import { cn } from "~/lib/utils";
+import { HeldSendStatus, type HeldSendActions } from "./HeldSendStatus";
 
 /**
  * Why queued messages are not going out yet, shown under the queue's title.
@@ -94,6 +96,9 @@ interface ComposerQueuedMessagesProps {
   /** Drops a stored attachment from the edit (absent while saving). */
   onDropEditingAttachment?: ((attachmentId: string) => void) | undefined;
   onCancelEdit?: (() => void) | undefined;
+  /** This tab's entries sent while their attachments uploaded, by message id. */
+  heldSends?: ReadonlyMap<string, HeldSendView> | undefined;
+  heldSendActions?: HeldSendActions | undefined;
 }
 
 const iconButtonClass = cn(
@@ -136,6 +141,8 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   editingAttachments,
   onDropEditingAttachment,
   onCancelEdit,
+  heldSends,
+  heldSendActions,
 }: ComposerQueuedMessagesProps) {
   if (rows.length === 0) {
     return null;
@@ -206,6 +213,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
           const editUnavailableReason = busy ? null : getEditUnavailableReason(row);
           const isSteering = row.status === "steering";
           const range = movableRange(rows, index);
+          const heldSend = row.source === "local" ? heldSends?.get(row.id) : undefined;
           return (
             <li
               key={row.id}
@@ -314,6 +322,11 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               >
                 <XIcon className="size-3.5" />
               </button>
+              {heldSend && heldSendActions ? (
+                <div className="basis-full pt-0.5">
+                  <HeldSendStatus held={heldSend} actions={heldSendActions} align="start" />
+                </div>
+              ) : null}
               {editing && editingAttachments && editingAttachments.length > 0 ? (
                 <ul
                   className="flex basis-full flex-wrap items-center gap-1 pt-0.5"
