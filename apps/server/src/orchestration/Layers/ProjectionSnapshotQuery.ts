@@ -88,6 +88,10 @@ import { ORCHESTRATION_PROJECTOR_NAMES } from "../projectorNames.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { makeShellSnapshotCopy } from "../shellSnapshotCopy.ts";
 import { readClientFor, SqliteReadClient } from "../../persistence/SqliteReadClient.ts";
+import {
+  TASK_ACTIVITY_KINDS,
+  threadActivitiesByKind,
+} from "../../persistence/threadActivityKindReads.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
 import { previewActivityPayload } from "../activityPayloadPreview.ts";
 import {
@@ -2163,18 +2167,28 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
-  // Payload-only projection for task rows: the linkage bundle (runHandles,
-  // outputFile) rides exclusively on task.* kinds, so path authorization
-  // never needs messages, plans, or checkpoints.
-  const listThreadTaskPayloadRows = SqlSchema.findAll({
+  // The linkage bundle (runHandles.scriptPath, outputFile) of a thread's task rows: it rides
+  // exclusively on task.* kinds, so path authorization never needs messages, plans, or
+  // checkpoints. The task-output RPC runs it on every poll of a running task, so it seeks the
+  // task kinds (not every activity row) and extracts the two strings in SQL instead of decoding
+  // every task payload. A malformed payload fails the read, as decoding it did: callers fail
+  // closed. `json_type` keeps only strings, as the reader's `typeof` checks did.
+  const listThreadTaskPathRefRows = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
-    Result: Schema.Struct({ payload: Schema.fromJsonString(Schema.Unknown) }),
+    Result: Schema.Struct({
+      scriptPath: Schema.NullOr(Schema.String),
+      outputPath: Schema.NullOr(Schema.String),
+    }),
     execute: ({ threadId }) =>
       sql`
-        SELECT payload_json AS "payload"
-        FROM projection_thread_activities
-        WHERE thread_id = ${threadId}
-          AND kind LIKE 'task.%'
+        SELECT
+          CASE WHEN json_type(payload_json, '$.runHandles.scriptPath') = 'text'
+            THEN json_extract(payload_json, '$.runHandles.scriptPath') END AS "scriptPath",
+          CASE WHEN json_type(payload_json, '$.outputFile') = 'text'
+            THEN json_extract(payload_json, '$.outputFile') END AS "outputPath"
+        FROM ${threadActivitiesByKind(sql)}
+        WHERE kind IN ${sql.in(TASK_ACTIVITY_KINDS)}
+          AND thread_id = ${threadId}
       `,
   });
 
@@ -2418,7 +2432,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         payload_json AS "payload",
         sequence,
         created_at AS "createdAt"
-      FROM projection_thread_activities
+      FROM ${threadActivitiesByKind(sql)}
       WHERE kind IN ${sql.in(PENDING_REQUEST_ACTIVITY_KINDS)}
         AND thread_id = ${threadId}
       ORDER BY sequence ASC, created_at ASC, activity_id ASC
@@ -2462,7 +2476,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         payload_json AS "payload",
         sequence,
         created_at AS "createdAt"
-      FROM projection_thread_activities
+      FROM ${threadActivitiesByKind(sql)}
       WHERE kind IN ('task.started', 'task.progress', 'task.updated')
         AND thread_id = ${threadId}
         AND CASE
@@ -4184,7 +4198,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
   const listThreadTaskPathRefs: NonNullable<
     ProjectionSnapshotQueryShape["listThreadTaskPathRefs"]
   > = (threadId) =>
-    listThreadTaskPayloadRows({ threadId }).pipe(
+    listThreadTaskPathRefRows({ threadId }).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProjectionSnapshotQuery.listThreadTaskPathRefs:query",
@@ -4195,21 +4209,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         const scriptPaths = new Set<string>();
         const outputPaths = new Set<string>();
         for (const row of rows) {
-          const payload = row.payload;
-          if (payload === null || typeof payload !== "object") {
-            continue;
-          }
-          const record = payload as Record<string, unknown>;
-          const runHandles = record.runHandles;
-          if (runHandles !== null && typeof runHandles === "object") {
-            const scriptPath = (runHandles as { scriptPath?: unknown }).scriptPath;
-            if (typeof scriptPath === "string") {
-              scriptPaths.add(scriptPath);
-            }
-          }
-          if (typeof record.outputFile === "string") {
-            outputPaths.add(record.outputFile);
-          }
+          if (row.scriptPath !== null) scriptPaths.add(row.scriptPath);
+          if (row.outputPath !== null) outputPaths.add(row.outputPath);
         }
         return { scriptPaths: [...scriptPaths], outputPaths: [...outputPaths] };
       }),
@@ -4443,14 +4444,37 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     sql
       .withTransaction(
         Effect.all({
+          // Every (message, completed turn) pair where the message belongs to the turn or is
+          // the user message that started it, as one join with an OR would give. That join
+          // could use no index for the turn side: it tested every turn of the thread for every
+          // message (22 ms on a 2,000-message thread; 160 ms when no turn had completed, so
+          // the LIMIT never ended it). Each branch here seeks: a reply's turn by its unique
+          // (thread_id, turn_id), a turn's user message by its primary key. The second branch
+          // leaves out the pairs the first already has, so each pair appears once.
           messages: sql<{ role: string; text: string; assembledText: string | null }>`
-        SELECT m.role, ${messageTextColumns(sql, "m", 64001)} FROM projection_thread_messages m
-        JOIN projection_turns t ON t.thread_id = m.thread_id
-          AND (t.turn_id = m.turn_id OR t.pending_message_id = m.message_id)
-        WHERE m.thread_id = ${threadId} AND t.state = 'completed' AND m.is_streaming = 0
-          AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions s
-            WHERE s.thread_id = t.thread_id AND s.active_turn_id = t.turn_id)
-        ORDER BY m.created_at ASC, m.message_id ASC LIMIT 201
+        SELECT m.role, ${messageTextColumns(sql, "m", 64001)}
+        FROM (
+          SELECT message_id, created_at FROM (
+            SELECT m.message_id, m.created_at
+            FROM projection_thread_messages m
+            JOIN projection_turns t ON t.thread_id = m.thread_id AND t.turn_id = m.turn_id
+            WHERE m.thread_id = ${threadId} AND t.state = 'completed' AND m.is_streaming = 0
+              AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions s
+                WHERE s.thread_id = t.thread_id AND s.active_turn_id = t.turn_id)
+            UNION ALL
+            SELECT m.message_id, m.created_at
+            FROM projection_turns t
+            JOIN projection_thread_messages m ON m.message_id = t.pending_message_id
+              AND m.thread_id = t.thread_id
+            WHERE t.thread_id = ${threadId} AND t.state = 'completed' AND m.is_streaming = 0
+              AND t.turn_id IS NOT m.turn_id
+              AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions s
+                WHERE s.thread_id = t.thread_id AND s.active_turn_id = t.turn_id)
+          )
+          ORDER BY created_at ASC, message_id ASC LIMIT 201
+        ) pair
+        JOIN projection_thread_messages m ON m.message_id = pair.message_id
+        ORDER BY pair.created_at ASC, pair.message_id ASC
       `,
           activities: sql<{ kind: string; summary: string }>`
         SELECT a.kind, substr(a.summary, 1, 64001) AS summary FROM projection_thread_activities a
