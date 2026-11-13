@@ -80,6 +80,8 @@ export const SERVER_SETTING_SHARING = {
   providerEventLogs: "device-only",
   cliProxyHubs: "device-only",
   usagePriceOverrides: "shareable",
+  // Whether Statistics read this machine's own session files outside Ryco.
+  statisticsOutsideSessions: "device-only",
   observability: "device-only",
   // On/off and delegation limits.
   agentControl: "shareable",

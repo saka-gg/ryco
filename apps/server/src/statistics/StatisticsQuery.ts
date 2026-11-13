@@ -71,7 +71,18 @@ export interface StatisticsQueryShape {
   readonly getStatistics: (
     options?: GetStatisticsOptions,
   ) => Effect.Effect<StatisticsSnapshot, ProjectionRepositoryError>;
+  /**
+   * What whole-machine statistics need to place session files beside Ryco's threads: the
+   * provider session ids Ryco stored for its threads, and every project's workspace and
+   * worktree directories.
+   */
+  readonly getMachineAttribution: () => Effect.Effect<
+    import("./machineAttribution.ts").StatisticsMachineAttribution,
+    ProjectionRepositoryError
+  >;
 }
+
+export type { StatisticsMachineAttribution } from "./machineAttribution.ts";
 
 /**
  * StatisticsQuery - service tag.
@@ -630,7 +641,14 @@ export const makeStatisticsQuery = Effect.gen(function* () {
       return Option.getOrElse(fresh, () => stale);
     });
 
-  return { getStatistics } satisfies StatisticsQueryShape;
+  // Only whole-machine statistics need it: its queries load on first use.
+  const getMachineAttribution: StatisticsQueryShape["getMachineAttribution"] = () =>
+    Effect.promise(() => import("./machineAttribution.ts")).pipe(
+      Effect.flatMap((module) => module.readMachineAttribution(reader)),
+      Effect.mapError(readError("machineAttribution")),
+    );
+
+  return { getStatistics, getMachineAttribution } satisfies StatisticsQueryShape;
 });
 
 export const StatisticsQueryLive = Layer.effect(StatisticsQuery, makeStatisticsQuery);

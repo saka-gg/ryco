@@ -25,6 +25,7 @@ const RESTORABLE_SETTINGS = {
   autoResumeLimitedThreads: "Auto-resume limited threads",
   snoozeLimitedThreads: "Snooze limited threads",
   promptSuggestions: "Suggest next prompt",
+  statisticsOutsideSessions: "Count sessions outside Ryco",
   defaultThreadEnvMode: "New thread mode",
   addProjectBaseDirectory: "Add project base directory",
   confirmThreadArchive: "Archive confirmation",

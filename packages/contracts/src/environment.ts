@@ -251,6 +251,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   usagePriceOverrides: Schema.optionalKey(Schema.Boolean),
   /**
+   * Statistics answer `scope: "machine"`: they also count the Claude Code and Codex sessions this
+   * node ran outside Ryco, and settings carry `statisticsOutsideSessions`. Absent on older
+   * servers, which answer every statistics request for Ryco's threads only.
+   */
+  statisticsMachineScope: Schema.optionalKey(Schema.Literal(true)),
+  /**
    * The node keeps each thread's follow-up queue (`thread.queue.*` commands, `followUpQueue` on
    * threads and shells) and sends it on its own; absent on older servers, whose clients keep
    * their own queue.

@@ -820,6 +820,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // setting, its capability and sharing entry, the `turn.prompt-suggestion` runtime event and
     // the ingestion case and latest-state group that project it. The Claude and Codex code stays
     // in the driver chunks, with `@ryco/shared/promptSuggestion` in a chunk of its own.
+    // 7.317 MB on 2026-11-13 with Statistics for the whole machine (+2.6 KB, measured 7.316971 MB):
+    // the request's scope, the session-file status and bucket source schemas, the setting and
+    // its capability, and the RPC's machine branch. The session-file reader, the attribution
+    // and its database queries load through import().
     // 7.333 MB on 2026-11-13 for five changes that merged together (measured 7.332355 MB with
     // all of them): the terminal history sanitizer's xterm.js rules (+1.5 KB), the long-thread
     // reads by activity kind (+1.2 KB), Statistics for the whole machine (+2.6 KB) and "Move to

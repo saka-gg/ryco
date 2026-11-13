@@ -12,6 +12,17 @@ export interface UsageRecord {
   readonly reportedCostUsd: number | null;
   /** Cross-file identity for records providers may copy into other transcripts. */
   readonly dedupeKey: string | null;
+  /** The directory the session ran in, when the provider recorded it (transcripts only). */
+  readonly cwd?: string;
+  /** A subagent's work (a Claude sidechain, a Codex thread another thread spawned). */
+  readonly sidechain?: boolean;
+  /**
+   * The session that ran this work when it is not `sessionId`: a spawned Codex thread's parent.
+   * Claude sidechains carry their parent's `sessionId` themselves.
+   */
+  readonly ownerSessionId?: string;
+  /** The provider recorded that Ryco started the session (Codex records its client). */
+  readonly rycoClient?: boolean;
 }
 
 export const EMPTY_USAGE_TOKEN_TOTALS: UsageTokenTotals = {

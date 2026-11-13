@@ -25,6 +25,7 @@ import {
   makeCodexStoredThreadReader,
   type CodexStoredThreadReader,
 } from "./CodexStoredThreadReader.ts";
+import { RYCO_CODEX_CLIENT_NAME } from "../codexClientName.ts";
 import { codexSpeedOptionDescriptors } from "../CodexServiceTier.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 
@@ -294,7 +295,7 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
 export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   return {
     clientInfo: {
-      name: "ryco_desktop",
+      name: RYCO_CODEX_CLIENT_NAME,
       title: "Ryco Desktop",
       version: packageJson.version,
     },

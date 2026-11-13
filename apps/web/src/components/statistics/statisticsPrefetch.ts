@@ -8,7 +8,8 @@ import { prefetchDailyRecap, TODAY_USAGE_RANGE } from "./today/useDailyRecap";
 import { prefetchUsageSummary } from "./useUsageSummary";
 
 /** The part of the page's search that decides which requests it makes. */
-export type StatisticsPrefetchSearch = Pick<StatisticsSearch, "view" | "range" | "environmentIds">;
+export type StatisticsPrefetchSearch = Pick<StatisticsSearch, "view" | "range" | "environmentIds"> &
+  Partial<Pick<StatisticsSearch, "scope">>;
 
 /**
  * Start the requests the Statistics page will make for `search`, in parallel
@@ -35,7 +36,7 @@ export function prefetchStatisticsPage(search: StatisticsPrefetchSearch): void {
     case "activity":
       // hosted-capability: routed node
       if (!readHostedRpcCapability(WS_METHODS.serverGetStatistics, null).allowed) return;
-      prefetchStatistics();
+      prefetchStatistics(search.scope);
       return;
     case "limits":
       // The Limits view reads provider limits itself and never shows the

@@ -658,6 +658,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
     section: "usage",
     storage: "device",
+    title: "Count sessions outside Ryco",
+    description: "Count Claude Code and Codex sessions run on this machine outside Ryco.",
+    keywords: "statistics activity machine terminal ide claude code codex session files outside",
+  },
+  {
+    section: "usage",
+    storage: "device",
     title: "Model prices",
     description: "Custom prices and model mappings for usage cost.",
     keywords: "usage cost price pricing rates override map alias preview gateway unpriced",

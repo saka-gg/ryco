@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
@@ -8,6 +9,7 @@ import {
   type UsageDailyBucket,
   type UsageImportedMetric,
   type UsagePriceOverrides,
+  type StatisticsMachineUsage,
   type StatisticsSnapshot,
   type UsagePricingStatus,
   type UsageProviderKind,
@@ -41,6 +43,14 @@ import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import {
+  aggregateMachineStatistics,
+  makeMachineProjectResolver,
+  mergeMachineStatistics,
+  type MachineStatisticsAggregation,
+  type MachineStatisticsFile,
+} from "./machineStatistics.ts";
+import {
+  appendUsageFileAggregate,
   buildUsageFileAggregate,
   EMPTY_USAGE_FILE_AGGREGATE,
   type UsageFileAggregate,
@@ -58,6 +68,8 @@ import {
   type UsageRateTable,
 } from "./usagePricing.ts";
 import {
+  anonymizeCodexResumeState,
+  anonymizeScanCachedSessionId,
   anonymizeScanCachedUsageRecord,
   capUsageScanCache,
   matchesUsageFileCache,
@@ -82,12 +94,15 @@ import { resolveUsageSourceIdentity } from "./usageSourceIdentity.ts";
 import {
   listUsageTranscriptFiles,
   createUsageTranscriptReader,
+  resumeUsageTranscript,
   type UsageTranscriptFile,
   type UsageTranscriptListing,
 } from "./usageTranscriptReader.ts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import type { UsageRecord } from "./usageRecord.ts";
 import {
+  emptyMachineUsage,
+  type MachineStatisticsRequest,
   UsageService,
   type UsageServiceShape,
   usageRatesCachePath,
@@ -139,6 +154,17 @@ const SCAN_CACHE_PERSIST_DELAY_MS = 1_000;
 const SCAN_CACHE_IDLE_MS = 10 * 60 * 1000;
 /** Memoized per-source results (one per source and requested window). */
 const SOURCE_MEMO_LIMIT = 32;
+/** Statistics reuse a whole-machine read this recent instead of listing the files again. */
+const MACHINE_READ_REUSE_MS = 15_000;
+/** Files a whole-machine read handles per turn of the scan lock, so Usage summaries interleave. */
+const MACHINE_READ_BATCH_FILES = 64;
+
+/** The device and inode of a listing fingerprint (`dev:ino:ctime`): the file's identity. */
+function fileIdentity(fingerprint: string | undefined): string | undefined {
+  if (fingerprint === undefined) return undefined;
+  const second = fingerprint.indexOf(":", fingerprint.indexOf(":") + 1);
+  return second === -1 ? fingerprint : fingerprint.slice(0, second);
+}
 
 interface PersistedRates {
   readonly version: number;
@@ -198,6 +224,32 @@ interface SourceScan {
   readonly unrecognizedModels: readonly string[];
   readonly liveFileKeys: readonly string[];
   readonly walkedRootKeys: readonly string[];
+}
+
+/** A whole-machine read: every Claude and Codex transcript's aggregate, with read counts. */
+interface MachineRead {
+  readonly files: readonly MachineStatisticsFile[];
+  readonly readAtMs: number;
+  readonly durationMs: number;
+  readonly fileCount: number;
+  readonly totalBytes: number;
+  readonly parsedFileCount: number;
+  readonly reusedFileCount: number;
+  readonly malformedLineCount: number;
+  readonly failedFileCount: number;
+  readonly unreadableDirectoryCount: number;
+  /** No transcript directory could be listed. */
+  readonly failed: boolean;
+}
+
+interface MachineJob {
+  readonly done: Deferred.Deferred<void>;
+  readonly progress: {
+    readFileCount: number;
+    fileCount: number;
+    readBytes: number;
+    totalBytes: number;
+  };
 }
 
 interface SourceMemo {
@@ -352,6 +404,23 @@ export const makeUsageService = Effect.fnUntraced(function* () {
     );
   });
 
+  /** The last completed whole-machine read of the Claude and Codex session files. */
+  let machineRead: MachineRead | null = null;
+  /** The read in progress, with its progress counters. */
+  let machineJob: MachineJob | null = null;
+  /** The last aggregation of `machineRead`, keyed by what attribution depended on. */
+  let machineAggregation: {
+    readonly read: MachineRead;
+    readonly key: string;
+    readonly result: MachineStatisticsAggregation;
+  } | null = null;
+  let mergedMachineStatistics: {
+    readonly snapshot: StatisticsSnapshot;
+    readonly aggregation: MachineStatisticsAggregation | null;
+    readonly status: string;
+    readonly merged: StatisticsSnapshot;
+  } | null = null;
+
   let lastSummaryAtMs = 0;
   let idleWatcherRunning = false;
   /** Release the scan cache and parser checkpoints once usage has been idle for a while. */
@@ -368,6 +437,10 @@ export const makeUsageService = Effect.fnUntraced(function* () {
           if ((yield* Clock.currentTimeMillis) - lastSummaryAtMs < SCAN_CACHE_IDLE_MS) return false;
           yield* persistLock.withPermits(1)(store.unload());
           readTranscript.clear();
+          if (machineJob === null) {
+            machineRead = null;
+            machineAggregation = null;
+          }
           return true;
         }),
       );
@@ -644,6 +717,58 @@ export const makeUsageService = Effect.fnUntraced(function* () {
       };
     }
 
+    // A grown file continues where the cached read stopped, when it is still the same file.
+    // (`matchesUsageFileCache` narrowed `cached` away above.)
+    const grown = scanCache.get(fileKey);
+    const start = grown?.resume;
+    if (
+      grown !== undefined &&
+      start !== undefined &&
+      grown.provider === provider &&
+      // The parser takes a rollout's ids from its first session header only. Before that header
+      // was read, a resumed read could meet it and carry raw ids: read such a file from the start.
+      (start.codexState === null || start.codexState.sawSessionMeta) &&
+      file.size >= grown.size &&
+      fileIdentity(grown.fingerprint) === fileIdentity(file.fingerprint)
+    ) {
+      const resumed = yield* Effect.promise((signal) =>
+        resumeUsageTranscript(file.path, provider, start, signal),
+      );
+      if (resumed === null)
+        return {
+          aggregate: EMPTY_USAGE_FILE_AGGREGATE,
+          reused: false,
+          skippedLineCount: 0,
+          malformedLineCount: 0,
+          failed: true,
+        };
+      if (resumed !== "mismatch" && !resumed.limited) {
+        // A resumed Codex parser carries the cached, already anonymized session ids.
+        const appended = deduplicateUsageRecordsWithinFile(resumed.records).map((record) =>
+          provider === "codex" ? record : anonymizeScanCachedUsageRecord(record),
+        );
+        const aggregate = appendUsageFileAggregate(grown.aggregate, appended);
+        if (resumed.malformedLineCount === 0 && resumed.resume !== undefined)
+          scanCache.set(fileKey, {
+            rootKey,
+            size: file.size,
+            mtimeMs: file.mtimeMs,
+            ...(file.fingerprint === undefined ? {} : { fingerprint: file.fingerprint }),
+            provider,
+            aggregate,
+            resume: resumed.resume,
+          });
+        else scanCache.delete(fileKey);
+        return {
+          aggregate,
+          reused: false,
+          skippedLineCount: resumed.skippedLineCount,
+          malformedLineCount: resumed.malformedLineCount,
+          failed: false,
+        };
+      }
+    }
+
     const read = yield* Effect.promise((signal) => readTranscript(file.path, provider, signal));
     if (read === null) {
       return {
@@ -665,6 +790,17 @@ export const makeUsageService = Effect.fnUntraced(function* () {
         ...(file.fingerprint === undefined ? {} : { fingerprint: file.fingerprint }),
         provider,
         aggregate,
+        ...(read.resume === undefined
+          ? {}
+          : {
+              resume:
+                read.resume.codexState === null
+                  ? read.resume
+                  : {
+                      ...read.resume,
+                      codexState: anonymizeCodexResumeState(read.resume.codexState),
+                    },
+            }),
       });
     else scanCache.delete(fileKey);
     return {
@@ -1109,8 +1245,11 @@ export const makeUsageService = Effect.fnUntraced(function* () {
         liveFileKeys,
         walkedRootKeys,
         windowStartMs: context.windowStartMs,
+        // Statistics of the whole machine show all history: keep every file's aggregate then.
         retentionCutoffMs:
-          input.startDate === undefined ? 0 : scanStartedAtMs - SCAN_CACHE_RETENTION_MS,
+          input.startDate === undefined || settings.statisticsOutsideSessions
+            ? 0
+            : scanStartedAtMs - SCAN_CACHE_RETENTION_MS,
       });
       capUsageScanCache(scanCache, USAGE_SCAN_CACHE_RETAINED_ROW_LIMIT);
       yield* schedulePersist;
@@ -1281,7 +1420,245 @@ export const makeUsageService = Effect.fnUntraced(function* () {
       ),
     );
 
-  return { readSummary, priceStatistics } satisfies UsageServiceShape;
+  /**
+   * Reads every Claude and Codex transcript of the node's homes into per-file aggregates, through
+   * the scan cache: unchanged files are not read, grown files are read from where they stopped.
+   * The lock is taken per batch of files, so Usage summaries are not held up by a cold read.
+   */
+  const readMachine = Effect.fn("UsageService.readMachine")(function* (
+    progress: MachineJob["progress"],
+  ) {
+    const startedAtMs = yield* Clock.currentTimeMillis;
+    const settings = yield* readSettings;
+    const plans = (yield* planSources(yield* resolveTranscriptSources(settings))).filter(
+      (plan) =>
+        (plan.source.provider === "claude" || plan.source.provider === "codex") &&
+        plan.source.unsupportedCode === undefined &&
+        plan.source.cursorExport === undefined,
+    );
+    const listed: Array<{
+      readonly provider: "claude" | "codex";
+      readonly file: UsageTranscriptFile;
+      readonly rootKey: string;
+      readonly fileKey: string;
+    }> = [];
+    const walkedRootKeys = new Set<string>();
+    let unreadableDirectoryCount = 0;
+    let existingRootCount = 0;
+    for (const plan of plans) {
+      const provider = plan.source.provider as "claude" | "codex";
+      for (const root of plan.source.scanRoots) {
+        const exists = yield* fileSystem
+          .exists(root)
+          .pipe(Effect.catchCause(() => Effect.succeed(false)));
+        if (!exists) continue;
+        existingRootCount += 1;
+        const listing = yield* Effect.promise((signal) =>
+          listUsageTranscriptFiles(root, 0, signal),
+        );
+        const rootKey = usageCacheRootKey(provider, root);
+        unreadableDirectoryCount += listing.errorCount;
+        if (listing.errorCount === 0) walkedRootKeys.add(rootKey);
+        for (const file of listing.files)
+          listed.push({ provider, file, rootKey, fileKey: usageCacheFileKey(provider, file.path) });
+      }
+    }
+    // Oldest first: a response copied into a resumed session counts where it was first written.
+    listed.sort(
+      (left, right) =>
+        left.file.mtimeMs - right.file.mtimeMs || left.file.path.localeCompare(right.file.path),
+    );
+    progress.fileCount = listed.length;
+    progress.totalBytes = listed.reduce((sum, entry) => sum + entry.file.size, 0);
+    if (listed.length > 0) yield* scanSemaphore.withPermits(1)(loadScanCache());
+
+    const files: MachineStatisticsFile[] = [];
+    const counts = { parsed: 0, reused: 0, malformed: 0, failed: 0 };
+    for (let offset = 0; offset < listed.length; offset += MACHINE_READ_BATCH_FILES) {
+      yield* scanSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          lastSummaryAtMs = yield* Clock.currentTimeMillis;
+          // The idle release may have unloaded the cache between batches.
+          yield* loadScanCache();
+          for (const entry of listed.slice(offset, offset + MACHINE_READ_BATCH_FILES)) {
+            const read = yield* readFileRecords(
+              entry.file,
+              entry.fileKey,
+              entry.provider,
+              entry.rootKey,
+            );
+            if (read.reused) counts.reused += 1;
+            else if (!read.failed) counts.parsed += 1;
+            if (read.failed) counts.failed += 1;
+            counts.malformed += read.malformedLineCount;
+            if (read.aggregate.recordCount > 0)
+              files.push({ provider: entry.provider, aggregate: read.aggregate });
+            progress.readFileCount += 1;
+            progress.readBytes += entry.file.size;
+          }
+        }),
+      );
+      yield* Effect.yieldNow;
+    }
+    yield* scanSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        if (!store.isLoaded()) return;
+        pruneUsageScanCache(scanCache, {
+          liveFileKeys: new Set(listed.map((entry) => entry.fileKey)),
+          walkedRootKeys,
+          windowStartMs: 0,
+          retentionCutoffMs: 0,
+        });
+        capUsageScanCache(scanCache, USAGE_SCAN_CACHE_RETAINED_ROW_LIMIT);
+        yield* schedulePersist;
+      }),
+    );
+    const finishedAtMs = yield* Clock.currentTimeMillis;
+    return {
+      files,
+      readAtMs: finishedAtMs,
+      durationMs: Math.max(0, Math.trunc(finishedAtMs - startedAtMs)),
+      fileCount: listed.length,
+      totalBytes: progress.totalBytes,
+      parsedFileCount: counts.parsed,
+      reusedFileCount: counts.reused,
+      malformedLineCount: counts.malformed,
+      failedFileCount: counts.failed,
+      unreadableDirectoryCount,
+      failed: existingRootCount > 0 && walkedRootKeys.size === 0 && listed.length === 0,
+    } satisfies MachineRead;
+  });
+
+  let machineReadFailed = false;
+  /** Starts a whole-machine read unless one runs or a recent one can be reused. */
+  const ensureMachineRead = Effect.gen(function* () {
+    if (machineJob !== null) return machineJob;
+    const now = yield* Clock.currentTimeMillis;
+    if (
+      machineRead !== null &&
+      now >= machineRead.readAtMs &&
+      now - machineRead.readAtMs < MACHINE_READ_REUSE_MS
+    )
+      return null;
+    const job: MachineJob = {
+      done: Deferred.makeUnsafe<void>(),
+      progress: { readFileCount: 0, fileCount: 0, readBytes: 0, totalBytes: 0 },
+    };
+    machineJob = job;
+    yield* readMachine(job.progress).pipe(
+      Effect.tap((read) =>
+        Effect.sync(() => {
+          machineRead = read;
+          machineReadFailed = false;
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.interrupt
+          : Effect.logWarning("whole-machine statistics read failed", { cause }).pipe(
+              Effect.andThen(Effect.sync(() => (machineReadFailed = true))),
+            ),
+      ),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (machineJob === job) machineJob = null;
+        }).pipe(Effect.andThen(Deferred.succeed(job.done, undefined))),
+      ),
+      Effect.andThen(noteSummaryActivity),
+      Effect.forkIn(serviceScope),
+    );
+    return job;
+  });
+
+  const aggregateMachineRead = (read: MachineRead, request: MachineStatisticsRequest) => {
+    const claude = new Set(
+      request.rycoSessionIds.claude.map((id) => anonymizeScanCachedSessionId("claude", id)),
+    );
+    const codex = new Set(
+      request.rycoSessionIds.codex.map((id) => anonymizeScanCachedSessionId("codex", id)),
+    );
+    const key = createHash("sha256")
+      .update(JSON.stringify([[...claude].toSorted(), [...codex].toSorted(), request.projectRoots]))
+      .digest("hex");
+    if (machineAggregation?.read === read && machineAggregation.key === key)
+      return machineAggregation.result;
+    const result = aggregateMachineStatistics({
+      files: read.files,
+      ryco: { claude, codex },
+      resolveProject: makeMachineProjectResolver(request.projectRoots, NodeOS.homedir()),
+    });
+    machineAggregation = { read, key, result };
+    return result;
+  };
+
+  const machineStatistics: UsageServiceShape["machineStatistics"] = (snapshot, request) =>
+    Effect.gen(function* () {
+      const settings = yield* readSettings;
+      if (!settings.statisticsOutsideSessions)
+        return { ...snapshot, scope: "machine" as const, machine: emptyMachineUsage("disabled") };
+      const job = yield* ensureMachineRead;
+      if (job !== null)
+        yield* Deferred.await(job.done).pipe(
+          Effect.timeoutOption(Duration.millis(Math.max(0, request.maxWaitMs))),
+        );
+      const read = machineRead;
+      const running = machineJob;
+      const aggregation = read === null ? null : aggregateMachineRead(read, request);
+      const status: StatisticsMachineUsage = {
+        ...emptyMachineUsage(
+          running !== null
+            ? "reading"
+            : read === null || read.failed || machineReadFailed
+              ? "failed"
+              : "ready",
+        ),
+        ...(running === null ? {} : { progress: { ...running.progress } }),
+        ...(read === null
+          ? {}
+          : {
+              readAt: iso(read.readAtMs),
+              readDurationMs: read.durationMs,
+              fileCount: read.fileCount,
+              totalBytes: read.totalBytes,
+              parsedFileCount: read.parsedFileCount,
+              reusedFileCount: read.reusedFileCount,
+              malformedLineCount: read.malformedLineCount,
+              failedFileCount: read.failedFileCount,
+              unreadableDirectoryCount: read.unreadableDirectoryCount,
+            }),
+        ...(aggregation === null
+          ? {}
+          : {
+              duplicateResponseCount: aggregation.duplicateResponseCount,
+              rycoResponseCount: aggregation.rycoResponseCount,
+              outsideSessionCount: aggregation.outsideSessionCount,
+            }),
+      };
+      // Reopens answer with the same object, so its pricing is memoized too.
+      const statusKey = JSON.stringify(status);
+      const previous = mergedMachineStatistics;
+      if (
+        previous?.snapshot === snapshot &&
+        previous.aggregation === aggregation &&
+        previous.status === statusKey
+      )
+        return previous.merged;
+      const merged = mergeMachineStatistics(snapshot, aggregation, status);
+      mergedMachineStatistics = { snapshot, aggregation, status: statusKey, merged };
+      return merged;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.interrupt
+          : Effect.succeed({
+              ...snapshot,
+              scope: "machine" as const,
+              machine: emptyMachineUsage("failed"),
+            }),
+      ),
+    );
+
+  return { readSummary, priceStatistics, machineStatistics } satisfies UsageServiceShape;
 });
 
 /** The pipeline built with its layer. The server uses `UsageServiceDeferredLive`. */

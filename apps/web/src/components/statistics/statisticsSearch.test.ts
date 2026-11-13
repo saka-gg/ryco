@@ -10,7 +10,15 @@ describe("parseStatisticsSearch", () => {
       usageMetric: "cost",
       usageBreakdown: "model",
       activityMetric: "turns",
+      scope: "ryco",
     });
+  });
+
+  it("parses the activity scope and falls back to Ryco's own threads", () => {
+    expect(parseStatisticsSearch({ scope: "machine" }).scope).toBe("machine");
+    expect(parseStatisticsSearch({ scope: "ryco" }).scope).toBe("ryco");
+    expect(parseStatisticsSearch({ scope: "Machine" }).scope).toBe("ryco");
+    expect(parseStatisticsSearch({ scope: 1 }).scope).toBe("ryco");
   });
 
   it("accepts the today view and keeps usage as the default", () => {

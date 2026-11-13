@@ -50,8 +50,29 @@ export type StatisticsModelRef = typeof StatisticsModelRef.Type;
 export const StatisticsProjectRef = Schema.Struct({
   id: ProjectId,
   title: Schema.String,
+  /**
+   * `folder`: not a Ryco project. Sessions run outside Ryco whose directory lies in no project
+   * are grouped by their folder's name under a synthetic id.
+   */
+  kind: Schema.optional(Schema.Literals(["folder"])),
 });
 export type StatisticsProjectRef = typeof StatisticsProjectRef.Type;
+
+/**
+ * Which sessions a snapshot counts: `ryco`, the threads Ryco ran (the default); `machine`, also
+ * the Claude Code and Codex sessions recorded on this node, run outside Ryco.
+ */
+export const StatisticsScope = Schema.Literals(["ryco", "machine"]);
+export type StatisticsScope = typeof StatisticsScope.Type;
+
+/**
+ * Where a bucket's usage was read, for buckets not from Ryco's own turn records:
+ * - `outside`: a Claude Code or Codex session Ryco did not run (a terminal, an IDE, another app).
+ * - `ryco-subagent`: subagents of a session Ryco ran. Ryco's turn records count the main session
+ *   only, so their usage is read from the provider's session files and attributed to Ryco.
+ */
+export const StatisticsUsageSource = Schema.Literals(["outside", "ryco-subagent"]);
+export type StatisticsUsageSource = typeof StatisticsUsageSource.Type;
 
 /**
  * One row per `(date, project, provider, model)`. Numeric fields are plain
@@ -73,6 +94,8 @@ export const StatisticsDailyBucket = Schema.Struct({
    * `(date, project, provider, model)` may have one bucket per speed.
    */
   speed: Schema.optional(StatisticsSpeed),
+  /** Absent: Ryco's own turn records. Session-file usage gets its own bucket per source. */
+  source: Schema.optional(StatisticsUsageSource),
   /** Includes cache reads (`cachedInputTokens`) and, where reported, cache writes. */
   inputTokens: Schema.Number,
   outputTokens: Schema.Number,
@@ -158,6 +181,57 @@ export const StatisticsTokenAttribution = Schema.Literals([
 ]);
 export type StatisticsTokenAttribution = typeof StatisticsTokenAttribution.Type;
 
+export const StatisticsMachineUsageState = Schema.Literals([
+  /** The node's setting turns reading sessions outside Ryco off. */
+  "disabled",
+  /** The first read (or a refresh) is still running; `progress` says how far. */
+  "reading",
+  "ready",
+  /** The read failed as a whole (no directory could be listed). */
+  "failed",
+]);
+export type StatisticsMachineUsageState = typeof StatisticsMachineUsageState.Type;
+
+/**
+ * How the node read the Claude Code and Codex session files of a `machine` snapshot. Counts
+ * describe the last completed read; only token counts, model names, times and directory names
+ * are taken from the files.
+ */
+export const StatisticsMachineUsage = Schema.Struct({
+  state: StatisticsMachineUsageState,
+  /** While `reading`: how much of the current read is done. */
+  progress: Schema.optional(
+    Schema.Struct({
+      readFileCount: Schema.Number,
+      fileCount: Schema.Number,
+      readBytes: Schema.Number,
+      totalBytes: Schema.Number,
+    }),
+  ),
+  /** When the shown session-file usage was read. Absent before the first read completes. */
+  readAt: Schema.optional(IsoDateTime),
+  readDurationMs: Schema.optional(Schema.Number),
+  fileCount: Schema.Number,
+  totalBytes: Schema.Number,
+  /** Files read (in full or from where an appended file stopped) by the last read. */
+  parsedFileCount: Schema.Number,
+  /** Unchanged files taken from the node's cache without reading them. */
+  reusedFileCount: Schema.Number,
+  /** Lines that were not valid JSON, and truncated or oversized lines. */
+  malformedLineCount: Schema.Number,
+  /** Files that vanished, changed during the read, or could not be read in full. */
+  failedFileCount: Schema.Number,
+  /** Directories that could not be listed. */
+  unreadableDirectoryCount: Schema.Number,
+  /** Responses a session file repeats (resumed or forked sessions), counted once. */
+  duplicateResponseCount: Schema.Number,
+  /** Responses of sessions Ryco ran, left to Ryco's own records so nothing counts twice. */
+  rycoResponseCount: Schema.Number,
+  /** Distinct sessions run outside Ryco, in all history. */
+  outsideSessionCount: Schema.Number,
+});
+export type StatisticsMachineUsage = typeof StatisticsMachineUsage.Type;
+
 export const StatisticsSnapshot = Schema.Struct({
   generatedAt: IsoDateTime,
   /** Earliest activity date observed, useful for the "all time" label. */
@@ -173,5 +247,15 @@ export const StatisticsSnapshot = Schema.Struct({
   recentPullRequests: Schema.Array(StatisticsRecentPullRequest).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /** The scope the node answered for. Absent: `ryco` (also every node without the scope). */
+  scope: Schema.optional(StatisticsScope),
+  /** With `scope: "machine"`: how the session files outside Ryco were read. */
+  machine: Schema.optional(StatisticsMachineUsage),
 });
 export type StatisticsSnapshot = typeof StatisticsSnapshot.Type;
+
+export const StatisticsRequest = Schema.Struct({
+  /** Absent: `ryco`. Nodes without the scope ignore it and answer for `ryco`. */
+  scope: Schema.optional(StatisticsScope),
+});
+export type StatisticsRequest = typeof StatisticsRequest.Type;

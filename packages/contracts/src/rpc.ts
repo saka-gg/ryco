@@ -166,7 +166,7 @@ import {
   DiagnosticsSignalProcessInput,
   DiagnosticsSignalProcessResult,
 } from "./diagnostics.ts";
-import { StatisticsSnapshot } from "./statistics.ts";
+import { StatisticsRequest, StatisticsSnapshot } from "./statistics.ts";
 import { UsageReadError, UsageSummary, UsageSummaryRequest } from "./usage.ts";
 import {
   CliProxyHubError,
@@ -1261,7 +1261,7 @@ export const WsServerSignalDiagnosticProcessRpc = Rpc.make(
 );
 
 export const WsServerGetStatisticsRpc = Rpc.make(WS_METHODS.serverGetStatistics, {
-  payload: Schema.Struct({}),
+  payload: StatisticsRequest,
   success: StatisticsSnapshot,
   error: AuthRpcError,
 });

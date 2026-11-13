@@ -326,7 +326,7 @@ import type {
   DiagnosticsSignalProcessInput,
   DiagnosticsSignalProcessResult,
 } from "./diagnostics.ts";
-import type { StatisticsSnapshot } from "./statistics.ts";
+import type { StatisticsRequest, StatisticsSnapshot } from "./statistics.ts";
 import type { UsageSummary, UsageSummaryRequest } from "./usage.ts";
 import type {
   AuthBearerBootstrapResult,
@@ -1443,7 +1443,7 @@ export interface LocalApi {
     getConfig: () => Promise<ServerConfig>;
     getAdvertisedEndpoints: () => Promise<readonly AdvertisedEndpoint[]>;
     getDiagnosticsMetrics: () => Promise<ServerLocalDiagnosticsMetrics>;
-    getStatistics: () => Promise<StatisticsSnapshot>;
+    getStatistics: (input?: StatisticsRequest) => Promise<StatisticsSnapshot>;
     getUsageSummary: (input: UsageSummaryRequest) => Promise<UsageSummary>;
     /**
      * Refresh provider snapshots. When `input.instanceId` is supplied only that

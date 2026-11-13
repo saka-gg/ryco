@@ -153,8 +153,8 @@ function createBrowserLocalApi(
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getAdvertisedEndpoints()),
       getDiagnosticsMetrics: () =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getDiagnosticsMetrics()),
-      getStatistics: () =>
-        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getStatistics()),
+      getStatistics: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getStatistics(input)),
       getUsageSummary: (input) =>
         withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.getUsageSummary(input)),
       readCodexResetCredits: (input) =>

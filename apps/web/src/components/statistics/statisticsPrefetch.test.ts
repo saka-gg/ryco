@@ -63,6 +63,17 @@ describe("prefetchStatisticsPage", () => {
     expect(mocks.prefetchUsageSummary).not.toHaveBeenCalled();
   });
 
+  it("starts the snapshot of the scope the activity view will show", () => {
+    mocks.allowed.add(WS_METHODS.serverGetStatistics);
+    prefetchStatisticsPage({
+      view: "activity",
+      range: "30d",
+      environmentIds: undefined,
+      scope: "machine",
+    });
+    expect(mocks.prefetchStatistics).toHaveBeenCalledWith("machine");
+  });
+
   it("starts no activity snapshot for the limits view", () => {
     mocks.allowed.add(WS_METHODS.serverGetStatistics);
     mocks.allowed.add(WS_METHODS.serverGetUsageSummary);

@@ -17,7 +17,7 @@ import type { HttpClient } from "effect/http";
 import type { ServerConfig } from "../config.ts";
 import type { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
 import type { ServerSettingsService } from "../serverSettings.ts";
-import { UsageService, type UsageServiceShape } from "./UsageServiceTag.ts";
+import { emptyMachineUsage, UsageService, type UsageServiceShape } from "./UsageServiceTag.ts";
 
 /** The services the pipeline is built with, captured when this layer is built. */
 type UsageServiceServices =
@@ -90,6 +90,18 @@ export const makeUsageServiceDeferred = Effect.fnUntraced(function* (
       Effect.flatMap(service, (usage) => usage.priceStatistics(snapshot)).pipe(
         Effect.catchCause((cause) =>
           Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(snapshot),
+        ),
+      ),
+    machineStatistics: (snapshot, request) =>
+      Effect.flatMap(service, (usage) => usage.machineStatistics(snapshot, request)).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.interrupt
+            : Effect.succeed({
+                ...snapshot,
+                scope: "machine" as const,
+                machine: emptyMachineUsage("failed"),
+              }),
         ),
       ),
   });

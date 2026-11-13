@@ -40,6 +40,7 @@ function fakeLoader(options: { readonly held?: boolean; readonly failFirst?: boo
         return UsageService.of({
           readSummary: (input) => Effect.succeed(makeEmptyUsageSummary(input)),
           priceStatistics: (snapshot) => Effect.succeed(snapshot),
+          machineStatistics: (snapshot) => Effect.succeed(snapshot),
         });
       }),
   };

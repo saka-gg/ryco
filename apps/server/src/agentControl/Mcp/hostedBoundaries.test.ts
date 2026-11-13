@@ -83,6 +83,7 @@ describe("pre-auth server environment descriptor", () => {
       "serverFollowUpQueue",
       "settingsSharingVersion",
       "stagedOnlyCommit",
+      "statisticsMachineScope",
       "storageManagement",
       "terminalOutputScope",
       "terminalWriteRequireIdle",

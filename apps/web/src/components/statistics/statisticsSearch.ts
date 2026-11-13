@@ -5,6 +5,8 @@ export type StatisticsRange = "7d" | "30d" | "90d" | "all";
 export type UsageMetric = "cost" | "tokens";
 export type UsageBreakdown = "model" | "day";
 export type ActivityMetric = "turns" | "activeMs" | "files";
+/** Activity counts Ryco's threads, or the whole machine (also Claude Code and Codex sessions outside Ryco). */
+export type ActivityScope = "ryco" | "machine";
 
 export interface StatisticsSearch {
   readonly view: StatisticsView;
@@ -17,6 +19,7 @@ export interface StatisticsSearch {
   readonly usageMetric: UsageMetric;
   readonly usageBreakdown: UsageBreakdown;
   readonly activityMetric: ActivityMetric;
+  readonly scope: ActivityScope;
 }
 
 function oneOf<T extends string>(value: unknown, allowed: ReadonlySet<string>, fallback: T): T {
@@ -57,5 +60,6 @@ export function parseStatisticsSearch(raw: Record<string, unknown>): StatisticsS
     usageMetric: oneOf(raw["usageMetric"], new Set(["cost", "tokens"]), "cost"),
     usageBreakdown: oneOf(raw["usageBreakdown"], new Set(["model", "day"]), "model"),
     activityMetric: oneOf(raw["activityMetric"], new Set(["turns", "activeMs", "files"]), "turns"),
+    scope: oneOf(raw["scope"], new Set(["ryco", "machine"]), "ryco"),
   };
 }

@@ -1102,6 +1102,10 @@ export const ServerSettings = Schema.Struct({
   cliProxyHubs: CliProxyHubs.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Node-scoped; not in Agent Control's settings allowlist.
   usagePriceOverrides: UsagePriceOverrides.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Statistics may also count the Claude Code and Codex sessions this node ran outside Ryco,
+  // read from their session files when someone asks for the whole machine. Node-scoped (the
+  // files are this node's); not shared and not in Agent Control's settings allowlist.
+  statisticsOutsideSessions: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   agentControl: AgentControlSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Shared or per-device state of each shareable key. Nodes that advertise the `settingsSharing`
@@ -1306,6 +1310,7 @@ export const ServerSettingsPatch = Schema.Struct({
   cliProxyHubs: Schema.optionalKey(
     Schema.Record(CliProxyHubId, Schema.NullOr(CliProxyHubConfigInput)),
   ),
+  statisticsOutsideSessions: Schema.optionalKey(Schema.Boolean),
   // Per-model replacement; `null` removes the model's entry.
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(UsageModelId, Schema.NullOr(UsagePriceOverride)),

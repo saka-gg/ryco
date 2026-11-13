@@ -1,3 +1,4 @@
+import { RYCO_CODEX_CLIENT_NAME } from "../provider/codexClientName.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
 import { parseTimestampMs, positiveInteger, withTokenTotal } from "./usageRecord.ts";
 
@@ -9,6 +10,12 @@ export interface CodexTranscriptState {
   sawSessionMeta: boolean;
   suppressingForkCopies: boolean;
   forkCopyAnchorMs: number;
+  /** The session's working directory (`session_meta`, updated by `turn_context`). */
+  cwd: string;
+  /** A spawned subagent thread's parent thread id; empty for a top-level session. */
+  parentSessionId: string;
+  /** The session's client (`originator`) is Ryco. */
+  rycoClient: boolean;
 }
 
 export function initialCodexTranscriptState(): CodexTranscriptState {
@@ -20,23 +27,28 @@ export function initialCodexTranscriptState(): CodexTranscriptState {
     sawSessionMeta: false,
     suppressingForkCopies: false,
     forkCopyAnchorMs: 0,
+    cwd: "",
+    parentSessionId: "",
+    rycoClient: false,
   };
 }
 
 const FORK_COPY_MAX_GAP_MS = 1_000;
 
-function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
-  if (typeof payload["forked_from_id"] === "string") return true;
+/** The parent thread of a session another thread spawned (a subagent), if any. */
+function spawnedParentThreadId(payload: Record<string, unknown>): string | null {
   const source = payload["source"];
-  if (typeof source !== "object" || source === null) return false;
+  if (typeof source !== "object" || source === null) return null;
   const subagent = (source as Record<string, unknown>)["subagent"];
-  if (typeof subagent !== "object" || subagent === null) return false;
+  if (typeof subagent !== "object" || subagent === null) return null;
   const threadSpawn = (subagent as Record<string, unknown>)["thread_spawn"];
-  return (
-    typeof threadSpawn === "object" &&
-    threadSpawn !== null &&
-    typeof (threadSpawn as Record<string, unknown>)["parent_thread_id"] === "string"
-  );
+  if (typeof threadSpawn !== "object" || threadSpawn === null) return null;
+  const parent = (threadSpawn as Record<string, unknown>)["parent_thread_id"];
+  return typeof parent === "string" && parent.length > 0 ? parent : null;
+}
+
+function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
+  return typeof payload["forked_from_id"] === "string" || spawnedParentThreadId(payload) !== null;
 }
 
 /** Parse one Codex rollout JSONL record while carrying its session/model state. */
@@ -62,6 +74,9 @@ export function parseCodexTranscriptLine(
     state.sawSessionMeta = true;
     const sessionId = payloadRecord["id"] ?? payloadRecord["session_id"];
     if (typeof sessionId === "string") state.sessionId = sessionId;
+    if (typeof payloadRecord["cwd"] === "string") state.cwd = payloadRecord["cwd"];
+    state.parentSessionId = spawnedParentThreadId(payloadRecord) ?? "";
+    state.rycoClient = payloadRecord["originator"] === RYCO_CODEX_CLIENT_NAME;
     const timestampMs = parseTimestampMs(record["timestamp"]);
     if (timestampMs !== null && isForkedSessionMeta(payloadRecord)) {
       state.suppressingForkCopies = true;
@@ -72,6 +87,8 @@ export function parseCodexTranscriptLine(
 
   if (record["type"] === "turn_context") {
     if (typeof payloadRecord["model"] === "string") state.model = payloadRecord["model"];
+    if (typeof payloadRecord["cwd"] === "string" && payloadRecord["cwd"].length > 0)
+      state.cwd = payloadRecord["cwd"];
     state.lastUsageSignature = null;
     return null;
   }
@@ -138,5 +155,10 @@ export function parseCodexTranscriptLine(
     totals,
     reportedCostUsd: null,
     dedupeKey: null,
+    ...(state.cwd.length > 0 ? { cwd: state.cwd } : {}),
+    ...(state.parentSessionId.length > 0
+      ? { sidechain: true, ownerSessionId: state.parentSessionId }
+      : {}),
+    ...(state.rycoClient ? { rycoClient: true } : {}),
   };
 }
