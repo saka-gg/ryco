@@ -10,6 +10,7 @@ import {
   TurnId,
   type ProviderRuntimeEvent,
 } from "@ryco/contracts";
+import { PROMPT_SUGGESTION_ACTIVITY_KIND } from "@ryco/shared/promptSuggestion";
 import { describe, expect, it } from "vite-plus/test";
 
 import { makeAcpToolCallEvent } from "../../provider/acp/AcpCoreRuntimeEvents.ts";
@@ -658,7 +659,8 @@ describe("runtimeEventToActivities prompt suggestion", () => {
         id: "prompt-suggestion:thread-1:latest",
         createdAt: base.createdAt,
         tone: "info",
-        kind: "prompt.suggestion",
+        // The ingestion spells the kind out (boot path); clients read it through the constant.
+        kind: PROMPT_SUGGESTION_ACTIVITY_KIND,
         summary: "Suggested next prompt",
         payload: { suggestion: "run the tests again" },
         turnId: "turn-2",

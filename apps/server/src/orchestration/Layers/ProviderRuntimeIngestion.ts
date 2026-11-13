@@ -56,7 +56,6 @@ import {
   parseClaudeFastModeReport,
 } from "@ryco/shared/claudeFastMode";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
-import { PROMPT_SUGGESTION_ACTIVITY_KIND } from "@ryco/shared/promptSuggestion";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import {
   LATEST_STATE_ACTIVITY_GROUPS,
@@ -1258,7 +1257,9 @@ export function runtimeEventToActivities(
           id: promptSuggestionActivityId(event.threadId),
           createdAt: event.createdAt,
           tone: "info",
-          kind: PROMPT_SUGGESTION_ACTIVITY_KIND,
+          // `PROMPT_SUGGESTION_ACTIVITY_KIND` (`@ryco/shared/promptSuggestion`), spelled out:
+          // importing that module here put it on the server boot path.
+          kind: "prompt.suggestion",
           summary: "Suggested next prompt",
           payload: { suggestion: event.payload.suggestion },
           turnId,
