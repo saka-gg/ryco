@@ -249,6 +249,54 @@ export function buildServerProvider(input: {
   };
 }
 
+interface UnprobedServerProviderInput {
+  presentation: ServerProviderPresentation;
+  checkedAt: string;
+  models: ReadonlyArray<ServerProviderModel>;
+}
+
+function buildUnprobedServerProvider(
+  input: UnprobedServerProviderInput & { enabled: boolean },
+  installed: boolean,
+  message: string,
+): ServerProviderDraft {
+  return buildServerProvider({
+    ...input,
+    probe: { installed, version: null, status: "warning", auth: { status: "unknown" }, message },
+  });
+}
+
+/**
+ * The snapshot of a provider the user turned off in settings. It is never probed, so nothing is
+ * known about its install or sign-in. `message` defaults to "<name> is disabled in Ryco settings.".
+ */
+export function buildDisabledServerProvider(
+  input: UnprobedServerProviderInput & { message?: string | undefined },
+): ServerProviderDraft {
+  return buildUnprobedServerProvider(
+    { ...input, enabled: false },
+    false,
+    input.message ?? `${input.presentation.displayName} is disabled in Ryco settings.`,
+  );
+}
+
+/**
+ * The snapshot shown before a provider's first probe: the disabled snapshot when it is turned off,
+ * otherwise a warning with an unknown version and sign-in. `pending` carries the provider's own
+ * `installed` guess and message.
+ */
+export function buildPendingServerProvider(
+  input: UnprobedServerProviderInput & {
+    enabled: boolean;
+    pending: { readonly installed: boolean; readonly message: string };
+    disabledMessage?: string | undefined;
+  },
+): ServerProviderDraft {
+  return input.enabled
+    ? buildUnprobedServerProvider(input, input.pending.installed, input.pending.message)
+    : buildDisabledServerProvider({ ...input, message: input.disabledMessage });
+}
+
 /** `snapshot` with `rateLimits` as its usage limits, or without any when there are none. */
 export function withProviderRateLimits(
   snapshot: ServerProvider,
