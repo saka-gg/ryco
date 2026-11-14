@@ -20,12 +20,14 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { createModelCapabilities } from "@ryco/shared/model";
 
 import {
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
-  spawnAndCollect,
   type ServerProviderDraft,
+  spawnAndCollect,
   withProviderRateLimits,
 } from "../providerSnapshot.ts";
 import {
@@ -68,34 +70,12 @@ export function buildInitialGrokProviderSnapshot(grokSettings: GrokSettings): Se
   const checkedAt = new Date().toISOString();
   const models = grokModelsFromSettings(grokSettings.customModels);
 
-  if (!grokSettings.enabled) {
-    return buildServerProvider({
-      presentation: GROK_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Grok is disabled in Ryco settings.",
-      },
-    });
-  }
-
-  return buildServerProvider({
+  return buildPendingServerProvider({
     presentation: GROK_PRESENTATION,
-    enabled: true,
+    enabled: grokSettings.enabled,
     checkedAt,
     models,
-    probe: {
-      installed: true,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
-      message: "Checking Grok CLI availability...",
-    },
+    pending: { installed: true, message: "Checking Grok CLI availability..." },
   });
 }
 
@@ -198,18 +178,10 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
   const fallbackModels = grokModelsFromSettings(grokSettings.customModels);
 
   if (!grokSettings.enabled) {
-    return buildServerProvider({
+    return buildDisabledServerProvider({
       presentation: GROK_PRESENTATION,
-      enabled: false,
       checkedAt,
       models: fallbackModels,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Grok is disabled in Ryco settings.",
-      },
     });
   }
 

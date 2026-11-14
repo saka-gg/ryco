@@ -3,6 +3,8 @@ import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "
 import { createModelCapabilities } from "@ryco/shared/model";
 
 import {
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
   buildServerProvider,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -125,5 +127,73 @@ describe("withInstanceIdentity", () => {
     })(stale);
     expect(stamped.continuation).toEqual({ groupKey: "codex:home" });
     expect(stamped.instanceId).toBe(identity.instanceId);
+  });
+});
+
+describe("buildDisabledServerProvider", () => {
+  it("reports a disabled, unprobed provider with the default message", () => {
+    const snapshot = buildDisabledServerProvider({
+      presentation: { displayName: "Example" },
+      checkedAt: "2026-11-14T00:00:00.000Z",
+      models: [],
+    });
+    expect(snapshot).toMatchObject({
+      displayName: "Example",
+      enabled: false,
+      installed: false,
+      version: null,
+      status: "disabled",
+      auth: { status: "unknown" },
+      checkedAt: "2026-11-14T00:00:00.000Z",
+      message: "Example is disabled in Ryco settings.",
+      skills: [],
+      slashCommands: [],
+    });
+  });
+
+  it("uses a caller's message instead of the default", () => {
+    const snapshot = buildDisabledServerProvider({
+      presentation: { displayName: "Example" },
+      checkedAt: "2026-11-14T00:00:00.000Z",
+      models: [],
+      message: "Example is off.",
+    });
+    expect(snapshot.message).toBe("Example is off.");
+  });
+});
+
+describe("buildPendingServerProvider", () => {
+  const base = {
+    presentation: { displayName: "Example" },
+    checkedAt: "2026-11-14T00:00:00.000Z",
+    models: [],
+    pending: { installed: true, message: "Checking Example..." },
+  } as const;
+
+  it("reports the provider's own pending guess while it is enabled", () => {
+    expect(buildPendingServerProvider({ ...base, enabled: true })).toMatchObject({
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: "Checking Example...",
+    });
+    expect(
+      buildPendingServerProvider({
+        ...base,
+        enabled: true,
+        pending: { installed: false, message: "Not checked yet." },
+      }),
+    ).toMatchObject({ installed: false, message: "Not checked yet." });
+  });
+
+  it("is the disabled snapshot when the provider is turned off", () => {
+    expect(buildPendingServerProvider({ ...base, enabled: false })).toEqual(
+      buildDisabledServerProvider(base),
+    );
+    expect(
+      buildPendingServerProvider({ ...base, enabled: false, disabledMessage: "Off." }).message,
+    ).toBe("Off.");
   });
 });
