@@ -36,8 +36,16 @@ export function createHostedReadVault(
   name = "ryco-hosted-read-v1",
 ) {
   let database: Promise<IDBDatabase> | undefined;
-  const open = () =>
-    (database ??= new Promise<IDBDatabase>((resolve, reject) => {
+  // A failed or blocked open is forgotten, so the next read or write tries again instead of
+  // the vault staying unavailable for the rest of the session.
+  const open = (): Promise<IDBDatabase> => {
+    if (database) return database;
+    let settled = false;
+    const opening = new Promise<IDBDatabase>((resolve, reject) => {
+      const fail = (error: unknown) => {
+        settled = true;
+        reject(error);
+      };
       const operation = factory.open(name, 1);
       operation.addEventListener(
         "upgradeneeded",
@@ -51,6 +59,12 @@ export function createHostedReadVault(
       operation.addEventListener(
         "success",
         () => {
+          // Opened after this attempt was given up as blocked: a retry owns the vault now.
+          if (settled) {
+            operation.result.close();
+            return;
+          }
+          settled = true;
           operation.result.addEventListener("versionchange", () => operation.result.close(), {
             once: true,
           });
@@ -58,11 +72,17 @@ export function createHostedReadVault(
         },
         { once: true },
       );
-      operation.addEventListener("error", () => reject(operation.error), { once: true });
-      operation.addEventListener("blocked", () => reject(new Error("Read cache is unavailable.")), {
+      operation.addEventListener("error", () => fail(operation.error), { once: true });
+      operation.addEventListener("blocked", () => fail(new Error("Read cache is unavailable.")), {
         once: true,
       });
-    }));
+    });
+    database = opening;
+    opening.catch(() => {
+      if (database === opening) database = undefined;
+    });
+    return opening;
+  };
   const idFor = (accountId: string, record: string) => JSON.stringify([accountId, record]);
   const aad = (account: ReadVaultAccount, record: string) =>
     new TextEncoder().encode(JSON.stringify([1, origin, account.id, account.epoch, record]));
