@@ -280,6 +280,35 @@ describe("cloud thread history sync adapter", () => {
     expect(retryProof).not.toEqual(firstProof);
   });
 
+  it("wipes each proof once it is serialized, and one it refuses to send", async () => {
+    const h = harness();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.http).toHaveBeenCalledTimes(2);
+    const sent = await Promise.all(h.proof.mock.results.map((result) => result.value));
+    expect(sent).toHaveLength(2);
+    for (const proof of sent) {
+      expect(proof.nonce.every((byte: number) => byte === 0)).toBe(true);
+      expect(proof.signature.every((byte: number) => byte === 0)).toBe(true);
+    }
+    // A proof for another node is refused before anything is sent, and wiped as well.
+    const foreign = {
+      nodeId: `node_${"b".repeat(22)}`,
+      protocolMajor: 1,
+      protocolMinor: 3,
+      nonce: new Uint8Array(32).fill(9),
+      signature: new Uint8Array(64).fill(9),
+    };
+    h.proof.mockResolvedValueOnce(foreign);
+    h.getSequence.mockReturnValue(Effect.succeed({ snapshotSequence: 2 }));
+    h.getShell.mockReturnValue(Effect.succeed({ ...h.shell, snapshotSequence: 2 }));
+    h.notifyChanged(turnEnded);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.proof).toHaveBeenCalledTimes(3);
+    expect(h.http).toHaveBeenCalledTimes(2);
+    expect(foreign.nonce.every((byte) => byte === 0)).toBe(true);
+    expect(foreign.signature.every((byte) => byte === 0)).toBe(true);
+  });
+
   it("does not send a proof that completed after shutdown", async () => {
     const h = harness();
     let complete!: (value: Awaited<ReturnType<typeof h.proof>>) => void;
@@ -293,15 +322,19 @@ describe("cloud thread history sync adapter", () => {
     expect(h.proof).toHaveBeenCalledOnce();
     await h.stop();
     expect(h.http).not.toHaveBeenCalled();
-    complete({
+    const late = {
       nodeId,
       protocolMajor: 1,
       protocolMinor: 3,
-      nonce: new Uint8Array(32),
-      signature: new Uint8Array(64),
-    });
+      nonce: new Uint8Array(32).fill(7),
+      signature: new Uint8Array(64).fill(7),
+    };
+    complete(late);
     await vi.advanceTimersByTimeAsync(0);
     expect(h.http).not.toHaveBeenCalled();
+    // The unsent proof is wiped too.
+    expect(late.nonce.every((byte) => byte === 0)).toBe(true);
+    expect(late.signature.every((byte) => byte === 0)).toBe(true);
     expect(h.reportFailure).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
