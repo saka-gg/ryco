@@ -39,7 +39,6 @@ import {
   findLinkedWorkItemWorktrees,
   type LinkedWorkItemWorktree,
 } from "~/lib/workItemLocalLinks";
-import { searchChangeRequestsQueryOptions } from "~/lib/sourceControlContextRpc";
 import { errorMessage } from "~/lib/errorMessage";
 import {
   useAddWorkItemCommentMutation,
@@ -49,6 +48,7 @@ import {
   useUpdateWorkItemMutation,
   useWorkItemDetail,
 } from "~/rpc/useWorkItems";
+import { useSourceControlChangeRequestSearch } from "~/rpc/useSourceControl";
 import { selectSidebarWorktreesForProjectRef, useStore } from "~/store";
 import { AtlassianJiraIcon } from "../Icons";
 import { Button } from "../ui/button";
@@ -132,15 +132,13 @@ export function WorkItemDetail(props: WorkItemDetailProps) {
     projectId: props.projectId,
     key: props.workItemKey,
   };
-  const linkedPrQuery = useQuery(
-    searchChangeRequestsQueryOptions({
-      environmentId: props.environmentId,
-      cwd: props.cwd,
-      query: props.workItemKey,
-      limit: 8,
-      enabled: props.cwd !== null,
-    }),
-  );
+  const linkedPrQuery = useSourceControlChangeRequestSearch({
+    environmentId: props.environmentId,
+    cwd: props.cwd,
+    query: props.workItemKey,
+    limit: 8,
+    enabled: props.cwd !== null,
+  });
   const localBranchQuery = useQuery({
     queryKey: [
       "workItems",

@@ -13,7 +13,6 @@ import { readEnvironmentApi } from "../environmentApi";
 import { readLocalGitRefName } from "../lib/gitStatusState";
 import { readWebQueueEnvironment } from "../messageQueueEnvironment";
 import type { WebQueuedMessage } from "../messageQueueStore";
-import { defaultQueryClient } from "../rpc/queryClient";
 import { selectProjectByRef, selectThreadByRef, useStore } from "../store";
 import {
   applyBuildModeToSend,
@@ -217,7 +216,6 @@ export async function sendQueuedMessageInBackground(
           project: { cwd: project.cwd },
           worktreePath: thread.worktreePath,
         }),
-        queryClient: defaultQueryClient,
       }),
     },
     persistSettings: {
