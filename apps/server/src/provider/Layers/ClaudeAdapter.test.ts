@@ -5788,6 +5788,51 @@ describe("ClaudeAdapterLive", () => {
     });
   });
 
+  it.effect("classifies only the SDK's session-gone messages as a gone session", () => {
+    const cases = [
+      ["model not found", "ProviderAdapterRequestError"],
+      ["executable not found: claude", "ProviderAdapterRequestError"],
+      ["connection closed by peer", "ProviderAdapterRequestError"],
+      ["Session 0b1c not found", "ProviderAdapterSessionNotFoundError"],
+      ["unknown session 0b1c", "ProviderAdapterSessionNotFoundError"],
+      ["Query closed before response received", "ProviderAdapterSessionClosedError"],
+      ["Transport is closed", "ProviderAdapterSessionClosedError"],
+    ] as const;
+    return Effect.gen(function* () {
+      for (const [message, expected] of cases) {
+        const harness = makeHarness();
+        Object.assign(harness.query, {
+          setModel: async () => {
+            throw new Error(message);
+          },
+        });
+        const tag = yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const session = yield* adapter.startSession({
+            runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-session-error"),
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          const error = yield* adapter
+            .sendTurn({
+              threadId: session.threadId,
+              input: "hello",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("claudeAgent"),
+                model: "claude-opus-4-6",
+              },
+              attachments: [],
+            })
+            .pipe(Effect.flip);
+          yield* adapter.stopAll().pipe(Effect.ignore);
+          return error._tag;
+        }).pipe(Effect.provide(harness.layer));
+        assert.equal(tag, expected, message);
+      }
+    }).pipe(Effect.provideService(Random.Random, makeDeterministicRandomService()));
+  });
+
   it.effect("updates model on sendTurn when model override is provided", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -12993,6 +13038,54 @@ describe("ClaudeAdapterLive agent process priority", () => {
         assert.equal(
           (error as { readonly detail?: string }).detail,
           "Claude Code process exited with code 1. stderr: error: unknown option --thinking-display",
+        );
+      }).pipe(
+        Effect.provide(priorityAdapterLayer({ createQuery, processPriority: linuxExecNice })),
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      );
+    },
+  );
+
+  it.live.skipIf(process.platform === "win32")(
+    "keeps a request failure when the exiting CLI's stderr mentions not found or closed",
+    () => {
+      const query = new FakeClaudeQuery();
+      let cliExited: Promise<void> = Promise.resolve();
+      const createQuery: ClaudeAdapterLiveOptions["createQuery"] = (input) => {
+        const child = input.options.spawnClaudeCodeProcess!({
+          command: "/bin/sh",
+          args: ["-c", "echo 'error: model not found; connection closed' >&2; exit 1"],
+          env: { ...process.env },
+          signal: new AbortController().signal,
+        });
+        cliExited = new Promise((resolve) => child.once("exit", () => resolve()));
+        return query;
+      };
+      Object.assign(query, {
+        setModel: async () => {
+          await cliExited;
+          throw new Error("Claude Code process exited with code 1");
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* startPrioritySession(adapter, "stderr-classification");
+        const error = yield* adapter
+          .sendTurn({
+            threadId: THREAD_ID,
+            input: "hello",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-opus-4-6",
+            },
+            attachments: [],
+          })
+          .pipe(Effect.flip);
+        yield* adapter.stopAll().pipe(Effect.ignore);
+        assert.equal(error._tag, "ProviderAdapterRequestError");
+        assert.equal(
+          (error as { readonly detail?: string }).detail,
+          "Claude Code process exited with code 1. stderr: error: model not found; connection closed",
         );
       }).pipe(
         Effect.provide(priorityAdapterLayer({ createQuery, processPriority: linuxExecNice })),

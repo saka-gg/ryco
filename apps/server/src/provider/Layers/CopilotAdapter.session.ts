@@ -19,7 +19,7 @@ import {
   type SessionConfig,
   type SessionEvent,
 } from "@github/copilot-sdk";
-import { Effect, Option } from "effect";
+import { Effect, Option, type Scope } from "effect";
 import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 
@@ -43,6 +43,10 @@ import {
   COPILOT_SESSION_STOP_TIMEOUT_MS,
   stopCopilotClient,
 } from "./CopilotAdapter.clientStop.ts";
+import {
+  makeCopilotSessionCallbacks,
+  type CopilotSessionCallbacks,
+} from "./CopilotAdapter.callbacks.ts";
 import {
   COPILOT_DRIVER_KIND,
   type ActiveCopilotSession,
@@ -95,8 +99,11 @@ export interface SessionOpsDeps {
     pendingUserInputs: Map<string, PendingUserInputRequest>,
     activeTurnId: () => TurnId | undefined,
     stoppedRef: { stopped: boolean },
+    callbacks: CopilotSessionCallbacks,
   ) => SessionConfig;
   readonly handleEvent: (session: ActiveCopilotSession, event: SessionEvent) => Effect.Effect<void>;
+  /** The adapter's scope; each session's callback scope is a child of it. */
+  readonly scope: Scope.Scope;
   readonly requireSession: (
     threadId: ThreadId,
   ) => Effect.Effect<ActiveCopilotSession, ProviderAdapterSessionNotFoundError>;
@@ -223,6 +230,10 @@ export const makeStartSession =
       const pendingUserInputs = new Map<string, PendingUserInputRequest>();
       let activeTurn: TurnId | undefined;
       const stoppedRef = { stopped: false };
+      const callbacks = yield* makeCopilotSessionCallbacks({
+        parentScope: deps.scope,
+        threadId: input.threadId,
+      });
       const deviceToolBinding = createProcessDeviceToolBinding({
         threadId: input.threadId,
         isTurnActive: () => activeTurn !== undefined && !stoppedRef.stopped,
@@ -249,6 +260,7 @@ export const makeStartSession =
           pendingUserInputs,
           () => activeTurn,
           stoppedRef,
+          callbacks,
         );
         return {
           ...baseSessionConfig,
@@ -278,6 +290,7 @@ export const makeStartSession =
             stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS }),
           ),
         ),
+        Effect.ensuring(callbacks.close),
       );
       const createSession = (config: SessionConfig) =>
         Effect.tryPromise({
@@ -334,6 +347,7 @@ export const makeStartSession =
         pendingTurnStarts: new Set(),
         htmlRenderToolCalls: new Map(),
         deviceToolBinding,
+        callbacks,
         turnIds: [],
         renewSession: () => client.createSession(sessionConfig),
         attachSession: (nextSession) => {
@@ -342,19 +356,22 @@ export const makeStartSession =
           delete record.contextUsage;
           record.lastUsage = undefined;
           record.unsubscribe = nextSession.on((event) => {
-            if (event.type === "assistant.turn_start" && !isCopilotChildEvent(event)) {
-              activeTurn = TurnId.make(event.data.turnId);
-              record.activeTurnId = activeTurn;
-              for (const pending of Array.from(record.pendingTurnStarts)) {
-                pending.resolve(activeTurn);
+            // Only what must not wait for the queue happens here: the turn a permission or
+            // device-tool call belongs to, and `sendTurn`'s wait for its turn. The session's own
+            // turn state (`activeTurnId`, Agent Control retirement) moves in `handleEvent`, in SDK
+            // order, so events still queued from the previous turn keep that turn.
+            if (!isCopilotChildEvent(event)) {
+              if (event.type === "assistant.turn_start") {
+                activeTurn = TurnId.make(event.data.turnId);
+                for (const pending of Array.from(record.pendingTurnStarts)) {
+                  pending.resolve(activeTurn);
+                }
+                record.pendingTurnStarts.clear();
+              } else if (event.type === "session.idle" || event.type === "abort") {
+                activeTurn = undefined;
               }
-              record.pendingTurnStarts.clear();
             }
-            void deps
-              .handleEvent(record, event)
-              .pipe(Effect.runPromise)
-              .catch(() => undefined);
-            activeTurn = record.activeTurnId;
+            callbacks.run(deps.handleEvent(record, event));
           });
         },
         unsubscribe: () => {},
@@ -653,6 +670,9 @@ export const stopSessionRecord = (
       }
       return Effect.void;
     }),
+    // After the unsubscribe above: callbacks queued before the stop still run, then the session
+    // scope closes (interrupting pending auto-approval timers).
+    Effect.ensuring(record.callbacks.close),
   );
 
 export const makeStopSession =
