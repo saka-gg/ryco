@@ -117,6 +117,7 @@ import {
 } from "../Services/ProjectTransfers.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import { NodePaths } from "../Services/NodePaths.ts";
+import { isPathInside } from "../../pathContainment.ts";
 
 /** Output and clone progress are published, and subscribers get a snapshot, at most this often. */
 const DEFAULT_SNAPSHOT_THROTTLE_MS = 1_000;
@@ -250,8 +251,7 @@ const sameOrInside = (candidate: string, directory: string): boolean => {
       ? resolved.toLowerCase()
       : resolved;
   };
-  const relative = path.relative(fold(directory), fold(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return isPathInside({ root: fold(directory), candidate: fold(candidate), allowRoot: true });
 };
 
 /** The image types the avatar pipeline accepts, by their magic bytes. */

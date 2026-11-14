@@ -82,6 +82,7 @@ import {
   isWorktreeRelocationBlocked,
   canonicalStoragePath,
 } from "./lifecycle.ts";
+import { isCanonicalPathInside } from "../pathContainment.ts";
 
 export interface OwnedStorageRow {
   id: string;
@@ -139,7 +140,7 @@ const canonical = canonicalStoragePath;
 /** The removal code (and the status check before it) loads on first use, off the boot path. */
 const loadRemoval = attempt(() => import("./quarantineRemoval.ts"));
 const contains = (root: string, candidate: string) =>
-  candidate === root || candidate.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+  isCanonicalPathInside({ root, candidate, allowRoot: true });
 /** Where a removal's cache folders stand: `planned`, `caches-only` (purging) or `preserved`. */
 const cachePurgeState = (row: Pick<OwnedStorageRow, "identity_json">): unknown => {
   try {

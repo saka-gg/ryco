@@ -23,6 +23,7 @@ import {
   type HtmlRenderMissingImage,
   HtmlRenderPageTooLargeError,
 } from "./HtmlRender.ts";
+import { isPathInside } from "../pathContainment.ts";
 
 const IMAGE_EXTENSIONS = "png|jpg|jpeg|gif|webp|avif|svg|bmp|ico";
 // POSIX `/…` (not protocol-relative `//…`) or Windows `C:\…` / `C:/…`.
@@ -111,15 +112,8 @@ const afterDoctype = (text: string, from: number) => {
   return -1;
 };
 
-const isInside = (root: string, candidate: string) => {
-  const relative = NodePath.relative(root, candidate);
-  return (
-    relative !== "" &&
-    relative !== ".." &&
-    !relative.startsWith(`..${NodePath.sep}`) &&
-    !NodePath.isAbsolute(relative)
-  );
-};
+const isInside = (root: string, candidate: string) =>
+  isPathInside({ root, candidate, allowRoot: false });
 
 /** The real locations of the allowed roots; a file system root never counts. */
 const realRoots = async (roots: ReadonlyArray<string>) => {

@@ -58,6 +58,7 @@ import {
   type ThreadGitSyncRequest,
   type TurnOverlap,
 } from "./threadGitMetadata.ts";
+import { isCanonicalPathInside } from "../pathContainment.ts";
 
 export interface ThreadGitMetadataOptions {
   /** Wait after a mid-turn command before reading HEAD, so a burst reads it once. Default 250 ms. */
@@ -137,7 +138,7 @@ export const locateCheckoutHead = Effect.fn("locateCheckoutHead")(function* (
 });
 
 const isWithin = (candidate: string, root: string) =>
-  candidate === root || candidate.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+  isCanonicalPathInside({ root, candidate, allowRoot: true });
 
 const remoteRefreshMemoTouch = (memo: Map<string, number>, key: string, atMs: number) => {
   memo.delete(key);
