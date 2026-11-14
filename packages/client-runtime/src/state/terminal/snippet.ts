@@ -1,5 +1,6 @@
 import type { ScopedThreadRef, EnvironmentApi } from "@ryco/contracts";
 import { TerminalInputRejectedError } from "@ryco/contracts/terminal";
+import * as Schema from "effect/Schema";
 
 import { terminalSnippetError } from "@ryco/shared/terminalPaste";
 export {
@@ -25,6 +26,8 @@ export interface TerminalSnippetRequest {
   readonly promise: Promise<void>;
   readonly dispatch: (inputEpoch: string, send: (source: string) => Promise<void>) => void;
 }
+
+const isTerminalInputRejected = Schema.is(TerminalInputRejectedError);
 
 const keyFor = (target: Pick<TerminalSnippetTarget, "threadRef" | "terminalId">) =>
   JSON.stringify([target.threadRef.environmentId, target.threadRef.threadId, target.terminalId]);
@@ -150,7 +153,7 @@ export function createTerminalSnippetBroker() {
             10_000,
           );
           const writeFailed = (error: unknown) => {
-            if (error instanceof TerminalInputRejectedError) {
+            if (isTerminalInputRejected(error)) {
               if (uncertain.get(key)?.token === token) uncertain.delete(key);
               if (pasted.get(key)?.token === token) pasted.delete(key);
             }

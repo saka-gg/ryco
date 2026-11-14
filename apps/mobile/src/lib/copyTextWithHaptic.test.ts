@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
@@ -68,9 +69,7 @@ describe("copyTextWithHaptic", () => {
     });
 
     const failures = consoleError.mock.calls.map(([failure]) => failure);
-    const clipboardError = failures.find(
-      (failure) => failure instanceof CopyTextClipboardWriteError,
-    );
+    const clipboardError = failures.find(Schema.is(CopyTextClipboardWriteError));
     expect(clipboardError).toBeInstanceOf(CopyTextClipboardWriteError);
     expect(clipboardError).toMatchObject({
       target: "connection-trace-id",
@@ -78,7 +77,7 @@ describe("copyTextWithHaptic", () => {
     });
     expect((clipboardError as Error).message).not.toContain("secret clipboard contents");
 
-    const hapticError = failures.find((failure) => failure instanceof CopyTextHapticFeedbackError);
+    const hapticError = failures.find(Schema.is(CopyTextHapticFeedbackError));
     expect(hapticError).toBeInstanceOf(CopyTextHapticFeedbackError);
     expect(hapticError).toMatchObject({
       target: "connection-trace-id",

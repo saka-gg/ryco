@@ -241,7 +241,7 @@ describe("wsRpcClient shell subscription", () => {
       client: createWsRpcClient(transport as unknown as WsTransport),
       connect: () => {
         const input = vi.fn((_input: unknown) => Stream.empty);
-        connects[0]!({ [ORCHESTRATION_WS_METHODS.subscribeShell]: input });
+        void connects[0]!({ [ORCHESTRATION_WS_METHODS.subscribeShell]: input });
         return input.mock.calls[0]?.[0];
       },
       emit: (item: OrchestrationShellStreamItem) => listeners[0]!(item),
