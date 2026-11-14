@@ -479,6 +479,11 @@ export const ItemLifecyclePayload = Schema.Struct({
    */
   agentId: Schema.optional(TrimmedNonEmptyStringSchema),
   parentToolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Provider thread ids of the subagents a collab tool call addressed. Omitted
+   * when it addressed none.
+   */
+  receiverThreadIds: Schema.optional(Schema.Array(TrimmedNonEmptyStringSchema)),
 });
 export type ItemLifecyclePayload = typeof ItemLifecyclePayload.Type;
 

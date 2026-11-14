@@ -464,7 +464,9 @@ function rawPayloadThreadId(event: ProviderRuntimeEvent): string | undefined {
   return asTrimmedString(asRecord(event.raw?.payload)?.threadId);
 }
 
-function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): string[] {
+function collabReceiverThreadIdsFromRuntimeEvent(
+  event: ProviderRuntimeEvent,
+): ReadonlyArray<string> {
   if (
     event.type === "subagent.started" ||
     event.type === "subagent.updated" ||
@@ -483,16 +485,7 @@ function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): s
   if (event.payload.itemType !== "collab_agent_tool_call") {
     return [];
   }
-
-  const data = asRecord(event.payload.data);
-  const item = asRecord(data?.item);
-  const receiverThreadIds = item?.type === "collabAgentToolCall" ? item.receiverThreadIds : [];
-  return Array.isArray(receiverThreadIds)
-    ? receiverThreadIds.flatMap((entry) => {
-        const threadId = asTrimmedString(entry);
-        return threadId ? [threadId] : [];
-      })
-    : [];
+  return event.payload.receiverThreadIds ?? [];
 }
 
 /**
