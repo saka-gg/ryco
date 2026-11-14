@@ -13,6 +13,10 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { threadPendingWork } from "@ryco/shared/workspaceLifecycle";
 import { captureWorktreeIdentity, type WorktreeIdentity } from "../storage/filesystem.ts";
 import {
+  isSameMovedWorktreeIdentity,
+  readWorktreeIdentity,
+} from "../storage/ownedEntryIdentity.ts";
+import {
   canonicalStoragePath,
   hasWorktreeCreationLease,
   isStoragePathBlocked,
@@ -54,15 +58,6 @@ const exists = async (file: string) => {
     throw cause;
   }
 };
-/** Directory and repository identity survive a same-filesystem Git move. */
-const sameIdentity = (a: WorktreeIdentity, b: WorktreeIdentity) =>
-  a.device === b.device &&
-  a.inode === b.inode &&
-  a.gitDirectory === b.gitDirectory &&
-  a.commonDirectory === b.commonDirectory &&
-  a.commonDevice === b.commonDevice &&
-  a.commonInode === b.commonInode;
-
 export function makeManagedWorktreeMigration(
   deps: WorkspaceLifecycleDeps,
   sql: SqlClient.SqlClient,
@@ -90,9 +85,8 @@ export function makeManagedWorktreeMigration(
   const inspect = (row: Relocation, candidate: string) =>
     Effect.tryPromise(async () => {
       validateLayout(row);
-      const original = JSON.parse(row.identity_json) as WorktreeIdentity;
       const identity = await captureWorktreeIdentity(row.repository_path, candidate);
-      if (!sameIdentity(original, identity))
+      if (!isSameMovedWorktreeIdentity(readWorktreeIdentity(row.identity_json), identity))
         throw new Error("Checkout or repository identity changed; manual recovery is required.");
       return identity;
     });
@@ -379,7 +373,10 @@ export function makeManagedWorktreeMigration(
                     captureWorktreeIdentity(repository, source),
                   );
                   if (
-                    !sameIdentity(JSON.parse(owned[0]!.identity_json) as WorktreeIdentity, identity)
+                    !isSameMovedWorktreeIdentity(
+                      readWorktreeIdentity(owned[0]!.identity_json),
+                      identity,
+                    )
                   )
                     return;
                   const target = yield* resolveWorktreeCheckoutPath({

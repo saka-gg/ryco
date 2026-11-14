@@ -72,6 +72,11 @@ import {
   type MeasuredSize,
   type WorktreeIdentity,
 } from "./filesystem.ts";
+import {
+  isSameWorktreeIdentity,
+  readTemporaryIdentity,
+  readWorktreeIdentity,
+} from "./ownedEntryIdentity.ts";
 // Types only: the module itself loads on first use (`import()` below), off the boot path.
 import type { CheckedCacheFolder } from "./cacheFolders.ts";
 import {
@@ -610,7 +615,7 @@ export function makeStorageService(deps: {
         const current = yield* attempt(() =>
           captureWorktreeIdentity(row.repository_path!, row.path),
         );
-        if (JSON.stringify(current) !== row.identity_json)
+        if (!isSameWorktreeIdentity(readWorktreeIdentity(row.identity_json), current))
           return yield* new StorageError({ detail: "Worktree ownership identity changed." });
         const registered = yield* git.listWorktreePaths(project.workspaceRoot);
         if (!registered.includes(row.path))
@@ -671,17 +676,9 @@ export function makeStorageService(deps: {
   const assertTemporaryUnchanged = (row: OwnedStorageRow, size: MeasuredSize) =>
     Effect.gen(function* () {
       const stat = yield* attempt(() => fs.lstat(row.path));
-      const identity = yield* Effect.try({
-        try: () =>
-          JSON.parse(row.identity_json) as {
-            device: number;
-            inode: number;
-            fingerprint?: string;
-          },
-        catch: failure,
-      });
+      const identity = readTemporaryIdentity(row.identity_json);
       if (
-        identity.device !== stat.dev ||
+        identity?.device !== stat.dev ||
         identity.inode !== stat.ino ||
         !identity.fingerprint ||
         identity.fingerprint !== size.fingerprint
@@ -1617,7 +1614,13 @@ export function makeStorageService(deps: {
         if (!row) return yield* new StorageError({ detail: "Staging allocation is not in use." });
         yield* attempt(() => assertCanonicalPath(row.path));
         const stat = yield* attempt(() => fs.lstat(row.path));
-        if (JSON.stringify({ device: stat.dev, inode: stat.ino }) !== row.identity_json)
+        // In use, the allocation records only where it is: a fingerprint means it was completed.
+        const allocated = readTemporaryIdentity(row.identity_json);
+        if (
+          allocated?.device !== stat.dev ||
+          allocated.inode !== stat.ino ||
+          allocated.fingerprint !== undefined
+        )
           return yield* new StorageError({ detail: "Staging allocation identity changed." });
         const size = yield* attempt(() =>
           measureDirectory(row.path, measurementBudget(), new Set(), true),
