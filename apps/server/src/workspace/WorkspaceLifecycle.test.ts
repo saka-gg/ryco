@@ -676,6 +676,25 @@ describe("workspace lifecycle service", () => {
     neverDeletesConversations(f.commandTypes());
   });
 
+  it("completes a stale-record step for a removal already on record without changing it", async () => {
+    const f = fixture();
+    f.git(f.repo, "worktree", "remove", f.checkout);
+    await f.previewAndApply({ worktreeId: topicId, action: "remove-stale-record" });
+    const before = f.commandTypes().length;
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-stale-record",
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects).toMatchObject({ removeCheckout: false, recordCheckoutRemoval: false });
+    expect(preview.summary).toBe(
+      "The checkout is already recorded as removed, leave conversations as they are, keep history and branch.",
+    );
+    expect(result.outcome).toBe("completed");
+    expect(f.commandTypes().length).toBe(before);
+    expect(f.state.removals).toBe(0);
+  });
+
   it("asks for a prune instead of guessing when Git still registers a missing checkout", async () => {
     const f = fixture();
     rmSync(f.checkout, { recursive: true, force: true });

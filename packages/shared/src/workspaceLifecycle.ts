@@ -369,7 +369,9 @@ export function summarizeWorkspaceLifecycleEffects(
         ? `Remove 1 checkout, ${conversations}, ${branch}.`
         : `Record 1 already-removed checkout, ${conversations}, ${branch}.`;
     case "remove-stale-record":
-      return `Record 1 missing checkout as removed, ${conversations}, ${branch}.`;
+      return effects.recordCheckoutRemoval
+        ? `Record 1 missing checkout as removed, ${conversations}, ${branch}.`
+        : `The checkout is already recorded as removed, ${conversations}, ${branch}.`;
     case "recreate-checkout":
       return `Recreate 1 checkout on branch ${effects.branch}. Conversations stay as they are.`;
   }
