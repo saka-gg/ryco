@@ -37,6 +37,7 @@ import type {
   OrchestrationThread,
   OrchestrationThreadHistoryError,
   OrchestrationThreadShell,
+  ProviderInstanceId,
   QueuedFollowUp,
   RuntimeMode,
   ThreadId,
@@ -121,6 +122,12 @@ export interface ServerQueueDrainDeps {
     ClaudeResumeReview | null,
     ProjectionRepositoryError | OrchestrationThreadHistoryError
   >;
+  /**
+   * Whether the adapter of `instanceId` asks for a resume cache review
+   * (`ProviderAdapterCapabilities.resumeCacheReview`); an unresolvable instance answers false.
+   * Passed with `claudeResumeReview`: without either, nothing is reviewed.
+   */
+  readonly resumeCacheReviewSupported?: (instanceId: ProviderInstanceId) => Effect.Effect<boolean>;
 }
 
 /** What a review hold tells the person (`ClaudeCacheReview`). */
@@ -305,9 +312,10 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
      * Whether the head waits for the person's review of a Claude resume, as the composer asks
      * before such a send: true once the hold is recorded, or while the review cannot be read (the
      * next pass asks again, and after a few failed reads the queue holds instead). Only a native
-     * resume of the thread's own Claude session is reviewed (another instance takes a context
-     * handoff), never a slash command, and never a person's message queued from a device where
-     * they turned the review off. Only a person's message is reviewed: an agent's or an
+     * resume of the thread's own session on an instance whose adapter asks for the review
+     * (`resumeCacheReviewSupported`) is reviewed (another instance takes a context handoff),
+     * never a slash command, and never a person's message queued from a device where they
+     * turned the review off. Only a person's message is reviewed: an agent's or an
      * automation's goes to a chat nobody may be watching, and its sender already chose to wake
      * it, so holding it would only stall the work until someone happens to look. A Resume answers for the cache observation the hold was
      * recorded for: its review hold is gone again (the queue is unheld here), so that cold cache
@@ -323,11 +331,12 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
         const session = thread.session;
         if (
           deps.claudeResumeReview === undefined ||
-          session?.providerName !== "claudeAgent" ||
-          session.providerInstanceId !== target.instanceId ||
+          deps.resumeCacheReviewSupported === undefined ||
+          session?.providerInstanceId !== target.instanceId ||
           head.text.trim().startsWith("/") ||
           head.author !== "user" ||
-          head.claudeResumeReview === "skip"
+          head.claudeResumeReview === "skip" ||
+          !(yield* deps.resumeCacheReviewSupported(target.instanceId))
         ) {
           return false;
         }
