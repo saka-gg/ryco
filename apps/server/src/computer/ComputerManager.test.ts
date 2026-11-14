@@ -15,12 +15,9 @@ import {
   type ComputerBackendActionResult,
 } from "./ComputerBackend.ts";
 import { computerApprovalGate } from "./ComputerApprovalGate.ts";
-import {
-  COMPUTER_CONTROL_ENABLE_TIMEOUT_MS,
-  COMPUTER_LEASE_WAIT_MS,
-  ComputerManager,
-  type ComputerAgentLane,
-} from "./ComputerManager.ts";
+import { ComputerManager } from "./ComputerManager.ts";
+import { COMPUTER_CONTROL_ENABLE_TIMEOUT_MS } from "./computerManagerConstants.ts";
+import { COMPUTER_LEASE_WAIT_MS, type ComputerAgentLane } from "./computerLease.ts";
 import {
   ComputerCallContext,
   ComputerCallTiming,
