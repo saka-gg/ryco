@@ -1,6 +1,5 @@
 import { sidebarUndo } from "../../state/sidebarUndo";
 import { ClaudeCacheSheet } from "./ClaudeCacheSheet";
-import { claudeCacheSummaryLabel } from "./claudeCacheSummary";
 import { latestClaudeCacheObservation } from "@ryco/shared/claudeCacheReview";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
 import { mobileConfirmStopBackgroundWork } from "./stopBackgroundWork";
@@ -14,10 +13,6 @@ import {
 } from "../../state/use-thread-outbox-drain";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
-import {
-  hasRetiredProjectMemory,
-  REMOVED_PROJECT_MEMORY_MESSAGE,
-} from "@ryco/shared/retiredFeatures";
 import { useStore as useZustandStore } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
 import { type LegendListRef, type LegendListRenderItemProps } from "@legendapp/list/react-native";
@@ -35,8 +30,6 @@ import {
 import {
   Alert,
   Platform,
-  Pressable,
-  ScrollView,
   Share,
   StyleSheet,
   View,
@@ -46,7 +39,6 @@ import {
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
-import type { HostedDeliveryNotice } from "@ryco/client-runtime/authorization";
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
 import {
   createSideChatStore,
@@ -54,16 +46,12 @@ import {
 } from "@ryco/client-runtime/state/side-chat";
 import {
   APPROVAL_REDIRECT_PLACEHOLDER,
+  appendReturnedComposerPrompt,
   approvalRedirectTooSoon,
   declineApprovalsForRedirect,
-  appendReturnedComposerPrompt,
   checkpointRevertUnsupportedMessage,
   deriveProviderSelectionPolicy,
   describeApprovalRedirectRefusal,
-  getAutoRuntimeModeUnavailableReason,
-  getProviderInstanceModels,
-  getProviderInteractionModeToggle,
-  getProviderSupportsAskMode,
   normalizeInteractionModeForProviderTarget,
   noteApprovalRedirectEnd,
   parseThreadGoalSlashCommand,
@@ -79,19 +67,13 @@ import {
 import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   deriveClaudeFastModeNotice,
-  deriveRevertTurnCountByUserMessageId,
-  inferCheckpointTurnCountByTurnId,
   readCheckpointRevertPhase,
-  findLatestProposedPlan,
-  hasActionableProposedPlan,
-  isLatestTurnSettled,
   revertKeptChangesDiscardedBy,
   selectConversationRevertSupported,
   selectFilesRevertSupported,
   subscribeCheckpointReverts,
   type PendingApproval,
   type PendingUserInput,
-  type TimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
   buildFollowUpQueueEditCommand,
@@ -110,8 +92,6 @@ import {
   getQueuedThreadKeys,
   indexTurnSteerRejections,
   resolveQueuedMessageEditUnavailableReason,
-  resolveFollowUpQueueEditState,
-  resolveQueuedMessageSteerEligibility,
   providerSteering,
   selectServerFollowUpQueueSupported,
   selectThreadFollowUpQueue,
@@ -126,20 +106,15 @@ import {
   type QueuedMessageSteerAttempt,
 } from "@ryco/client-runtime/state/message-queue";
 import {
-  buildThreadInbox,
-  type BuildThreadInboxInput,
   createThreadForkAttemptController,
   defaultThreadForkBaseRef,
   deriveForkableReplyMessageIds,
-  deriveUndoTurnCountByTurnId,
   isArchivedThreadStub,
   readThreadForkApi,
   resolveThreadWorkspacePullRequestLink,
   CONTINUE_AFTER_FAILURE_PROMPT,
   failedTurnNotice,
   restartInterruptionNotice,
-  threadForkBoundaryQuote,
-  threadForkReplyExcerpt,
   waitForStoreCondition,
   type ChatMessage,
   type ProposedPlan,
@@ -148,7 +123,8 @@ import { isChatProject } from "@ryco/shared/projectKind";
 import { listThreadLifecycleActions } from "@ryco/client-runtime/state/lifecycle";
 import { goBackOrHome } from "../../navigation/goBackOrHome";
 import { ThreadUsageLimitBanner } from "./ThreadUsageLimitBanner";
-import { ThreadFindBar } from "./ThreadFindBar";
+import { ThreadBannerStack } from "./ThreadNoticeBanners";
+import { ThreadFeedEmptyState, ThreadFeedListHeader, ThreadHeaderFade } from "./ThreadFeedParts";
 import { ThreadArtifactsSheet } from "./ThreadArtifactsSheet";
 import { summarizeContextWindow } from "./contextWindowSummary";
 import { deriveContextWindowUsage } from "@ryco/client-runtime/state/session/contextWindow";
@@ -168,10 +144,6 @@ import {
   deriveChatFileUploadSendBlock,
 } from "@ryco/client-runtime/state/composer";
 
-import { AppText as Text } from "../../components/AppText";
-import { EmptyState } from "../../components/EmptyState";
-import { ErrorBanner } from "../../components/ErrorBanner";
-import { SymbolView } from "../../components/AppSymbol";
 import { ensureEnvironmentApi, readRpcClient } from "../../connection/environmentApi";
 import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
 import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
@@ -187,11 +159,7 @@ import type {
   DraftComposerAttachment,
   DraftComposerFileAttachment,
 } from "../../lib/composerFiles";
-import {
-  isDraftComposerFileAttachment,
-  pickComposerAttachmentsFrom,
-  readComposerFileBytes,
-} from "../../lib/composerFiles";
+import { pickComposerAttachmentsFrom, readComposerFileBytes } from "../../lib/composerFiles";
 import { convertPastedImagesToAttachments } from "../../lib/composerImages";
 import { newCommandId, newMessageId, newThreadId } from "../../lib/ids";
 import { runWhileBusy } from "../../lib/runWhileBusy";
@@ -254,11 +222,7 @@ import {
 } from "../../state/followUpQueue";
 import { buildQueuedThreadMessageAttachments } from "../../state/queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "../../state/threadOutboxModel";
-import {
-  isQueuedThreadMessageHeld,
-  modelSelectionsEqual,
-  summarizeQueuedThreadMessage,
-} from "../../state/threadOutboxModel";
+import { modelSelectionsEqual } from "../../state/threadOutboxModel";
 import { useThreadTimelineOf } from "../../state/threadTimeline";
 import { createThreadChromeSelector, createThreadSummaryChromeSelector } from "./threadChromeModel";
 import { ThreadFeedList } from "./ThreadFeedList";
@@ -269,9 +233,7 @@ import {
   selectSubscribedClaudeReviewState,
   selectThreadByRef,
   selectThreadDetailLoaded,
-  selectThreadExistsByRef,
   selectThreadLiveDetailLoaded,
-  selectWorkingDelegatedDescendants,
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
@@ -283,28 +245,19 @@ import {
   deriveNewTaskLaunchView,
   discardNewTaskLaunch,
   newTaskLaunchKey,
-  requeueNewTaskLaunch,
   setNewTaskLaunchEditing,
-  retryNewTaskLaunch,
   useNewTaskLaunchStore,
 } from "../newTask/newTaskLaunch";
-import { createNewTaskLaunchDeps } from "../newTask/newTaskLaunchRuntime";
-import { AgentControlProposalCard } from "./AgentControlProposalCard";
 import {
   runEditFromHere,
   subscribeReturnedSentMessages,
   takeReturnedSentMessages,
 } from "./editFromHere";
 import { executeSendTurn } from "./executeSendTurn";
-import { PendingApprovalCard } from "./PendingApprovalCard";
 import { useNotificationThreadAction } from "../../notifications/useNotificationThreadAction";
-import { PendingUserInputCard } from "./PendingUserInputCard";
+import { ThreadPromptCards } from "./ThreadPromptCards";
 import { useAlertExcerptPrompts } from "../../notifications/push/useAlertExcerptPrompts";
-import {
-  resolveOptionalAnswerRoute,
-  sendOptionalAnswerAsMessage,
-} from "@ryco/client-runtime/state/user-input";
-import { SecretRequestCard } from "./SecretRequestCard";
+import { sendOptionalAnswerAsMessage } from "@ryco/client-runtime/state/user-input";
 import { mobileSecretRequestCards } from "./secretRequestCardModel";
 import { resolveThreadSendAction, sendThreadTurn } from "./sendThreadTurn";
 import { startOptimisticDispatch } from "./optimisticSend";
@@ -315,7 +268,6 @@ import {
   type PendingRename,
   type PendingStop,
 } from "./optimisticThreadActionsModel";
-import { useIsOptimisticUserMessage } from "../../state/optimisticUserMessages";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
   clearThreadGoal,
@@ -333,31 +285,31 @@ import {
 } from "./sessionActions";
 import { answerThreadApproval, answerThreadUserInput } from "./threadRequestAnswers";
 import { useThreadChecks } from "./useThreadChecks";
-import { buildThreadTimelineRows, toggleFold, type TurnHtmlRender } from "./threadActivityFold";
+import { buildThreadTimelineRows, toggleFold } from "./threadActivityFold";
 import { HtmlRenderFullScreenProvider } from "./HtmlRenderFullScreen";
 import { ThreadActivityFoldRow } from "./ThreadActivityFoldRow";
-import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import {
   composerFileUploadEngine,
   useComposerFileUploadMaxBytes,
   useComposerFileUploadRecords,
 } from "../../state/composerFileUpload";
-import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerModel";
-import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
+import { buildModelPickerModel } from "./modelPickerModel";
+import { resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { useThreadAgents } from "./ThreadAgentsSheet";
 import { ThreadContextSheet } from "./ThreadContextSheet";
 import { buildThreadParentLink, threadTitlePillGoal } from "./threadContextSheetModel";
 import type { ThreadGoalActions } from "./ThreadGoalSection";
 import {
   buildThreadHeaderMenu,
-  flattenThreadHeaderMenu,
-  THREAD_HEADER_MORE_ICON,
-  THREAD_HEADER_MORE_TITLE,
   resolveThreadRename,
-  type ThreadHeaderMenuAction,
   type ThreadHeaderMenuActionId,
   type ThreadHeaderMenuSection,
 } from "./threadHeaderMenuModel";
+import {
+  androidThreadHeaderMenuActions,
+  iosThreadHeaderRightItems,
+} from "./threadHeaderNativeMenu";
+import { ThreadHeaderMenuButton } from "./ThreadHeaderMenuButton";
 import { ThreadRenameSheet } from "./ThreadRenameSheet";
 import { useTerminalHeaderActivity } from "../terminal/useTerminalHeaderActivity";
 import { ThreadTitlePill } from "./ThreadTitlePill";
@@ -377,10 +329,7 @@ import { selectCompletionReturnsByChildThreadId } from "@ryco/client-runtime/sta
 import {
   isDelegatedThreadLineage,
   planThreadGoalCommand,
-  type ThreadGoalCommandPlan,
 } from "@ryco/client-runtime/state/threads";
-import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
-import type { NativeStackHeaderItem } from "@react-navigation/native-stack";
 import { openTaskCapture } from "../tasks/taskCaptureStore";
 import { useThreadWorkspaceRoot } from "../files/useThreadWorkspaceRoot";
 import { ThreadComposer } from "./ThreadComposer";
@@ -396,15 +345,60 @@ import { clearCancelledServerQueueEdit } from "./serverQueueEdit";
 import type { ThreadComposerHandle } from "./ThreadComposer";
 import { ThreadDevicePill } from "../devices/ThreadDevicePill";
 import { buildThreadHeaderModel, findThreadWorktree } from "./threadHeaderModel";
-import { ThreadMessage } from "./ThreadMessage";
-import { ProposedPlanCard, type ProposedPlanCardActions } from "./ProposedPlanCard";
+import type { ProposedPlanCardActions } from "./ProposedPlanCard";
+import { TimelineRow } from "./TimelineRow";
+import {
+  confirmClearThreadGoal,
+  confirmDeleteThread,
+  guardPlanImplementation,
+  offerToStopDelegatedTasks,
+  promptThreadRename,
+  retryThreadNewTaskLaunch,
+  saveProposedPlan,
+  sendGoalPlan,
+  waitForThreadInStore,
+} from "./threadDetailActions";
+import {
+  actionFailureMessage,
+  actionableThreadPlanId,
+  ANCHOR_ROWS_CLOCK,
+  buildThreadSettlementModel,
+  claudeCacheSummary,
+  composerAttachmentsTotalBytes,
+  contextWindowModelLimitOf,
+  contextWindowOptionOf,
+  delegatedChildAttention,
+  firstThreadSettlementEntry,
+  floatingThreadAttention,
+  localFollowUpQueueRows,
+  MESSAGE_ANCHOR_HIGHLIGHT_MS,
+  modelPickerSelectionAvailable,
+  NO_REVERT_TARGETS,
+  queuedMessageEditUnavailableReason,
+  queuedRowEditUnavailableReason,
+  RENAME_ECHO_WAIT_MS,
+  revertTurnCountByUserMessageIdOf,
+  SERVER_QUEUE_EDIT_IN_PROGRESS,
+  serverQueueEditView,
+  threadErrorBannerMessage,
+  threadForkSheetRequest,
+  threadHasStarted,
+  threadHeaderSettlement,
+  threadQueuedMessageSteerEligibility,
+  threadSessionPhase,
+  threadSessionPolicyModel,
+  threadSettlementEnvironment,
+  threadTitlePillView,
+  threadWorkspaceTools,
+  undoTurnCountByReplyIdOf,
+  visibleFailedTurnNotice,
+  withUploadedFileTokens,
+} from "./threadDetailModel";
 import {
   implementPlanHere,
   implementPlanInNewThread,
   planMarkdownExport,
-  resolvePlanSavePath,
 } from "./proposedPlanActions";
-import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { derivePendingComposerHandoff } from "./contextHandoffModel";
 import { ForkDestinationSheet } from "./ForkDestinationSheet";
 import { mobileForkSheetPorts } from "./forkActions";
@@ -413,7 +407,6 @@ import {
   initialForkSheetSelection,
   isThreadForkOffered,
 } from "./forkDestinationModel";
-import { ForkOriginRow } from "./ForkOriginRow";
 import { useForkSheetState } from "./useForkSheetState";
 import {
   nextThreadMessageAnchorStep,
@@ -425,216 +418,9 @@ import {
 
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 const NO_PENDING_APPROVALS: PendingApproval[] = [];
-const NO_REVERT_TARGETS: ReadonlyMap<MessageId, number> = new Map();
 const NO_PENDING_FOLLOW_UPS: ReadonlyArray<PendingFollowUpAdd> = [];
 const NO_FIND_MESSAGES: ReadonlyArray<ThreadFindMessage> = [];
 const NO_ARTIFACT_MESSAGES: ReadonlyArray<ChatMessage> = [];
-const SERVER_QUEUE_EDIT_IN_PROGRESS = "Save or cancel the message you are editing first.";
-/** How long a rename's new title is shown before the node's own title, whatever it says. */
-const RENAME_ECHO_WAIT_MS = 15_000;
-/** The clock the anchor's rows are built with: their positions do not depend on it. */
-const ANCHOR_ROWS_CLOCK = new Date(0).toISOString();
-/** How long the message a link opened the thread at stays highlighted. */
-const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
-
-/**
- * The thread's settlement model, evaluated at the current time but never
- * before `notBeforeMs` (the last scheduled evaluation). The clock is read here
- * rather than in the component: React Compiler would cache a render-time
- * `Date.now()` once per screen instance, so every input change would evaluate
- * settle, snooze and auto-settle against the time the screen opened.
- */
-/** An action's failure, as its alert says it (kept out of the component for React Compiler). */
-/** Runs one plan implementation; a tap while one is on its way does nothing. */
-async function guardPlanImplementation(
-  inFlight: { current: boolean },
-  run: () => Promise<void>,
-): Promise<void> {
-  if (inFlight.current) return;
-  inFlight.current = true;
-  try {
-    await run();
-  } finally {
-    inFlight.current = false;
-  }
-}
-
-/** Resolves once the node's new thread reached this device (a few seconds at most). */
-async function waitForThreadInStore(environmentId: EnvironmentId, threadId: ThreadId) {
-  await waitForStoreCondition({
-    ready: (state) => selectThreadExistsByRef(state, scopeThreadRef(environmentId, threadId)),
-    timeoutMs: 12_000,
-  });
-}
-
-/** Sends what a `/goal` message asked for (a plan that changes something). */
-async function sendGoalPlan(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-  plan: Extract<ThreadGoalCommandPlan, { kind: "set" | "clear" }>,
-): Promise<void> {
-  const api = ensureEnvironmentApi(environmentId);
-  if (plan.kind === "clear") await clearThreadGoal(api, threadId);
-  else await setThreadGoal(api, threadId, plan.update, { startTurn: plan.startTurn });
-}
-
-function actionFailureMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "The request failed.";
-}
-
-function buildThreadSettlementModel(
-  input: Omit<BuildThreadInboxInput, "nowMs">,
-  notBeforeMs: number,
-) {
-  return buildThreadInbox({ ...input, nowMs: Math.max(notBeforeMs, Date.now()) });
-}
-
-function TimelineRow(props: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-  readonly entry: TimelineEntry;
-  readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender> | undefined;
-  /** Present only on a reply that can be forked right now. */
-  readonly onForkFromMessage?: ((message: ChatMessage) => void) | undefined;
-  /** Present only on a sent message the thread can be rewound to before right now. */
-  readonly onEditFromMessage?: ((message: ChatMessage) => void) | undefined;
-  /** Present only on a reply whose turn's file changes can be undone right now. */
-  readonly onUndoFileChangesOfReply?: ((reply: ChatMessage) => void) | undefined;
-  /** The blank reply a page row stands in for; its fork starts from that reply. */
-  readonly forkReply?: ChatMessage | undefined;
-  readonly onOpenThread: (threadId: ThreadId, messageId: MessageId | null) => void;
-  /** The message a link opened this thread at. */
-  readonly highlighted?: boolean | undefined;
-  /** This row's plan can be implemented now. */
-  readonly planActionable?: boolean | undefined;
-  readonly planActions?: ProposedPlanCardActions | undefined;
-}) {
-  const { entry, onForkFromMessage, onEditFromMessage, onUndoFileChangesOfReply, forkReply } =
-    props;
-  const pending = useIsOptimisticUserMessage(
-    scopedThreadKey(scopeThreadRef(props.environmentId, props.threadId)),
-    entry.kind === "message" && entry.message.role === "user" ? entry.message.id : "",
-  );
-  if (entry.kind === "message") {
-    const message = (
-      <ThreadMessage
-        environmentId={props.environmentId}
-        threadId={props.threadId}
-        message={entry.message}
-        pending={pending}
-        turnHtmlRenders={props.turnHtmlRenders}
-        onForkFromHere={
-          onForkFromMessage ? () => onForkFromMessage(forkReply ?? entry.message) : undefined
-        }
-        onEditFromHere={onEditFromMessage ? () => onEditFromMessage(entry.message) : undefined}
-        onUndoFileChanges={
-          onUndoFileChangesOfReply
-            ? () => onUndoFileChangesOfReply(forkReply ?? entry.message)
-            : undefined
-        }
-      />
-    );
-    return props.highlighted ? <View className="bg-primary/10">{message}</View> : message;
-  }
-  if (entry.kind === "proposed-plan") {
-    return (
-      <ProposedPlanCard
-        plan={entry.proposedPlan}
-        actionable={props.planActionable === true}
-        actions={props.planActions}
-      />
-    );
-  }
-  if (entry.kind === "context-compaction") {
-    return (
-      <View className="my-3 flex-row items-center gap-2 px-6">
-        <View className="h-px flex-1 bg-border" />
-        <Text className="text-2xs uppercase tracking-wide text-foreground-muted">
-          Context compacted
-        </Text>
-        <View className="h-px flex-1 bg-border" />
-      </View>
-    );
-  }
-  if (entry.kind === "context-handoff") {
-    return <ContextHandoffMarkerRow marker={entry.marker} />;
-  }
-  if (entry.kind === "user-input-exchange") {
-    return <UserInputExchangeRow exchange={entry.exchange} />;
-  }
-  if (entry.kind === "fork-origin") {
-    return (
-      <ForkOriginRow
-        environmentId={props.environmentId}
-        marker={entry.marker}
-        onOpenSource={props.onOpenThread}
-      />
-    );
-  }
-  // Work entries never reach here — buildThreadTimelineRows folds them before
-  // the list sees them. This is the remaining unknown-kind fallback.
-  return null;
-}
-
-/**
- * The cached / degraded strip. Sits with ErrorBanner between the context bar
- * and the timeline, and carries the context bar's `mx-4` so the three read as
- * one column. Copy and tone are decided in threadCachedViewModel.ts. The quiet
- * restart interruption line uses it too.
- */
-function ThreadCachedBanner(props: {
-  readonly text: string;
-  readonly tone: "info" | "warning";
-  readonly testID?: string;
-}) {
-  const warning = props.tone === "warning";
-  return (
-    <View
-      accessibilityRole="alert"
-      testID={props.testID ?? "thread-cached-banner"}
-      className={`mx-4 rounded-2xl px-3.5 py-3 ${warning ? "bg-warning-bg" : "bg-card"}`}
-    >
-      <Text
-        className={`font-ryco-medium text-sm ${warning ? "text-warning" : "text-foreground-muted"}`}
-      >
-        {props.text}
-      </Text>
-    </View>
-  );
-}
-
-/**
- * An action sent to this machine may not have arrived before its connection
- * dropped. Sits with the cached strip so it is seen where a retry would start;
- * copy and readiness come from threadDeliveryNoticeModel.ts.
- */
-function ThreadDeliveryBanner(props: {
-  readonly notice: HostedDeliveryNotice;
-  readonly onContinue: () => void;
-}) {
-  const { notice } = props;
-  return (
-    <View
-      accessibilityRole="alert"
-      testID="thread-delivery-banner"
-      className="mx-4 rounded-2xl bg-warning-bg px-3.5 py-3"
-    >
-      <Text className="font-ryco-bold text-sm text-warning">{notice.title}</Text>
-      <Text className="mt-1 font-ryco-medium text-sm text-warning">{notice.description}</Text>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ disabled: !notice.canAcknowledge }}
-        disabled={!notice.canAcknowledge}
-        onPress={props.onContinue}
-        className={`mt-2 self-start rounded-full px-3 py-1.5 ${
-          notice.canAcknowledge ? "bg-subtle-strong active:opacity-70" : "bg-subtle opacity-60"
-        }`}
-      >
-        <Text className="font-ryco-bold text-sm text-foreground">{notice.actionLabel}</Text>
-      </Pressable>
-    </View>
-  );
-}
 
 export function ThreadDetailScreen(props: {
   readonly environmentId: EnvironmentId;
@@ -849,15 +635,10 @@ export function ThreadDetailScreen(props: {
       deriveFollowUpQueueView({
         server: serverFollowUpQueue,
         pending: pendingFollowUps,
-        local: queuedMessages.map((message) => ({
-          id: message.messageId,
-          summary: hasRetiredProjectMemory(message)
-            ? REMOVED_PROJECT_MEMORY_MESSAGE
-            : summarizeQueuedThreadMessage(message),
-          deliveryStatus: isQueuedThreadMessageHeld(message) ? ("failed" as const) : undefined,
-          steering: steeringMessageIds.has(message.messageId),
-          moving: message.messageId === movingOutboxMessageId,
-        })),
+        local: localFollowUpQueueRows(queuedMessages, {
+          steeringMessageIds,
+          movingMessageId: movingOutboxMessageId,
+        }),
         localHold: queueHold,
       }),
     [
@@ -873,29 +654,20 @@ export function ThreadDetailScreen(props: {
   const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<FollowUpQueueEdit | null>(
     null,
   );
-  const shownServerQueueEdit =
-    serverQueueEdit !== null && serverQueueEdit.threadKey === outboxThreadKey
-      ? serverQueueEdit
-      : null;
   // An edit whose entry left the queue (sent, or removed elsewhere), or changed meanwhile (an
   // edit elsewhere, a Retry, a steer that came back), is over: the composer keeps the text,
   // which a send then sends as a new message.
-  const serverQueueEditState =
-    shownServerQueueEdit === null
-      ? null
-      : resolveFollowUpQueueEditState({
-          queue: serverFollowUpQueue,
-          detailLoaded: threadDetailLoaded,
-          messageId: shownServerQueueEdit.messageId,
-          revision: shownServerQueueEdit.revision,
-          saving: savingServerQueueEdit === shownServerQueueEdit,
-        });
-  const endedServerQueueEditState =
-    serverQueueEditState === "gone" || serverQueueEditState === "changed"
-      ? serverQueueEditState
-      : null;
-  const endedServerQueueEdit = endedServerQueueEditState === null ? null : shownServerQueueEdit;
-  const activeServerQueueEdit = serverQueueEditState === "editing" ? shownServerQueueEdit : null;
+  const {
+    ended: endedServerQueueEdit,
+    endedState: endedServerQueueEditState,
+    active: activeServerQueueEdit,
+  } = serverQueueEditView({
+    edit: serverQueueEdit,
+    threadKey: outboxThreadKey,
+    queue: serverFollowUpQueue,
+    detailLoaded: threadDetailLoaded,
+    saving: savingServerQueueEdit,
+  });
   useEffect(() => {
     if (endedServerQueueEdit === null || endedServerQueueEditState === null) return;
     setServerQueueEdit((current) => (current === endedServerQueueEdit ? null : current));
@@ -1048,17 +820,7 @@ export function ThreadDetailScreen(props: {
         projects: project ? [project] : [],
         worktrees,
         threads: [sidebarThread],
-        environments: [
-          {
-            environmentId,
-            label: environmentRow.label,
-            threadSettlementSupported: environmentRow.threadSettlementSupported ?? "unknown",
-            autoSettleAfterDays: environmentRow.autoSettleAfterDays,
-            connected: environmentRow.connectionState === "connected",
-            mutationReady: environmentRow.mutationReady ?? false,
-            shellCurrent: environmentRow.shellCurrent ?? false,
-          },
-        ],
+        environments: [threadSettlementEnvironment(environmentId, environmentRow)],
         localQueuedThreadKeys: getQueuedThreadKeys(queuesByThreadKey),
         autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
       },
@@ -1098,12 +860,7 @@ export function ThreadDetailScreen(props: {
     );
     if (wokeAt !== null) markSnoozeWokeSeen(outboxThreadKey, wokeAt);
   }, [outboxThreadKey, settlementNowMs, summarySnoozedAt, summarySnoozedUntil]);
-  const settlementEntry =
-    settlementModel?.active[0] ??
-    settlementModel?.settled[0] ??
-    settlementModel?.snoozed[0] ??
-    settlementModel?.hidden[0] ??
-    null;
+  const settlementEntry = firstThreadSettlementEntry(settlementModel);
   // The inbox's own rule for whether this chat can be snoozed (the usage-limit banner's Snooze).
   const usageLimitSnoozeEligible = settlementEntry?.canSnooze === true;
   const cachedView = useMemo(
@@ -1151,21 +908,7 @@ export function ThreadDetailScreen(props: {
               available: pullRequestWatchAvailable,
               watches: pullRequestWatches,
             },
-            ...(settlementEntry
-              ? {
-                  settlement: {
-                    attentionState:
-                      settlementEntry.lifecycle.classification === "settled" ? "settled" : "active",
-                    // A working task files: the node settles it when the work ends.
-                    canSettle:
-                      settlementEntry.lifecycle.eligibility.canSettle ||
-                      settlementEntry.lifecycle.settleFiles === true,
-                    settlementBlocker: settlementEntry.lifecycle.settlementBlocker,
-                    mutationEnabled: settlementEntry.mutationEnabled,
-                    mutationBlocker: settlementEntry.mutationBlocker,
-                  },
-                }
-              : {}),
+            ...(settlementEntry ? { settlement: threadHeaderSettlement(settlementEntry) } : {}),
           })
         : null,
     [
@@ -1226,9 +969,7 @@ export function ThreadDetailScreen(props: {
     });
   };
 
-  const threadStarted = Boolean(
-    thread && (thread.latestTurn !== null || thread.messages.length > 0 || thread.session !== null),
-  );
+  const threadStarted = Boolean(thread && threadHasStarted(thread));
   const canonicalProviderDriver = useMemo(() => {
     if (thread?.session?.provider) return thread.session.provider;
     if (!canonicalModelSelection) return null;
@@ -1237,14 +978,7 @@ export function ThreadDetailScreen(props: {
         ?.driver ?? null
     );
   }, [canonicalModelSelection, providers, thread?.session?.provider]);
-  const sessionPhase =
-    thread?.session?.status === "running"
-      ? "running"
-      : thread?.session?.status === "connecting"
-        ? "connecting"
-        : thread?.session?.status === "ready"
-          ? "ready"
-          : "disconnected";
+  const sessionPhase = threadSessionPhase(thread?.session?.status);
   const providerSelectionPolicy = deriveProviderSelectionPolicy({
     threadStarted,
     canonicalProvider: canonicalProviderDriver,
@@ -1320,22 +1054,11 @@ export function ThreadDetailScreen(props: {
   const policyModel = useMemo(
     () =>
       thread
-        ? buildSessionPolicyModel({
-            runtimeMode: thread.runtimeMode,
-            interactionMode: thread.interactionMode,
-            interactionModeSupported: threadProviderDriver
-              ? getProviderInteractionModeToggle(providers, threadProviderDriver)
-              : true,
-            askModeSupported: threadProviderDriver
-              ? getProviderSupportsAskMode(providers, threadProviderDriver)
-              : false,
-            autoModeUnavailableReason: selectedModelSelection
-              ? getAutoRuntimeModeUnavailableReason(
-                  getProviderInstanceModels(providers, selectedModelSelection.instanceId),
-                  selectedModelSelection.model,
-                )
-              : null,
-            mutationBlockedReason: thread.archivedAt !== null ? "This task is archived." : null,
+        ? threadSessionPolicyModel({
+            thread,
+            providers,
+            selectedModelSelection,
+            threadProviderDriver,
           })
         : null,
     [providers, selectedModelSelection, thread, threadProviderDriver],
@@ -1364,14 +1087,11 @@ export function ThreadDetailScreen(props: {
   const threadActivities = thread?.activities;
   // The context window, for the context sheet: the provider's latest report, against the model's
   // limit (the model option, else what the provider says the model holds).
-  const contextWindowModelLimit =
-    serverConfig?.providers
-      .find((provider) => provider.instanceId === selectedModelSelection?.instanceId)
-      ?.models.find((model) => model.slug === selectedModelSelection?.model)?.maxContextTokens ??
-    null;
-  const contextWindowOption = selectedModelSelection?.options?.find(
-    (option) => option.id === "contextWindow",
-  )?.value;
+  const contextWindowModelLimit = contextWindowModelLimitOf(
+    serverConfig?.providers,
+    selectedModelSelection,
+  );
+  const contextWindowOption = contextWindowOptionOf(selectedModelSelection);
   const contextWindow = useMemo(
     () =>
       summarizeContextWindow(
@@ -1491,17 +1211,13 @@ export function ThreadDetailScreen(props: {
       const sourceBranch = source?.branch ?? null;
       setForkSheet({
         visible: true,
-        request: {
+        request: threadForkSheetRequest({
           environmentId,
-          sourceThreadId: threadId,
-          sourceTitle: source?.title ?? "",
-          messageId: message.id,
+          threadId,
+          source,
+          message,
           turnId: message.turnId,
-          // A page-only turn, or a blank reply under a page, quotes what the turn published.
-          excerpt: threadForkReplyExcerpt(
-            threadForkBoundaryQuote(source?.messages ?? [], message.id),
-          ),
-        },
+        }),
         controller: createThreadForkAttemptController({
           boundary: { environmentId, sourceThreadId: threadId, sourceMessageId: message.id },
           initialSelection: initialForkSheetSelection({
@@ -1554,19 +1270,10 @@ export function ThreadDetailScreen(props: {
   );
   // "Edit from here": each sent message's revert target (shared with web), offered while the
   // thread is idle and the node takes mutations.
-  const revertTurnCountByUserMessageId = useMemo(() => {
-    if (!threadMessages || !threadTurnDiffSummaries) return NO_REVERT_TARGETS;
-    return deriveRevertTurnCountByUserMessageId({
-      messages: threadMessages,
-      turnDiffSummaryByAssistantMessageId: new Map(
-        threadTurnDiffSummaries.flatMap((summary) =>
-          summary.assistantMessageId ? [[summary.assistantMessageId, summary] as const] : [],
-        ),
-      ),
-      inferredCheckpointTurnCountByTurnId:
-        inferCheckpointTurnCountByTurnId(threadTurnDiffSummaries),
-    });
-  }, [threadMessages, threadTurnDiffSummaries]);
+  const revertTurnCountByUserMessageId = useMemo(
+    () => revertTurnCountByUserMessageIdOf(threadMessages, threadTurnDiffSummaries),
+    [threadMessages, threadTurnDiffSummaries],
+  );
   const revertOffered =
     revertPhase === null &&
     !sendBusy &&
@@ -1584,22 +1291,13 @@ export function ThreadDetailScreen(props: {
   // "Undo file changes": the checkpoint before each reply's turn, offered like "Edit from here"
   // on a node that restores files without rewinding the chat.
   const filesRevertOffered = revertOffered && selectFilesRevertSupported(environmentServerConfig);
-  const undoTurnCountByReplyId = useMemo(() => {
-    if (!filesRevertOffered || !threadTurnDiffSummaries) return NO_REVERT_TARGETS;
-    const byTurnId = deriveUndoTurnCountByTurnId({
-      turnDiffSummaries: threadTurnDiffSummaries,
-      inferredCheckpointTurnCountByTurnId:
-        inferCheckpointTurnCountByTurnId(threadTurnDiffSummaries),
-    });
-    return new Map(
-      threadTurnDiffSummaries.flatMap((summary) => {
-        const turnCount = byTurnId.get(summary.turnId);
-        return summary.assistantMessageId && turnCount !== undefined
-          ? [[summary.assistantMessageId, turnCount] as const]
-          : [];
-      }),
-    );
-  }, [filesRevertOffered, threadTurnDiffSummaries]);
+  const undoTurnCountByReplyId = useMemo(
+    () =>
+      !filesRevertOffered || !threadTurnDiffSummaries
+        ? NO_REVERT_TARGETS
+        : undoTurnCountByReplyIdOf(threadTurnDiffSummaries),
+    [filesRevertOffered, threadTurnDiffSummaries],
+  );
   const undoableMessageIds = useMemo(
     () =>
       undoTurnCountByReplyId.size > 0
@@ -1639,30 +1337,16 @@ export function ThreadDetailScreen(props: {
         QueuedThreadMessage,
         "modelSelection" | "runtimeMode" | "interactionMode" | "tokenMode"
       >,
-    ) => {
-      if (hasRetiredProjectMemory(message))
-        return { allowed: false as const, reason: REMOVED_PROJECT_MEMORY_MESSAGE };
-      const activeSelection = thread?.modelSelection;
-      const providerInstanceId = thread?.session?.providerInstanceId ?? activeSelection?.instanceId;
-      const provider = providers.find((entry) => entry.instanceId === providerInstanceId);
-      return resolveQueuedMessageSteerEligibility({
+    ) =>
+      threadQueuedMessageSteerEligibility({
+        message,
+        thread,
+        providers,
         // A cache-provenance thread reads `turnRunning` from a snapshot; a
         // steer dispatched against it targets a turn state the node may have
         // left long ago. Not mutation-ready until the live snapshot lands.
         mutationReady: connectionUiState === "connected" && hydratedFromCacheAt === null,
-        turnRunning: thread?.latestTurn?.state === "running",
-        activeTurnId: thread?.session?.activeTurnId,
-        supportsTurnSteering: providerSteering(provider) !== null,
-        queuedModelSelection: message.modelSelection,
-        activeModelSelection: activeSelection,
-        queuedRuntimeMode: message.runtimeMode,
-        activeRuntimeMode: thread?.runtimeMode,
-        queuedInteractionMode: message.interactionMode,
-        activeInteractionMode: thread?.interactionMode,
-        queuedTokenMode: message.tokenMode,
-        activeTokenMode: thread?.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-      });
-    },
+      }),
     [connectionUiState, hydratedFromCacheAt, providers, thread],
   );
 
@@ -1924,10 +1608,7 @@ export function ThreadDetailScreen(props: {
   const pickAttachments = useCallback(
     async (source: ComposerAttachmentSource) => {
       setAttachmentError(null);
-      const existingTotalBytes = attachments.reduce((total, attachment) => {
-        if (attachment.type === "file" && attachment.uploadState === "needsReattach") return total;
-        return total + attachment.sizeBytes;
-      }, 0);
+      const existingTotalBytes = composerAttachmentsTotalBytes(attachments);
       const result = await pickComposerAttachmentsFrom(source, {
         existingCount: attachments.length,
         existingTotalBytes,
@@ -2119,23 +1800,7 @@ export function ThreadDetailScreen(props: {
   // Sync uploaded tokens onto the rows so an enqueued outbox message persists
   // token metadata (never bytes) and the immediate dispatch path can read it.
   useEffect(() => {
-    setAttachments((current) => {
-      let changed = false;
-      const next = current.map((attachment) => {
-        if (!isDraftComposerFileAttachment(attachment)) return attachment;
-        const status = fileUploadRecords.get(attachment.id)?.status;
-        if (status?.kind !== "uploaded") return attachment;
-        if (
-          attachment.uploadToken === status.uploadToken &&
-          attachment.expiresAt === status.expiresAt
-        ) {
-          return attachment;
-        }
-        changed = true;
-        return { ...attachment, uploadToken: status.uploadToken, expiresAt: status.expiresAt };
-      });
-      return changed ? next : current;
-    });
+    setAttachments((current) => withUploadedFileTokens(current, fileUploadRecords));
   }, [fileUploadRecords]);
 
   // Engine records are process-transient: drop the ones whose attachment left
@@ -2164,14 +1829,11 @@ export function ThreadDetailScreen(props: {
     const message = queuedMessages.find((entry) => entry.messageId === messageId);
     if (!message) return;
     // An add on its way to the node would come back as a second copy of the edited message.
-    const unavailableReason =
-      getThreadOutboxMovingMessageId(outboxThreadKey) === messageId
-        ? FOLLOW_UP_ON_ITS_WAY_REASON
-        : resolveQueuedMessageEditUnavailableReason({
-            deliveryStatus: undefined,
-            steering: steerAttemptsRef.current.has(messageId),
-            composerHasContent: attachments.length > 0 || composerRef.current?.hasText() === true,
-          });
+    const unavailableReason = queuedMessageEditUnavailableReason({
+      moving: getThreadOutboxMovingMessageId(outboxThreadKey) === messageId,
+      steering: steerAttemptsRef.current.has(messageId),
+      composerHasContent: attachments.length > 0 || composerRef.current?.hasText() === true,
+    });
     if (unavailableReason !== null) {
       setSendError(unavailableReason);
       return;
@@ -2223,19 +1885,11 @@ export function ThreadDetailScreen(props: {
     else if (row.source === "local") editQueuedMessage(row.id);
   };
 
-  const getQueuedRowEditUnavailableReason = (row: FollowUpQueueRow): string | null => {
-    if (row.source === "server" && activeServerQueueEdit !== null) {
-      return SERVER_QUEUE_EDIT_IN_PROGRESS;
-    }
-    const onItsWay = followUpQueueRowOnItsWayReason(row);
-    if (onItsWay !== null) return onItsWay;
-    return resolveQueuedMessageEditUnavailableReason({
-      deliveryStatus: undefined,
-      steering: row.status === "steering",
-      // The typed text is only known at press time (`editQueuedMessage`).
-      composerHasContent: attachments.length > 0,
+  const getQueuedRowEditUnavailableReason = (row: FollowUpQueueRow): string | null =>
+    queuedRowEditUnavailableReason(row, {
+      serverQueueEditActive: activeServerQueueEdit !== null,
+      composerAttachmentCount: attachments.length,
     });
-  };
 
   const removeQueuedRow = (row: FollowUpQueueRow) => {
     if (row.source === "server") {
@@ -2354,10 +2008,7 @@ export function ThreadDetailScreen(props: {
       return false;
     }
 
-    const currentThreadStarted =
-      currentThread.latestTurn !== null ||
-      currentThread.messages.length > 0 ||
-      currentThread.session !== null;
+    const currentThreadStarted = threadHasStarted(currentThread);
     if (
       canonicalSelection &&
       !selectionAllowedAtSendBoundary({
@@ -2857,23 +2508,14 @@ export function ThreadDetailScreen(props: {
   // so LegendList re-renders the rows they change (it never re-renders on a new renderItem).
   // The plan the settled latest turn proposed and nobody implemented: Implement is offered on it
   // while the chat can take a turn (the shared rule web's plan follow-up reads).
-  const latestTurnSettled = thread
-    ? isLatestTurnSettled(thread.latestTurn, thread.session ?? null)
-    : false;
-  const latestPlan =
-    thread && latestTurnSettled
-      ? findLatestProposedPlan(thread.proposedPlans, thread.latestTurn?.turnId ?? null)
-      : null;
-  const actionablePlanId =
-    latestPlan !== null &&
-    hasActionableProposedPlan(latestPlan) &&
+  const actionablePlanId = actionableThreadPlanId(
+    thread,
     pendingUserInputs.length === 0 &&
-    !cachedView.composerDisabled &&
-    !actionBusy &&
-    !sendBusy &&
-    connectionUiState === "connected"
-      ? latestPlan.id
-      : null;
+      !cachedView.composerDisabled &&
+      !actionBusy &&
+      !sendBusy &&
+      connectionUiState === "connected",
+  );
   // One object for every plan row: LegendList keeps mounted rows, so the row calls through it
   // into this render's handlers instead of holding an old closure.
   const planHandlersRef = useRef<ProposedPlanCardActions | null>(null);
@@ -2960,12 +2602,8 @@ export function ThreadDetailScreen(props: {
   // A failed last turn stays visible, with Continue, until a new turn starts or it is
   // dismissed for that turn; the error banner then leaves out what it already says.
   const failedNoticeDerived = thread && threadDetailLoaded ? failedTurnNotice(thread) : null;
-  const failedNotice =
-    failedNoticeDerived && failedNoticeDerived.turnId !== dismissedFailedTurnId
-      ? failedNoticeDerived
-      : null;
-  const errorBannerMessage =
-    failedNotice !== null && visibleError === failedNotice.detail ? null : visibleError;
+  const failedNotice = visibleFailedTurnNotice(failedNoticeDerived, dismissedFailedTurnId);
+  const errorBannerMessage = threadErrorBannerMessage(visibleError, failedNotice);
   const hasPrompts =
     alertApprovals.length > 0 ||
     alertUserInputs.length > 0 ||
@@ -3011,12 +2649,12 @@ export function ThreadDetailScreen(props: {
   const feedTopInset = headerHeight + 6 + (hasBanners ? bannerHeight + 4 : 0);
 
   // What the floating status capsule over the composer says; the feed keeps room for it.
-  const floatingAttention =
-    pendingApprovals.length > 0 || pendingAgentControlProposals.length > 0
-      ? ("approval" as const)
-      : pendingUserInputs.length > 0 || secretRequests.requests.length > 0
-        ? ("question" as const)
-        : null;
+  const floatingAttention = floatingThreadAttention({
+    approvals: pendingApprovals.length,
+    agentControlProposals: pendingAgentControlProposals.length,
+    userInputs: pendingUserInputs.length,
+    secretRequests: secretRequests.requests.length,
+  });
 
   // ── Header: the title pill, its context sheet, and one ⋯ menu ─────────────────────────────
   // Which chat a sheet was opened for: the screen is reused when a link retargets it, and
@@ -3050,13 +2688,7 @@ export function ThreadDetailScreen(props: {
     [threadAgents.model.sections],
   );
   // The first delegated chat that waits on the reader, for the floating status.
-  const childAttentionRow = delegatedRows.find(
-    (row) => row.tone === "attention" && row.childThreadId !== null,
-  );
-  const childAttention =
-    childAttentionRow?.childThreadId != null
-      ? { threadId: childAttentionRow.childThreadId, title: childAttentionRow.label }
-      : null;
+  const childAttention = delegatedChildAttention(delegatedRows);
   const floatingCapsuleShown = showsFloatingThreadCapsule({
     runningSince,
     attention: floatingAttention,
@@ -3095,12 +2727,7 @@ export function ThreadDetailScreen(props: {
         : undefined,
     [canonicalProviderDriver, threadActivities],
   );
-  const cacheSummary =
-    canonicalProviderDriver !== "claudeAgent"
-      ? null
-      : claudeCacheObservation
-        ? claudeCacheSummaryLabel(claudeCacheObservation)
-        : "Unknown";
+  const cacheSummary = claudeCacheSummary(canonicalProviderDriver, claudeCacheObservation);
   // Here, outside the sheet, so a change in flight outlives closing it.
   const pullRequestWatch = usePullRequestWatchControl({
     environmentId,
@@ -3132,17 +2759,14 @@ export function ThreadDetailScreen(props: {
       ? null
       : { environmentId, projectId, ...(worktree?.id ? { worktreeId: worktree.id } : {}) };
   const serverCapabilities = environmentServerConfig?.environment.capabilities;
-  const workspaceTools = {
-    findInFiles:
-      headerModel?.filesVisible === true && serverCapabilities?.projectContentSearch === true,
-    scripts: headerModel?.terminalVisible === true && project !== null,
-    servers:
-      serverCapabilities?.threadLocalServers === true ||
-      environmentServerConfig?.nodeBrowser?.available === true,
-    notes: checkoutParams !== null && serverCapabilities?.worktreeNotes === true,
-    devices:
-      threadDeviceState !== null && threadDeviceState.availability.kind !== "unsupported-platform",
-  };
+  const workspaceTools = threadWorkspaceTools({
+    headerModel,
+    capabilities: serverCapabilities,
+    nodeBrowserAvailable: environmentServerConfig?.nodeBrowser?.available === true,
+    hasProject: project !== null,
+    hasCheckout: checkoutParams !== null,
+    deviceAvailability: threadDeviceState === null ? null : threadDeviceState.availability,
+  });
   const openExplorer =
     checkoutParams === null
       ? undefined
@@ -3281,20 +2905,7 @@ export function ThreadDetailScreen(props: {
       const title = resolveThreadRename(current, value);
       if (title !== null) saveThreadTitle(title);
     };
-    if (Platform.OS === "ios") {
-      Alert.prompt(
-        "Rename chat",
-        undefined,
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Save", onPress: save },
-        ],
-        "plain-text",
-        current,
-      );
-    } else {
-      setRenameSheetFor(outboxThreadKey);
-    }
+    promptThreadRename(current, save, () => setRenameSheetFor(outboxThreadKey));
   };
   const openSideChat = selectedModelSelection
     ? () => sideChatStore.getState().open(sideChatKey, selectedModelSelection)
@@ -3339,14 +2950,7 @@ export function ThreadDetailScreen(props: {
   const runGoalAction = (send: (api: EnvironmentApi) => Promise<void>) =>
     void runAction(() => send(ensureEnvironmentApi(environmentId)), "Could not update the goal");
   const clearGoal = () =>
-    Alert.alert("Clear goal?", "The agent stops pursuing it.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Clear",
-        style: "destructive",
-        onPress: () => runGoalAction((api) => clearThreadGoal(api, threadId)),
-      },
-    ]);
+    confirmClearThreadGoal(() => runGoalAction((api) => clearThreadGoal(api, threadId)));
   const goalSheetActions = (goal: ThreadGoal): ThreadGoalActions => ({
     edit: () => {
       setContextSheetVisible(false);
@@ -3476,51 +3080,8 @@ export function ThreadDetailScreen(props: {
   });
   const planWorkspaceRoot = thread?.worktreePath ?? project?.cwd ?? null;
   const planIds = { newCommandId, newMessageId };
-  const savePlan = (plan: ProposedPlan) => {
-    const root = planWorkspaceRoot;
-    if (!root) {
-      Alert.alert("Can't save the plan", "This chat has no folder on its machine yet.");
-      return;
-    }
-    const { filename, contents } = planMarkdownExport(plan.planMarkdown);
-    const write = (typed: string | undefined) => {
-      const relativePath = resolvePlanSavePath(typed);
-      if (relativePath === null) {
-        Alert.alert("Can't save there", "Use a path inside the chat's folder.");
-        return;
-      }
-      void runAction(async () => {
-        await ensureEnvironmentApi(environmentId).projects.writeFile({
-          cwd: root,
-          relativePath,
-          contents,
-        });
-        Alert.alert("Plan saved", relativePath);
-      }, "Could not save the plan");
-    };
-    if (Platform.OS === "ios") {
-      Alert.prompt(
-        "Save plan",
-        "A path inside the chat's folder. A file already there is replaced.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Save", onPress: write },
-        ],
-        "plain-text",
-        filename,
-      );
-    } else {
-      // Android has no text prompt: it saves under the plan's own name, once confirmed.
-      Alert.alert(
-        "Save plan?",
-        `As ${filename} in the chat's folder. A file already there is replaced.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Save", onPress: () => write(filename) },
-        ],
-      );
-    }
-  };
+  const savePlan = (plan: ProposedPlan) =>
+    saveProposedPlan(plan, { environmentId, root: planWorkspaceRoot, runAction });
   const planHandlers: ProposedPlanCardActions = {
     implement: (plan) => {
       const settings = planTurnSettings();
@@ -3581,21 +3142,13 @@ export function ThreadDetailScreen(props: {
   // terminal history.
   const deleteCurrentThread = () => {
     const title = headerTitle ?? "this chat";
-    Alert.alert(
-      `Delete "${title}"?`,
-      "The chat, its attachments and its terminal history are removed for good.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () =>
-            void runAction(async () => {
-              await trashThread(ensureEnvironmentApi(environmentId), threadId);
-              goBackOrHome(navigation);
-            }, "Could not delete the chat"),
-        },
-      ],
+    confirmDeleteThread(
+      title,
+      () =>
+        void runAction(async () => {
+          await trashThread(ensureEnvironmentApi(environmentId), threadId);
+          goBackOrHome(navigation);
+        }, "Could not delete the chat"),
     );
   };
 
@@ -3606,49 +3159,22 @@ export function ThreadDetailScreen(props: {
 
   useLayoutEffect(() => {
     const runMenuAction = (id: ThreadHeaderMenuActionId) => onHeaderMenuActionRef.current(id);
-    const nativeMenuItem = (action: ThreadHeaderMenuAction) => ({
-      type: "action" as const,
-      label: action.title,
-      icon: { type: "sfSymbol" as const, name: action.icon as never },
-      ...(action.subtitle ? { description: action.subtitle } : {}),
-      disabled: action.disabled ?? false,
-      destructive: action.destructive ?? false,
-      onPress: () => runMenuAction(action.id),
-    });
-    const androidMenuAction = (action: ThreadHeaderMenuAction): MenuAction => ({
-      id: action.id,
-      title: action.title,
-      ...(action.subtitle ? { subtitle: action.subtitle } : {}),
-      attributes: {
-        disabled: action.disabled ?? false,
-        destructive: action.destructive ?? false,
-      },
-    });
     const toggleContextCard = (pillBottom: number | null) =>
       setContextCard((current) =>
         current?.key === outboxThreadKey ? null : { key: outboxThreadKey, pillBottom },
       );
-    const pill =
-      pillTitle === null ||
-      pillStatus === null ||
-      pillProject === null ||
-      pillWorktree === null ||
-      pillBadgeName === null
-        ? null
-        : {
-            title: pillTitle,
-            statusLabel: pillStatus,
-            projectLabel: pillProject,
-            worktreeLabel: pillWorktree,
-            branchLabel: pillBranch,
-            goal: pillGoal,
-            badge: {
-              environmentId,
-              projectId: pillBadgeProjectId,
-              customAvatarContentHash: pillBadgeAvatar,
-              name: pillBadgeName,
-            },
-          };
+    const pill = threadTitlePillView({
+      title: pillTitle,
+      statusLabel: pillStatus,
+      projectLabel: pillProject,
+      worktreeLabel: pillWorktree,
+      branchLabel: pillBranch,
+      goal: pillGoal,
+      environmentId,
+      badgeProjectId: pillBadgeProjectId,
+      badgeAvatar: pillBadgeAvatar,
+      badgeName: pillBadgeName,
+    });
     navigation.setOptions({
       title: pillTitle ?? "Task",
       headerTitle: pill
@@ -3664,62 +3190,15 @@ export function ThreadDetailScreen(props: {
         ? { headerRight: undefined }
         : Platform.OS === "ios"
           ? {
-              unstable_headerRightItems: (): NativeStackHeaderItem[] => [
-                {
-                  type: "menu",
-                  label: "",
-                  accessibilityLabel: "More chat actions",
-                  icon: { type: "sfSymbol", name: "ellipsis" },
-                  menu: {
-                    items: headerMenu.map((section) => ({
-                      type: "submenu" as const,
-                      label: section.collapsed?.title ?? "",
-                      ...(section.collapsed
-                        ? {
-                            icon: {
-                              type: "sfSymbol" as const,
-                              name: section.collapsed.icon as never,
-                            },
-                          }
-                        : { inline: true }),
-                      items: [
-                        ...section.actions.map((action) => nativeMenuItem(action)),
-                        ...(section.more && section.more.length > 0
-                          ? [
-                              {
-                                type: "submenu" as const,
-                                label: THREAD_HEADER_MORE_TITLE,
-                                icon: {
-                                  type: "sfSymbol" as const,
-                                  name: THREAD_HEADER_MORE_ICON as never,
-                                },
-                                items: section.more.map((action) => nativeMenuItem(action)),
-                              },
-                            ]
-                          : []),
-                      ],
-                    })),
-                  },
-                },
-              ],
+              unstable_headerRightItems: () => iosThreadHeaderRightItems(headerMenu, runMenuAction),
             }
           : {
               headerRight: () => (
-                <MenuView
-                  // One flat list: Android draws each inline group as an untitled submenu.
-                  actions={flattenThreadHeaderMenu(headerMenu).map(androidMenuAction)}
-                  onPressAction={({ nativeEvent }: NativeActionEvent) =>
-                    runMenuAction(nativeEvent.event as ThreadHeaderMenuActionId)
-                  }
-                >
-                  <View
-                    accessibilityRole="button"
-                    accessibilityLabel="More chat actions"
-                    className="h-11 w-11 items-center justify-center rounded-full"
-                  >
-                    <SymbolView name="ellipsis" size={21} tintColor={iconColor} type="monochrome" />
-                  </View>
-                </MenuView>
+                <ThreadHeaderMenuButton
+                  actions={androidThreadHeaderMenuActions(headerMenu)}
+                  onAction={runMenuAction}
+                  iconColor={iconColor}
+                />
               ),
             }),
     });
@@ -3792,40 +3271,17 @@ export function ThreadDetailScreen(props: {
                 // A spacer the list measures (unlike contentContainerStyle padding), so following
                 // the end and anchoring still add up.
                 ListHeaderComponent: (
-                  <>
-                    <View style={{ height: feedTopInset }} />
-                    {messageHistory?.hasMoreBefore || messageHistoryLoad?.status === "loading" ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        disabled={messageHistoryLoad?.status === "loading"}
-                        onPress={loadOlderMessages}
-                        className="items-center px-4 py-3"
-                      >
-                        <Text className="text-xs text-muted-foreground">
-                          {messageHistoryLoad?.status === "loading"
-                            ? "Loading earlier history…"
-                            : messageHistoryLoad?.status === "error"
-                              ? "Retry earlier history"
-                              : "Load earlier history"}
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                  </>
+                  <ThreadFeedListHeader
+                    topInset={feedTopInset}
+                    hasMoreBefore={messageHistory?.hasMoreBefore === true}
+                    loadStatus={messageHistoryLoad?.status}
+                    onLoadOlder={loadOlderMessages}
+                  />
                 ),
                 ListEmptyComponent: launchView ? (
                   <NewTaskLaunchCard
                     view={launchView}
-                    onRetry={() => {
-                      let deps: ReturnType<typeof createNewTaskLaunchDeps>;
-                      try {
-                        deps = createNewTaskLaunchDeps(environmentId);
-                      } catch {
-                        // The machine is away: wait in the outbox and start once it is back.
-                        requeueNewTaskLaunch(launchKey);
-                        return;
-                      }
-                      retryNewTaskLaunch(launchKey, deps);
-                    }}
+                    onRetry={() => retryThreadNewTaskLaunch(environmentId, launchKey)}
                     onEdit={() => {
                       // Held from the tap on: the outbox must not start it under the edit.
                       setNewTaskLaunchEditing(launchKey, true);
@@ -3839,108 +3295,41 @@ export function ThreadDetailScreen(props: {
                     }}
                   />
                 ) : savedBodyPending ? null : (
-                  <View className="px-4 py-16">
-                    <EmptyState
-                      variant="plain"
-                      title={built ? (thread?.title ?? "Task") : "Loading task"}
-                      detail={
-                        cachedView.emptyStateDetail ??
-                        (built
-                          ? "No messages yet. Send one to get started."
-                          : "Syncing the conversation from the node.")
-                      }
-                    />
-                  </View>
+                  <ThreadFeedEmptyState
+                    loaded={Boolean(built)}
+                    threadTitle={thread?.title}
+                    cachedDetail={cachedView.emptyStateDetail}
+                  />
                 ),
               }}
             />
             {/* The header's glass floats over the feed: a fade under it keeps the title and
                 the buttons readable while messages scroll beneath. */}
-            <View
-              pointerEvents="none"
-              className="absolute left-0 right-0 top-0"
-              style={{
-                height: headerHeight + 20,
-                experimental_backgroundImage: `linear-gradient(to bottom, ${screenColor} 0%, ${screenColor}f5 72%, ${screenColor}00 100%)`,
-              }}
-            />
+            <ThreadHeaderFade height={headerHeight + 20} screenColor={screenColor} />
             {hasBanners ? (
-              <View
-                pointerEvents="box-none"
-                className="absolute left-0 right-0 gap-1"
-                style={{ top: headerHeight + 4 }}
-                onLayout={(event) => setBannerHeight(event.nativeEvent.layout.height)}
-              >
-                {findOpen ? (
-                  <ThreadFindBar
-                    environmentId={environmentId}
-                    threadId={threadId}
-                    messages={thread?.messages ?? NO_FIND_MESSAGES}
-                    onGoTo={goToFoundMessage}
-                    onClose={() => {
-                      setFindOpenFor(null);
-                      setFindTargetEntry(null);
-                    }}
-                  />
-                ) : null}
-                {cachedView.banner ? (
-                  <ThreadCachedBanner text={cachedView.banner.text} tone={cachedView.banner.tone} />
-                ) : null}
-                {deliveryNotice ? (
-                  <ThreadDeliveryBanner
-                    notice={deliveryNotice}
-                    onContinue={() =>
-                      acknowledgeThreadDelivery(
-                        getMobileHostedConnectionCoordinator(),
-                        environmentId,
-                      )
-                    }
-                  />
-                ) : null}
-                {errorBannerMessage ? <ErrorBanner message={errorBannerMessage} /> : null}
-                {failedNotice ? (
-                  <View
-                    accessibilityRole="alert"
-                    testID="thread-failed-turn-banner"
-                    className="mx-4 gap-2 rounded-2xl bg-danger px-3.5 py-3"
-                  >
-                    <Text className="font-ryco-medium text-sm text-danger-foreground">
-                      {failedNotice.title}
-                    </Text>
-                    {failedNotice.detail ? (
-                      <Text className="text-xs text-foreground-muted" numberOfLines={4}>
-                        {failedNotice.detail}
-                      </Text>
-                    ) : null}
-                    <Text className="text-2xs text-foreground-tertiary">
-                      To try another model, pick it in the composer first.
-                    </Text>
-                    <View className="flex-row gap-2">
-                      <Pressable
-                        accessibilityRole="button"
-                        onPress={() => void onSend(CONTINUE_AFTER_FAILURE_PROMPT, [])}
-                        className="rounded-full bg-foreground px-3 py-1.5 active:opacity-70"
-                      >
-                        <Text className="font-ryco-medium text-xs text-background">Continue</Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityRole="button"
-                        onPress={() => setDismissedFailedTurnId(failedNotice.turnId)}
-                        className="rounded-full border border-border px-3 py-1.5 active:opacity-70"
-                      >
-                        <Text className="font-ryco-medium text-xs text-foreground">Dismiss</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                ) : null}
-                {restartNotice ? (
-                  <ThreadCachedBanner
-                    text={restartNotice}
-                    tone="info"
-                    testID="thread-restart-banner"
-                  />
-                ) : null}
-              </View>
+              <ThreadBannerStack
+                top={headerHeight + 4}
+                onHeightChange={setBannerHeight}
+                environmentId={environmentId}
+                threadId={threadId}
+                findOpen={findOpen}
+                findMessages={thread?.messages ?? NO_FIND_MESSAGES}
+                onFindGoTo={goToFoundMessage}
+                onFindClose={() => {
+                  setFindOpenFor(null);
+                  setFindTargetEntry(null);
+                }}
+                cachedBanner={cachedView.banner}
+                deliveryNotice={deliveryNotice}
+                onContinueDelivery={() =>
+                  acknowledgeThreadDelivery(getMobileHostedConnectionCoordinator(), environmentId)
+                }
+                errorMessage={errorBannerMessage}
+                failedNotice={failedNotice}
+                onContinueFailedTurn={() => void onSend(CONTINUE_AFTER_FAILURE_PROMPT, [])}
+                onDismissFailedTurn={setDismissedFailedTurnId}
+                restartNotice={restartNotice}
+              />
             ) : null}
             <ComposerShrinkFade progress={composerShrink.binding.progress} />
             <Animated.View
@@ -3972,68 +3361,22 @@ export function ThreadDetailScreen(props: {
       </HtmlRenderFullScreenProvider>
 
       {hasPrompts ? (
-        <ScrollView
-          className="grow-0"
-          style={{ maxHeight: "42%" }}
-          keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ paddingVertical: 4 }}
-        >
-          {pendingApprovals.map((approval) => (
-            <PendingApprovalCard
-              key={approval.requestId}
-              environmentId={environmentId}
-              threadId={threadId}
-              approval={approval}
-              disabled={promptsDisabled}
-            />
-          ))}
-          {alertApprovals.map((approval) => (
-            <PendingApprovalCard
-              key={`alert:${approval.requestId}`}
-              environmentId={environmentId}
-              threadId={threadId}
-              approval={approval}
-              fromAlert
-            />
-          ))}
-          {alertUserInputs.map((userInput) => (
-            <PendingUserInputCard
-              key={`alert:${userInput.requestId}`}
-              environmentId={environmentId}
-              threadId={threadId}
-              userInput={userInput}
-              fromAlert={{ partial: alertExcerpt.partial }}
-            />
-          ))}
-          {[...pendingUserInputs, ...optionalUserInputs].map((userInput) => (
-            <PendingUserInputCard
-              key={userInput.userInputIdentity?.requestEventId ?? userInput.requestId}
-              environmentId={environmentId}
-              threadId={threadId}
-              userInput={userInput}
-              route={resolveOptionalAnswerRoute({ userInput, session: thread?.session })}
-              onSendAsMessage={sendOptionalAnswer}
-              disabled={promptsDisabled}
-            />
-          ))}
-          {secretRequests.requests.map((request) => (
-            <SecretRequestCard
-              key={request.requestId}
-              environmentId={environmentId}
-              threadId={threadId}
-              request={request}
-              disabledReason={secretRequests.access.reason}
-            />
-          ))}
-          {pendingAgentControlProposals.map((proposal) => (
-            <AgentControlProposalCard
-              key={proposal.proposalId}
-              environmentId={environmentId}
-              proposal={proposal}
-              disabled={cachedView.promptsDisabled}
-            />
-          ))}
-        </ScrollView>
+        <ThreadPromptCards
+          environmentId={environmentId}
+          threadId={threadId}
+          pendingApprovals={pendingApprovals}
+          alertApprovals={alertApprovals}
+          alertUserInputs={alertUserInputs}
+          alertPartial={alertExcerpt.partial}
+          pendingUserInputs={pendingUserInputs}
+          optionalUserInputs={optionalUserInputs}
+          session={thread?.session}
+          onSendAsMessage={sendOptionalAnswer}
+          promptsDisabled={promptsDisabled}
+          secretRequests={secretRequests}
+          agentControlProposals={pendingAgentControlProposals}
+          agentControlDisabled={cachedView.promptsDisabled}
+        />
       ) : null}
 
       <ThreadQueuedMessages
@@ -4186,12 +3529,7 @@ export function ThreadDetailScreen(props: {
         {...(cacheSummary !== null ? { onOpenCacheInfo: () => setCacheSheetVisible(true) } : {})}
         onSelectModel={(selection) => {
           if (policyBusy || cachedView.actionsDisabled) return;
-          const entry = (modelPicker ? listModelPickerEntries(modelPicker) : []).find(
-            (candidate) =>
-              candidate.selection.instanceId === selection.instanceId &&
-              candidate.selection.model === selection.model,
-          );
-          if (entry && !entry.disabled) stageModelSelection(selection);
+          if (modelPickerSelectionAvailable(modelPicker, selection)) stageModelSelection(selection);
         }}
         onSelectRuntimeMode={(value) => {
           if (!policyModel || policyBusy || cachedView.actionsDisabled) return;
@@ -4361,57 +3699,5 @@ export function ThreadDetailScreen(props: {
         />
       ) : null}
     </KeyboardAvoidingView>
-  );
-}
-
-/**
- * A Stop ends this chat's turn and the automatic return of its delegated results, but its
- * delegated tasks keep working. Offer to stop those too, deepest first, each like a Stop of
- * its own chat (its outbox holds).
- */
-function offerToStopDelegatedTasks(environmentId: EnvironmentId, threadId: ThreadId): void {
-  const working = selectWorkingDelegatedDescendants(
-    useStore.getState(),
-    scopeThreadRef(environmentId, threadId),
-  );
-  if (working.length === 0) return;
-  const count = working.length;
-  Alert.alert(
-    "Stopped",
-    count === 1
-      ? "A task this chat delegated is still working."
-      : `${count} tasks this chat delegated are still working.`,
-    [
-      { text: "Keep it running", style: "cancel" },
-      {
-        text: count === 1 ? "Stop it too" : "Stop them too",
-        style: "destructive",
-        onPress: () => {
-          void (async () => {
-            let failed = 0;
-            for (const ref of working) {
-              const held = holdThreadOutboxForInterrupt(
-                scopedThreadKey(ref),
-                selectThreadByRef(useStore.getState(), ref)?.session?.activeTurnId ?? null,
-              );
-              try {
-                await interruptThreadTurn(ensureEnvironmentApi(ref.environmentId), ref.threadId);
-              } catch {
-                held.undo();
-                failed += 1;
-              }
-            }
-            if (failed > 0) {
-              Alert.alert(
-                failed === 1
-                  ? "A task could not be stopped"
-                  : `${failed} tasks could not be stopped`,
-                "Open the task to stop it there.",
-              );
-            }
-          })();
-        },
-      },
-    ],
   );
 }

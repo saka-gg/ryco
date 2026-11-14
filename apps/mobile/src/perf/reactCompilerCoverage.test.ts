@@ -763,7 +763,12 @@ describe("mobile React Compiler coverage", () => {
   });
 
   it.each([
-    ["src/features/threads/ThreadDetailScreen.tsx", ["ThreadDetailScreen", "TimelineRow"]],
+    ["src/features/threads/ThreadDetailScreen.tsx", ["ThreadDetailScreen"]],
+    ["src/features/threads/TimelineRow.tsx", ["TimelineRow"]],
+    [
+      "src/features/threads/ThreadNoticeBanners.tsx",
+      ["ThreadCachedBanner", "ThreadDeliveryBanner", "ThreadFailedTurnBanner", "ThreadBannerStack"],
+    ],
     ["src/features/threads/ThreadComposer.tsx", ["ThreadComposer"]],
     ["src/features/threads/useThreadChecks.ts", ["useThreadChecks"]],
     // The header pill and context sheet re-render with every watch change the shell brings.
@@ -777,6 +782,12 @@ describe("mobile React Compiler coverage", () => {
     ["src/features/threads/FloatingThreadControl.tsx", ["FloatingThreadControl"]],
     ["src/features/threads/usePullRequestWatchControl.ts", ["usePullRequestWatchControl"]],
     ["src/features/threads/ThreadActivityFoldRow.tsx", ["ThreadActivityFoldRow"]],
+    ["src/features/threads/ThreadPromptCards.tsx", ["ThreadPromptCards"]],
+    [
+      "src/features/threads/ThreadFeedParts.tsx",
+      ["ThreadFeedListHeader", "ThreadFeedEmptyState", "ThreadHeaderFade"],
+    ],
+    ["src/features/threads/ThreadHeaderMenuButton.tsx", ["ThreadHeaderMenuButton"]],
     ["src/features/threads/PendingApprovalCard.tsx", ["PendingApprovalCard"]],
     ["src/features/threads/PendingUserInputCard.tsx", ["PendingUserInputCard"]],
     ["src/features/threads/AgentControlProposalCard.tsx", ["AgentControlProposalCard"]],
