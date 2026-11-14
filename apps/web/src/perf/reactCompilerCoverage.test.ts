@@ -64,9 +64,10 @@ const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions:
     functions: ["useNewThreadState", "useNewThreadHandler"],
   },
   { file: "src/hooks/useProjectGroupingSettings.ts", functions: ["useProjectGroupingSettings"] },
+  { file: "src/components/chat/ChatComposer.tsx", functions: ["ChatComposer"] },
   {
-    file: "src/components/chat/ChatComposer.tsx",
-    functions: ["ChatComposer", "useSetPromptFromTraits"],
+    file: "src/components/chat/useSetPromptFromTraits.ts",
+    functions: ["useSetPromptFromTraits"],
   },
   // Mounted in every chat's toolbar and the new-thread hero; it re-renders on
   // each git status and ref list update.
