@@ -56,6 +56,7 @@ import {
   useProjectWorkspaceInspection,
   type WorkspaceInspection,
 } from "./useProjectWorkspaceInspection";
+import { errorMessage } from "~/lib/errorMessage";
 
 const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
@@ -112,7 +113,7 @@ function WorkspaceSuggestions(props: {
         stackedThreadToast({
           type: "error",
           title: `Failed to archive "${title}"`,
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     }

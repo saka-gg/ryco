@@ -43,6 +43,7 @@ import {
 import { SettingsSelect } from "./SettingsSelect";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { retryAgentControlStartup } from "./agentControlStartupRetry";
+import { errorMessage } from "~/lib/errorMessage";
 
 export const AGENT_CONTROL_CLIENT_LABELS: Record<AgentControlExternalClientKind, string> = {
   codex: "Codex",
@@ -169,7 +170,7 @@ function showFailure(title: string, error: unknown) {
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : "The request failed.",
+      description: errorMessage(error, "The request failed."),
     }),
   );
 }

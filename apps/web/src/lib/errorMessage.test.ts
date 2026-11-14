@@ -21,6 +21,18 @@ describe("errorMessage", () => {
     );
   });
 
+  it("never yields blank text for an Error with an empty or blank message", () => {
+    expect(errorMessage(new Error(""), "fallback")).toBe("fallback");
+    expect(errorMessage(new Error("   "), "fallback")).toBe("fallback");
+    expect(errorMessage(Object.assign(new Error(""), { detail: "  " }), "fallback")).toBe(
+      "fallback",
+    );
+  });
+
+  it("uses a thrown string, trimmed", () => {
+    expect(errorMessage("  Request timed out.  ", "fallback")).toBe("Request timed out.");
+  });
+
   it("falls back for empty or unknown errors", () => {
     expect(errorMessage("", "fallback")).toBe("fallback");
     expect(errorMessage({ detail: "" }, "fallback")).toBe("fallback");

@@ -44,6 +44,7 @@ import { ScriptIcon } from "./ScriptIcon";
 import type { SurfaceMorph } from "./ui/surfaceMorph";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
+import { errorMessage } from "~/lib/errorMessage";
 
 export const SCRIPT_ICONS = PROJECT_SCRIPT_ICONS;
 
@@ -246,7 +247,7 @@ export function ProjectScriptDialog(props: ProjectScriptDialogProps) {
       props.onOpenChange(false);
       setIconPickerOpen(false);
     } catch (error) {
-      setValidationError(error instanceof Error ? error.message : "Failed to save action.");
+      setValidationError(errorMessage(error, "Failed to save action."));
     }
   };
 

@@ -15,6 +15,7 @@ import {
 } from "@ryco/client-runtime/state/worktree-setup";
 
 import { useTerminalStateStore } from "../../../terminalStateStore";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** The launch of a first send in `threadId`, keyed like the thread itself. */
 export function worktreeLaunchKey(environmentId: EnvironmentId, threadId: ThreadId): string {
@@ -108,7 +109,7 @@ export function settleFailedWorktreeLaunch(input: {
   readonly retry: WorktreeLaunchRetry;
 }): "cancelled" | "failed" {
   const launch = readWorktreeLaunch(input.key);
-  const message = input.error instanceof Error ? input.error.message : "Worktree setup failed.";
+  const message = errorMessage(input.error, "Worktree setup failed.");
   if (launch?.phase === "cancelling" || message === WORKTREE_SETUP_CANCELLED_MESSAGE) {
     input.retry.restore();
     forgetWorktreeLaunch(input.key);

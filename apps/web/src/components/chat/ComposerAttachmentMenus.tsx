@@ -33,6 +33,7 @@ import { basenameOfPath } from "../../pathEntry";
 import { randomUUID } from "~/lib/utils";
 import { toastManager } from "../ui/toast";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** The `#` picker shows open issues and PRs from the shared superset list, sliced to this. */
 const COMPOSER_SOURCE_CONTROL_LIST_LIMIT = 50;
@@ -375,7 +376,7 @@ export function useComposerSourceControlContextSelection(
         });
       } catch (err) {
         removeSourceControlContext(composerDraftTarget, id);
-        const message = err instanceof Error ? err.message : "unknown error";
+        const message = errorMessage(err, "unknown error");
         toastManager.add({
           type: "error",
           title: `Couldn't fetch ${reference}: ${message}`,

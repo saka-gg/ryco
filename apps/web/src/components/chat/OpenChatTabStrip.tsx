@@ -28,6 +28,7 @@ import {
   useReadRouteThreadRef,
   useRecordOpenChatTab,
 } from "./useOpenChatTabs";
+import { errorMessage } from "~/lib/errorMessage";
 
 /*
  * The open chats as browser-style tabs in the chat header, in place of the chat's title. Owns what
@@ -196,7 +197,7 @@ export function OpenChatTabStrip(props: {
           } catch (error) {
             return {
               ok: false,
-              error: error instanceof Error ? error.message : "Unable to open a new chat.",
+              error: errorMessage(error, "Unable to open a new chat."),
             };
           }
         },

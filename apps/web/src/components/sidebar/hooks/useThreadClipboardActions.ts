@@ -2,6 +2,7 @@ import type { ThreadId } from "@ryco/contracts";
 
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * The shared thread clipboard actions (thread id and workspace path) with
@@ -24,7 +25,7 @@ export function useThreadClipboardActions() {
         stackedThreadToast({
           type: "error",
           title: "Failed to copy thread ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     },
@@ -44,7 +45,7 @@ export function useThreadClipboardActions() {
         stackedThreadToast({
           type: "error",
           title: "Failed to copy path",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     },

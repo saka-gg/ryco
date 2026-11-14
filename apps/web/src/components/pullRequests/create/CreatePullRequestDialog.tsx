@@ -39,7 +39,6 @@ import { toastManager } from "../../ui/toast";
 import {
   COMPOSER_BOX_CLASS,
   COMPOSER_TEXTAREA_CLASS,
-  errorText,
   SubmitKeyHint,
 } from "../conversation/MarkdownEditor";
 import { BranchPicker } from "./BranchPicker";
@@ -59,6 +58,7 @@ import type { CreatePullRequestTarget } from "./createPullRequestDialogStore";
 import { useRemoteBranchPresence } from "./useRemoteBranchPresence";
 import { TemplatePicker } from "./TemplatePicker";
 import { useTemplatedDescription } from "./useChangeRequestTemplates";
+import { errorMessage } from "~/lib/errorMessage";
 
 export interface CreatePullRequestDialogProps {
   readonly open: boolean;
@@ -238,7 +238,7 @@ function CreatePullRequestFields(props: {
       });
       onCreated(created);
     } catch (submitError) {
-      setError(errorText(submitError, `Could not open the ${presentation.longName}.`));
+      setError(errorMessage(submitError, `Could not open the ${presentation.longName}.`));
       setPending(false);
     }
   };

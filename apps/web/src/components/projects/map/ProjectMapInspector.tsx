@@ -104,6 +104,7 @@ import {
 import { ProjectMapSelectionPanel } from "./ProjectMapSelectionPanel";
 import { useNowMs } from "./ProjectMapNodes";
 import type { MapCheckoutDetail } from "./useProjectMapCheckouts";
+import { errorMessage } from "~/lib/errorMessage";
 
 /* ---------------------------------------------------------------- kinds */
 
@@ -523,7 +524,7 @@ function DevicePanel(props: {
                     stackedThreadToast({
                       type: "error",
                       title: "Unable to open the project",
-                      description: error instanceof Error ? error.message : "An error occurred.",
+                      description: errorMessage(error, "An error occurred."),
                     }),
                   ),
               );
@@ -1108,7 +1109,7 @@ function ThreadPanel(props: {
         stackedThreadToast({
           type: "error",
           title: `${label} failed`,
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       ),
     );

@@ -15,6 +15,7 @@ import { ProjectSection, useSavedFlash } from "./ProjectSection";
 import { GitWritingStyleSettings } from "../../settings/GitWritingStyleSettings";
 import { ProjectNodeSettingsScope, useEnvironmentProjectChoices } from "./ProjectNodeSettingsScope";
 import type { ProjectSectionProps } from "./projectSectionTypes";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** "Auto-detect" in the radio group; git remote names are never empty. */
 const AUTO_REMOTE = "";
@@ -76,7 +77,7 @@ export function ProjectRepositorySection({ member, canEdit, canManageNode }: Pro
           stackedThreadToast({
             type: "error",
             title: "Failed to change the primary remote",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         ),
     );
@@ -92,7 +93,7 @@ export function ProjectRepositorySection({ member, canEdit, canManageNode }: Pro
         stackedThreadToast({
           type: "error",
           title: "Could not initialize git",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     } finally {

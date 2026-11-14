@@ -74,6 +74,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { errorMessage } from "~/lib/errorMessage";
 
 type McpApi = NonNullable<EnvironmentApi["mcp"]>;
 const EMPTY_WORKSPACES: readonly McpWorkspace[] = [];
@@ -91,7 +92,7 @@ function showErrorToast(title: string, error: unknown) {
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : "An error occurred.",
+      description: errorMessage(error, "An error occurred."),
     }),
   );
 }
@@ -842,7 +843,7 @@ export function McpServersSettings() {
         if (isCurrent()) setSnapshot(result);
       } catch (cause) {
         if (!isCurrent()) return;
-        setError(cause instanceof Error ? cause.message : "Failed to load MCP servers.");
+        setError(errorMessage(cause, "Failed to load MCP servers."));
         showErrorToast("Failed to load MCP servers", cause);
       } finally {
         if (loadGeneration === loadGenerationRef.current) setRefreshing(false);
@@ -869,7 +870,7 @@ export function McpServersSettings() {
         setSnapshot(null);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Failed to load MCP workspaces.");
+      setError(errorMessage(cause, "Failed to load MCP workspaces."));
       showErrorToast("Failed to load MCP workspaces", cause);
     } finally {
       setLoading(false);

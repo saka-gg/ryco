@@ -1,5 +1,6 @@
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { readLocalApi } from "../localApi";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** Opens a URL through the platform shell; failures surface as a toast. */
 export function openExternalLink(url: string, failureTitle: string): void {
@@ -13,7 +14,7 @@ export function openExternalLink(url: string, failureTitle: string): void {
       stackedThreadToast({
         type: "error",
         title: failureTitle,
-        description: error instanceof Error ? error.message : "An error occurred.",
+        description: errorMessage(error, "An error occurred."),
       }),
     );
   });

@@ -11,6 +11,7 @@ import { useComposerDraftStore } from "../../composerDraftStore";
 import { readEnvironmentApi } from "../../environmentApi";
 import { newCommandId } from "../../lib/utils";
 import { toastManager } from "../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 // One sync for every pane, so two panes on one chat share a single pending write.
 const threadModelSelectionSync = createThreadModelSelectionSync();
@@ -32,7 +33,7 @@ const reportPickFailure = (error: unknown) =>
   toastManager.add({
     type: "error",
     title: "Could not change the model",
-    description: error instanceof Error ? error.message : "An unexpected error occurred.",
+    description: errorMessage(error, "An unexpected error occurred."),
   });
 
 /** The user picked a model, effort or speed in a started chat's composer. */

@@ -12,6 +12,7 @@ import {
   lineCommentTargetLabel,
   type LineCommentTarget,
 } from "./pullRequestFiles.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * A new comment on a line (or a dragged range), opened from the gutter `+` or
@@ -62,7 +63,7 @@ export function LineComposer(props: {
     try {
       await props.onCommentNow(body.trim());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not send the comment.");
+      setError(errorMessage(cause, "Could not send the comment."));
       setSending(false);
     }
   };

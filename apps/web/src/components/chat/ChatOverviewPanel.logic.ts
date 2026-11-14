@@ -13,12 +13,13 @@ import {
   parseWorkspacePullRequestReveal,
   type WorkspacePullRequestReveal,
 } from "~/workspaceRouteSearch";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type GitStatusData = NonNullable<ReturnType<typeof useGitStatus>["data"]>;
 
 export function compactQueryErrorMessage(error: unknown): string | undefined {
   if (!error) return undefined;
-  const message = error instanceof Error ? error.message : "Failed to load.";
+  const message = errorMessage(error, "Failed to load.");
   const providerMatch = /^Source control provider [^ ]+ failed in [^:]+:\s*(.*)$/u.exec(message);
   return providerMatch?.[1] ?? message;
 }

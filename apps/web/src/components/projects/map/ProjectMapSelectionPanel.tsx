@@ -60,6 +60,7 @@ import {
   Title,
 } from "./ProjectMapInspectorParts";
 import type { MapCheckoutDetail } from "./useProjectMapCheckouts";
+import { errorMessage } from "~/lib/errorMessage";
 
 type WorkspaceBatchTarget = WorkspaceLifecycleTarget & { readonly action: WorkspaceDirectAction };
 
@@ -142,9 +143,6 @@ const applyRefusal = (detail: MapCheckoutDetail) =>
   detail.capabilities.applyWorkspace.allowed
     ? null
     : hostedCapabilityCopy(detail.capabilities.applyWorkspace, detail.checkout.deviceLabel);
-
-const errorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : "An error occurred.";
 
 function reportFailures(title: string, failures: readonly string[]) {
   if (failures.length === 0) return;
@@ -285,7 +283,7 @@ export function ProjectMapSelectionPanel(props: {
           else if (id === "archive") await threadActions.archiveThread(entry.target);
           else await threadActions.unarchiveThread(entry.target);
         } catch (error) {
-          failures.push(`${entry.thread.title}: ${errorMessage(error)}`);
+          failures.push(`${entry.thread.title}: ${errorMessage(error, "An error occurred.")}`);
         }
       }
       reportFailures(

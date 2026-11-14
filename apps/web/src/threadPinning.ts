@@ -12,6 +12,7 @@ import { stackedThreadToast } from "./components/ui/toastHelpers";
 import { toastManager } from "./components/ui/toastManager";
 import { readLocalApi } from "./localApi";
 import { useUiStateStore } from "./uiStateStore";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type { ThreadPinChangeResult };
 
@@ -58,7 +59,7 @@ const defaultDependencies: ThreadPinChangeDependencies = {
       stackedThreadToast({
         type: "error",
         title: "Could not update pin",
-        description: error instanceof Error ? error.message : "The request failed.",
+        description: errorMessage(error, "The request failed."),
       }),
     ),
 };

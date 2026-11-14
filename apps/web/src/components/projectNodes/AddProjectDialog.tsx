@@ -132,6 +132,7 @@ import {
   useProjectNodesDialogStore,
   type AddProjectDialogRequest,
 } from "./projectNodesDialogStore";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** The app's one add-project dialog. */
 export function AddProjectDialog() {
@@ -215,12 +216,6 @@ const ROVING_KEYS: ReadonlySet<string> = new Set([
   "Home",
   "End",
 ]);
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error && error.message.trim().length > 0
-    ? error.message
-    : "An error occurred.";
-}
 
 function toastError(title: string, description: string): void {
   toastManager.add(stackedThreadToast({ type: "error", title, description }));
@@ -550,7 +545,7 @@ function AddProjectFlow(props: {
     switch (outcome.kind) {
       case "create-failed":
         setPhase({ kind: "form" });
-        toastError("Failed to add project", errorMessage(outcome.error));
+        toastError("Failed to add project", errorMessage(outcome.error, "An error occurred."));
         return;
       case "opened-existing":
         closeAddProject();
@@ -600,10 +595,10 @@ function AddProjectFlow(props: {
     }
     if (snapshot === null) {
       if (closedRef.current) {
-        toastError("Couldn't start on the node", errorMessage(failure));
+        toastError("Couldn't start on the node", errorMessage(failure, "An error occurred."));
         return;
       }
-      update({ error: errorMessage(failure) });
+      update({ error: errorMessage(failure, "An error occurred.") });
       return;
     }
     if (closedRef.current) {
@@ -630,14 +625,14 @@ function AddProjectFlow(props: {
       try {
         await cancelImportOnNode(environmentId, input.importId);
       } catch (error) {
-        toastError("Couldn't cancel", errorMessage(error));
+        toastError("Couldn't cancel", errorMessage(error, "An error occurred."));
         if (snapshot !== null && closedRef.current) {
           handOverImport(input, environmentId, snapshot.title);
         } else if (snapshot !== null) {
           update({ accepted: true, cancelling: false, error: null });
           applyImportSnapshot(snapshot);
         } else {
-          update({ cancelling: false, error: errorMessage(error) });
+          update({ cancelling: false, error: errorMessage(error, "An error occurred.") });
         }
         return;
       }
@@ -713,7 +708,7 @@ function AddProjectFlow(props: {
       });
       if (outcome.kind === "create-failed") {
         setPhase({ kind: "form" });
-        toastError("Failed to add project", errorMessage(outcome.error));
+        toastError("Failed to add project", errorMessage(outcome.error, "An error occurred."));
         return;
       }
       setPhase({
@@ -728,7 +723,7 @@ function AddProjectFlow(props: {
       });
     } catch (error) {
       setPhase({ kind: "form" });
-      toastError("Clone failed", errorMessage(error));
+      toastError("Clone failed", errorMessage(error, "An error occurred."));
     }
   };
 
@@ -863,7 +858,7 @@ function AddProjectFlow(props: {
       setPhase((current) =>
         current.kind === "import" ? { ...current, cancelling: false } : current,
       );
-      toastError("Couldn't cancel", errorMessage(error));
+      toastError("Couldn't cancel", errorMessage(error, "An error occurred."));
     }
   };
   /** Back from an import that failed; one whose start had no answer may still run, so it is cancelled. */
@@ -892,7 +887,7 @@ function AddProjectFlow(props: {
       sourceRef:
         linking && linkSource ? scopeProjectRef(linkSource.environmentId, linkSource.id) : null,
     }).catch((error: unknown) => {
-      toastError("Lost track of the import", errorMessage(error));
+      toastError("Lost track of the import", errorMessage(error, "An error occurred."));
     });
   };
   // Closing the dialog (Run in background, Esc, another open) never stops the import.

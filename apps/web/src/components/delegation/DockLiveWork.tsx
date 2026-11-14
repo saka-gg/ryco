@@ -19,6 +19,7 @@ import {
   type ThreadLiveWork,
   type ThreadLiveWorkSummary,
 } from "./threadLiveWork";
+import { errorMessage } from "~/lib/errorMessage";
 
 function elapsed(task: BackgroundTask, connected: boolean): string {
   const start = task.activeSince ? Date.parse(task.activeSince) : NaN;
@@ -80,7 +81,7 @@ const TaskRow = memo(function TaskRow({
       if (!mounted.current || version !== requestVersion.current) return;
       pendingRef.current = false;
       setPending(false);
-      setError(cause instanceof Error ? cause.message : "Could not stop this task.");
+      setError(errorMessage(cause, "Could not stop this task."));
     }
   };
   return (

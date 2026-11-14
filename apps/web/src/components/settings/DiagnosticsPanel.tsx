@@ -33,6 +33,7 @@ import {
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { errorMessage } from "~/lib/errorMessage";
 
 const CONNECTION_STATE_DOT: Record<string, string> = {
   connected: "bg-success",
@@ -236,7 +237,7 @@ export function DiagnosticsSupportSections({
           stackedThreadToast({
             type: "error",
             title: "Could not open logs folder",
-            description: error instanceof Error ? error.message : "Failed to open logs folder.",
+            description: errorMessage(error, "Failed to open logs folder."),
           }),
         );
       })

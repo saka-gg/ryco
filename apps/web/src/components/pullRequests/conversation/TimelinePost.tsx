@@ -50,7 +50,7 @@ import { RelativeTime } from "../primitives";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { ReviewThread } from "../threads/ReviewThread";
 import { PROSE_CLASS } from "./DescriptionBlock";
-import { errorText, MarkdownEditor } from "./MarkdownEditor";
+import { MarkdownEditor } from "./MarkdownEditor";
 import {
   Actor,
   AvatarNode,
@@ -60,6 +60,7 @@ import {
   VerdictNode,
   type TimelineNodeTone,
 } from "./TimelineRail";
+import { errorMessage } from "~/lib/errorMessage";
 
 type CommentItem = Extract<ChangeRequestTimelineItem, { kind: "comment" }>;
 
@@ -180,7 +181,7 @@ function usePost(post: Post) {
     setOptimistic({ base: post.reactions, value: toggleCommentReaction(reactions, content) });
     react.mutateAsync({ commentId: post.id, content }).catch((reactionError: unknown) => {
       setOptimistic(null);
-      setError(errorText(reactionError, "Could not update the reaction."));
+      setError(errorMessage(reactionError, "Could not update the reaction."));
     });
   };
 
@@ -204,7 +205,7 @@ function usePost(post: Post) {
       setConfirmDelete(false);
     } catch (deleteError) {
       setConfirmDelete(false);
-      setError(errorText(deleteError, "Could not delete the comment."));
+      setError(errorMessage(deleteError, "Could not delete the comment."));
     }
   };
 

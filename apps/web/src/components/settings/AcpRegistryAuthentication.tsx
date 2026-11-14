@@ -11,6 +11,7 @@ import { useSettingsTarget } from "../../settingsTarget";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { Button } from "../ui/button";
+import { errorMessage } from "~/lib/errorMessage";
 
 function AcpRegistryAuthenticationContent({
   instanceId,
@@ -73,8 +74,7 @@ function AcpRegistryAuthenticationContent({
         }
       }
     } catch (cause) {
-      if (generation.current === current)
-        setError(cause instanceof Error ? cause.message : "Authentication failed.");
+      if (generation.current === current) setError(errorMessage(cause, "Authentication failed."));
     } finally {
       if (generation.current === current) setBusy(false);
     }

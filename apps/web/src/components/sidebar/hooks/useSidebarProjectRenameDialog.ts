@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { updateProjectMeta } from "../../../projectMutations";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function useSidebarProjectRenameDialog() {
   const [projectRenameTarget, setProjectRenameTarget] = useState<SidebarProjectGroupMember | null>(
@@ -46,7 +47,7 @@ export function useSidebarProjectRenameDialog() {
         stackedThreadToast({
           type: "error",
           title: "Failed to rename project",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     }

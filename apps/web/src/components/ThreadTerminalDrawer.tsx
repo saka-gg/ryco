@@ -97,6 +97,7 @@ import {
   resolveTerminalViewCatchUp,
   terminalViewCacheKey,
 } from "./terminalViewCache";
+import { errorMessage } from "~/lib/errorMessage";
 
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
@@ -540,10 +541,7 @@ export function TerminalViewport({
       try {
         await api.terminal.write({ threadId, terminalId, data });
       } catch (error) {
-        writeBufferedSystemMessage(
-          activeTerminal,
-          error instanceof Error ? error.message : fallbackError,
-        );
+        writeBufferedSystemMessage(activeTerminal, errorMessage(error, fallbackError));
       }
     };
 
@@ -630,7 +628,7 @@ export function TerminalViewport({
                 void localApi.shell.openExternal(match.text).catch((error: unknown) => {
                   writeBufferedSystemMessage(
                     latestTerminal,
-                    error instanceof Error ? error.message : "Unable to open link",
+                    errorMessage(error, "Unable to open link"),
                   );
                 });
                 return;
@@ -640,7 +638,7 @@ export function TerminalViewport({
               void openPathInEditor(environmentId, target).catch((error) => {
                 writeBufferedSystemMessage(
                   latestTerminal,
-                  error instanceof Error ? error.message : "Unable to open path",
+                  errorMessage(error, "Unable to open path"),
                 );
               });
             },
@@ -653,10 +651,7 @@ export function TerminalViewport({
     const input = createTerminalInputCoalescer({
       send: (data) => api.terminal.write({ threadId, terminalId, data }),
       onError: (err) =>
-        writeBufferedSystemMessage(
-          terminal,
-          err instanceof Error ? err.message : "Terminal write failed",
-        ),
+        writeBufferedSystemMessage(terminal, errorMessage(err, "Terminal write failed")),
     });
     const inputDisposable = terminal.onData((data) => {
       if (inputBlocked()) return;
@@ -1003,10 +998,7 @@ export function TerminalViewport({
         snippetRequest?.complete(
           err instanceof Error ? err : new Error("Failed to open the thread terminal."),
         );
-        writeBufferedSystemMessage(
-          terminal,
-          err instanceof Error ? err.message : "Failed to open terminal",
-        );
+        writeBufferedSystemMessage(terminal, errorMessage(err, "Failed to open terminal"));
       }
     };
 

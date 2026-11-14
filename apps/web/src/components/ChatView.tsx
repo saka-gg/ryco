@@ -592,6 +592,7 @@ import type {
   WorktreeSetupActions,
   WorktreeSetupTimelineState,
 } from "./chat/worktreeLaunch/WorktreeSetupTimelineContext";
+import { errorMessage } from "~/lib/errorMessage";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -1601,8 +1602,7 @@ export default function ChatView(props: ChatViewProps) {
             stackedThreadToast({
               type: "error",
               title: failureTitle,
-              description:
-                error instanceof Error ? error.message : "The node did not take the change.",
+              description: errorMessage(error, "The node did not take the change."),
             }),
           );
           return false;
@@ -1899,7 +1899,7 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: "Could not reconnect environment",
-            description: error instanceof Error ? error.message : "Failed to reconnect.",
+            description: errorMessage(error, "Failed to reconnect."),
           }),
         );
       } finally {
@@ -1920,7 +1920,7 @@ export default function ChatView(props: ChatViewProps) {
         stackedThreadToast({
           type: "error",
           title: "Could not switch environment on",
-          description: error instanceof Error ? error.message : "Failed to switch it on.",
+          description: errorMessage(error, "Failed to switch it on."),
         }),
       );
     } finally {
@@ -2681,10 +2681,7 @@ export default function ChatView(props: ChatViewProps) {
       await compactThreadNow();
     } catch (error) {
       compactDispatch.resetLocalDispatch();
-      setThreadError(
-        activeThreadId,
-        error instanceof Error ? error.message : "Failed to compact the conversation.",
-      );
+      setThreadError(activeThreadId, errorMessage(error, "Failed to compact the conversation."));
     } finally {
       compactInFlight.current = false;
     }
@@ -2821,10 +2818,7 @@ export default function ChatView(props: ChatViewProps) {
         // reached the server, so liveness would hold "Stopping..." forever.
         setIsStoppingBackgroundWork(false);
         if (activeThreadId) {
-          setThreadError(
-            activeThreadId,
-            error instanceof Error ? error.message : "Failed to stop background work.",
-          );
+          setThreadError(activeThreadId, errorMessage(error, "Failed to stop background work."));
         }
       }
     })();
@@ -4186,7 +4180,7 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: "Could not update goal",
-            description: error instanceof Error ? error.message : "The goal update failed.",
+            description: errorMessage(error, "The goal update failed."),
           }),
         );
         return false;
@@ -4242,7 +4236,7 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: "Could not clear goal",
-            description: error instanceof Error ? error.message : "The goal could not be cleared.",
+            description: errorMessage(error, "The goal could not be cleared."),
           }),
         );
         return false;
@@ -4788,7 +4782,7 @@ export default function ChatView(props: ChatViewProps) {
             target.kind === "pull-request"
               ? "Failed to copy pull request link"
               : "Failed to copy thread ID",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     },
@@ -5424,7 +5418,7 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: "Could not steer message",
-            description: error instanceof Error ? error.message : "The steer request failed.",
+            description: errorMessage(error, "The steer request failed."),
           }),
         );
       }
@@ -5749,10 +5743,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       return true;
     } catch (error) {
-      setThreadError(
-        activeThread.id,
-        error instanceof Error ? error.message : "Could not launch the prompt.",
-      );
+      setThreadError(activeThread.id, errorMessage(error, "Could not launch the prompt."));
       return false;
     } finally {
       sendPreparing.current = false;
@@ -6176,8 +6167,7 @@ export default function ChatView(props: ChatViewProps) {
           toastManager.add({
             type: "warning",
             title: "Computer Use setup",
-            description:
-              error instanceof Error ? error.message : "Complete setup, then send again.",
+            description: errorMessage(error, "Complete setup, then send again."),
           });
           return;
         }
@@ -6211,7 +6201,7 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: "Could not save the queued message",
-            description: error instanceof Error ? error.message : "Try again.",
+            description: errorMessage(error, "Try again."),
           }),
         );
         return;
@@ -6439,7 +6429,7 @@ export default function ChatView(props: ChatViewProps) {
             stackedThreadToast({
               type: "error",
               title: "Not queued",
-              description: error instanceof Error ? error.message : "The node did not queue it.",
+              description: errorMessage(error, "The node did not queue it."),
             }),
           );
         };
@@ -6768,10 +6758,7 @@ export default function ChatView(props: ChatViewProps) {
             existing.filter((message) => message.id !== messageIdForSend),
           );
         }
-        setThreadError(
-          threadIdForSend,
-          err instanceof Error ? err.message : "Failed to send plan follow-up.",
-        );
+        setThreadError(threadIdForSend, errorMessage(err, "Failed to send plan follow-up."));
         sendInFlight.current = false;
         sendLocalDispatch.resetLocalDispatch();
         return false;
@@ -6928,10 +6915,7 @@ export default function ChatView(props: ChatViewProps) {
           stackedThreadToast({
             type: "error",
             title: "Could not start implementation thread",
-            description:
-              err instanceof Error
-                ? err.message
-                : "An error occurred while creating the new thread.",
+            description: errorMessage(err, "An error occurred while creating the new thread."),
           }),
         );
       })

@@ -44,6 +44,7 @@ import {
   CONTEXT_HANDOFF_ENDPOINT_LABELERS,
   ContextHandoffEndpointLabel,
 } from "./ContextHandoffEndpointLabel";
+import { errorMessage } from "~/lib/errorMessage";
 
 const SECTION_LABELS: Record<ContextHandoffInspectionSection, string> = {
   messages: "Messages",
@@ -70,9 +71,7 @@ interface SectionState {
   readonly error: string | null;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "The context artifact could not be loaded.";
-}
+const LOAD_FAILED = "The context artifact could not be loaded.";
 
 function formatBytes(value: number): string {
   if (value < 1_024) return `${value} B`;
@@ -172,7 +171,7 @@ export function ContextHandoffInspectionPanel(props: {
       setSummary(next);
       setScope(next.status === "consumed" && next.sent.available ? "sent" : "complete");
     } catch (error) {
-      if (generationRef.current === generation) setSummaryError(errorMessage(error));
+      if (generationRef.current === generation) setSummaryError(errorMessage(error, LOAD_FAILED));
     }
   }, [api, props.marker.handoffId, props.threadId]);
 
@@ -232,7 +231,7 @@ export function ContextHandoffInspectionPanel(props: {
             entries: current[key]?.entries ?? [],
             nextCursor: cursor,
             loading: false,
-            error: errorMessage(error),
+            error: errorMessage(error, LOAD_FAILED),
           },
         }));
       }
@@ -260,7 +259,7 @@ export function ContextHandoffInspectionPanel(props: {
     } catch (error) {
       if (generationRef.current !== generation) return;
       setRawState("error");
-      setRawError(errorMessage(error));
+      setRawError(errorMessage(error, LOAD_FAILED));
     }
   }, [api, props.marker.handoffId, props.threadId, scope]);
 
@@ -296,7 +295,7 @@ export function ContextHandoffInspectionPanel(props: {
         });
         startContextHandoffDownload(exported.blob, exported.filename);
       } catch (error) {
-        setExportError(errorMessage(error));
+        setExportError(errorMessage(error, LOAD_FAILED));
       } finally {
         setExporting(null);
       }

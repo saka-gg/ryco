@@ -8,10 +8,6 @@ import { Button } from "../ui/button";
  * panel around it without either loading the other.
  */
 
-export function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim() ? error.message : fallback;
-}
-
 export function Control(props: {
   /** A lucide icon, or one of the inline glyphs drawn to keep icons out of shared chunks. */
   readonly icon: ComponentType<{ className?: string }>;

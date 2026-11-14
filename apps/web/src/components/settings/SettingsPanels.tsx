@@ -87,6 +87,7 @@ import { openWhatsNewDialog, preloadWhatsNewDialog } from "../whatsNew/whatsNewD
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { errorMessage } from "~/lib/errorMessage";
 
 function EditorOptionIcon({ editor }: { editor: EditorId }) {
   const IconComponent = getEditorIcon(editor, navigator.platform);
@@ -113,7 +114,7 @@ function openExternalLink(url: string) {
         stackedThreadToast({
           type: "error",
           title: "Could not open link",
-          description: error instanceof Error ? error.message : "Failed to open external link.",
+          description: errorMessage(error, "Failed to open external link."),
         }),
       );
     });
@@ -182,7 +183,7 @@ function AboutVersionSection({
             stackedThreadToast({
               type: "error",
               title: "Could not download update",
-              description: error instanceof Error ? error.message : "Download failed.",
+              description: errorMessage(error, "Download failed."),
             }),
           );
         });
@@ -206,7 +207,7 @@ function AboutVersionSection({
             stackedThreadToast({
               type: "error",
               title: "Could not install update",
-              description: error instanceof Error ? error.message : "Install failed.",
+              description: errorMessage(error, "Install failed."),
             }),
           );
         });
@@ -234,7 +235,7 @@ function AboutVersionSection({
           stackedThreadToast({
             type: "error",
             title: "Could not check for updates",
-            description: error instanceof Error ? error.message : "Update check failed.",
+            description: errorMessage(error, "Update check failed."),
           }),
         );
       });
@@ -933,7 +934,7 @@ export function LogsFolderSetting({ title = "Diagnostics" }: { readonly title?: 
         .catch((error) => {
           setOpenPathErrorByTarget((existing) => ({
             ...existing,
-            [target]: error instanceof Error ? error.message : failureMessage,
+            [target]: errorMessage(error, failureMessage),
           }));
         })
         .finally(() => {
@@ -1094,7 +1095,7 @@ export function ArchivedThreadsPanel({
             stackedThreadToast({
               type: "error",
               title: "Failed to unarchive thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              description: errorMessage(error, "An error occurred."),
             }),
           );
         }
@@ -1273,7 +1274,7 @@ function ArchivedThreadRow(props: {
               stackedThreadToast({
                 type: "error",
                 title: "Failed to unarchive thread",
-                description: error instanceof Error ? error.message : "An error occurred.",
+                description: errorMessage(error, "An error occurred."),
               }),
             );
           })

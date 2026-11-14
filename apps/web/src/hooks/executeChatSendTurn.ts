@@ -74,6 +74,7 @@ import {
   refreshStaleSourceControlContexts,
   revokeUserMessagePreviewUrls,
 } from "../components/ChatView.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -979,10 +980,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       });
     } else {
       restoreComposer();
-      setThreadError(
-        thread.threadId,
-        err instanceof Error ? err.message : "Failed to send message.",
-      );
+      setThreadError(thread.threadId, errorMessage(err, "Failed to send message."));
     }
   } finally {
     refs.sendInFlightRef.current = false;

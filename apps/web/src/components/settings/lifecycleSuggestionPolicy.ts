@@ -9,6 +9,7 @@ import { useCallback, useState } from "react";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { useServerConfig } from "../../rpc/serverState";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type LifecycleSuggestionField = keyof LifecycleSuggestionPolicy;
 
@@ -87,7 +88,7 @@ export function useLifecycleSuggestionPolicyEditor(input: {
           stackedThreadToast({
             type: "error",
             title: "Could not save suggestion settings",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
         return false;

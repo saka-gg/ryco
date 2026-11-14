@@ -21,15 +21,16 @@ import {
   type DescriptionTaskHost,
   type DescriptionTaskState,
 } from "./descriptionTaskQueue";
-import { errorText, MarkdownEditor } from "./MarkdownEditor";
+import { MarkdownEditor } from "./MarkdownEditor";
 import { applyTaskToggles } from "./markdownTasks";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** Prose in Conversation: 14px/1.6, at most 68ch per line. */
 export const PROSE_CLASS = "pr-prose max-w-[68ch] text-[14px] leading-[1.6]";
 
 /** One queue per page load, keyed by pull request, so remounts share it. */
 const descriptionTasks = createDescriptionTaskQueue((error) =>
-  errorText(error, "Could not update the task."),
+  errorMessage(error, "Could not update the task."),
 );
 
 function taskQueueKey(target: ChangeRequestMutationTarget): string | null {
