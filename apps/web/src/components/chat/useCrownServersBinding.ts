@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { normalizeBrowserUrl, projectBrowserKey, useBrowserUi } from "~/browser/browserState";
 import { readEnvironmentApi } from "~/environmentApi";
-import { isLoopbackHostname } from "~/environments/primary";
+import { isPrimaryLoopbackHostname } from "~/environments/primary";
 import { getEnvironmentHttpBaseUrl } from "~/environments/runtime";
 import { readHostedRpcCapability, useHostedRpcCapability } from "~/hostedHub/capabilities";
 import { useDocumentVisible } from "~/hooks/useDocumentVisible";
@@ -39,7 +39,7 @@ const selectNodeLabel = (config: ServerConfig | null) => config?.environment.lab
 function nodeIsThisComputer(environmentId: EnvironmentId): boolean {
   try {
     const url = getEnvironmentHttpBaseUrl(environmentId);
-    return url !== null && isLoopbackHostname(new URL(url).hostname);
+    return url !== null && isPrimaryLoopbackHostname(new URL(url).hostname);
   } catch {
     return false;
   }
