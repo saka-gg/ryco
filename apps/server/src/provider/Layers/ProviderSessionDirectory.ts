@@ -11,6 +11,7 @@ import {
   type ProviderRuntimeBindingWithMetadata,
   type ProviderSessionDirectoryShape,
 } from "../Services/ProviderSessionDirectory.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 function toPersistenceError(operation: string) {
   return (cause: unknown) =>
@@ -35,10 +36,6 @@ function decodeProviderDriverKind(
         }),
     ),
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function mergeRuntimePayload(

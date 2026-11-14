@@ -1,5 +1,4 @@
 import * as FS from "node:fs";
-import * as Path from "node:path";
 
 import {
   ClientSettingsSchema,
@@ -13,6 +12,8 @@ import {
   isSavedEnvironmentHubLink,
   persistedSavedEnvironmentRecordFields,
 } from "@ryco/shared/savedEnvironmentRecord";
+
+import { writeFileAtomicallySync } from "./atomicFileWrite.ts";
 
 interface ClientSettingsDocument {
   readonly settings: ClientSettings;
@@ -43,12 +44,9 @@ function readJsonFile<T>(filePath: string): T | null {
   }
 }
 
+/** Owner-only, and a failed write leaves the previous file and no temp file behind. */
 function writeJsonFile(filePath: string, value: unknown): void {
-  const directory = Path.dirname(filePath);
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  FS.mkdirSync(directory, { recursive: true });
-  FS.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  FS.renameSync(tempPath, filePath);
+  writeFileAtomicallySync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function isPersistedSavedEnvironmentStorageRecord(
@@ -102,6 +100,21 @@ export function readClientSettings(settingsPath: string): ClientSettings | null 
     return Schema.decodeUnknownSync(ClientSettingsSchema)(raw);
   } catch {
     return null;
+  }
+}
+
+const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
+
+/**
+ * The settings a renderer sent, decoded with the schema `readClientSettings` reads them back
+ * with. Throws on anything else, so an invalid payload is refused instead of written and later
+ * read back as "no settings".
+ */
+export function decodeClientSettingsPayload(payload: unknown): ClientSettings {
+  try {
+    return decodeClientSettings(payload);
+  } catch {
+    throw new Error("Invalid client settings payload.");
   }
 }
 

@@ -85,6 +85,7 @@ import {
 
 import { validateWorktreeRoot } from "./project/worktreeRoot.ts";
 import { makeWorkspaceAccessPolicy } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -621,9 +622,6 @@ const UNREADABLE_PROJECT_RETENTION: StorageRetentionPolicy = {
   temporaryDataDays: null,
 };
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 /**
  * Decodes each top-level key on its own so an invalid value resets only that key, and each
  * entry of a record key on its own so an invalid entry drops only that entry. Undefined when
@@ -646,7 +644,7 @@ function recoverServerSettings(
       valid[key] = value;
       continue;
     }
-    if (!RECORD_SETTINGS_KEYS.has(key) || !isPlainObject(value)) {
+    if (!RECORD_SETTINGS_KEYS.has(key) || !isRecord(value)) {
       invalidKeys[key] = formatSchemaError(decoded.cause);
       continue;
     }
@@ -676,7 +674,7 @@ function recoverServerSettings(
     !Object.hasOwn(valid, "projectStorageRetention")
   ) {
     valid.storageRetention = {
-      ...(isPlainObject(valid.storageRetention) ? valid.storageRetention : {}),
+      ...(isRecord(valid.storageRetention) ? valid.storageRetention : {}),
       automatic: false,
     };
   }

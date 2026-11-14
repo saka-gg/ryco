@@ -4,6 +4,7 @@ import { Effect, Option, Redacted, Schema, Scope } from "effect";
 
 import { AgentControlIntegrationId } from "@ryco/contracts";
 
+import { readBoundedBody } from "../../readBoundedBody.ts";
 import type { AgentControlExternalIntegrationServiceShape } from "../Services/AgentControlExternalIntegration.ts";
 import {
   AGENT_CONTROL_MCP_MAX_BODY_BYTES,
@@ -57,23 +58,6 @@ const endJson = (response: ServerResponse, status: number, body: JsonRpcResponse
   response.writeHead(status, { ...headers, "content-type": "application/json" });
   response.end(serialized);
 };
-const readBody = (request: IncomingMessage): Promise<string | null> =>
-  new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    request.on("data", (chunk: Buffer) => {
-      bytes += chunk.length;
-      if (bytes > AGENT_CONTROL_MCP_MAX_BODY_BYTES) {
-        request.removeAllListeners("data");
-        request.removeAllListeners("end");
-        resolve(null);
-      } else {
-        chunks.push(chunk);
-      }
-    });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", reject);
-  });
 
 const protocolVersion = (requested: unknown): string => {
   const versions: ReadonlyArray<string> = AGENT_CONTROL_MCP_PROTOCOL_VERSIONS;
@@ -103,7 +87,7 @@ export const makeExternalMcpRequestHandler = (deps: {
         pathname: AGENT_CONTROL_MCP_PATH,
       });
       if (rejection !== null) return endEmpty(response, rejection.status);
-      const body = await readBody(request);
+      const body = await readBoundedBody(request, AGENT_CONTROL_MCP_MAX_BODY_BYTES);
       if (body === null) return endEmpty(response, 413);
       let value: { integrationId?: unknown; pairingCode?: unknown };
       try {
@@ -146,7 +130,7 @@ export const makeExternalMcpRequestHandler = (deps: {
       response.end();
       return;
     }
-    const body = await readBody(request);
+    const body = await readBoundedBody(request, AGENT_CONTROL_MCP_MAX_BODY_BYTES);
     if (body === null) return endEmpty(response, 413);
     const parsed = parseJsonRpcMessage(body);
     if (parsed.kind === "invalid") return endJson(response, 400, parsed.response);
