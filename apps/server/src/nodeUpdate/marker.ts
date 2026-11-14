@@ -163,7 +163,8 @@ export const writeNodeUpdateMarker = Effect.fn("writeNodeUpdateMarker")(function
   marker: NodeUpdateMarker,
 ) {
   const contents = yield* encodeMarker(marker);
-  yield* writeFileStringAtomically({ filePath, contents: `${contents}\n` });
+  // Durable like the boot guard's own marker write: a power loss must not lose the update record.
+  yield* writeFileStringAtomically({ filePath, contents: `${contents}\n`, durable: true });
 });
 
 /** Best effort: a marker that cannot be deleted is ignored once it is a day old. */

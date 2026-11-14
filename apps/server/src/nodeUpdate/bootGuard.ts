@@ -178,7 +178,8 @@ const flagValue = (args: ReadonlyArray<string>, name: string): string | undefine
 /**
  * The state directory `ryco serve <args>` uses: `--base-dir`, else `RYCO_HOME`, else `~/.ryco`,
  * then `dev` with a dev URL and `userdata` without, as the CLI resolves it (`resolveBaseDir`,
- * `deriveServerPaths`). A service passes `--base-dir` itself.
+ * `deriveServerPaths`). A service passes `--base-dir` itself. Keeps its own copy of
+ * `resolveRycoBaseDir` (`os-jank.ts`) because the guard imports nothing from the server graph.
  */
 export function serveStateDirectory(input: {
   readonly args: ReadonlyArray<string>;
@@ -221,7 +222,12 @@ const syncDirectoryBestEffort = (directory: string) => {
   }
 };
 
-/** Through a temp file and a rename, so a crash leaves the old marker or the new one. */
+/**
+ * Through a temp file and a rename, so a crash leaves the old marker or the new one, flushed like
+ * `replaceFileAtomically` (`fsDurability.ts`). A separate synchronous copy on purpose: the guard
+ * runs before the server graph and imports nothing but `updateProtocol.ts`
+ * (`serverBundleBoundaries.test.ts`).
+ */
 function writeMarkerAtomically(markerPath: string, marker: Record<string, unknown>): void {
   const temporary = `${markerPath}.${process.pid}.tmp`;
   const fd = openSync(temporary, "w");

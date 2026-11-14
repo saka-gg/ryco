@@ -24,6 +24,7 @@ import {
   composeAttachmentId,
   uuidFromSha256Hex,
 } from "./attachmentStore.ts";
+import { detectAllowedRasterImageMimeType } from "./imageMime.ts";
 
 export class AssistantAttachmentError extends Data.TaggedError("AssistantAttachmentError")<{}> {}
 
@@ -196,6 +197,14 @@ interface StageWorkspaceFileInput {
   readonly signal?: AbortSignal | undefined;
 }
 
+/** Raster types a staged workspace file is sent inline as; anything else is a download. */
+const INLINE_RASTER_IMAGE_TYPES: ReadonlySet<string> = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
 /**
  * Copies a regular file of the workspace `cwd` (a relative path without links, parent traversal
  * or hard links) into a fresh `.part` staging file in `stagingDir`, in bounded chunks, and fails
@@ -247,15 +256,8 @@ export async function stageWorkspaceFile(
     // Generated raster images are identified by bytes. Other formats are downloads or native media.
     const header = Buffer.alloc(16);
     await handle.read(header, 0, header.length, 0);
-    const rasterMime = header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-      ? "image/png"
-      : header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff
-        ? "image/jpeg"
-        : /^GIF8[79]a/.test(header.toString("ascii", 0, 6))
-          ? "image/gif"
-          : header.toString("ascii", 0, 4) === "RIFF" && header.toString("ascii", 8, 12) === "WEBP"
-            ? "image/webp"
-            : undefined;
+    const rasterMime =
+      detectAllowedRasterImageMimeType(header, INLINE_RASTER_IMAGE_TYPES) ?? undefined;
     const inlineImage = rasterMime !== undefined && info.size <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES;
     const mimeType = rasterMime ?? Mime.getType(source) ?? "application/octet-stream";
     const contentHash = input.hashSeed

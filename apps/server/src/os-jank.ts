@@ -42,16 +42,11 @@ function logPathHydrationWarning(message: string, error?: unknown): void {
  * only `RYCO_HOME` (never `--base-dir`, which is unknown this early) selects it.
  */
 export function resolveShellEnvironmentCachePath(env: NodeJS.ProcessEnv = process.env): string {
-  const configured = env.RYCO_HOME?.trim();
-  const baseDir =
-    configured === undefined || configured.length === 0
-      ? NodePath.join(OS.homedir(), ".ryco")
-      : configured === "~"
-        ? OS.homedir()
-        : configured.startsWith("~/") || configured.startsWith("~\\")
-          ? NodePath.join(OS.homedir(), configured.slice(2))
-          : NodePath.resolve(configured);
-  return NodePath.join(baseDir, "userdata", SHELL_ENVIRONMENT_CACHE_FILE_NAME);
+  return NodePath.join(
+    resolveRycoBaseDir(env.RYCO_HOME),
+    "userdata",
+    SHELL_ENVIRONMENT_CACHE_FILE_NAME,
+  );
 }
 
 function scheduleShellEnvironmentRefresh(refresh: () => Promise<void>): void {
@@ -202,6 +197,27 @@ export const expandHomePath = Effect.fn(function* (input: string) {
   }
   return input;
 });
+
+/**
+ * The base directory a raw `--base-dir` or `RYCO_HOME` value names, for code that runs before
+ * `ServerConfig` exists (the login-shell cache, the device layers, the device host worker):
+ * `~/.ryco` when it is missing or blank, `~` and `~/…` expanded against `homeDirectory`, anything
+ * else resolved to an absolute path, the way {@link resolveBaseDir} resolves it. The node-update
+ * boot guard keeps its own copy (`serveStateDirectory`): it may not import this module.
+ */
+export function resolveRycoBaseDir(
+  raw: string | undefined,
+  homeDirectory: string = OS.homedir(),
+): string {
+  const value = raw?.trim() ?? "";
+  if (value.length === 0) return NodePath.join(homeDirectory, ".ryco");
+  if (value === "~") return homeDirectory;
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    // Joined first, as `expandHomePath` does: `~//x` stays under the home directory.
+    return NodePath.resolve(NodePath.join(homeDirectory, value.slice(2)));
+  }
+  return NodePath.resolve(value);
+}
 
 /** The data directory when neither `--base-dir` nor `RYCO_HOME` names one: `~/.ryco`. */
 export const defaultBaseDir = (): string => NodePath.join(OS.homedir(), ".ryco");
