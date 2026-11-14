@@ -764,7 +764,7 @@ export function SettingsDevicePage({
       <SlidingTabs
         tabs={DEVICE_TABS}
         activeId={shownTab}
-        onSelect={(id) => onTabChange(id as SettingsDevicePartId)}
+        onSelect={onTabChange}
         onTabIntent={(id) => {
           for (const chunk of DEVICE_TAB_CHUNKS[id as SettingsDevicePartId]) void chunk.preload();
         }}

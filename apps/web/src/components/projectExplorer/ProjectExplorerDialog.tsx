@@ -303,11 +303,7 @@ export function ProjectExplorerDialog(props: ProjectExplorerDialogProps) {
 
         {selection === null ? (
           <>
-            <ContextPickerTabs
-              tabs={tabs}
-              activeId={activeTab}
-              onSelect={(id) => setActiveTab(id as ProjectExplorerTabId)}
-            />
+            <ContextPickerTabs tabs={tabs} activeId={activeTab} onSelect={setActiveTab} />
             <div className="min-h-0 flex-1">
               {activeTab === "overview" ? (
                 <ProjectOverviewTab

@@ -2,10 +2,8 @@ import { hostedHubStore } from "@ryco/client-runtime/authorization";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   HostedRelayPreparationError,
-  relayE2eeUnresolvedAttemptFailure,
-  type RelayE2eeChannel,
-  type RelayE2eeHost,
   type RelayE2eeProvider,
+  unresolvedRelayE2eeChannel,
 } from "@ryco/client-runtime/relay";
 // Type-only: the initiator's code is loaded through `./e2eeRuntime`, never here.
 import type { RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay/e2ee";
@@ -292,15 +290,7 @@ export function webRelayE2eeAttempt(selection: WebE2eeSelection): RelayE2eeIniti
  * The close is the RETRYABLE one, so a store that moved under a reconnect costs
  * one channel rather than the whole hosted session.
  */
-function unresolvedAttemptChannel(host: RelayE2eeHost): RelayE2eeChannel {
-  host.close(relayE2eeUnresolvedAttemptFailure());
-  return {
-    intercept: async () => ({ kind: "rejected" }),
-    submit: () => false,
-    beginClose: async () => "refused",
-    dispose: () => undefined,
-  };
-}
+const unresolvedAttemptChannel: RelayE2eeProvider = unresolvedRelayE2eeChannel;
 
 /**
  * The `RelayE2eeProvider` the hosted socket is built with, resolved

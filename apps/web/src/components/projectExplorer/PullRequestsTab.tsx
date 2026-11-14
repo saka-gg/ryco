@@ -1,4 +1,4 @@
-import type { ChangeRequest, EnvironmentId, SourceControlIssueSummary } from "@ryco/contracts";
+import type { ChangeRequest, EnvironmentId } from "@ryco/contracts";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { SearchIcon, RotateCwIcon } from "lucide-react";
 import { useCallback, useMemo, type RefObject } from "react";
@@ -64,13 +64,7 @@ export function PullRequestsTab(props: PullRequestsTabProps) {
 
   const cachedItems = useMemo(() => listQuery.data ?? [], [listQuery.data]);
   const filteredItems = useMemo(
-    () =>
-      // ChangeRequest has the same number/title shape as SourceControlIssueSummary
-      // for filtering purposes, so reuse the existing helper.
-      searchSourceControlSummaries(
-        cachedItems as unknown as ReadonlyArray<SourceControlIssueSummary>,
-        props.query,
-      ) as unknown as ReadonlyArray<ChangeRequest>,
+    () => searchSourceControlSummaries(cachedItems, props.query),
     [cachedItems, props.query],
   );
 
