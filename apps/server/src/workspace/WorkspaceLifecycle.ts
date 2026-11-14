@@ -417,8 +417,10 @@ export function workspaceActionBlockers(
       break;
     }
     case "remove-stale-record":
+      // Idempotent: a removal already on record leaves nothing to record or verify. Agent
+      // Control's record-only delete runs this step before dropping such a record.
       if (checkoutRemoved) {
-        blockers.push("The checkout is already recorded as removed.");
+        if (activeWork) blockers.push(activeWork);
         break;
       }
       if (!facts) blockers.push(state.inspectionError ?? "The checkout could not be inspected.");
