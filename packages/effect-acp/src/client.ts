@@ -30,7 +30,6 @@ export interface AcpClientOptions {
 }
 
 type AcpClientRaw = {
-  readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
   readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
 };
@@ -338,7 +337,12 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
   ) =>
     Effect.forEach(
       registration.handlers,
-      (handler) => handler(notification).pipe(Effect.catch(() => Effect.void)),
+      (handler) =>
+        handler(notification).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("ACP notification handler failed", { error: error.message }),
+          ),
+        ),
       { discard: true },
     );
 
@@ -460,7 +464,6 @@ export const make = Effect.fn("effect-acp/AcpClient.make")(function* (
 
   return AcpClient.of({
     raw: {
-      notifications: transport.incoming,
       request: transport.request,
       notify: transport.notify,
     },

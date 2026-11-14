@@ -34,8 +34,6 @@ export interface CodexAppServerClientOptions {
 }
 
 interface CodexAppServerClientRaw {
-  readonly notifications: CodexProtocol.CodexAppServerPatchedProtocol["incomingNotifications"];
-  readonly requests: CodexProtocol.CodexAppServerPatchedProtocol["incomingRequests"];
   readonly request: CodexProtocol.CodexAppServerPatchedProtocol["request"];
   readonly notify: CodexProtocol.CodexAppServerPatchedProtocol["notify"];
   readonly respond: CodexProtocol.CodexAppServerPatchedProtocol["respond"];
@@ -149,7 +147,8 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     notification: CodexProtocol.CodexAppServerIncomingNotification,
   ): Effect.Effect<void, never> => {
     const schema =
-      notification.method in CodexRpc.SERVER_NOTIFICATION_PARAMS
+      // Own keys only: "constructor" or "toString" is not a Codex method.
+      Object.hasOwn(CodexRpc.SERVER_NOTIFICATION_PARAMS, notification.method)
         ? CodexRpc.SERVER_NOTIFICATION_PARAMS[
             notification.method as CodexRpc.ServerNotificationMethod
           ]
@@ -188,7 +187,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   const dispatchRequest = (
     request: CodexProtocol.CodexAppServerIncomingRequest,
   ): Effect.Effect<unknown, CodexError.CodexAppServerError> => {
-    if (request.method in CodexRpc.SERVER_REQUEST_PARAMS) {
+    if (Object.hasOwn(CodexRpc.SERVER_REQUEST_PARAMS, request.method)) {
       const method = request.method as CodexRpc.ServerRequestMethod;
       const payloadSchema = getServerRequestParamSchema(method);
       const responseSchema = getServerRequestResponseSchema(method);
@@ -248,8 +247,6 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
   return CodexAppServerClient.of({
     raw: {
-      notifications: transport.incomingNotifications,
-      requests: transport.incomingRequests,
       request: transport.request,
       notify: transport.notify,
       respond: transport.respond,
