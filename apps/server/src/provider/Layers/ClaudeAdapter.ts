@@ -2078,19 +2078,32 @@ function toolResultBlocksFromUserMessage(message: SDKMessage): Array<{
   return blocks;
 }
 
+/**
+ * The SDK's own "this session is gone" messages: `Session <id> not found`, "unknown session",
+ * "Query closed before …" and "Transport is closed". Everything else (a missing model, file or
+ * executable, a peer closing a connection) is an ordinary request failure.
+ */
+const CLAUDE_SESSION_NOT_FOUND = /\bunknown session\b|\bsession\b[^.:]*\bnot found\b/;
+const CLAUDE_SESSION_CLOSED = /\bquery closed\b|\btransport is closed\b|\bsession (?:is )?closed\b/;
+
+/**
+ * Classifies a Claude SDK failure as a gone session. Callers pass the SDK's error before any stderr
+ * tail is appended (see {@link toSessionRequestError}): CLI stderr is free text and must not turn
+ * a request failure into a session-gone one.
+ */
 function toSessionError(
   threadId: ThreadId,
   cause: unknown,
 ): ProviderAdapterSessionNotFoundError | ProviderAdapterSessionClosedError | undefined {
   const normalized = toMessage(cause, "").toLowerCase();
-  if (normalized.includes("unknown session") || normalized.includes("not found")) {
+  if (CLAUDE_SESSION_NOT_FOUND.test(normalized)) {
     return new ProviderAdapterSessionNotFoundError({
       provider: PROVIDER,
       threadId,
       cause,
     });
   }
-  if (normalized.includes("closed")) {
+  if (CLAUDE_SESSION_CLOSED.test(normalized)) {
     return new ProviderAdapterSessionClosedError({
       provider: PROVIDER,
       threadId,
@@ -2101,10 +2114,10 @@ function toSessionError(
 }
 
 function toRequestError(threadId: ThreadId, method: string, cause: unknown): ProviderAdapterError {
-  const sessionError = toSessionError(threadId, cause);
-  if (sessionError) {
-    return sessionError;
-  }
+  return toSessionError(threadId, cause) ?? toPlainRequestError(method, cause);
+}
+
+function toPlainRequestError(method: string, cause: unknown): ProviderAdapterRequestError {
   return new ProviderAdapterRequestError({
     provider: PROVIDER,
     method,
@@ -2115,8 +2128,9 @@ function toRequestError(threadId: ThreadId, method: string, cause: unknown): Pro
 
 /**
  * {@link toRequestError} for an SDK call on a live session. When the CLI exits, the SDK rejects
- * every pending call with its exit error; this restores the stderr tail on it first (see
- * {@link withClaudeProcessStderr}), so the text and its classification match the SDK's own spawn.
+ * every pending call with its exit error; this restores the stderr tail on it (see
+ * {@link withClaudeProcessStderr}), so the text matches the SDK's own spawn. The session-gone
+ * classification reads the SDK's message from before the tail is added.
  */
 function toSessionRequestError(
   context: Pick<ClaudeSessionContext, "processStderrTail">,
@@ -2124,7 +2138,9 @@ function toSessionRequestError(
   method: string,
   cause: unknown,
 ): ProviderAdapterError {
-  return toRequestError(threadId, method, withClaudeProcessStderr(context, cause));
+  const sessionError = toSessionError(threadId, cause);
+  const withStderr = withClaudeProcessStderr(context, cause);
+  return sessionError ?? toPlainRequestError(method, withStderr);
 }
 
 function sdkMessageType(value: unknown): string | undefined {
@@ -2283,8 +2299,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   let nextSessionGeneration = 0;
   /** Orders `commands_changed` pushes across sessions, so the newest list of a directory wins. */
   let nextSlashCommandsOrder = 0;
-  // One SDK message fans out into several runtime events that all carry it as
-  // `raw.payload` (and is logged natively first): redact it once, share it.
+  // An SDK message is logged natively and may be previewed: redact it once, share it. Runtime
+  // events are redacted centrally (`ProviderService.publishRuntimeEvent`).
   const secretRedactor = makeSharedPayloadSecretRedactor();
   const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(
     options?.runtimeEventQueueCapacity ?? 2_048,
@@ -2349,10 +2365,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       !context.liveTaskIds.has(event.payload.taskId)
         ? takeSubagentMessages(context.pendingSubagentMessages, event.payload.taskId)
         : null;
-    const safeEvent = secretRedactor.event(event);
+    // Agent Control tokens are redacted centrally (`ProviderService.publishRuntimeEvent`).
     const offered = Queue.offer(
       runtimeEventQueue,
-      stampRuntimeEvent(safeEvent, {
+      stampRuntimeEvent(event, {
         providerInstanceId: boundInstanceId,
         runtimeSessionId: context.session.runtimeSessionId,
       }),

@@ -35,6 +35,7 @@ import {
   requestTypeFromPermissionRequest,
   selectionTargetsCopilotInstance,
 } from "./CopilotAdapter.types.ts";
+import type { CopilotSessionCallbacks } from "./CopilotAdapter.callbacks.ts";
 import { mapEvent, type MapEventDeps } from "./CopilotAdapter.mapEvent.ts";
 import {
   type SessionOpsDeps,
@@ -78,6 +79,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
   if (options?.nativeEventLogger === undefined && nativeEventLogger !== undefined) {
     yield* Effect.addFinalizer(() => nativeEventLogger.close());
   }
+  const adapterScope = yield* Effect.scope;
   const sessions = new Map<ThreadId, ActiveCopilotSession>();
   const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(2_048);
   const runtimeEventQueueMetrics = yield* makeServerQueueMetrics({
@@ -108,18 +110,18 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
         );
   };
 
-  const emit = (events: ReadonlyArray<ProviderRuntimeEvent>) => {
+  const emit = (events: ReadonlyArray<ProviderRuntimeEvent>): Effect.Effect<void> => {
     for (const event of events) {
       if (event.runtimeSessionId === undefined) {
-        throw new Error(
-          `CopilotAdapter emitted '${event.type}' without a runtime session for thread '${event.threadId}'.`,
+        return Effect.die(
+          new Error(
+            `CopilotAdapter emitted '${event.type}' without a runtime session for thread '${event.threadId}'.`,
+          ),
         );
       }
     }
-    const safeEvents = events.map(
-      (event) => redactAgentControlSecrets(event) as ProviderRuntimeEvent,
-    );
-    return Queue.offerAll(runtimeEventQueue, safeEvents).pipe(
+    // Agent Control tokens are redacted centrally (`ProviderService.publishRuntimeEvent`).
+    return Queue.offerAll(runtimeEventQueue, events).pipe(
       Effect.andThen(runtimeEventQueueMetrics.recordEnqueued(events.length)),
       Effect.asVoid,
     );
@@ -244,6 +246,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     pendingUserInputs: Map<string, PendingUserInputRequest>,
     activeTurnId: () => TurnId | undefined,
     stoppedRef: { stopped: boolean },
+    callbacks: CopilotSessionCallbacks,
   ): SessionConfig => ({
     ...(selectionTargetsCopilotInstance(input.modelSelection, instanceId)
       ? {
@@ -297,51 +300,49 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
           resolve,
         });
 
-        void makeSyntheticEvent(
-          input.threadId,
-          input.runtimeSessionId,
-          "request.opened",
-          {
-            requestType,
-            ...(requestDetail ? { detail: requestDetail } : {}),
-            args: request,
-          },
-          {
-            ...(currentTurnId ? { turnId: currentTurnId } : {}),
-            requestId,
-          },
-        )
-          .pipe(
-            Effect.flatMap((event) => emit([event])),
-            Effect.runPromise,
-          )
-          .catch(() => undefined);
+        callbacks.run(
+          makeSyntheticEvent(
+            input.threadId,
+            input.runtimeSessionId,
+            "request.opened",
+            {
+              requestType,
+              ...(requestDetail ? { detail: requestDetail } : {}),
+              args: request,
+            },
+            {
+              ...(currentTurnId ? { turnId: currentTurnId } : {}),
+              requestId,
+            },
+          ).pipe(Effect.flatMap((event) => emit([event]))),
+        );
 
         if (input.runtimeMode === "full-access") {
-          void Effect.gen(function* () {
-            yield* Effect.sleep(FULL_ACCESS_AUTO_APPROVE_AFTER_MS);
-            if (stoppedRef.stopped) return;
-            const pending = pendingApprovals.get(requestId);
-            if (!pending) return;
-            pendingApprovals.delete(requestId);
-            pending.resolve({ kind: "approve-once" });
-            const event = yield* makeSyntheticEvent(
-              input.threadId,
-              input.runtimeSessionId,
-              "request.resolved",
-              {
-                requestType,
-                decision: "accept",
-              },
-              {
-                ...(currentTurnId ? { turnId: currentTurnId } : {}),
-                requestId,
-              },
-            );
-            yield* emit([event]);
-          })
-            .pipe(Effect.runPromise)
-            .catch(() => undefined);
+          // Forked into the session scope: a stopped session interrupts the timer.
+          callbacks.fork(
+            Effect.gen(function* () {
+              yield* Effect.sleep(FULL_ACCESS_AUTO_APPROVE_AFTER_MS);
+              if (stoppedRef.stopped) return;
+              const pending = pendingApprovals.get(requestId);
+              if (!pending) return;
+              pendingApprovals.delete(requestId);
+              pending.resolve({ kind: "approve-once" });
+              const event = yield* makeSyntheticEvent(
+                input.threadId,
+                input.runtimeSessionId,
+                "request.resolved",
+                {
+                  requestType,
+                  decision: "accept",
+                },
+                {
+                  ...(currentTurnId ? { turnId: currentTurnId } : {}),
+                  requestId,
+                },
+              );
+              yield* emit([event]);
+            }),
+          );
         }
       }),
     onUserInputRequest: (request) =>
@@ -364,21 +365,18 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
           })),
         };
 
-        void makeSyntheticEvent(
-          input.threadId,
-          input.runtimeSessionId,
-          "user-input.requested",
-          { questions: [question] },
-          {
-            ...(currentTurnId ? { turnId: currentTurnId } : {}),
-            requestId,
-          },
-        )
-          .pipe(
-            Effect.flatMap((event) => emit([event])),
-            Effect.runPromise,
-          )
-          .catch(() => undefined);
+        callbacks.run(
+          makeSyntheticEvent(
+            input.threadId,
+            input.runtimeSessionId,
+            "user-input.requested",
+            { questions: [question] },
+            {
+              ...(currentTurnId ? { turnId: currentTurnId } : {}),
+              requestId,
+            },
+          ).pipe(Effect.flatMap((event) => emit([event]))),
+        );
       }),
   });
 
@@ -394,6 +392,7 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     buildSessionConfig,
     handleEvent,
     requireSession,
+    scope: adapterScope,
   };
 
   const respondToRequest: CopilotAdapterShape["respondToRequest"] = (
