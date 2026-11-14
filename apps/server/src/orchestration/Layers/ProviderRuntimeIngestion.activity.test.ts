@@ -15,7 +15,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { makeAcpToolCallEvent } from "../../provider/acp/AcpCoreRuntimeEvents.ts";
 import { parseSessionUpdateEvent } from "../../provider/acp/AcpRuntimeModel.ts";
-import { runtimeEventToActivities, taskProgressChangeKey } from "./ProviderRuntimeIngestion.ts";
+import { runtimeEventToActivities } from "./ProviderRuntimeIngestion.activities.ts";
+import { taskProgressChangeKey } from "./ProviderRuntimeIngestion.helpers.ts";
 
 const base = {
   provider: ProviderDriverKind.make("codex"),
