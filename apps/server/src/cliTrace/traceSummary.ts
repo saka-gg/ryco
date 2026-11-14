@@ -16,6 +16,7 @@ import {
 import type { BigIntStats } from "node:fs";
 
 import { traceRecordStatus } from "../observability/TraceRecord.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export interface TraceSpanNameSummary {
   readonly name: string;
@@ -51,9 +52,6 @@ interface SpanNameStats {
 /** The largest epoch ms a `Date` can hold. */
 const MAX_DATE_MS = 8.64e15;
 const DECIMAL_DIGITS = /^\d+$/u;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** `endTimeUnixNano` as epoch ms, or undefined when it is not a decimal nanosecond count. */
 function endTimeMs(value: unknown): number | undefined {
