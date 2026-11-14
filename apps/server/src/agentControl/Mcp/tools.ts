@@ -143,6 +143,7 @@ import {
   readThreadPage,
 } from "./threadReads.ts";
 import { readControlRequestReceipt, waitForControlRequestReceipt } from "./proposalReads.ts";
+import { decodeToolArgs } from "./toolFailure.ts";
 import { modelSelectionSchema } from "./modelSelectionToolSchema.ts";
 import {
   interruptThreadPlan,
@@ -1336,11 +1337,6 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       ),
     );
 
-  const decodeArgs = <S extends Schema.Top>(schema: S, args: unknown) =>
-    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
-      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
-    ) as Effect.Effect<S["Type"], ToolFailure>;
-
   const authorizeRead = (session: AgentControlSessionRecord, toolName: string) =>
     deps.policy
       .authorize({
@@ -1422,7 +1418,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpCreateThreadsInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpCreateThreadsInput, args);
       // A chat started as a task's writes to the task (its starts, its project): that needs the
       // task grant as well, however the chat is created.
       if (input.entries.some((entry) => entry.localTaskId !== undefined)) {
@@ -1459,7 +1455,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpSendMessageInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpSendMessageInput, args);
       return yield* submitMutation({
         session,
         authority,
@@ -1474,7 +1470,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpInterruptThreadInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpInterruptThreadInput, args);
       return yield* submitMutation({
         session,
         authority,
@@ -1489,7 +1485,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpUpdateThreadInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpUpdateThreadInput, args);
       return yield* submitMutation({
         session,
         authority,
@@ -1509,7 +1505,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     watching: boolean,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpPullRequestWatchInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpPullRequestWatchInput, args);
       const submitted = yield* submitMutation({
         session,
         authority,
@@ -1544,19 +1540,19 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       const workspaces = deps.workspaces;
       if (!workspaces) return yield* failTool("Workspace lifecycle service unavailable.");
       if (name === AGENT_CONTROL_MCP_TOOLS.listWorkspaces) {
-        const input = yield* decodeArgs(AgentControlListWorkspacesInput, args);
+        const input = yield* decodeToolArgs(AgentControlListWorkspacesInput, args);
         return yield* workspaces.list(input.projectId, session.threadId, input.after, input.limit);
       }
       if (name === AGENT_CONTROL_MCP_TOOLS.readWorkspace) {
-        const input = yield* decodeArgs(AgentControlReadWorkspaceInput, args);
+        const input = yield* decodeToolArgs(AgentControlReadWorkspaceInput, args);
         return yield* workspaces.read(input.projectId, input.workspaceId, session.threadId);
       }
       if (name === AGENT_CONTROL_MCP_TOOLS.planWorkspace) {
-        const input = yield* decodeArgs(AgentControlPlanWorkspaceInput, args);
+        const input = yield* decodeToolArgs(AgentControlPlanWorkspaceInput, args);
         return yield* planWorkspaceLifecycle(workspaces, input, session.threadId);
       }
       if (!authority) return yield* failTool("Exact active-turn authority required.");
-      const input = yield* decodeArgs(AgentControlProposeWorkspaceInput, args);
+      const input = yield* decodeToolArgs(AgentControlProposeWorkspaceInput, args);
       const replayed = yield* replayedAgentControlMutation(
         deps.proposals,
         session,
@@ -1599,7 +1595,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpProposeProjectCreateInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeProjectCreateInput, args);
       const plan = yield* prepareProjectPlan((plans) => plans.prepareCreate(input));
       return yield* submitMutation({
         session,
@@ -1615,7 +1611,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpProposeProjectUpdateInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeProjectUpdateInput, args);
       const plan = yield* prepareProjectPlan((plans) => plans.prepareUpdate(input));
       return yield* submitMutation({
         session,
@@ -1631,7 +1627,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpProposeProjectRemoveInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeProjectRemoveInput, args);
       const plan = yield* prepareProjectPlan((plans) => plans.prepareRemove(input));
       return yield* submitMutation({
         session,
@@ -1660,7 +1656,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpProposeSettingsChangeInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeSettingsChangeInput, args);
       if (deps.getSettings === undefined) {
         return yield* failTool("Settings proposal creation is unavailable.");
       }
@@ -1742,7 +1738,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
 
   const listDevices = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpListDevicesInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpListDevicesInput, args);
       const { service, scope } = yield* deviceContext(session);
       const result = yield* devicePromise(
         () =>
@@ -1765,7 +1761,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
 
   const readDeviceState = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      yield* decodeArgs(AgentControlMcpReadDeviceStateInput, args);
+      yield* decodeToolArgs(AgentControlMcpReadDeviceStateInput, args);
       const { service, scope } = yield* deviceContext(session);
       const state = yield* devicePromise(
         () => service.manager.getThreadState(session.threadId),
@@ -1793,7 +1789,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
 
   const requireAttachedDeviceContent = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpReadDeviceContentInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpReadDeviceContentInput, args);
       const { service } = yield* deviceContext(session);
       if (!service.manager.isAttached(session.threadId, input.udid)) {
         return yield* failTool("Device content is limited to this thread's attached devices.");
@@ -1927,7 +1923,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       let plan: AgentControlDeviceActionPlan;
       switch (name) {
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceBoot: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceBootInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceBootInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -1939,7 +1935,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceAttach: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceAttachInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceAttachInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -1951,7 +1947,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceDetach: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceDetachInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceDetachInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -1963,7 +1959,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceInstall: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceInstallInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceInstallInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -1983,7 +1979,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceLaunch: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceLaunchInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceLaunchInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -1995,7 +1991,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceOpenUrl: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceOpenUrlInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceOpenUrlInput, args);
           requestId = input.requestId;
           yield* Effect.try({
             try: () => assertSafeAgentControlDeviceUrl(input.url),
@@ -2011,7 +2007,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceInput: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceInputInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceInputInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -2050,7 +2046,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceRecording: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceRecordingInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceRecordingInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -2065,7 +2061,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
           break;
         }
         case AGENT_CONTROL_MCP_TOOLS.proposeDeviceShutdown: {
-          const input = yield* decodeArgs(AgentControlMcpProposeDeviceShutdownInput, args);
+          const input = yield* decodeToolArgs(AgentControlMcpProposeDeviceShutdownInput, args);
           requestId = input.requestId;
           const prepared = yield* prepareDeviceTarget(
             session,
@@ -2088,7 +2084,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       if (deps.automations === undefined)
         return yield* failTool("Automation reads are unavailable.");
-      const input = yield* decodeArgs(AgentControlMcpListAutomationsInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpListAutomationsInput, args);
       const scope = yield* automationScope(session);
       if (input.projectId !== undefined && !scope.projectIds.includes(input.projectId)) {
         return yield* failTool("Project scope denied.");
@@ -2120,7 +2116,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       if (deps.automations === undefined)
         return yield* failTool("Automation reads are unavailable.");
-      const input = yield* decodeArgs(AgentControlMcpReadAutomationInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpReadAutomationInput, args);
       const scope = yield* automationScope(session);
       const automation = yield* deps.automations
         .get(input.automationId, scope)
@@ -2134,7 +2130,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       if (deps.automations === undefined)
         return yield* failTool("Automation reads are unavailable.");
-      const input = yield* decodeArgs(AgentControlMcpListAutomationRunsInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpListAutomationRunsInput, args);
       const scope = yield* automationScope(session);
       const limit = clampLimit(
         input.limit,
@@ -2156,7 +2152,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpProposeAutomationCreateInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeAutomationCreateInput, args);
       // A chat without a project names its own project; its schedules live in "No project".
       const scope = yield* automationScope(session);
       const projectId = scope.projectIds.includes(input.projectId)
@@ -2189,7 +2185,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (deps.automations === undefined) {
         return yield* failTool("Automation proposal creation is unavailable.");
       }
-      const input = yield* decodeArgs(AgentControlMcpProposeAutomationUpdateInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeAutomationUpdateInput, args);
       const scope = yield* automationScope(session);
       const current = yield* deps.automations
         .get(input.automationId, scope)
@@ -2224,7 +2220,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (deps.automations === undefined) {
         return yield* failTool("Automation proposal creation is unavailable.");
       }
-      const input = yield* decodeArgs(AgentControlMcpProposeAutomationCancelInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpProposeAutomationCancelInput, args);
       const scope = yield* automationScope(session);
       const current = yield* deps.automations
         .get(input.automationId, scope)
@@ -2253,7 +2249,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     Effect.gen(function* () {
       if (deps.diagnostics === undefined)
         return yield* failTool("Operational reads are unavailable.");
-      const input = yield* decodeArgs(AgentControlMcpOperationalReadInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpOperationalReadInput, args);
       const scope = yield* sessionScope(session);
       return { diagnostics: deps.diagnostics, input, scope };
     });
@@ -2286,7 +2282,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
   const diagnosticsSummary = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       if (deps.diagnostics === undefined) return yield* failTool("Diagnostics are unavailable.");
-      const input = yield* decodeArgs(AgentControlMcpDiagnosticsSummaryInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpDiagnosticsSummaryInput, args);
       const scope = yield* sessionScope(session);
       if (
         (input.projectId !== undefined && input.projectId !== scope.projectId) ||
@@ -2302,7 +2298,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
 
   const usageLimits = (args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpUsageLimitsInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpUsageLimitsInput, args);
       const providers = yield* deps.getProviders;
       const hubs = yield* (deps.getCliProxyHubs ?? Effect.succeed([])).pipe(
         Effect.mapError(() => new ToolFailure("Usage limits read failed.")),
@@ -2321,7 +2317,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
 
   const listProjects = (_session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decodeArgs(AgentControlMcpListProjectsInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpListProjectsInput, args);
       const limit = clampLimit(
         input.limit,
         AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
@@ -2351,17 +2347,17 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     });
 
   const listThreads = (_session: AgentControlSessionRecord, args: unknown) =>
-    decodeArgs(AgentControlMcpListThreadsInput, args).pipe(
+    decodeToolArgs(AgentControlMcpListThreadsInput, args).pipe(
       Effect.flatMap((input) => listThreadsPage(deps.projections, input)),
     );
 
   const readThread = (_session: AgentControlSessionRecord, args: unknown) =>
-    decodeArgs(AgentControlMcpReadThreadInput, args).pipe(
+    decodeToolArgs(AgentControlMcpReadThreadInput, args).pipe(
       Effect.flatMap((input) => readThreadPage(deps.projections, input)),
     );
 
   const readControlRequest = (session: AgentControlSessionRecord, args: unknown) =>
-    decodeArgs(AgentControlMcpReadControlRequestInput, args).pipe(
+    decodeToolArgs(AgentControlMcpReadControlRequestInput, args).pipe(
       Effect.flatMap((input) =>
         readControlRequestReceipt(deps.proposals, input.proposalId, (proposal) =>
           proposalVisibleToSession(proposal, session),
@@ -2370,7 +2366,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
     );
 
   const waitForControlRequest = (session: AgentControlSessionRecord, args: unknown) =>
-    decodeArgs(AgentControlMcpWaitForControlRequestInput, args).pipe(
+    decodeToolArgs(AgentControlMcpWaitForControlRequestInput, args).pipe(
       Effect.flatMap((input) =>
         waitForControlRequestReceipt({
           proposals: deps.proposals,

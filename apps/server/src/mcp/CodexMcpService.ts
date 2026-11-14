@@ -51,6 +51,7 @@ import {
   applyProviderMcpSecretMutations,
   providerMcpSecretPresence,
 } from "./ProviderMcpSecrets.ts";
+import { asRecord } from "@ryco/shared/unknownValue";
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
@@ -201,13 +202,6 @@ function sortProviderSupport(left: McpProviderSupport, right: McpProviderSupport
     left.driver.localeCompare(right.driver) ||
     left.instanceId.localeCompare(right.instanceId)
   );
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
 }
 
 function asStringArray(value: unknown): string[] {

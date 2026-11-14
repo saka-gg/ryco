@@ -11,6 +11,7 @@ import { isElectron } from "~/env";
 import { configuredHostedAppUrl } from "~/hostedPairing";
 
 import { toastManager } from "../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * The site a copied link opens: this one in a browser (the Hub, or a node's own
@@ -77,7 +78,7 @@ export async function copyPromptLink(link: string): Promise<void> {
     toastManager.add({
       type: "error",
       title: "Could not copy the prompt link",
-      description: error instanceof Error ? error.message : "An error occurred.",
+      description: errorMessage(error, "An error occurred."),
     });
   }
 }

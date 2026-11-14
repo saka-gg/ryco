@@ -78,9 +78,14 @@ export function inferImageExtension(input: { mimeType: string; fileName?: string
   return ".bin";
 }
 
-const PNG_MAGIC_BYTES = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+/** `\x89PNG\r\n\x1a\n`, the eight bytes every PNG opens with. */
+export const PNG_SIGNATURE: ReadonlyArray<number> = [
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+];
 const JPEG_MAGIC_BYTES = [0xff, 0xd8, 0xff];
-const GIF_MAGIC_BYTES = [0x47, 0x49, 0x46, 0x38];
+/** `GIF87a` and `GIF89a`, the only two GIF versions. */
+const GIF87A_MAGIC_BYTES = [0x47, 0x49, 0x46, 0x38, 0x37, 0x61];
+const GIF89A_MAGIC_BYTES = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61];
 const BMP_MAGIC_BYTES = [0x42, 0x4d];
 const ICO_MAGIC_BYTES = [0x00, 0x00, 0x01, 0x00];
 const RIFF_MAGIC_BYTES = [0x52, 0x49, 0x46, 0x46];
@@ -113,9 +118,11 @@ function hasMagicBytes(bytes: Uint8Array, magic: ReadonlyArray<number>, offset =
  * refused rather than guessed at.
  */
 export function detectRasterImageMimeType(bytes: Uint8Array): string | null {
-  if (hasMagicBytes(bytes, PNG_MAGIC_BYTES)) return "image/png";
+  if (hasMagicBytes(bytes, PNG_SIGNATURE)) return "image/png";
   if (hasMagicBytes(bytes, JPEG_MAGIC_BYTES)) return "image/jpeg";
-  if (hasMagicBytes(bytes, GIF_MAGIC_BYTES)) return "image/gif";
+  if (hasMagicBytes(bytes, GIF87A_MAGIC_BYTES) || hasMagicBytes(bytes, GIF89A_MAGIC_BYTES)) {
+    return "image/gif";
+  }
   if (hasMagicBytes(bytes, RIFF_MAGIC_BYTES) && hasMagicBytes(bytes, WEBP_MAGIC_BYTES, 8)) {
     return "image/webp";
   }
@@ -128,4 +135,16 @@ export function detectRasterImageMimeType(bytes: Uint8Array): string | null {
     return ISO_BASE_MEDIA_IMAGE_BRANDS[brand] ?? null;
   }
   return null;
+}
+
+/**
+ * {@link detectRasterImageMimeType}, limited to the types one call site accepts (its own
+ * policy); `null` for bytes of any other type.
+ */
+export function detectAllowedRasterImageMimeType(
+  bytes: Uint8Array,
+  allowed: ReadonlySet<string>,
+): string | null {
+  const detected = detectRasterImageMimeType(bytes);
+  return detected !== null && allowed.has(detected) ? detected : null;
 }

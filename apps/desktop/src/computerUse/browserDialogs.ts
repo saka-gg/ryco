@@ -5,7 +5,7 @@ import type {
   BrowserHandledDialog,
   BrowserPendingDialog,
 } from "./browser.ts";
-import { truncateUtf8 } from "./browserDiagnostics.ts";
+import { truncateUtf8 } from "@ryco/shared/utf8Truncate";
 
 export const MAX_DIALOGS_PER_COMMAND = 20;
 /**
@@ -27,7 +27,7 @@ const dialogText = (value: unknown): string =>
       // oxlint-disable-next-line no-control-regex -- page text.
       .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " "),
     MAX_DIALOG_TEXT_BYTES,
-  );
+  ).value;
 
 /** Page-supplied dialog data (CDP params or shim records), bounded and typed. */
 export function normalizeDialog(opening: Record<string, unknown>): BrowserPendingDialog {

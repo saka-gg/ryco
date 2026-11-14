@@ -9,6 +9,7 @@ import { Textarea } from "../../ui/textarea";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { ProjectSection, useSavedFlash } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Instructions appended to every agent prompt in this project. A draft is
@@ -37,7 +38,7 @@ export function ProjectInstructionsSection({ member, canEdit }: ProjectSectionPr
         stackedThreadToast({
           type: "error",
           title: "Failed to save the instructions",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     } finally {

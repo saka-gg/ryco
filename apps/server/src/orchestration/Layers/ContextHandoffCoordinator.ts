@@ -7,7 +7,6 @@ import {
   CONTEXT_HANDOFF_CONTEXT_VERSION,
   CONTEXT_HANDOFF_ERROR_MAX_CHARS,
   CONTEXT_HANDOFF_SCHEMA_VERSION,
-  CommandId,
   ContextHandoffActivityPayload,
   type ContextHandoffInspectionSummaryMetadata,
   DEFAULT_AGENT_TOKEN_MODE,
@@ -28,6 +27,7 @@ import { DEFAULT_CONTEXT_HANDOFF_INPUT_BUDGET } from "@ryco/shared/contextWindow
 import { getModelDisplayLabel } from "@ryco/shared/model";
 import { Cause, Effect, Layer, Option, Ref, Schema } from "effect";
 
+import { serverCommandId } from "../commandOrigin.ts";
 import { ModelManifest, BUNDLED_MODEL_MANIFEST } from "../../provider/ModelManifest.ts";
 import { resolveHandoffBudgetFromManifest } from "../../provider/ModelContextWindow.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
@@ -119,9 +119,6 @@ function deliveryArtifactFromRecord(
     Schema.decodeUnknownOption(ContextHandoffDeliveryArtifact)(record.deliveryArtifact),
   );
 }
-
-const serverCommandId = (tag: string): CommandId =>
-  CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
 const nowIso = () => new Date().toISOString();
 
@@ -488,7 +485,12 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       createdAt: nowIso(),
       // Putting the source back is not new thread activity, even when it failed.
       wakesSnoozed: false,
-    }).pipe(Effect.catch(() => Effect.void));
+    }).pipe(
+      Effect.ignore({
+        log: "Warn",
+        message: "Context handoff could not put the source session back",
+      }),
+    );
   });
 
   /** Stops and retires the record's target epoch, if reserved, then puts the source back. */
@@ -507,12 +509,18 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         runtimeMode: input.thread.runtimeMode,
       });
       if (targetBinding) {
-        yield* providerService
-          .stopSessionBinding(targetBinding)
-          .pipe(Effect.catch(() => Effect.void));
-        yield* providerService
-          .retireSessionBinding(targetBinding)
-          .pipe(Effect.catch(() => Effect.void));
+        yield* providerService.stopSessionBinding(targetBinding).pipe(
+          Effect.ignore({
+            log: "Warn",
+            message: "Context handoff could not stop its target session",
+          }),
+        );
+        yield* providerService.retireSessionBinding(targetBinding).pipe(
+          Effect.ignore({
+            log: "Warn",
+            message: "Context handoff could not retire its target session",
+          }),
+        );
       }
       yield* restoreSource({
         thread: input.thread,
@@ -686,9 +694,12 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         yield* increment(contextHandoffsTotal, { status: "consumed" });
       }
       if (input.sourceBinding) {
-        yield* providerService
-          .stopSessionBinding(input.sourceBinding)
-          .pipe(Effect.catch(() => Effect.void));
+        yield* providerService.stopSessionBinding(input.sourceBinding).pipe(
+          Effect.ignore({
+            log: "Warn",
+            message: "Context handoff could not stop its source session",
+          }),
+        );
       }
     },
   );

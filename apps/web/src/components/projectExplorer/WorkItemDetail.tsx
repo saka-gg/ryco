@@ -1258,9 +1258,7 @@ function ImproveDescriptionDialog(props: {
           </div>
           {props.generateError ? (
             <p className="text-destructive text-xs">
-              {props.generateError instanceof Error
-                ? props.generateError.message
-                : "AI draft generation failed."}
+              {errorMessage(props.generateError, "AI draft generation failed.")}
             </p>
           ) : null}
           <Textarea

@@ -14,6 +14,7 @@ import type { ShareableServerSettingKey } from "@ryco/shared/settingsSharing";
 import { SettingsRow } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
 import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
+import { errorMessage } from "~/lib/errorMessage";
 
 const INHERIT = "inherit";
 
@@ -117,7 +118,7 @@ export function ProjectOverrideSelectEditor<Value extends string>({
       if (target) await updateEnvironmentServerSettings(target.environmentId, patch);
       else applySettingsUpdated(await ensureLocalApi().server.updateSettings(patch));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : spec.saveFailed);
+      setError(errorMessage(cause, spec.saveFailed));
     }
     setSaving(false);
   }

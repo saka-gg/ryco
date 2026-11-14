@@ -65,6 +65,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { errorMessage } from "~/lib/errorMessage";
 
 type TestHub = (input: CliProxyTestHubInput) => Promise<CliProxyTestHubResult>;
 
@@ -120,7 +121,7 @@ export function CliProxyHubSettings() {
   const runWrite = (patch: ServerSettingsPatch) => {
     setError(null);
     void writePatch(patch).catch((cause: unknown) =>
-      setError(cause instanceof Error ? cause.message : "Could not save the hub. Try again."),
+      setError(errorMessage(cause, "Could not save the hub. Try again.")),
     );
   };
 
@@ -409,7 +410,7 @@ function CliProxyHubDialog(props: {
           if (!current()) return;
           setTest({
             status: "failed",
-            message: cause instanceof Error ? cause.message : "The hub could not be reached.",
+            message: errorMessage(cause, "The hub could not be reached."),
           });
         },
       );
@@ -430,7 +431,7 @@ function CliProxyHubDialog(props: {
       setSaving(false);
       openChange(false);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "Could not save the hub.";
+      const message = errorMessage(cause, "Could not save the hub.");
       // A save that fails after its dialog closed is reported by the section instead.
       if (formSession.current !== session) return props.onLateSaveError(message);
       setSaving(false);

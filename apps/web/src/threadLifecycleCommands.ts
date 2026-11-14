@@ -15,14 +15,12 @@ import { readLocalApi } from "./localApi";
 import { sidebarUndo } from "./sidebarUndo";
 import type { ThreadBatchAction } from "./threadLifecycleBatch";
 import type { SidebarThreadSummary } from "./types";
+import { errorMessage } from "~/lib/errorMessage";
 
 // The lifecycle changes every surface makes (Inbox rows and menus, the project
 // sidebar, shortcuts, the command palette). Each goes through sidebarUndo, so
 // receipts, Undo and the owning node's checks stay in one place. Failures are
 // shown here.
-
-const errorDescription = (error: unknown, fallback: string) =>
-  error instanceof Error ? error.message : fallback;
 
 const settlementCommand = (threadId: ThreadId, settled: boolean) =>
   settled
@@ -55,7 +53,7 @@ export async function dispatchThreadSettlement(
     toastManager.add({
       type: "error",
       title: failureTitle,
-      description: errorDescription(error, "The request failed."),
+      description: errorMessage(error, "The request failed."),
     });
     return false;
   }
@@ -80,7 +78,7 @@ export async function dispatchThreadSnooze(
     toastManager.add({
       type: "error",
       title: "Could not update snooze",
-      description: errorDescription(error, "The request failed."),
+      description: errorMessage(error, "The request failed."),
     });
   }
 }
@@ -112,7 +110,7 @@ export async function dispatchThreadHidden(
     toastManager.add({
       type: "error",
       title,
-      description: errorDescription(error, "The request failed."),
+      description: errorMessage(error, "The request failed."),
     });
   }
 }
@@ -130,7 +128,7 @@ export async function requestCustomSnooze(): Promise<string | null> {
     toastManager.add({
       type: "error",
       title: "Could not open custom snooze",
-      description: errorDescription(error, "The request failed."),
+      description: errorMessage(error, "The request failed."),
     });
     return null;
   }
@@ -154,7 +152,7 @@ async function dispatchThreadBatch(
       stackedThreadToast({
         type: "error",
         title: "Could not update threads",
-        description: errorDescription(error, "The request failed."),
+        description: errorMessage(error, "The request failed."),
       }),
     );
     return null;
@@ -209,7 +207,7 @@ export async function attemptThreadArchive(input: {
       stackedThreadToast({
         type: "error",
         title: "Failed to archive thread",
-        description: errorDescription(error, "An error occurred."),
+        description: errorMessage(error, "An error occurred."),
       }),
     );
   }

@@ -25,6 +25,7 @@ import {
 import { SUBMIT_SHORTCUT_LABEL } from "../threads/ReplyComposer";
 import { commentSnippet } from "../threads/reviewThread.logic";
 import { lineCommentTargetLabel } from "./pullRequestFiles.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 const CONFIRM_WINDOW_MS = 4000;
 
@@ -136,7 +137,7 @@ export function ReviewSubmitPopover(props: {
       );
       props.onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not submit the review.");
+      setError(errorMessage(cause, "Could not submit the review."));
     }
   };
 

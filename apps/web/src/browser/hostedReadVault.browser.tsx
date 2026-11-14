@@ -66,4 +66,29 @@ describe("remembered browser encrypted storage", () => {
     expect(await vault.read(owner, "large")).toBeNull();
     await vault.purge(owner.id);
   });
+  it("opens again after a failed first open instead of staying unavailable", async () => {
+    const name = `read-cache-test-${crypto.randomUUID()}`;
+    // A newer database under another name: opening it at version 1 fails with VersionError.
+    const newer = `${name}-newer`;
+    await new Promise<void>((resolve, reject) => {
+      const operation = indexedDB.open(newer, 2);
+      operation.onsuccess = () => {
+        operation.result.close();
+        resolve();
+      };
+      operation.onerror = () => reject(operation.error);
+    });
+    let opens = 0;
+    const factory = {
+      open: (database: string, version?: number) =>
+        indexedDB.open(opens++ === 0 ? newer : database, version),
+    } as IDBFactory;
+    const vault = createHostedReadVault(factory, crypto, location.origin, name);
+    await expect(vault.account("account-a", true)).rejects.toThrow();
+    const owner = (await vault.account("account-a", true))!;
+    await vault.write(owner, "thread", { text: "after retry" });
+    expect(await vault.read(owner, "thread")).toEqual({ text: "after retry" });
+    await vault.purge(owner.id);
+    indexedDB.deleteDatabase(newer);
+  });
 });
