@@ -4870,11 +4870,14 @@ export const STOP_BACKGROUND_TASK_ERROR_MESSAGES = {
   "stop-failed": "Stopping the background task failed.",
 } as const;
 
+/** Typed like `ThreadId`, decoded as before (any string), so older peers stay compatible. */
+const BackgroundTaskErrorThreadId = Schema.String.pipe(Schema.brand("ThreadId"));
+
 export class OrchestrationStopBackgroundTaskError extends Schema.TaggedError<OrchestrationStopBackgroundTaskError>()(
   "OrchestrationStopBackgroundTaskError",
   {
     reason: Schema.Literals(["unsupported", "session-not-found", "stop-failed"]),
-    threadId: Schema.String,
+    threadId: BackgroundTaskErrorThreadId,
     taskId: Schema.String,
   },
 ) {
@@ -4924,7 +4927,7 @@ export class OrchestrationMessageBackgroundTaskError extends Schema.TaggedError<
       "too-many-pending",
       "message-failed",
     ]),
-    threadId: Schema.String,
+    threadId: BackgroundTaskErrorThreadId,
     taskId: Schema.String,
   },
 ) {

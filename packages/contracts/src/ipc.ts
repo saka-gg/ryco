@@ -1,4 +1,4 @@
-import type { EffectiveProjectPreferences } from "./settings.ts";
+import type { ColorMode, EffectiveProjectPreferences } from "./settings.ts";
 import type { DesktopWindowMaterial } from "./windowMaterial.ts";
 import type {
   DesktopNotificationBadge,
@@ -419,7 +419,7 @@ export type DesktopUpdateStatus =
   | "downloaded"
   | "error";
 
-export type DesktopTheme = "light" | "dark" | "system";
+export type DesktopTheme = ColorMode;
 export type DesktopUpdateChannel = "latest" | "nightly";
 export type DesktopAppStageLabel = "Beta" | "Dev" | "Nightly";
 

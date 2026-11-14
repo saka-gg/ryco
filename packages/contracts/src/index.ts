@@ -1,4 +1,5 @@
 export * from "./baseSchemas.ts";
+export * from "./spaceRole.ts";
 export * from "./auth.ts";
 export * from "./directRouteIdentity.ts";
 export * from "./environment.ts";

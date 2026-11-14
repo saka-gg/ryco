@@ -1,13 +1,13 @@
 // The Settings tab's per-machine pages: which machines they list and what each page's row
 // says. Pure, so the test can hold the summaries.
 
-import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
+import type { EnvironmentId, NodeSessionRole, ServerConfig } from "@ryco/contracts";
 
 export interface MachineListEntry {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly connectionState: "connected" | "reconnecting" | "offline" | "read-only";
-  readonly role?: "viewer" | "operator" | "owner" | "client";
+  readonly role?: NodeSessionRole;
 }
 
 /** The Machine page's row values: providers turned on, and whether Agent Control is. */

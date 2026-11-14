@@ -61,6 +61,11 @@
       "import": "./src/relayConstants.ts",
       "require": "./src/relayConstants.ts"
     },
+    "./space-role": {
+      "types": "./src/spaceRole.ts",
+      "import": "./src/spaceRole.ts",
+      "require": "./src/spaceRole.ts"
+    },
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts",

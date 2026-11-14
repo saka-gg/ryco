@@ -1,3 +1,4 @@
+import { SpaceRole } from "@ryco/contracts/space-role";
 import { Schema } from "effect";
 
 /**
@@ -15,7 +16,7 @@ export const AuthAccessLink = Schema.Struct({
   enrollmentId: Schema.NullOr(Schema.String),
   /** Base64url `ryco.client-key.v1` fingerprint of the device's identity key. */
   clientFingerprint: Schema.String,
-  role: Schema.Literals(["viewer", "operator", "owner"]),
+  role: SpaceRole,
   /** The Hub account the linking grant named (`account-enrolled`); absent before nodes kept it. */
   accountId: Schema.optionalKey(Schema.String),
 });

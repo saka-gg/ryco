@@ -122,6 +122,10 @@ export const ModelFavorite = Schema.Struct({
 });
 export type ModelFavorite = typeof ModelFavorite.Type;
 
+/** The app's color mode: a fixed light or dark theme, or the system's. */
+export const ColorMode = Schema.Literals(["system", "light", "dark"]);
+export type ColorMode = typeof ColorMode.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   // Local lifecycle metadata. Optional so restoring default preferences preserves it.
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
