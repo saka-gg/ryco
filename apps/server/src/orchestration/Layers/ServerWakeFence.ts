@@ -151,7 +151,9 @@ export const makeServerWakeFence = Effect.gen(function* () {
         nowMs - lastReleasePassMs < RELEASE_PASS_MIN_INTERVAL_MS
       )
         ? // A failed read frees nothing; the budget stays as it was.
-          releaseColdSlots(nowMs).pipe(Effect.catch(() => Effect.void))
+          releaseColdSlots(nowMs).pipe(
+            Effect.ignore({ log: "Debug", message: "Wake fence could not read cold slots" }),
+          )
         : Effect.void,
     );
 

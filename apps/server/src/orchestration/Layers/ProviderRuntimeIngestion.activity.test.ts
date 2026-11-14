@@ -163,7 +163,7 @@ describe("runtimeEventToActivities Claude Fast mode state", () => {
             requested: true,
           },
         },
-        { turnId: TurnId.make("turn-1"), sessionSequence: 12 },
+        { turnId: TurnId.make("turn-1") },
       ),
     ).toEqual([
       {
@@ -180,7 +180,6 @@ describe("runtimeEventToActivities Claude Fast mode state", () => {
           instanceId: "claude-hub",
         },
         turnId: null,
-        sequence: 12,
       },
     ]);
   });
@@ -654,7 +653,7 @@ describe("runtimeEventToActivities prompt suggestion", () => {
     } satisfies ProviderRuntimeEvent);
 
   it("projects the thread's one suggestion activity, tied to the completed turn", () => {
-    expect(suggested({ turnId: TurnId.make("turn-2"), sessionSequence: 7 })).toEqual([
+    expect(suggested({ turnId: TurnId.make("turn-2") })).toEqual([
       {
         id: "prompt-suggestion:thread-1:latest",
         createdAt: base.createdAt,
@@ -664,7 +663,6 @@ describe("runtimeEventToActivities prompt suggestion", () => {
         summary: "Suggested next prompt",
         payload: { suggestion: "run the tests again" },
         turnId: "turn-2",
-        sequence: 7,
       },
     ]);
   });
