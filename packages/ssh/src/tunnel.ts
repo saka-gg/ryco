@@ -35,11 +35,13 @@ import {
   buildSshHostSpecEffect,
   collectProcessOutput,
   getLastNonEmptyOutputLine,
+  normalizeSshErrorMessage,
   remoteStateKey,
   resolveSshTarget,
   RYCO_CLI_PACKAGE_NAME,
   runSshCommand,
   SSH_COMMAND,
+  sshTargetLogFields,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -114,15 +116,6 @@ function makeSshTunnelCancelledError(target: DesktopSshEnvironmentTarget): SshCo
     stderr: "",
     message: `SSH environment connection was cancelled for ${target.alias || target.hostname}.`,
   });
-}
-
-function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
-  return {
-    alias: target.alias,
-    hostname: target.hostname,
-    username: target.username,
-    port: target.port,
-  };
 }
 
 function sshRunnerLogFields(runner: RemoteRycoRunnerOptions | undefined) {
@@ -200,11 +193,6 @@ const RemoteHttpError = Schema.Struct({
 const decodeRemoteLaunchResult = Schema.decodeEffect(fromLenientJson(RemoteLaunchResult));
 const decodeRemotePairingResult = Schema.decodeEffect(fromLenientJson(RemotePairingResult));
 const decodeRemoteHttpError = Schema.decodeEffect(Schema.fromJsonString(RemoteHttpError));
-
-export function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): string {
-  const cleaned = stderr.trim();
-  return cleaned.length > 0 ? cleaned : fallbackMessage;
-}
 
 function stripTrailingNewlines(value: string): string {
   return value.replace(/\n+$/u, "");
@@ -1146,10 +1134,10 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
         command: tunnelCommand,
         exitCode,
         stderr,
-        message: normalizeSshErrorMessage(
+        message: normalizeSshErrorMessage({
           stderr,
-          `SSH tunnel exited unexpectedly for ${input.resolvedTarget.alias} (exit ${exitCode}).`,
-        ),
+          fallbackMessage: `SSH tunnel exited unexpectedly for ${input.resolvedTarget.alias} (exit ${exitCode}).`,
+        }),
       });
       return Effect.logWarning("ssh.tunnel.process.exited", {
         ...sshTargetLogFields(input.resolvedTarget),
