@@ -27,7 +27,7 @@ import type {
 import { ChangeRequestActivity } from "@ryco/contracts/change-request-review";
 import { ChangeRequest, SourceControlChangeRequestDetail } from "@ryco/contracts/source-control";
 import * as Schema from "effect/Schema";
-import { KEY_SEP } from "@ryco/client-runtime/rpc";
+import { KEY_SEP, type KeyedQueryEnabledInput } from "@ryco/client-runtime/rpc";
 import type {
   ChangeRequestRefreshScope,
   PullRequestsStateFilter,
@@ -96,22 +96,28 @@ function listKey(input: PullRequestListInput): string {
   }${KEY_SEP}${input.limit}`;
 }
 
+type EnabledPullRequestListInput = KeyedQueryEnabledInput<
+  PullRequestListInput,
+  "environmentId" | "cwd"
+>;
+
 export const pullRequestListQuery = pullRequestCache.defineQuery<
   PullRequestListInput,
-  ReadonlyArray<ChangeRequest>
+  ReadonlyArray<ChangeRequest>,
+  EnabledPullRequestListInput
 >({
   label: "list",
   staleTime: LIST_STALE_TIME_MS,
   retainedKeyLimit: PULL_REQUEST_LIST_RETAINED_KEY_LIMIT,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledPullRequestListInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: listKey,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   persist: SAVED_LIST,
   run: (input) =>
     runWithRetry(() =>
-      sourceControlClient(input.environmentId as EnvironmentId).listChangeRequests({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).listChangeRequests({
+        cwd: input.cwd,
         state: input.state,
         limit: input.limit,
         ...(input.involvement ? { involvement: input.involvement } : {}),
@@ -123,6 +129,11 @@ export const pullRequestListQuery = pullRequestCache.defineQuery<
 // One pull request: detail, activity, diff
 // ---------------------------------------------------------------------------
 
+type EnabledPullRequestInput = KeyedQueryEnabledInput<
+  PullRequestInput,
+  "environmentId" | "cwd" | "number"
+>;
+
 export interface PullRequestInput {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
@@ -130,7 +141,9 @@ export interface PullRequestInput {
   readonly enabled?: boolean;
 }
 
-function pullRequestEnabled(input: PullRequestInput): boolean {
+function pullRequestEnabled<T extends PullRequestInput>(
+  input: T,
+): input is KeyedQueryEnabledInput<T, "environmentId" | "cwd" | "number"> {
   return (
     (input.enabled ?? true) &&
     input.environmentId !== null &&
@@ -155,20 +168,21 @@ export function requestFreshPullRequestDetail(input: PullRequestInput): void {
 
 export const pullRequestDetailQuery = pullRequestCache.defineQuery<
   PullRequestInput,
-  SourceControlChangeRequestDetail
+  SourceControlChangeRequestDetail,
+  EnabledPullRequestInput
 >({
   label: "detail",
   staleTime: DETAIL_STALE_TIME_MS,
   retainedKeyLimit: PULL_REQUEST_DETAIL_RETAINED_KEY_LIMIT,
   isEnabled: pullRequestEnabled,
   buildKey: pullRequestKey,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   persist: SAVED_DETAIL,
   run: (input) => {
     const fresh = freshDetailKeys.delete(pullRequestKey(input));
     return runWithRetry(() =>
-      sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDetail({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).getChangeRequestDetail({
+        cwd: input.cwd,
         reference: String(input.number),
         fullContent: true,
         ...(fresh ? { fresh: true } : {}),
@@ -179,19 +193,20 @@ export const pullRequestDetailQuery = pullRequestCache.defineQuery<
 
 export const pullRequestActivityQuery = pullRequestCache.defineQuery<
   PullRequestInput,
-  ChangeRequestActivity
+  ChangeRequestActivity,
+  EnabledPullRequestInput
 >({
   label: "activity",
   staleTime: DETAIL_STALE_TIME_MS,
   retainedKeyLimit: PULL_REQUEST_DETAIL_RETAINED_KEY_LIMIT,
   isEnabled: pullRequestEnabled,
   buildKey: pullRequestKey,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   persist: SAVED_ACTIVITY,
   run: (input) =>
     runWithRetry(() =>
-      sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestActivity({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).getChangeRequestActivity({
+        cwd: input.cwd,
         reference: String(input.number),
       }),
     ),
@@ -203,17 +218,26 @@ export interface PullRequestDiffInput extends PullRequestInput {
 }
 
 /** The raw patch; each screen that reads it splits it (`splitPullRequestPatch`). */
-export const pullRequestDiffQuery = pullRequestCache.defineQuery<PullRequestDiffInput, string>({
+type EnabledPullRequestDiffInput = KeyedQueryEnabledInput<
+  PullRequestDiffInput,
+  "environmentId" | "cwd" | "number"
+>;
+
+export const pullRequestDiffQuery = pullRequestCache.defineQuery<
+  PullRequestDiffInput,
+  string,
+  EnabledPullRequestDiffInput
+>({
   label: "diff",
   staleTime: DIFF_STALE_TIME_MS,
   retainedKeyLimit: PULL_REQUEST_DIFF_RETAINED_KEY_LIMIT,
   isEnabled: pullRequestEnabled,
   buildKey: (input) => `${pullRequestKey(input)}${KEY_SEP}${input.headSha ?? "head"}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   // A refused (too large) diff is not retried: the host will refuse it again.
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDiff({
-      cwd: input.cwd as string,
+    sourceControlClient(input.environmentId).getChangeRequestDiff({
+      cwd: input.cwd,
       reference: String(input.number),
       ...(input.headSha ? { expectedHeadSha: input.headSha } : {}),
     }),
@@ -227,13 +251,20 @@ export const pullRequestDiffQuery = pullRequestCache.defineQuery<PullRequestDiff
 // dropped with the node, counted and cleared in Storage. Never saved on the
 // device.
 
+type EnabledPullRequestRepositoryInput = KeyedQueryEnabledInput<
+  PullRequestRepositoryInput,
+  "environmentId" | "cwd"
+>;
+
 export interface PullRequestRepositoryInput {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly enabled?: boolean;
 }
 
-function repositoryEnabled(input: PullRequestRepositoryInput): boolean {
+function repositoryEnabled(
+  input: PullRequestRepositoryInput,
+): input is EnabledPullRequestRepositoryInput {
   return (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null;
 }
 
@@ -243,36 +274,38 @@ function repositoryKey(input: PullRequestRepositoryInput): string {
 
 export const pullRequestRepositoryPeopleQuery = pullRequestCache.defineQuery<
   PullRequestRepositoryInput,
-  ReadonlyArray<SourceControlAssigneeCandidate>
+  ReadonlyArray<SourceControlAssigneeCandidate>,
+  EnabledPullRequestRepositoryInput
 >({
   label: "people",
   staleTime: REPOSITORY_STALE_TIME_MS,
   retainedKeyLimit: PULL_REQUEST_REPOSITORY_RETAINED_KEY_LIMIT,
   isEnabled: repositoryEnabled,
   buildKey: repositoryKey,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   run: (input) =>
     runWithRetry(() =>
-      sourceControlClient(input.environmentId as EnvironmentId).listIssueAssignees({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).listIssueAssignees({
+        cwd: input.cwd,
       }),
     ),
 });
 
 export const pullRequestRepositoryLabelsQuery = pullRequestCache.defineQuery<
   PullRequestRepositoryInput,
-  ReadonlyArray<SourceControlLabel>
+  ReadonlyArray<SourceControlLabel>,
+  EnabledPullRequestRepositoryInput
 >({
   label: "labels",
   staleTime: REPOSITORY_STALE_TIME_MS,
   retainedKeyLimit: PULL_REQUEST_REPOSITORY_RETAINED_KEY_LIMIT,
   isEnabled: repositoryEnabled,
   buildKey: repositoryKey,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   run: (input) =>
     runWithRetry(() =>
-      sourceControlClient(input.environmentId as EnvironmentId).listIssueLabels({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).listIssueLabels({
+        cwd: input.cwd,
       }),
     ),
 });

@@ -13,7 +13,7 @@ import {
   SourceControlDiscoveryResult,
   SourceControlProviderInfo,
 } from "@ryco/contracts/source-control";
-import { KEY_SEP } from "@ryco/client-runtime/rpc";
+import { KEY_SEP, type KeyedQueryEnabledInput } from "@ryco/client-runtime/rpc";
 import * as Schema from "effect/Schema";
 
 import { ensureEnvironmentApi } from "../connection/environmentApi";
@@ -33,7 +33,12 @@ export interface CheckoutInput {
   readonly enabled?: boolean;
 }
 
-function checkoutEnabled(input: CheckoutInput): boolean {
+type EnabledCheckoutInput<T extends CheckoutInput = CheckoutInput> = KeyedQueryEnabledInput<
+  T,
+  "environmentId" | "cwd"
+>;
+
+function checkoutEnabled<T extends CheckoutInput>(input: T): input is EnabledCheckoutInput<T> {
   return (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null;
 }
 
@@ -45,18 +50,22 @@ const checkout = {
   retainedKeyLimit: CHECKOUT_RETAINED_KEY_LIMIT,
   isEnabled: checkoutEnabled,
   buildKey: checkoutKey,
-  resolveEnvironmentId: (input: CheckoutInput) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input: EnabledCheckoutInput) => input.environmentId,
 } as const;
 
 /** The checkout's full Git status; the status stream writes each push. */
-export const vcsStatusQuery = sourceControlCache.defineQuery<CheckoutInput, VcsStatusResult>({
+export const vcsStatusQuery = sourceControlCache.defineQuery<
+  CheckoutInput,
+  VcsStatusResult,
+  EnabledCheckoutInput
+>({
   ...checkout,
   label: "status",
   staleTime: 5_000,
   persist: schemaSavedQueryCodec(VcsStatusResult, 1),
   run: (input) =>
-    ensureEnvironmentApi(input.environmentId as EnvironmentId).vcs.refreshStatus({
-      cwd: input.cwd as string,
+    ensureEnvironmentApi(input.environmentId).vcs.refreshStatus({
+      cwd: input.cwd,
     }),
 });
 
@@ -71,7 +80,8 @@ export interface SourceControlProviderAnswer {
  */
 export const sourceControlProviderMirror = sourceControlCache.defineSavedMirror<
   CheckoutInput,
-  SourceControlProviderAnswer
+  SourceControlProviderAnswer,
+  EnabledCheckoutInput
 >({
   ...checkout,
   label: "provider",
@@ -84,7 +94,8 @@ export const sourceControlProviderMirror = sourceControlCache.defineSavedMirror<
 /** The last staging review, shown while the staging controller reads again. */
 export const localChangesMirror = sourceControlCache.defineSavedMirror<
   CheckoutInput,
-  GitLocalChangesResult
+  GitLocalChangesResult,
+  EnabledCheckoutInput
 >({
   ...checkout,
   label: "changes",
@@ -92,15 +103,19 @@ export const localChangesMirror = sourceControlCache.defineSavedMirror<
 });
 
 /** The first page of refs (no search): the branch picker's list and compare's choices. */
-export const vcsRefsQuery = sourceControlCache.defineQuery<CheckoutInput, VcsListRefsResult>({
+export const vcsRefsQuery = sourceControlCache.defineQuery<
+  CheckoutInput,
+  VcsListRefsResult,
+  EnabledCheckoutInput
+>({
   ...checkout,
   label: "refs",
   staleTime: 15_000,
   persist: schemaSavedQueryCodec(VcsListRefsResult, 1),
   run: (input) =>
     runWithRetry(() =>
-      ensureEnvironmentApi(input.environmentId as EnvironmentId).vcs.listRefs({
-        cwd: input.cwd as string,
+      ensureEnvironmentApi(input.environmentId).vcs.listRefs({
+        cwd: input.cwd,
         limit: REF_PAGE_SIZE,
       }),
     ),
@@ -111,16 +126,21 @@ export interface RefSearchInput extends CheckoutInput {
 }
 
 /** A typed ref search: asked of the node, never saved. */
-export const vcsRefSearchQuery = sourceControlCache.defineQuery<RefSearchInput, VcsListRefsResult>({
+export const vcsRefSearchQuery = sourceControlCache.defineQuery<
+  RefSearchInput,
+  VcsListRefsResult,
+  EnabledCheckoutInput<RefSearchInput>
+>({
   ...checkout,
   label: "ref-search",
   staleTime: 15_000,
   retainedKeyLimit: 4,
-  isEnabled: (input) => checkoutEnabled(input) && input.query.length > 0,
+  isEnabled: (input): input is EnabledCheckoutInput<RefSearchInput> =>
+    checkoutEnabled(input) && input.query.length > 0,
   buildKey: (input) => `${checkoutKey(input)}${KEY_SEP}${input.query}`,
   run: (input) =>
-    ensureEnvironmentApi(input.environmentId as EnvironmentId).vcs.listRefs({
-      cwd: input.cwd as string,
+    ensureEnvironmentApi(input.environmentId).vcs.listRefs({
+      cwd: input.cwd,
       limit: REF_PAGE_SIZE,
       query: input.query,
     }),
@@ -131,19 +151,22 @@ export interface NodeInput {
 }
 
 /** The hosts the node is signed in to (publish): the node's recent answer, then saved. */
+type EnabledNodeInput = KeyedQueryEnabledInput<NodeInput, "environmentId">;
+
 export const sourceControlDiscoveryQuery = sourceControlCache.defineQuery<
   NodeInput,
-  SourceControlDiscoveryResult
+  SourceControlDiscoveryResult,
+  EnabledNodeInput
 >({
   label: "discovery",
   staleTime: 60_000,
   retainedKeyLimit: 2,
-  isEnabled: (input) => input.environmentId !== null,
+  isEnabled: (input): input is EnabledNodeInput => input.environmentId !== null,
   buildKey: (input) => `${input.environmentId}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   persist: schemaSavedQueryCodec(SourceControlDiscoveryResult, 1),
   run: (input) => {
-    const server = ensureEnvironmentApi(input.environmentId as EnvironmentId).server;
+    const server = ensureEnvironmentApi(input.environmentId).server;
     if (!server) return Promise.reject(new Error("This node cannot list its hosts."));
     return server.discoverSourceControl({ cached: true });
   },

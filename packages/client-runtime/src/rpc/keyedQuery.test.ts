@@ -6,7 +6,9 @@ import {
   createKeyedQueryRegistry,
   createRetainedKeyTracker,
   defineKeyedQueryByInput,
+  defineKeyedQueryByKey,
   KEY_SEP,
+  type KeyedQueryEnabledInput,
   type KeyedQueryRegistryConfig,
 } from "./keyedQuery.ts";
 
@@ -74,7 +76,7 @@ function makeBinding(
     {
       label: "family",
       staleTime,
-      isEnabled: () => true,
+      isEnabled: (_input: { readonly key: string }) => true,
       buildKey: (input: { readonly key: string }) => `${environmentId}\u0000${input.key}`,
       resolveEnvironmentId: () => environmentId,
       createControllerFields: () => ({}),
@@ -86,6 +88,77 @@ function makeBinding(
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("keyed query enabled guard", () => {
+  interface NullableInput {
+    readonly environmentId: EnvironmentId | null;
+    readonly path: string | null;
+  }
+  type EnabledInput = KeyedQueryEnabledInput<NullableInput, "environmentId" | "path">;
+
+  function defineGuarded(registry: ReturnType<typeof makeRegistry>) {
+    const seen: Array<{ readonly environmentId: EnvironmentId; readonly path: string }> = [];
+    const definition = {
+      label: "guarded",
+      staleTime: 60_000,
+      isEnabled: (input: NullableInput): input is EnabledInput =>
+        input.environmentId !== null && input.path !== null,
+      buildKey: (input: EnabledInput) => `${input.environmentId}${KEY_SEP}${input.path}`,
+      resolveEnvironmentId: (input: EnabledInput) => input.environmentId,
+      createControllerFields: (input: EnabledInput) => ({ path: input.path }),
+      run: (input: EnabledInput) => {
+        // The guard's narrowing reaches `run`: no casts for the fields it checked.
+        seen.push({ environmentId: input.environmentId, path: input.path });
+        return Promise.resolve(input.path);
+      },
+    };
+    return {
+      seen,
+      byInput: defineKeyedQueryByInput(registry, definition, (controller) => !controller.hasData),
+      byKey: defineKeyedQueryByKey(
+        registry,
+        { ...definition, label: "guarded-by-key" },
+        (controller) => !controller.hasData,
+      ),
+    };
+  }
+
+  it("never keys, watches or runs an input the guard rejects", async () => {
+    const registry = makeRegistry();
+    const { seen, byInput, byKey } = defineGuarded(registry);
+    const disabled = { environmentId, path: null };
+
+    expect(byInput.targetKey(disabled)).toBeNull();
+    expect(byKey.keyOf(disabled)).toBeNull();
+    byInput.watch(disabled)();
+    byKey.watch(disabled)();
+    await Promise.resolve();
+
+    expect(seen).toEqual([]);
+    expect(registry.controllers.size).toBe(0);
+  });
+
+  it("hands the narrowed input to every callback once the guard passes", async () => {
+    const registry = makeRegistry();
+    const { seen, byInput, byKey } = defineGuarded(registry);
+    const enabled = { environmentId, path: "README.md" };
+
+    const releaseByInput = byInput.watch(enabled);
+    const releaseByKey = byKey.watch(enabled);
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+
+    const key = byInput.targetKey(enabled);
+    expect(key).toBe(`guarded${KEY_SEP}${environmentId}${KEY_SEP}README.md`);
+    expect(registry.controllers.get(key as string)?.path).toBe("README.md");
+    expect(registry.controllers.get(key as string)?.environmentId).toBe(environmentId);
+    expect(seen).toEqual([
+      { environmentId, path: "README.md" },
+      { environmentId, path: "README.md" },
+    ]);
+    releaseByInput();
+    releaseByKey();
+  });
 });
 
 describe("keyed query retention", () => {

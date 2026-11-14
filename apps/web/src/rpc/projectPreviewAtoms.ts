@@ -10,6 +10,8 @@ import {
   defineKeyedQueryByKey,
   KEY_SEP,
   type KeyedQueryByKey,
+  type KeyedQueryEnabledInput,
+  type KeyedQueryReadDefinition,
 } from "@ryco/client-runtime/rpc";
 import { listEntriesSince, readFileSince } from "@ryco/client-runtime/state/files";
 
@@ -70,14 +72,10 @@ export type ProjectPreviewQuery<TInput, TData> = KeyedQueryByKey<
   ProjectPreviewQueryState<TData>
 >;
 
-interface ProjectPreviewQueryDefinition<TInput, TData> {
-  readonly label: string;
-  readonly staleTime: number;
-  readonly isEnabled: (input: TInput) => boolean;
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
-  readonly run: (input: TInput) => Promise<TData>;
-}
+type ProjectPreviewQueryDefinition<TInput, TData, TEnabled extends TInput = TInput> = Omit<
+  KeyedQueryReadDefinition<TInput, TData, TEnabled>,
+  "gcTime"
+>;
 
 function runWithRetry<T>(run: () => Promise<T>, retries = FETCH_RETRY_COUNT): Promise<T> {
   return run().catch((error) => {
@@ -88,8 +86,8 @@ function runWithRetry<T>(run: () => Promise<T>, retries = FETCH_RETRY_COUNT): Pr
   });
 }
 
-function defineQuery<TInput, TData>(
-  definition: ProjectPreviewQueryDefinition<TInput, TData>,
+function defineQuery<TInput, TData, TEnabled extends TInput = TInput>(
+  definition: ProjectPreviewQueryDefinition<TInput, TData, TEnabled>,
 ): ProjectPreviewQuery<TInput, TData> {
   return defineKeyedQueryByKey(
     projectPreviewRegistry,
@@ -116,21 +114,26 @@ export interface ProjectListEntriesInput {
   readonly enabled?: boolean;
 }
 
+type EnabledProjectListEntriesInput = KeyedQueryEnabledInput<
+  ProjectListEntriesInput,
+  "environmentId" | "cwd"
+>;
+
 export const projectListEntriesQuery: ProjectPreviewQuery<
   ProjectListEntriesInput,
   ProjectListEntriesResult
-> = defineQuery<ProjectListEntriesInput, ProjectListEntriesResult>({
+> = defineQuery<ProjectListEntriesInput, ProjectListEntriesResult, EnabledProjectListEntriesInput>({
   label: "listEntries",
   staleTime: LIST_ENTRIES_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledProjectListEntriesInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   run: (input) =>
     runWithRetry(() =>
       listEntriesSince(
-        projectsClient(input.environmentId as EnvironmentId).listEntries,
-        input.cwd as string,
+        projectsClient(input.environmentId).listEntries,
+        input.cwd,
         projectListEntriesQuery.getSnapshot(projectListEntriesQuery.keyOf(input)).data,
       ),
     ),
@@ -147,25 +150,30 @@ export interface ProjectReadFileInput {
   readonly enabled?: boolean;
 }
 
+type EnabledProjectReadFileInput = KeyedQueryEnabledInput<
+  ProjectReadFileInput,
+  "environmentId" | "cwd" | "relativePath"
+>;
+
 export const projectReadFileQuery: ProjectPreviewQuery<
   ProjectReadFileInput,
   ProjectReadFileResult
-> = defineQuery<ProjectReadFileInput, ProjectReadFileResult>({
+> = defineQuery<ProjectReadFileInput, ProjectReadFileResult, EnabledProjectReadFileInput>({
   label: "readFile",
   staleTime: READ_FILE_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledProjectReadFileInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.relativePath !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.relativePath}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   run: (input) =>
     runWithRetry(() =>
       readFileSince(
-        projectsClient(input.environmentId as EnvironmentId).readFile,
-        { cwd: input.cwd as string, relativePath: input.relativePath as string },
+        projectsClient(input.environmentId).readFile,
+        { cwd: input.cwd, relativePath: input.relativePath },
         projectReadFileQuery.getSnapshot(projectReadFileQuery.keyOf(input)).data,
       ),
     ),
