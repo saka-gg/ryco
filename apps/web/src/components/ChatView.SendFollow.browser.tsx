@@ -137,17 +137,25 @@ async function mountScrollableThread() {
     targetText: "send follow target",
   });
   const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
-  const timelineRow = await waitForElement(
-    () => document.querySelector<HTMLElement>("[data-message-id]"),
-    "Unable to find a timeline message row.",
-  );
-  const scroller = findScrollableAncestor(timelineRow);
-  expect(scroller).not.toBeNull();
-  const distanceFromEnd = () =>
-    scroller!.scrollHeight - scroller!.clientHeight - scroller!.scrollTop;
-  await vi.waitFor(() => expect(distanceFromEnd()).toBeLessThanOrEqual(1));
-  await waitForComposerEditor();
-  return { mounted, snapshot, scroller: scroller!, distanceFromEnd };
+  try {
+    const timelineRow = await waitForElement(
+      () => document.querySelector<HTMLElement>("[data-message-id]"),
+      "Unable to find a timeline message row.",
+    );
+    const scroller = findScrollableAncestor(timelineRow);
+    expect(scroller).not.toBeNull();
+    const distanceFromEnd = () =>
+      scroller!.scrollHeight - scroller!.clientHeight - scroller!.scrollTop;
+    await vi.waitFor(() => expect(distanceFromEnd()).toBeLessThanOrEqual(1));
+    await waitForComposerEditor();
+    return { mounted, snapshot, scroller: scroller!, distanceFromEnd };
+  } catch (error) {
+    // The test's own cleanup never runs for a mount that failed here; left
+    // mounted, the view's DOM is cleared from under React and the next test
+    // fails on it. The original error is the one to report.
+    await mounted.cleanup().catch(() => {});
+    throw error;
+  }
 }
 
 /** Scrolls to the top and waits for the pill that says the end is out of view. */

@@ -779,14 +779,23 @@ const HEADER_CLEARANCE_PROPERTY = "--chat-header-clearance";
  * variable. The size comes from the observer's notifications, which run once
  * layout is clean and before the first paint: reading the height here
  * directly would force a layout of the freshly committed tree on every
- * switch. Returns the cleanup that drops the variable.
+ * switch. `onResize` runs when a later change moves the clearance, not for the
+ * first value. Returns the cleanup that drops the variable.
  */
 function publishOverlayClearance(
   host: HTMLElement,
   bar: HTMLElement,
   property: string,
+  onResize?: () => void,
 ): () => void {
-  const apply = () => host.style.setProperty(property, `${bar.offsetHeight + 8}px`);
+  let published: number | null = null;
+  const apply = () => {
+    const clearance = bar.offsetHeight + 8;
+    host.style.setProperty(property, `${clearance}px`);
+    const moved = published !== null && clearance !== published;
+    published = clearance;
+    if (moved) onResize?.();
+  };
   const observer = new ResizeObserver(apply);
   observer.observe(bar);
   return () => {
@@ -7500,7 +7509,11 @@ export default function ChatView(props: ChatViewProps) {
   }, [composerOverlayActive, chatSurfaceMounted]);
   // Same mechanism for the top bar: the header overlays the transcript and
   // publishes its height so the timeline's list header, the search bar, the
-  // Crown rail, and the (rare) banner stack clear it.
+  // Crown rail, and the (rare) banner stack clear it. The list header grows
+  // with it and pushes the rows down, which the list does not follow, so a
+  // transcript at its end is pinned there again (as a resizing composer does).
+  // A header that grows after the opened thread reached its end (its chat tabs
+  // loading, say) left the transcript short of the end.
   useEffect(() => {
     const shell = chatShellRef.current;
     if (!shell) return;
@@ -7510,8 +7523,10 @@ export default function ChatView(props: ChatViewProps) {
     }
     const header = headerOverlayRef.current;
     if (!header) return;
-    return publishOverlayClearance(shell, header, HEADER_CLEARANCE_PROPERTY);
-  }, [headerOverlayActive, chatSurfaceMounted]);
+    return publishOverlayClearance(shell, header, HEADER_CLEARANCE_PROPERTY, () => {
+      if (isAtEndRef.current) scrollToEnd(false);
+    });
+  }, [headerOverlayActive, chatSurfaceMounted, scrollToEnd]);
 
   // Empty state: no active thread. An archived thread listed as a stub exists:
   // its full shell and window are loading (this view retains them).

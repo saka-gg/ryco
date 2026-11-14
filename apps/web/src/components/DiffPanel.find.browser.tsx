@@ -245,16 +245,18 @@ describe("Diff panel find on the real renderer", () => {
       },
       { timeout: 10_000 },
     );
+    // Read in the wait: pierre redrawing the row (its highlighted tokens landing) leaves the
+    // painted ranges collapsed until the next frame paints them on the new nodes.
     await vi.waitFor(() => {
       expect(highlightRanges(CURRENT)).toHaveLength(1);
       expect(highlightRanges(MATCH)).toHaveLength(1);
+      const [current] = highlightRanges(CURRENT);
+      const [other] = highlightRanges(MATCH);
+      expect(current!.toString()).toBe("needle");
+      expect(other!.toString()).toBe("needle");
+      // The first "needle" on the row is current: it starts before the other.
+      expect(current!.compareBoundaryPoints(Range.START_TO_START, other!)).toBe(-1);
     });
-    const [current] = highlightRanges(CURRENT);
-    const [other] = highlightRanges(MATCH);
-    expect(current!.toString()).toBe("needle");
-    expect(other!.toString()).toBe("needle");
-    // The first "needle" on the row is current: it starts before the other.
-    expect(current!.compareBoundaryPoints(Range.START_TO_START, other!)).toBe(-1);
 
     // The next match on the same row becomes current.
     await userEvent.keyboard("{Enter}");
@@ -282,10 +284,6 @@ describe("Diff panel find on the real renderer", () => {
     // value7 is on a removed and an added line: one match per column.
     await expect.element(page.getByText("1 of 2")).toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
-    await vi.waitFor(() => {
-      expect(highlightRanges(CURRENT)).toHaveLength(1);
-      expect(highlightRanges(MATCH)).toHaveLength(1);
-    });
     const columnOf = (range: Range) => {
       const node = range.startContainer.parentElement;
       return node?.closest("code[data-deletions]")
@@ -294,9 +292,14 @@ describe("Diff panel find on the real renderer", () => {
           ? "additions"
           : null;
     };
-    expect(columnOf(highlightRanges(CURRENT)[0]!)).toBe("deletions");
-    expect(columnOf(highlightRanges(MATCH)[0]!)).toBe("additions");
-    expect(highlightRanges(CURRENT)[0]!.toString()).toBe("value7 =");
+    // Read in the wait, as above: a redraw collapses the ranges until the next paint.
+    await vi.waitFor(() => {
+      expect(highlightRanges(CURRENT)).toHaveLength(1);
+      expect(highlightRanges(MATCH)).toHaveLength(1);
+      expect(columnOf(highlightRanges(CURRENT)[0]!)).toBe("deletions");
+      expect(columnOf(highlightRanges(MATCH)[0]!)).toBe("additions");
+      expect(highlightRanges(CURRENT)[0]!.toString()).toBe("value7 =");
+    });
     await screen.unmount();
   });
 

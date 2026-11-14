@@ -12,10 +12,11 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { page, userEvent } from "vite-plus/test/browser";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { isMacPlatform } from "../lib/utils";
 import { useStore } from "../store";
+import * as chatViewLazySurfaces from "./chat/chatViewLazySurfaces";
 import {
   COMPOSER_STASH_KEYBINDING,
   DEFAULT_VIEWPORT,
@@ -210,8 +211,20 @@ function rendersSince(
   ) as Record<(typeof COUNTED_LABELS)[number], number>;
 }
 
-/** Mount-time work (row measurement, motion gates, idle preloads) settles before counting. */
+/**
+ * Mount-time work (row measurement, motion gates, idle preloads) settles before counting.
+ *
+ * The opened thread's timeline mounts in a low-priority pass after the chrome
+ * (`useDeferredValue` in ChatView), and that pass can wait on a code-split
+ * module without rendering anything. A quiet render counter alone would then
+ * start counting before the timeline exists, and the deltas that follow keep
+ * interrupting its pass, so its catch-up renders would land in the count. The
+ * transcript's rows show the pass committed.
+ */
 async function waitForQuiescence(): Promise<void> {
+  await vi.waitFor(() =>
+    expect(document.querySelectorAll("[data-message-id]").length).toBeGreaterThan(0),
+  );
   let last = -1;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -244,6 +257,13 @@ function transcriptText(): string {
 
 describe("ChatView render cost while a reply streams", () => {
   setupChatViewBrowserSuite();
+
+  // The chat view loads these surfaces after its first frame. Under load a
+  // chunk can land after the mount looked settled, and the commit that shows
+  // it (the header's chat tabs, say) would count as a render of the stream.
+  beforeAll(async () => {
+    await Promise.all(Object.values(chatViewLazySurfaces).map((surface) => surface.preload()));
+  });
 
   afterEach(() => {
     renderCounts.clear();
