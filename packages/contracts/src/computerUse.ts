@@ -23,7 +23,8 @@ export const ComputerUseApp = Schema.Struct({
 export type ComputerUseApp = typeof ComputerUseApp.Type;
 
 export const ComputerUseActivity = Schema.Struct({
-  threadId: Schema.String,
+  /** Typed like `ThreadId`, decoded as before (any string). */
+  threadId: Schema.String.pipe(Schema.brand("ThreadId")),
   target: boundedText,
   /** The app (or browser) being used, for status text that names no window or action. */
   app: Schema.optionalKey(boundedText),
@@ -75,8 +76,13 @@ export type ComputerUseBridgeConfig = typeof ComputerUseBridgeConfig.Type;
 
 export const ComputerUseRequest = Schema.Struct({
   sessionId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
-  threadId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
-  turnId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  /** Typed like `ThreadId` and `TurnId`, decoded as before (bounded, untrimmed). */
+  threadId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)).pipe(
+    Schema.brand("ThreadId"),
+  ),
+  turnId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)).pipe(
+    Schema.brand("TurnId"),
+  ),
   tool: Schema.Literals(["computer", "browser"]),
   args: Schema.Record(Schema.String, Schema.Unknown),
 });

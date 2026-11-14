@@ -34,13 +34,10 @@ import {
   hookViaWords,
   maskedSecret,
 } from "./webhookPanel.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 const READ_FAILED = "The webhook couldn't be read.";
 const NO_HOOKS = "This device can't show webhooks. Update Ryco on it.";
-
-function errorText(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message ? cause.message : fallback;
-}
 
 /** "Copy", then "Copied" for a moment; a refused clipboard says so. */
 function CopyButton(props: {
@@ -185,7 +182,7 @@ export function WebhookPanel(props: WebhookPanelProps) {
       if (epoch === generation.current) setState({ kind: "ready", view });
     } catch (cause) {
       if (epoch === generation.current)
-        setState({ kind: "failed", error: errorText(cause, READ_FAILED) });
+        setState({ kind: "failed", error: errorMessage(cause, READ_FAILED) });
     }
   });
 
@@ -207,7 +204,7 @@ export function WebhookPanel(props: WebhookPanelProps) {
       if (epoch === generation.current) setState({ kind: "ready", view });
     } catch (cause) {
       if (epoch === generation.current) {
-        setRegenerateError(errorText(cause, "The secret couldn't be regenerated."));
+        setRegenerateError(errorMessage(cause, "The secret couldn't be regenerated."));
         void read();
       }
     }

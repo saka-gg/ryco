@@ -116,7 +116,7 @@ describe("deriveConnectionRows", () => {
     const rows = deriveConnectionRows({
       records: {
         ...records,
-        [STUDIO]: { ...records[STUDIO], disabledAt: "2026-10-31T09:00:00.000Z" },
+        [STUDIO]: { ...records[STUDIO]!, disabledAt: "2026-10-31T09:00:00.000Z" },
       },
       runtimeById: {
         [STUDIO]: runtime({ connectionState: "error", authState: "requires-auth" }),
@@ -143,7 +143,7 @@ describe("deriveConnectionRows", () => {
 
   it("reads a node the runtime store has not seen as disconnected", () => {
     const rows = deriveConnectionRows({
-      records: { [STUDIO]: records[STUDIO] },
+      records: { [STUDIO]: records[STUDIO]! },
       runtimeById: {},
       statuses: new Map(),
     });

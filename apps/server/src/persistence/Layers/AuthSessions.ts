@@ -1,3 +1,4 @@
+import { SpaceRole } from "@ryco/contracts/space-role";
 import { AuthSessionId } from "@ryco/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
@@ -47,7 +48,7 @@ const AuthSessionDbRow = Schema.Struct({
   linkTrustSource: Schema.NullOr(Schema.Literals(["account-enrolled", "locally-verified"])),
   linkEnrollmentId: Schema.NullOr(Schema.String),
   linkClientFingerprint: Schema.NullOr(Schema.String),
-  linkRole: Schema.NullOr(Schema.Literals(["viewer", "operator", "owner"])),
+  linkRole: Schema.NullOr(SpaceRole),
   linkAccountId: Schema.NullOr(Schema.String),
 });
 

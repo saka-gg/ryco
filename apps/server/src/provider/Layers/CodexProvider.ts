@@ -19,7 +19,12 @@ import { ServerSettingsError } from "@ryco/contracts";
 
 import { createModelCapabilities } from "@ryco/shared/model";
 
-import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
+import {
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
+  buildServerProvider,
+  type ServerProviderDraft,
+} from "../providerSnapshot.ts";
 import { scopedSafeTeardown } from "./scopedSafeTeardown.ts";
 import {
   makeCodexStoredThreadReader,
@@ -433,34 +438,13 @@ const makePendingCodexProvider = (codexSettings: CodexSettings): ServerProviderD
   const checkedAt = new Date().toISOString();
   const models = emptyCodexModelsFromSettings(codexSettings);
 
-  if (!codexSettings.enabled) {
-    return buildServerProvider({
-      presentation: CODEX_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      skills: [],
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Codex is disabled in Ryco settings.",
-      },
-    });
-  }
-
-  return buildServerProvider({
+  return buildPendingServerProvider({
     presentation: CODEX_PRESENTATION,
-    enabled: true,
+    enabled: codexSettings.enabled,
     checkedAt,
     models,
-    skills: [],
-    probe: {
+    pending: {
       installed: false,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
       message: "Codex provider status has not been checked in this session yet.",
     },
   });
@@ -516,19 +500,10 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const emptyModels = emptyCodexModelsFromSettings(codexSettings);
 
   if (!codexSettings.enabled) {
-    return buildServerProvider({
+    return buildDisabledServerProvider({
       presentation: CODEX_PRESENTATION,
-      enabled: false,
       checkedAt,
       models: emptyModels,
-      skills: [],
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Codex is disabled in Ryco settings.",
-      },
     });
   }
 

@@ -1,7 +1,7 @@
 // Kept apart from `primaryShellCache.ts` so the boot path can decide without
 // loading the store.
 
-const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 /**
  * Whether this page keeps a last-known copy of the primary environment's shell:
@@ -13,5 +13,5 @@ export function isPrimaryShellCacheEligible(input: {
   readonly hostname: string;
   readonly desktop: boolean;
 }): boolean {
-  return input.desktop || LOOPBACK_HOSTNAMES.has(input.hostname.toLowerCase());
+  return input.desktop || isLoopbackHostname(input.hostname, { ipv4: "127.0.0.1" });
 }

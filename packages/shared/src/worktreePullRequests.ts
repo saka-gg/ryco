@@ -9,26 +9,11 @@
 import type {
   PullRequestState,
   WorktreePullRequestLink,
-  WorktreePullRequestLinkSource,
+  WorktreePullRequestLinkUpsert,
 } from "@ryco/contracts";
 
-export type { WorktreePullRequestLink };
-
-/** A link change as the decider receives it (missing fields keep what is stored). */
-export interface WorktreePullRequestLinkUpsert {
-  readonly number: number;
-  readonly title?: string | null | undefined;
-  readonly url?: string | null | undefined;
-  readonly state: PullRequestState | null;
-  readonly isDraft: boolean | null;
-  /** Omitted: kept while the terminal state holds, else the change time. */
-  readonly terminalAt?: string | null | undefined;
-  readonly headRefName?: string | null | undefined;
-  readonly baseRefName?: string | null | undefined;
-  readonly source: WorktreePullRequestLinkSource;
-  /** Linked by hand: brings a dismissed link back (refreshes never do). */
-  readonly restore?: boolean | undefined;
-}
+/** `WorktreePullRequestLinkUpsert`: a link change as the decider receives it (missing fields keep what is stored). */
+export type { WorktreePullRequestLink, WorktreePullRequestLinkUpsert };
 
 /** The flat fields older readers (and the settlement rule) use: the current link. */
 export interface WorktreeCurrentPullRequestFields {

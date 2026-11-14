@@ -24,8 +24,8 @@ export const HTML_RENDER_CARD_THUMBNAIL = { width: 72, height: 45 } as const;
  * the page's top, scaled down.
  */
 export const HTML_RENDER_CARD_THUMBNAIL_BACKGROUND: Readonly<Record<ThemeAppearance, string>> = {
-  dark: defaultHtmlRenderTheme("dark").variables["--background"],
-  light: defaultHtmlRenderTheme("light").variables["--background"],
+  dark: defaultHtmlRenderTheme("dark").variables["--background"]!,
+  light: defaultHtmlRenderTheme("light").variables["--background"]!,
 };
 
 function HtmlRenderCard(props: {

@@ -7,12 +7,12 @@ import {
   downloadContentDisposition,
   ifNoneMatchSatisfies,
   inlineImageResponseHeaders,
-  isLoopbackHostname,
   resolveDevRedirectUrl,
   resolveStaticCacheControl,
   staticFileEtag,
   userAssetResponseHeaders,
 } from "./http.ts";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 const testPath = {
   basename: (value: string) => value.split("/").at(-1) ?? value,
@@ -25,16 +25,16 @@ const testPath = {
 
 describe("http dev routing", () => {
   it("treats localhost and loopback addresses as local", () => {
-    expect(isLoopbackHostname("127.0.0.1")).toBe(true);
-    expect(isLoopbackHostname("localhost")).toBe(true);
-    expect(isLoopbackHostname("::1")).toBe(true);
-    expect(isLoopbackHostname("[::1]")).toBe(true);
+    expect(isLoopbackHostname("127.0.0.1", { ipv4: "127.0.0.1" })).toBe(true);
+    expect(isLoopbackHostname("localhost", { ipv4: "127.0.0.1" })).toBe(true);
+    expect(isLoopbackHostname("::1", { ipv4: "127.0.0.1" })).toBe(true);
+    expect(isLoopbackHostname("[::1]", { ipv4: "127.0.0.1" })).toBe(true);
   });
 
   it("does not treat LAN addresses as local", () => {
-    expect(isLoopbackHostname("192.168.86.35")).toBe(false);
-    expect(isLoopbackHostname("10.0.0.24")).toBe(false);
-    expect(isLoopbackHostname("example.local")).toBe(false);
+    expect(isLoopbackHostname("192.168.86.35", { ipv4: "127.0.0.1" })).toBe(false);
+    expect(isLoopbackHostname("10.0.0.24", { ipv4: "127.0.0.1" })).toBe(false);
+    expect(isLoopbackHostname("example.local", { ipv4: "127.0.0.1" })).toBe(false);
   });
 
   it("preserves path and query when redirecting to the dev server", () => {

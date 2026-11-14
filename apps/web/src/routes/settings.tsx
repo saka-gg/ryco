@@ -4,6 +4,7 @@ import { ROUTE_PAGE_PENDING_MS, RoutePagePending } from "../components/routeView
 import { getPresentationTier } from "../lib/presentationTier";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { preloadOpenSettingsSection, SettingsRouteComponent } from "../settingsRoute";
+import { requireAppSession } from "../routeAuthGate";
 
 export const Route = createFileRoute("/settings")({
   // Section, device page tab, device and its view, so Back, Forward and links open them.
@@ -24,13 +25,7 @@ export const Route = createFileRoute("/settings")({
     };
   },
   beforeLoad: ({ context, preload }) => {
-    if (
-      context.authGateState.status !== "authenticated" &&
-      context.authGateState.status !== "hosted-static" &&
-      context.authGateState.status !== "hosted-hub"
-    ) {
-      throw redirect({ to: "/pair", replace: true });
-    }
+    requireAppSession(context);
     // The frozen phone tier presents settings as its own full-screen sheet over
     // the home stack, so the page itself never renders there. An intent
     // preload (hovering a link) must not open the sheet.

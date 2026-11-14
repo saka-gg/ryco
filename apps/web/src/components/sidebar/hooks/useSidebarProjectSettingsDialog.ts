@@ -9,6 +9,7 @@ import {
 } from "../../../projectMutations";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function useSidebarProjectSettingsDialog() {
   // Uncompiled on purpose: Babel's React Compiler never compiled this function
@@ -162,7 +163,7 @@ export function useSidebarProjectSettingsDialog() {
         stackedThreadToast({
           type: "error",
           title: "Failed to update project",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     }
@@ -196,7 +197,7 @@ export function useSidebarProjectSettingsDialog() {
           stackedThreadToast({
             type: "error",
             title: "Failed to upload avatar",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       }
@@ -218,7 +219,7 @@ export function useSidebarProjectSettingsDialog() {
         stackedThreadToast({
           type: "error",
           title: "Failed to remove avatar",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     }

@@ -55,6 +55,7 @@ import {
   ComboboxTrigger,
 } from "./ui/combobox";
 import { stackedThreadToast, toastManager } from "./ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface BranchToolbarBranchSelectorProps {
   className?: string;
@@ -78,7 +79,7 @@ interface BranchToolbarBranchSelectorProps {
 }
 
 function toBranchActionErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "An error occurred.";
+  return errorMessage(error, "An error occurred.");
 }
 
 function getBranchTriggerLabel(input: {

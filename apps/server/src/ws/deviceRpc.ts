@@ -17,6 +17,7 @@ import {
   type DeviceRpcErrorCode,
   type DeviceTapInput,
   type ThreadDeviceState,
+  type SpaceRole,
 } from "@ryco/contracts";
 
 import type { DeviceManager } from "../device/DeviceManager.ts";
@@ -138,7 +139,7 @@ function makeDeviceEventStream(
 export interface DeviceRpcContext {
   readonly deviceService: Option.Option<DeviceServiceShape>;
   readonly withAccess: <A, E, R>(
-    access: "viewer" | "operator" | "owner" | "authenticated" | "direct_owner",
+    access: SpaceRole | "authenticated" | "direct_owner",
     method: string,
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | AuthRpcError, R>;

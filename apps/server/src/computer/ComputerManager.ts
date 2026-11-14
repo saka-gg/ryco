@@ -5565,6 +5565,7 @@ export class ComputerManager {
           if (state.root) return resolve(state.root);
         } catch (freshError) {
           // The miss is confirmed against fresh state; report its candidates.
+          // oxlint-disable-next-line no-ex-assign -- the fresh miss replaces the cached one below
           if (freshError instanceof ComputerTargetError) error = freshError;
         }
       }

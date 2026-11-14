@@ -1,7 +1,8 @@
+import type { NodeSessionRole } from "@ryco/contracts";
 import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 
 /** The session's role on a node, as the environment rows carry it. */
-export type NodeSessionRole = "viewer" | "operator" | "owner" | "client";
+export type { NodeSessionRole };
 
 /**
  * Whether the session's role may call `method`, by the node's own access rule.

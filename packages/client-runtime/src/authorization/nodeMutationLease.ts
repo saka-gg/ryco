@@ -1,6 +1,6 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, SpaceRole } from "@ryco/contracts";
 
-export type NodeMutationRole = "viewer" | "operator" | "owner";
+export type NodeMutationRole = SpaceRole;
 
 export interface NodeMutationLease {
   readonly environmentId: EnvironmentId;

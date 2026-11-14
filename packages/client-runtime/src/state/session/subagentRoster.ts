@@ -6,7 +6,7 @@
  */
 import type { ThreadSession } from "../threads/types.ts";
 import { derivePhase } from "./session-logic.ts";
-import type { RuntimeSubagent, RuntimeSubagentStatus } from "./subagentRuntime.ts";
+import type { RuntimeSubagent, SubagentViewStatus } from "./subagentRuntime.ts";
 
 /**
  * Whether the thread's provider session can still be running agents. A dead or
@@ -33,7 +33,7 @@ export interface SubagentStatusText {
 }
 
 /** Provider phases remain distinct, including resumable idle agents. */
-export const SUBAGENT_STATUS_TEXT: Readonly<Record<RuntimeSubagentStatus, SubagentStatusText>> = {
+export const SUBAGENT_STATUS_TEXT: Readonly<Record<SubagentViewStatus, SubagentStatusText>> = {
   pending: { label: "Queued", word: "Queued" },
   running: { label: "Running", word: null },
   waiting: { label: "Waiting", word: "Waiting" },

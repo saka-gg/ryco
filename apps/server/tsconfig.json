@@ -4,6 +4,8 @@
     "composite": true,
     "types": ["node", "bun"],
     "lib": ["ESNext", "esnext.disposable"],
+    // A plugin list replaces the inherited one, so this repeats tsconfig.effect.json
+    // and adds the server's two extra rules, which are off.
     "plugins": [
       {
         "name": "@effect/language-service",

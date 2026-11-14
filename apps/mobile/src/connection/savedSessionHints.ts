@@ -1,6 +1,9 @@
 import { shouldRenewSavedSession } from "@ryco/client-runtime/connection";
 import type { KVService } from "@ryco/client-runtime/platform";
-import type { AuthSessionState, EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId } from "@ryco/contracts";
+import { AuthSessionState } from "@ryco/contracts/auth";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 /**
  * The node's last answer about each saved environment's session.
@@ -74,23 +77,30 @@ function sessionHintFields(session: AuthSessionState): AuthSessionState {
   ) as AuthSessionState;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+/**
+ * The stored record: version 1, and each hint in the session answer's JSON
+ * form (the encoded side of `AuthSessionState`: `expiresAt` an ISO string).
+ */
+const StoredHints = Schema.Struct({
+  version: Schema.Literal(1),
+  sessions: Schema.Record(Schema.String, Schema.Unknown),
+});
+const decodeStoredHints = Schema.decodeUnknownOption(Schema.fromJsonString(StoredHints));
+/** A hint in that JSON form, decoded the way a node's answer decodes. */
+const decodeStoredHint = Schema.decodeUnknownOption(Schema.toCodecJson(AuthSessionState));
 
 function decodeHints(raw: string | null): Map<string, AuthSessionState> {
   const hints = new Map<string, AuthSessionState>();
   if (raw === null) return hints;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.sessions)) return hints;
-    for (const [environmentId, session] of Object.entries(parsed.sessions)) {
-      if (isRecord(session) && session.authenticated === true && isRecord(session.auth)) {
-        hints.set(environmentId, session as unknown as AuthSessionState);
-      }
+  // A corrupt record is no hint: every connect checks first.
+  const stored = decodeStoredHints(raw);
+  if (Option.isNone(stored)) return hints;
+  for (const [environmentId, session] of Object.entries(stored.value.sessions)) {
+    const hint = decodeStoredHint(session);
+    if (Option.isSome(hint) && hint.value.authenticated) {
+      // Kept in the JSON form it was checked in, as every session answer is held.
+      hints.set(environmentId, session as AuthSessionState);
     }
-  } catch {
-    // A corrupt record is no hint: every connect checks first.
   }
   return hints;
 }
