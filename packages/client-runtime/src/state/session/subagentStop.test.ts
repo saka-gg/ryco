@@ -163,7 +163,11 @@ describe("subagentStopRequest", () => {
 
 describe("describeSubagentStopFailure", () => {
   function nodeError(reason: OrchestrationStopBackgroundTaskError["reason"]) {
-    return new OrchestrationStopBackgroundTaskError({ reason, threadId: "thread-1", taskId: "t1" });
+    return new OrchestrationStopBackgroundTaskError({
+      reason,
+      threadId: ThreadId.make("thread-1"),
+      taskId: "t1",
+    });
   }
 
   it("speaks of the agent for each reason the node gives", () => {

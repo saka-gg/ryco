@@ -2,7 +2,7 @@ import { SETTINGS_SECTION_TITLES } from "@ryco/client-runtime/state/settings/set
 import {
   createPathConfigForStaticNavigation,
   getPathFromState,
-  NavigationState,
+  type NavigationState,
   StackActions,
   useNavigation,
 } from "@react-navigation/native";

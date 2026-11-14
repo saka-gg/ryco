@@ -1,0 +1,12 @@
+{
+  "apps/desktop": 137,
+  "apps/mobile": 499,
+  "apps/server": 1194,
+  "apps/web": 709,
+  "packages/client-runtime": 545,
+  "packages/contracts": 20,
+  "packages/shared": 60,
+  "packages/ssh": 1,
+  "packages/tailscale": 1,
+  "scripts": 9
+}

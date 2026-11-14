@@ -19,6 +19,7 @@ import { useProjectsPage } from "../ProjectsPageContext";
 import { useEnvironmentPresence } from "../useEnvironmentPresence";
 import { ProjectSection } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Removing the project from this device. The confirmation grows from the
@@ -56,7 +57,7 @@ export function ProjectDangerSection({ member, canEdit }: ProjectSectionProps) {
         stackedThreadToast({
           type: "error",
           title: `Failed to remove "${member.name}"`,
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     } finally {

@@ -505,6 +505,22 @@ export function relayE2eeUnresolvedAttemptFailure(): HostedRelayFailure {
   return { kind: "protocol", retryable: true, closeReason: "channel_rejected" };
 }
 
+/**
+ * The channel an attempt gets when its E2EE selection cannot be resolved (§11.2 FATAL-PRE: send
+ * nothing and close). It closes with the retryable `relayE2eeUnresolvedAttemptFailure` and
+ * refuses every frame. It is never a legacy channel: unresolved evidence is not an unset latch.
+ * Web and mobile hand it out as their `RelayE2eeProvider` for that case.
+ */
+export function unresolvedRelayE2eeChannel(host: RelayE2eeHost): RelayE2eeChannel {
+  host.close(relayE2eeUnresolvedAttemptFailure());
+  return {
+    intercept: async () => ({ kind: "rejected" }),
+    submit: () => false,
+    beginClose: async () => "refused",
+    dispose: () => undefined,
+  };
+}
+
 export class HostedRelayEngine {
   readonly options: RelayEngineOptions;
   #limits: RelayLimits | null = null;

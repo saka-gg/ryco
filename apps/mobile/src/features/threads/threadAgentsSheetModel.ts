@@ -15,7 +15,7 @@ import {
   type AgentPanelModel,
   type AgentRosterIdentity,
   type RuntimeSubagent,
-  type RuntimeSubagentStatus,
+  type SubagentViewStatus,
   type SubagentActivityEntry,
 } from "@ryco/client-runtime/state/session";
 import {
@@ -142,7 +142,7 @@ export interface ThreadAgentsSheetInput {
   readonly completionReturns: ReadonlyMap<ThreadId, AgentControlCompletionReturn>;
 }
 
-const SUBAGENT_TONE: Readonly<Record<RuntimeSubagentStatus, ThreadAgentTone>> = {
+const SUBAGENT_TONE: Readonly<Record<SubagentViewStatus, ThreadAgentTone>> = {
   pending: "working",
   running: "working",
   waiting: "attention",

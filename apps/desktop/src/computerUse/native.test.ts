@@ -1,3 +1,4 @@
+import { TurnId, ThreadId } from "@ryco/contracts";
 import { expect, it, vi } from "vitest";
 import { NativeComputerDriver } from "./native.ts";
 import type { ComputerNativeHelper } from "./helper.ts";
@@ -26,8 +27,8 @@ function fixture() {
   const context: ComputerOperationContext = {
     request: {
       sessionId: "session",
-      threadId: "thread",
-      turnId: "turn",
+      threadId: ThreadId.make("thread"),
+      turnId: TurnId.make("turn"),
       tool: "computer",
       args: { action: "windows", app: window.app },
     },

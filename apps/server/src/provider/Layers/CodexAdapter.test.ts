@@ -1377,6 +1377,93 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect(
+    "names the subagent threads a collab tool call addressed in the canonical payload",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime, session } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const item = (
+          status: "inProgress" | "completed",
+          receiverThreadIds: ReadonlyArray<string>,
+        ) => ({
+          type: "collabAgentToolCall",
+          id: "collab_1",
+          tool: "spawnAgent",
+          status,
+          senderThreadId: "parent-thread",
+          receiverThreadIds,
+          prompt: "Inspect the retry flow.",
+          model: null,
+          reasoningEffort: null,
+          agentsStates: {},
+        });
+        const base = {
+          kind: "notification" as const,
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: new Date().toISOString(),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("collab_1"),
+        };
+        yield* runtime.emit({
+          ...base,
+          id: asEventId("evt-collab-start"),
+          method: "item/started",
+          payload: {
+            startedAtMs: 1_778_000_000_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: item("inProgress", [" child-a ", "", "child-b"]),
+          },
+        });
+        yield* runtime.emit({
+          ...base,
+          id: asEventId("evt-collab-complete"),
+          method: "item/completed",
+          payload: {
+            completedAtMs: 1_778_000_000_100,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: item("completed", []),
+          },
+        });
+        // A child thread's own collab call reaches the adapter untyped.
+        yield* runtime.emit({
+          ...base,
+          id: asEventId("evt-child-collab"),
+          method: "collabAgent/item",
+          threadId: session.threadId,
+          payload: {
+            agentThreadId: "child-a",
+            lifecycle: "item/started",
+            item: item("inProgress", ["grandchild"]),
+          },
+        });
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.deepEqual(
+          events.map((event) =>
+            event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed"
+              ? [event.type, event.payload.itemType, event.payload.receiverThreadIds]
+              : [event.type],
+          ),
+          [
+            ["item.started", "collab_agent_tool_call", ["child-a", "child-b"]],
+            ["item.completed", "collab_agent_tool_call", undefined],
+            ["item.updated", "collab_agent_tool_call", ["grandchild"]],
+          ],
+        );
+        const completed = events[1];
+        assert.ok(completed?.type === "item.completed");
+        assert.equal("receiverThreadIds" in completed.payload, false);
+      }),
+  );
+
   it.effect("shows Ryco HTML tool items by page title, without the page markup", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

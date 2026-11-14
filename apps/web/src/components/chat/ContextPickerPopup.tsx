@@ -59,11 +59,7 @@ export function ContextPickerPopup(props: {
   const cachedPrs = prListQuery.data ?? [];
 
   const filteredIssues = searchSourceControlSummaries(cachedIssues, query);
-  // For PRs, ChangeRequest has number and title, so it satisfies the constraint
-  const filteredPrs = searchSourceControlSummaries(
-    cachedPrs as unknown as ReadonlyArray<SourceControlIssueSummary>,
-    query,
-  ) as unknown as ReadonlyArray<ChangeRequest>;
+  const filteredPrs = searchSourceControlSummaries(cachedPrs, query);
 
   // Fall-through server search when client filter is empty and query is long enough
   const needsServerSearchIssues =
@@ -197,7 +193,7 @@ export function ContextPickerPopup(props: {
               { id: "prs", label: "PRs", count: cachedPrs.length },
             ]}
             activeId={activeTab}
-            onSelect={(id) => setActiveTab(id as TabId)}
+            onSelect={setActiveTab}
           />
 
           {/* List */}
@@ -216,7 +212,7 @@ export function ContextPickerPopup(props: {
             />
           ) : (
             <ContextPickerList
-              items={displayPrs as unknown as ReadonlyArray<SourceControlIssueSummary>}
+              items={displayPrs}
               isLoading={isLoadingPrs}
               emptyText={
                 prsUnavailable
@@ -225,7 +221,7 @@ export function ContextPickerPopup(props: {
                     ? "No matching PRs"
                     : "No open PRs"
               }
-              onSelect={(item) => props.onSelectChangeRequest(item as unknown as ChangeRequest)}
+              onSelect={props.onSelectChangeRequest}
             />
           )}
         </>

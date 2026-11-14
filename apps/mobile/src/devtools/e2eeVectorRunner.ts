@@ -288,15 +288,15 @@ function checkNoiseIkVector(vectors: E2eeVectorSet = testOnlyEmbeddedVectors): v
 
   // Each role reads the VECTOR's bytes rather than the ones just written, so a
   // writer defect cannot mask a reader defect.
-  const message1 = initiator.writeMessage(hexToBytes(F15_IK.handshakePayloads[0]));
-  if (!equalHex(message1, F15_IK.handshakeMessages[0])) throw new Error("message 1");
-  const read1 = responder.readMessage(hexToBytes(F15_IK.handshakeMessages[0]));
-  if (!equalHex(read1, F15_IK.handshakePayloads[0])) throw new Error("payload 1");
+  const message1 = initiator.writeMessage(hexToBytes(F15_IK.handshakePayloads[0]!));
+  if (!equalHex(message1, F15_IK.handshakeMessages[0]!)) throw new Error("message 1");
+  const read1 = responder.readMessage(hexToBytes(F15_IK.handshakeMessages[0]!));
+  if (!equalHex(read1, F15_IK.handshakePayloads[0]!)) throw new Error("payload 1");
 
-  const message2 = responder.writeMessage(hexToBytes(F15_IK.handshakePayloads[1]));
-  if (!equalHex(message2, F15_IK.handshakeMessages[1])) throw new Error("message 2");
-  const read2 = initiator.readMessage(hexToBytes(F15_IK.handshakeMessages[1]));
-  if (!equalHex(read2, F15_IK.handshakePayloads[1])) throw new Error("payload 2");
+  const message2 = responder.writeMessage(hexToBytes(F15_IK.handshakePayloads[1]!));
+  if (!equalHex(message2, F15_IK.handshakeMessages[1]!)) throw new Error("message 2");
+  const read2 = initiator.readMessage(hexToBytes(F15_IK.handshakeMessages[1]!));
+  if (!equalHex(read2, F15_IK.handshakePayloads[1]!)) throw new Error("payload 2");
 
   const handshakeHash = initiator.testOnlyHandshakeHash;
   if (handshakeHash === undefined || !equalHex(handshakeHash, F15_IK.handshakeHash)) {
@@ -405,7 +405,7 @@ async function checkRecordProtection(
       // §9.2 Q3: one flipped ciphertext byte is a fatal authentication failure,
       // not a silently accepted record.
       const tampered = hexToBytes(vector.envelope);
-      tampered[E2EE_ENVELOPE_HEADER_BYTES] ^= 0x01;
+      tampered[E2EE_ENVELOPE_HEADER_BYTES] = tampered[E2EE_ENVELOPE_HEADER_BYTES]! ^ 0x01;
       const tamperedResult = tamperReceiver.unprotect(tampered);
       if (tamperedResult.kind !== "fatal" || tamperedResult.reason !== "authentication_failed") {
         throw new Error("tamper");
@@ -463,7 +463,7 @@ function checkNodePrekeyCertificate(vectors: E2eeVectorSet = testOnlyEmbeddedVec
     throw new Error("verify");
   }
   const forged = hexToBytes(F4_NODE_PREKEY.crossSignature);
-  forged[0] ^= 0x01;
+  forged[0] = forged[0]! ^ 0x01;
   if (
     verifyE2eeSignature({
       algorithm: E2EE_NODE_IDENTITY_ALGORITHM,

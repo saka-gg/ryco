@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderDriverKind, type ModelCapabilities } from "@ryco/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
 
-import { parseGenericCliVersion, providerModelsFromSettings } from "./providerSnapshot.ts";
+import {
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
+  buildServerProvider,
+  parseGenericCliVersion,
+  providerModelsFromSettings,
+  withInstanceIdentity,
+} from "./providerSnapshot.ts";
 
 const OPENCODE_CUSTOM_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [
@@ -62,5 +69,131 @@ describe("parseGenericCliVersion", () => {
     expect(parseGenericCliVersion("2.1.111 (Claude Code)\n\n(node:1) Warning: node v20.1.0")).toBe(
       "2.1.111",
     );
+  });
+});
+
+describe("withInstanceIdentity", () => {
+  const draft = buildServerProvider({
+    presentation: { displayName: "Codex" },
+    enabled: true,
+    checkedAt: "2026-11-14T00:00:00.000Z",
+    models: [],
+    probe: { installed: true, version: "1.0.0", status: "ready", auth: { status: "unknown" } },
+  });
+  const identity = {
+    driver: ProviderDriverKind.make("codex"),
+    instanceId: ProviderInstanceId.make("codex_work"),
+    continuationGroupKey: "codex:home",
+  };
+
+  it("stamps the instance, driver, display name, accent color and continuation group", () => {
+    const stamped = withInstanceIdentity({
+      ...identity,
+      displayName: "Work",
+      accentColor: "#ff0000",
+    })(draft);
+    expect(stamped).toEqual({
+      ...draft,
+      instanceId: identity.instanceId,
+      driver: identity.driver,
+      displayName: "Work",
+      accentColor: "#ff0000",
+      continuation: { groupKey: "codex:home" },
+    });
+  });
+
+  it("keeps the snapshot's own display name and adds no accent color when none is set", () => {
+    for (const unset of [undefined, ""]) {
+      const stamped = withInstanceIdentity({
+        ...identity,
+        displayName: unset,
+        accentColor: unset,
+      })(draft);
+      expect(stamped.displayName).toBe("Codex");
+      expect("accentColor" in stamped).toBe(false);
+      expect(stamped.continuation).toEqual({ groupKey: "codex:home" });
+    }
+  });
+
+  it("replaces an identity the snapshot already carries", () => {
+    const stale = {
+      ...draft,
+      continuation: { groupKey: "old" },
+    };
+    const stamped = withInstanceIdentity({
+      ...identity,
+      displayName: undefined,
+      accentColor: undefined,
+    })(stale);
+    expect(stamped.continuation).toEqual({ groupKey: "codex:home" });
+    expect(stamped.instanceId).toBe(identity.instanceId);
+  });
+});
+
+describe("buildDisabledServerProvider", () => {
+  it("reports a disabled, unprobed provider with the default message", () => {
+    const snapshot = buildDisabledServerProvider({
+      presentation: { displayName: "Example" },
+      checkedAt: "2026-11-14T00:00:00.000Z",
+      models: [],
+    });
+    expect(snapshot).toMatchObject({
+      displayName: "Example",
+      enabled: false,
+      installed: false,
+      version: null,
+      status: "disabled",
+      auth: { status: "unknown" },
+      checkedAt: "2026-11-14T00:00:00.000Z",
+      message: "Example is disabled in Ryco settings.",
+      skills: [],
+      slashCommands: [],
+    });
+  });
+
+  it("uses a caller's message instead of the default", () => {
+    const snapshot = buildDisabledServerProvider({
+      presentation: { displayName: "Example" },
+      checkedAt: "2026-11-14T00:00:00.000Z",
+      models: [],
+      message: "Example is off.",
+    });
+    expect(snapshot.message).toBe("Example is off.");
+  });
+});
+
+describe("buildPendingServerProvider", () => {
+  const base = {
+    presentation: { displayName: "Example" },
+    checkedAt: "2026-11-14T00:00:00.000Z",
+    models: [],
+    pending: { installed: true, message: "Checking Example..." },
+  } as const;
+
+  it("reports the provider's own pending guess while it is enabled", () => {
+    expect(buildPendingServerProvider({ ...base, enabled: true })).toMatchObject({
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "warning",
+      auth: { status: "unknown" },
+      message: "Checking Example...",
+    });
+    expect(
+      buildPendingServerProvider({
+        ...base,
+        enabled: true,
+        pending: { installed: false, message: "Not checked yet." },
+      }),
+    ).toMatchObject({ installed: false, message: "Not checked yet." });
+  });
+
+  it("is the disabled snapshot when the provider is turned off", () => {
+    expect(buildPendingServerProvider({ ...base, enabled: false })).toEqual(
+      buildDisabledServerProvider(base),
+    );
+    expect(
+      buildPendingServerProvider({ ...base, enabled: false, disabledMessage: "Off." }).message,
+    ).toBe("Off.");
   });
 });

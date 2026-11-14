@@ -11,21 +11,7 @@
     "types": ["vite-plus/client"],
     "paths": {
       "~/*": ["./src/*"]
-    },
-    "plugins": [
-      {
-        "name": "@effect/language-service",
-        "includeSuggestionsInTsc": false,
-        "namespaceImportPackages": ["@effect/platform-node"],
-        "diagnosticSeverity": {
-          "unstableApiUsage": "off",
-          "experimentalApiUsage": "off",
-          "anyUnknownInErrorContext": "warning",
-          "instanceOfSchema": "warning",
-          "deterministicKeys": "off"
-        }
-      }
-    ]
+    }
   },
   "include": ["src", "vite.config.ts", "vitest.config.ts", "test", "../../vitest.*.ts"]
 }

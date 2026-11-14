@@ -75,8 +75,6 @@ downgrades a binary over a database a newer one migrated.
   its own data home. Its backend, MCP bridge and other CLI children get `RYCO_HOME` pinned to that
   home, so a `RYCO_HOME` exported in a login shell never points it at Ryco's data.
 - The unsigned macOS installer refuses a downloaded bundle whose id differs from the running app's.
-- Features that ship only in Nightly are listed in `NIGHTLY_ONLY_FEATURES`
-  (`packages/shared/src/nightlyFeatures.ts`). The node is authoritative, from its own version.
 - CLI nodes keep the in-place npm `nightly` dist-tag.
 
 ### Copying Ryco's data into Ryco Nightly
@@ -265,7 +263,7 @@ Notes:
 - For local signed builds, import the Developer ID identity into Keychain and
   set `APPLE_API_KEY` (the private `.p8` file path), `APPLE_API_KEY_ID`, and
   `APPLE_API_ISSUER` in the repo-root `.env.local`. Load that file explicitly:
-  `bun --env-file=.env.local run dist:mac --signed`.
+  `bun --env-file=.env.local run dist:desktop:dmg --signed`.
 
 ## 3) Azure Trusted Signing setup (Windows)
 

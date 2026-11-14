@@ -39,13 +39,6 @@ export function rycoAppRuntimeNative(): RycoAppRuntimeNativeModule | null {
   return native ?? null;
 }
 
-/** Test seam. */
-export function setRycoAppRuntimeNativeForTests(
-  native: RycoAppRuntimeNativeModule | null | undefined,
-): void {
-  resolved = native;
-}
-
 const BACKGROUND_STAY_NAME = "ryco-hub-connections";
 
 /** An iOS background task as the shared policy's platform stay; null when iOS grants none. */

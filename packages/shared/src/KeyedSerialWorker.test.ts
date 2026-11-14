@@ -128,7 +128,7 @@ describe("makeKeyedSerialWorker", () => {
                 return Effect.gen(function* () {
                   const child = yield* Effect.forkChild(Effect.never);
                   yield* Fiber.interrupt(child);
-                  yield* Fiber.join(child);
+                  return yield* Fiber.join(child);
                 });
               default:
                 return Effect.sync(() => {
