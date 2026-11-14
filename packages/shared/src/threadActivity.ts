@@ -3,6 +3,7 @@ import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type OrchestrationThreadActivity,
+  type ThreadActivityKind,
 } from "@ryco/contracts/orchestration";
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
 import { THREAD_MOVED_ACTIVITY_KIND } from "@ryco/contracts/thread-move";
@@ -160,7 +161,7 @@ export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "provider.user-input.respond.failed",
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
-] as const;
+] as const satisfies ReadonlyArray<ThreadActivityKind>;
 
 function activityRequestId(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null || !("requestId" in payload)) {

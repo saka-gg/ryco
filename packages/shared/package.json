@@ -353,6 +353,10 @@
       "types": "./src/threadActivity.ts",
       "import": "./src/threadActivity.ts"
     },
+    "./threadActivityPayloads": {
+      "types": "./src/threadActivityPayloads.ts",
+      "import": "./src/threadActivityPayloads.ts"
+    },
     "./latestStateActivities": {
       "types": "./src/latestStateActivities.ts",
       "import": "./src/latestStateActivities.ts"

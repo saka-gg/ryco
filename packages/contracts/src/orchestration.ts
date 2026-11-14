@@ -1019,6 +1019,83 @@ export const OrchestrationThreadActivityTone = Schema.Literals([
 ]);
 export type OrchestrationThreadActivityTone = typeof OrchestrationThreadActivityTone.Type;
 
+/**
+ * Every activity kind this version writes or reads. `OrchestrationThreadActivity.kind` stays an
+ * open string on the wire, so a kind from a newer node (or an old row) still decodes; code that
+ * names a kind uses this union, so a misspelt or retired kind fails to compile.
+ * `@ryco/shared/threadActivityPayloads` has the guard and the typed payload readers.
+ */
+export const ThreadActivityKind = /* @__PURE__ */ Schema.Literals([
+  // Provider requests and the answers to them.
+  "approval.requested",
+  "approval.resolved",
+  "approval.response.submitted",
+  "user-input.requested",
+  "user-input.resolved",
+  "user-input.response.submitted",
+  "secret.requested",
+  "secret.resolved",
+  // Provider task, tool and subagent lifecycle.
+  "task.started",
+  "task.progress",
+  "task.updated",
+  "task.completed",
+  "tool.started",
+  "tool.updated",
+  "tool.completed",
+  "tool.progress",
+  "tool.denied",
+  "subagent.started",
+  "subagent.updated",
+  "subagent.completed",
+  "reasoning",
+  "agent.message",
+  "turn.plan.updated",
+  "prompt.suggestion",
+  // Session and context state.
+  "context-window.updated",
+  "context-compaction",
+  "context-handoff",
+  "fast-mode.state",
+  "background-work.session-boundary",
+  "background-work.checkpoint",
+  "background-work.omitted",
+  "runtime.error",
+  "runtime.warning",
+  "runtime.notice",
+  "usage-limit.resumed",
+  "goal.paused",
+  // Provider command failures and notices.
+  "provider.turn.start.failed",
+  "provider.turn.start.cancelled",
+  "provider.turn.steer.failed",
+  "provider.turn.interrupt.failed",
+  "provider.turn.unresponsive",
+  "provider.turn.lost",
+  "provider.goal.update.failed",
+  "provider.approval.respond.failed",
+  "provider.user-input.respond.failed",
+  "provider.session.stop.failed",
+  "provider.session.restart.failed",
+  "restart.background-work-stopped",
+  "restart.continuation-skipped",
+  "restart.continuation-failed",
+  // Checkpoints, history and thread lifecycle.
+  "checkpoint.captured",
+  "checkpoint.capture.failed",
+  "checkpoint.baseline.unconfirmed",
+  "checkpoint.revert",
+  "history.imported",
+  "thread.moved",
+  "thread.forked",
+  "setup-script.requested",
+  "setup-script.started",
+  "setup-script.failed",
+  "computer.control-denied",
+  "computer.setup-required",
+]);
+export type ThreadActivityKind = typeof ThreadActivityKind.Type;
+
 export const OrchestrationThreadActivity = Schema.Struct({
   id: EventId,
   tone: OrchestrationThreadActivityTone,
