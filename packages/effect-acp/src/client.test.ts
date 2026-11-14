@@ -1,5 +1,6 @@
 import * as Path from "effect/Path";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -8,7 +9,6 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -45,6 +45,8 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
     Effect.gen(function* () {
       const updates = yield* Ref.make<Array<unknown>>([]);
       const elicitationCompletions = yield* Ref.make<Array<unknown>>([]);
+      const updateSeen = yield* Deferred.make<void>();
+      const elicitationCompleteSeen = yield* Deferred.make<void>();
       const typedRequests = yield* Ref.make<Array<unknown>>([]);
       const typedNotifications = yield* Ref.make<Array<unknown>>([]);
       const handle = yield* makeHandle();
@@ -74,10 +76,14 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
           }),
         );
         yield* acp.handleSessionUpdate((notification) =>
-          Ref.update(updates, (current) => [...current, notification]),
+          Ref.update(updates, (current) => [...current, notification]).pipe(
+            Effect.andThen(Deferred.succeed(updateSeen, undefined)),
+          ),
         );
         yield* acp.handleElicitationComplete((notification) =>
-          Ref.update(elicitationCompletions, (current) => [...current, notification]),
+          Ref.update(elicitationCompletions, (current) => [...current, notification]).pipe(
+            Effect.andThen(Deferred.succeed(elicitationCompleteSeen, undefined)),
+          ),
         );
         yield* acp.handleExtRequest(
           "x/typed_request",
@@ -123,10 +129,8 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
         });
         assert.equal(prompt.stopReason, "end_turn");
 
-        const streamed = yield* Stream.runCollect(Stream.take(acp.raw.notifications, 2));
-        assert.equal(streamed.length, 2);
-        assert.equal(streamed[0]?._tag, "SessionUpdate");
-        assert.equal(streamed[1]?._tag, "ElicitationComplete");
+        yield* Deferred.await(updateSeen);
+        yield* Deferred.await(elicitationCompleteSeen);
         assert.equal((yield* Ref.get(updates)).length, 1);
         assert.equal((yield* Ref.get(elicitationCompletions)).length, 1);
         assert.deepEqual(yield* Ref.get(typedRequests), [{ message: "hello from typed request" }]);

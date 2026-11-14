@@ -54,7 +54,9 @@ export interface CodexAppServerPatchedProtocolOptions {
 }
 
 export interface CodexAppServerPatchedProtocol {
+  /** Incoming notifications, while no `onNotification` handler is installed. */
   readonly incomingNotifications: Stream.Stream<CodexAppServerIncomingNotification>;
+  /** Incoming server requests, while no `onRequest` handler is installed. */
   readonly incomingRequests: Stream.Stream<CodexAppServerIncomingRequest>;
   readonly request: (
     method: string,
@@ -146,12 +148,11 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const requestTimeoutMs = options.requestTimeoutMs ?? PROTOCOL_REQUEST_TIMEOUT_MS;
     const timeoutOrElse = options.timeoutOrElse ?? Effect.timeoutOrElse;
     const outgoing = yield* Queue.bounded<string, Cause.Done<void>>(PROTOCOL_QUEUE_CAPACITY);
-    const incomingNotifications = yield* options.onNotification
-      ? Queue.sliding<CodexAppServerIncomingNotification>(PROTOCOL_QUEUE_CAPACITY)
-      : Queue.bounded<CodexAppServerIncomingNotification>(PROTOCOL_QUEUE_CAPACITY);
-    const incomingRequests = yield* options.onRequest
-      ? Queue.sliding<CodexAppServerIncomingRequest>(PROTOCOL_QUEUE_CAPACITY)
-      : Queue.bounded<CodexAppServerIncomingRequest>(PROTOCOL_QUEUE_CAPACITY);
+    // Read only without a handler (`incomingNotifications` / `incomingRequests`).
+    const incomingNotifications =
+      yield* Queue.bounded<CodexAppServerIncomingNotification>(PROTOCOL_QUEUE_CAPACITY);
+    const incomingRequests =
+      yield* Queue.bounded<CodexAppServerIncomingRequest>(PROTOCOL_QUEUE_CAPACITY);
     const pending = yield* Ref.make(
       new Map<string, Deferred.Deferred<unknown, CodexError.CodexAppServerError>>(),
     );
@@ -321,9 +322,9 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
 
     const handleRequest = (request: CodexAppServerIncomingRequest) =>
       Effect.gen(function* () {
-        yield* offerBounded(incomingRequests, request, "incoming-requests");
         const handler = options.onRequest;
-        if (!handler) return;
+        // A handler is the only reader once installed: no copy of the request is queued.
+        if (!handler) return yield* offerBounded(incomingRequests, request, "incoming-requests");
         const accepted = yield* Ref.modify(activeRequestHandlers, (count) =>
           count < MAX_ACTIVE_REQUEST_HANDLERS ? [true, count + 1] : [false, count],
         );
@@ -353,9 +354,9 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       });
 
     const handleNotification = (notification: CodexAppServerIncomingNotification) =>
-      offerBounded(incomingNotifications, notification, "incoming-notifications").pipe(
-        Effect.andThen(options.onNotification ? options.onNotification(notification) : Effect.void),
-      );
+      options.onNotification
+        ? options.onNotification(notification)
+        : offerBounded(incomingNotifications, notification, "incoming-notifications");
 
     const routeMessage = (
       message: unknown,
