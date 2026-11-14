@@ -1180,7 +1180,7 @@ export const DeviceFrameHeader = Schema.Struct({
 });
 export type DeviceFrameHeader = typeof DeviceFrameHeader.Type;
 
-export const DeviceFrameDecodeErrorReason = Schema.Literals([
+export const DeviceFrameDecodeErrorReason = /* @__PURE__ */ Schema.Literals([
   "too-short",
   "bad-magic",
   "unsupported-version",

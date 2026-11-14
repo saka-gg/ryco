@@ -687,7 +687,7 @@ export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "no
 export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
 
 /** Narrow repository-owned policy; unrelated JSON keys remain forward compatible. */
-export const WorktreeSubmoduleRepositoryConfig = Schema.Struct({
+export const WorktreeSubmoduleRepositoryConfig = /* @__PURE__ */ Schema.Struct({
   worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
 });
 export const INITIAL_MODEL_OPTION_IDS = [

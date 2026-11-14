@@ -284,7 +284,7 @@ export const ExecutionEnvironmentDescriptor = Schema.Struct({
 });
 export type ExecutionEnvironmentDescriptor = typeof ExecutionEnvironmentDescriptor.Type;
 
-export const EnvironmentConnectionState = Schema.Literals([
+export const EnvironmentConnectionState = /* @__PURE__ */ Schema.Literals([
   "connecting",
   "connected",
   "disconnected",
@@ -321,19 +321,19 @@ export const RepositoryIdentity = Schema.Struct({
 });
 export type RepositoryIdentity = typeof RepositoryIdentity.Type;
 
-export const ScopedProjectRef = Schema.Struct({
+export const ScopedProjectRef = /* @__PURE__ */ Schema.Struct({
   environmentId: EnvironmentId,
   projectId: ProjectId,
 });
 export type ScopedProjectRef = typeof ScopedProjectRef.Type;
 
-export const ScopedThreadRef = Schema.Struct({
+export const ScopedThreadRef = /* @__PURE__ */ Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
 });
 export type ScopedThreadRef = typeof ScopedThreadRef.Type;
 
-export const ScopedThreadSessionRef = Schema.Struct({
+export const ScopedThreadSessionRef = /* @__PURE__ */ Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
 });

@@ -107,7 +107,7 @@ export const ServerAuthDescriptor = Schema.Struct({
 });
 export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
 
-export const AuthBootstrapInput = Schema.Struct({
+export const AuthBootstrapInput = /* @__PURE__ */ Schema.Struct({
   credential: TrimmedNonEmptyString,
 });
 export type AuthBootstrapInput = typeof AuthBootstrapInput.Type;
@@ -248,17 +248,17 @@ export const AuthAccessStreamEvent = Schema.Union([
 ]);
 export type AuthAccessStreamEvent = typeof AuthAccessStreamEvent.Type;
 
-export const AuthRevokePairingLinkInput = Schema.Struct({
+export const AuthRevokePairingLinkInput = /* @__PURE__ */ Schema.Struct({
   id: TrimmedNonEmptyString,
 });
 export type AuthRevokePairingLinkInput = typeof AuthRevokePairingLinkInput.Type;
 
-export const AuthRevokeClientSessionInput = Schema.Struct({
+export const AuthRevokeClientSessionInput = /* @__PURE__ */ Schema.Struct({
   sessionId: AuthSessionId,
 });
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
 
-export const AuthCreatePairingCredentialInput = Schema.Struct({
+export const AuthCreatePairingCredentialInput = /* @__PURE__ */ Schema.Struct({
   label: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;

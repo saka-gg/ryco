@@ -32,7 +32,7 @@ export const GitStackedAction = Schema.Literals([
 export type GitStackedAction = typeof GitStackedAction.Type;
 export const GitActionProgressPhase = Schema.Literals(["branch", "commit", "push", "pr"]);
 export type GitActionProgressPhase = typeof GitActionProgressPhase.Type;
-export const GitActionProgressKind = Schema.Literals([
+export const GitActionProgressKind = /* @__PURE__ */ Schema.Literals([
   "action_started",
   "phase_started",
   "hook_started",

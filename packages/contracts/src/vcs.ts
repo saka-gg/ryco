@@ -29,7 +29,7 @@ export const VcsDriverCapabilities = Schema.Struct({
 });
 export type VcsDriverCapabilities = typeof VcsDriverCapabilities.Type;
 
-export const VcsRepositoryIdentity = Schema.Struct({
+export const VcsRepositoryIdentity = /* @__PURE__ */ Schema.Struct({
   kind: VcsDriverKind,
   rootPath: TrimmedNonEmptyString,
   metadataPath: Schema.NullOr(TrimmedNonEmptyString),
@@ -52,7 +52,7 @@ export const VcsRemote = Schema.Struct({
 });
 export type VcsRemote = typeof VcsRemote.Type;
 
-export const VcsListRemotesResult = Schema.Struct({
+export const VcsListRemotesResult = /* @__PURE__ */ Schema.Struct({
   remotes: Schema.Array(VcsRemote),
   freshness: VcsFreshness,
 });

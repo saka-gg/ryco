@@ -1423,7 +1423,7 @@ export const OrchestrationWorktreeShell = Schema.Struct({
 });
 export type OrchestrationWorktreeShell = typeof OrchestrationWorktreeShell.Type;
 
-export const OrchestrationReadModel = Schema.Struct({
+export const OrchestrationReadModel = /* @__PURE__ */ Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   worktrees: Schema.optional(Schema.Array(OrchestrationWorktreeShell)),
@@ -1692,7 +1692,7 @@ export const OrchestrationShellSnapshotEndItem = Schema.Struct({
 });
 export type OrchestrationShellSnapshotEndItem = typeof OrchestrationShellSnapshotEndItem.Type;
 
-export const OrchestrationShellSnapshotPageItem = Schema.Union([
+export const OrchestrationShellSnapshotPageItem = /* @__PURE__ */ Schema.Union([
   OrchestrationShellSnapshotBeginItem,
   OrchestrationShellSnapshotThreadsItem,
   OrchestrationShellSnapshotArchivedThreadsItem,
@@ -1724,7 +1724,9 @@ const OrchestrationShellStreamItemMembers = [
 ] as const;
 
 /** A shell stream item as the server builds it. */
-export const OrchestrationShellStreamItem = Schema.Union(OrchestrationShellStreamItemMembers);
+export const OrchestrationShellStreamItem = /* @__PURE__ */ Schema.Union(
+  OrchestrationShellStreamItemMembers,
+);
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
 
 /**
@@ -3082,7 +3084,7 @@ const WorktreeManualPositionSetCommand = Schema.Struct({
   changedAt: IsoDateTime,
 });
 
-const DispatchableClientOrchestrationCommand = Schema.Union([
+const DispatchableClientOrchestrationCommand = /* @__PURE__ */ Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectAvatarSetCommand,
@@ -3525,13 +3527,13 @@ const InternalOrchestrationCommand = Schema.Union([
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
-export const OrchestrationCommand = Schema.Union([
+export const OrchestrationCommand = /* @__PURE__ */ Schema.Union([
   DispatchableClientOrchestrationCommand,
   InternalOrchestrationCommand,
 ]);
 export type OrchestrationCommand = typeof OrchestrationCommand.Type;
 
-export const OrchestrationEventType = Schema.Literals([
+export const OrchestrationEventType = /* @__PURE__ */ Schema.Literals([
   "project.created",
   "project.meta-updated",
   "project.avatar-set",
@@ -3601,7 +3603,11 @@ export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
 export const OrchestrationAggregateKind = Schema.Literals(["project", "thread", "worktree"]);
 export type OrchestrationAggregateKind = typeof OrchestrationAggregateKind.Type;
-export const OrchestrationActorKind = Schema.Literals(["client", "server", "provider"]);
+export const OrchestrationActorKind = /* @__PURE__ */ Schema.Literals([
+  "client",
+  "server",
+  "provider",
+]);
 
 export const ProjectCreatedPayload = Schema.Struct({
   projectId: ProjectId,
@@ -4574,7 +4580,7 @@ export type OrchestrationSlimThreadEvent = typeof OrchestrationSlimThreadEvent.T
  * ignores the field and sends full events, which a client asking for slim
  * ones handles unchanged.
  */
-export const OrchestrationLiveEventForm = Schema.Literals(["full", "slim"]);
+export const OrchestrationLiveEventForm = /* @__PURE__ */ Schema.Literals(["full", "slim"]);
 export type OrchestrationLiveEventForm = typeof OrchestrationLiveEventForm.Type;
 
 /**
@@ -4637,7 +4643,10 @@ export const OrchestrationThreadWindowStreamItem = ForwardCompatibleUnion(
 );
 export type OrchestrationThreadWindowStreamItem = typeof OrchestrationThreadWindowStreamItem.Type;
 
-export const OrchestrationCommandReceiptStatus = Schema.Literals(["accepted", "rejected"]);
+export const OrchestrationCommandReceiptStatus = /* @__PURE__ */ Schema.Literals([
+  "accepted",
+  "rejected",
+]);
 export type OrchestrationCommandReceiptStatus = typeof OrchestrationCommandReceiptStatus.Type;
 
 export const TurnCountRange = Schema.Struct({
@@ -4707,7 +4716,7 @@ export const ThreadTurnDiff = TurnCountRange.mapFields(
   { unsafePreserveChecks: true },
 );
 
-export const ProviderSessionRuntimeStatus = Schema.Literals([
+export const ProviderSessionRuntimeStatus = /* @__PURE__ */ Schema.Literals([
   "starting",
   "running",
   "stopped",
@@ -4715,7 +4724,7 @@ export const ProviderSessionRuntimeStatus = Schema.Literals([
 ]);
 export type ProviderSessionRuntimeStatus = typeof ProviderSessionRuntimeStatus.Type;
 
-const ProjectionThreadTurnStatus = Schema.Literals([
+const ProjectionThreadTurnStatus = /* @__PURE__ */ Schema.Literals([
   "running",
   "completed",
   "interrupted",
@@ -4723,7 +4732,7 @@ const ProjectionThreadTurnStatus = Schema.Literals([
 ]);
 export type ProjectionThreadTurnStatus = typeof ProjectionThreadTurnStatus.Type;
 
-const ProjectionCheckpointRow = Schema.Struct({
+const ProjectionCheckpointRow = /* @__PURE__ */ Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
   checkpointTurnCount: NonNegativeInt,
@@ -4735,10 +4744,14 @@ const ProjectionCheckpointRow = Schema.Struct({
 });
 export type ProjectionCheckpointRow = typeof ProjectionCheckpointRow.Type;
 
-export const ProjectionPendingApprovalStatus = Schema.Literals(["pending", "resolved"]);
+export const ProjectionPendingApprovalStatus = /* @__PURE__ */ Schema.Literals([
+  "pending",
+  "resolved",
+]);
 export type ProjectionPendingApprovalStatus = typeof ProjectionPendingApprovalStatus.Type;
 
-export const ProjectionPendingApprovalDecision = Schema.NullOr(ProviderApprovalDecision);
+export const ProjectionPendingApprovalDecision =
+  /* @__PURE__ */ Schema.NullOr(ProviderApprovalDecision);
 export type ProjectionPendingApprovalDecision = typeof ProjectionPendingApprovalDecision.Type;
 
 export const DispatchResult = Schema.Struct({
