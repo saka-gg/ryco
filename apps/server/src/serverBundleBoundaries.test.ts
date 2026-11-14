@@ -833,7 +833,13 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // all of them): the terminal history sanitizer's xterm.js rules (+1.5 KB), the long-thread
     // reads by activity kind (+1.2 KB), Statistics for the whole machine (+2.6 KB) and "Move to
     // project" (+12.7 KB). The last two list their shares above.
-    expect(bytes).toBeLessThan(7_333_000);
+    // 7.335 MB on 2026-11-14 for the code-quality changes that merged together (measured
+    // 7.333884 MB with all 29): typed thread-activity kinds and their lenient payload readers
+    // (+0.6 KB), owned-entry identities read through a schema, the shared path-containment and
+    // atomic-write helpers, the pending and disabled provider snapshot builder and the adapter
+    // capability flags orchestration asks. The shared guards, logged ignores and MCP tool
+    // helpers in the same set made boot smaller (about -1.7 KB).
+    expect(bytes).toBeLessThan(7_335_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

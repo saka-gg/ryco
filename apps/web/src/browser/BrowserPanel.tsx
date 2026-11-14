@@ -17,6 +17,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { appLocalStorage } from "../hooks/useLocalStorage";
 import { useComposerContextIntakeAvailable } from "../composerContextIntake";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { useBrowserElementPicker } from "./BrowserElementPicker";
@@ -146,7 +147,7 @@ function ProjectBrowserPanel({
     setNewTab(false);
     try {
       const value: unknown = JSON.parse(
-        localStorage.getItem(`ryco:browser-sites:${project}`) ?? "[]",
+        appLocalStorage.getItem(`ryco:browser-sites:${project}`) ?? "[]",
       );
       setSaved(
         Array.isArray(value)
@@ -211,7 +212,7 @@ function ProjectBrowserPanel({
       ? saved.filter((url) => url !== active.url)
       : [active.url, ...saved].slice(0, 20);
     try {
-      localStorage.setItem(`ryco:browser-sites:${project}`, JSON.stringify(next));
+      appLocalStorage.setItem(`ryco:browser-sites:${project}`, JSON.stringify(next));
       setSaved(next);
     } catch {
       setError("Could not save this URL.");

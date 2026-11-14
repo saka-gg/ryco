@@ -1,5 +1,7 @@
 import type { PersistedComposerImageAttachment } from "@ryco/client-runtime/state/composer";
 
+import { appLocalStorage } from "./hooks/useLocalStorage";
+
 // ---------------------------------------------------------------------------
 // Recovery records for messages sent while their attachments uploaded
 // (`heldSends.ts`). The message itself waits in this tab's queue, in memory;
@@ -7,6 +9,8 @@ import type { PersistedComposerImageAttachment } from "@ryco/client-runtime/stat
 // message comes back into its draft unless it already went out. Text and
 // attachment rows only: bytes stay where the draft keeps them (IndexedDB), and
 // a file whose upload had not finished comes back as "attach again".
+// Hosted Hub builds keep the record in this window's memory (`appLocalStorage`):
+// it holds prompt text, which must not reach the browser's localStorage there.
 // ---------------------------------------------------------------------------
 
 const STORAGE_KEY = "ryco:held-sends:v1";
@@ -36,11 +40,7 @@ export interface HeldSendRecord {
 }
 
 function storage(): Storage | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
+  return typeof window === "undefined" ? null : appLocalStorage;
 }
 
 let cachedTabId: string | null = null;

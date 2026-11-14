@@ -38,7 +38,8 @@ import {
 // the queue's drain sends it, through the same readiness gate as any send,
 // once nothing is left to wait for. A recovery record in local storage covers
 // what memory cannot: after a reload or a closed tab the message comes back
-// into its draft unless the thread already has it.
+// into its draft unless the thread already has it. Hosted Hub builds keep that
+// record in memory too (`heldSendRecords.ts`).
 // ---------------------------------------------------------------------------
 
 type ComposerThreadTarget = ScopedThreadRef | DraftId;
