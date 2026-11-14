@@ -11,6 +11,8 @@ import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 
 import {
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
   buildServerProvider,
   nonEmptyTrimmed,
   parseGenericCliVersion,
@@ -311,6 +313,12 @@ function deriveShortNameByStrippingPrefix(name: string, prefix: string): string 
   return rest.length > 0 ? rest : undefined;
 }
 
+function openCodeDisabledMessage(hasServerUrl: boolean): string | undefined {
+  return hasServerUrl
+    ? "OpenCode is disabled in Ryco settings. A server URL is configured."
+    : undefined;
+}
+
 export const makePendingOpenCodeProvider = (
   openCodeSettings: OpenCodeSettings,
 ): ServerProviderDraft => {
@@ -322,37 +330,16 @@ export const makePendingOpenCodeProvider = (
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
 
-  if (!openCodeSettings.enabled) {
-    return buildServerProvider({
-      presentation: OPENCODE_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message:
-          openCodeSettings.serverUrl.trim().length > 0
-            ? "OpenCode is disabled in Ryco settings. A server URL is configured."
-            : "OpenCode is disabled in Ryco settings.",
-      },
-    });
-  }
-
-  return buildServerProvider({
+  return buildPendingServerProvider({
     presentation: OPENCODE_PRESENTATION,
-    enabled: true,
+    enabled: openCodeSettings.enabled,
     checkedAt,
     models,
-    probe: {
+    pending: {
       installed: false,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
       message: "OpenCode provider status has not been checked in this session yet.",
     },
+    disabledMessage: openCodeDisabledMessage(openCodeSettings.serverUrl.trim().length > 0),
   });
 };
 
@@ -397,9 +384,8 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
   };
 
   if (!openCodeSettings.enabled) {
-    return buildServerProvider({
+    return buildDisabledServerProvider({
       presentation: OPENCODE_PRESENTATION,
-      enabled: false,
       checkedAt,
       models: providerModelsFromSettings(
         [],
@@ -407,15 +393,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
         customModels,
         DEFAULT_OPENCODE_MODEL_CAPABILITIES,
       ),
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: isExternalServer
-          ? "OpenCode is disabled in Ryco settings. A server URL is configured."
-          : "OpenCode is disabled in Ryco settings.",
-      },
+      message: openCodeDisabledMessage(isExternalServer),
     });
   }
 

@@ -7,6 +7,7 @@ function safeRouteId(value: unknown): string | null {
   if (typeof candidate !== "string") return null;
   const trimmed = candidate.trim();
   if (trimmed.length === 0 || trimmed.length > MAX_ROUTE_ID_LENGTH) return null;
+  // oxlint-disable-next-line no-control-regex -- control characters are what it refuses
   return /[\u0000-\u001f\u007f]/u.test(trimmed) ? null : trimmed;
 }
 

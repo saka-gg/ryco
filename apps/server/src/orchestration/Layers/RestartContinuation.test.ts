@@ -34,6 +34,10 @@ import { OrchestrationCommandReceiptRepository } from "../../persistence/Service
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import {
+  ProviderService,
+  type ProviderServiceShape,
+} from "../../provider/Services/ProviderService.ts";
+import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
 } from "../../provider/Services/ProviderSessionDirectory.ts";
@@ -62,6 +66,8 @@ import { makeRestartContinuationLayer } from "./RestartContinuation.ts";
 
 const codex = ProviderInstanceId.make("codex");
 const claude = ProviderInstanceId.make("claude");
+/** A Claude-driven instance whose adapter does not ask for a resume cache review. */
+const claudeWithoutCacheReview = ProviderInstanceId.make("claude-without-cache-review");
 const projectId = ProjectId.make("project-restart");
 
 const MockProjectAvatarStoreLive = Layer.succeed(ProjectAvatarStore, {
@@ -127,6 +133,14 @@ async function createSystem(options: SystemOptions = {}) {
       getBinding: (threadId: ThreadId) =>
         Effect.succeed(Option.fromNullishOr(state.bindings.get(threadId))),
     } as unknown as ProviderSessionDirectory["Service"]),
+    Layer.succeed(ProviderService, {
+      getCapabilities: (instanceId: ProviderInstanceId) =>
+        Effect.succeed(
+          instanceId === claude
+            ? { sessionModelSwitch: "in-session", resumeCacheReview: true }
+            : { sessionModelSwitch: "in-session" },
+        ),
+    } as unknown as ProviderServiceShape),
     Layer.succeed(CompletionReturnRepository, {
       get: (threadId: ThreadId) =>
         state.delegatedReturnReadFails
@@ -895,11 +909,14 @@ describe("RestartContinuation", () => {
     });
   }
 
-  it("leaves a large Claude conversation with a cold cache for review", async () => {
-    const system = await createSystem();
+  /** A Claude thread whose last usage observation shows a large cache that has since gone cold. */
+  async function seedColdCacheClaudeThread(
+    system: Awaited<ReturnType<typeof createSystem>>,
+    instanceId: ProviderInstanceId,
+  ) {
     const seeded = await system.seedThread({
-      id: "claude",
-      instanceId: claude,
+      id: instanceId,
+      instanceId,
       providerName: "claudeAgent",
     });
     const observedAt = system.ago(10);
@@ -917,7 +934,7 @@ describe("RestartContinuation", () => {
             source: "assistant-usage",
             observedAt,
             runtimeSessionId: seeded.runtimeSessionId,
-            providerInstanceId: claude,
+            providerInstanceId: instanceId,
             model: "gpt-5",
             messageId: "request-1",
             directInputTokens: 1_000,
@@ -931,6 +948,12 @@ describe("RestartContinuation", () => {
       },
       createdAt: observedAt,
     });
+    return seeded;
+  }
+
+  it("leaves a large Claude conversation with a cold cache for review", async () => {
+    const system = await createSystem();
+    const seeded = await seedColdCacheClaudeThread(system, claude);
     await system.startup([seeded.threadId]);
     await system.run(system.restart.dispatchPending());
     expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
@@ -945,6 +968,17 @@ describe("RestartContinuation", () => {
     ).toEqual([
       "Not continued automatically: continuing this large Claude conversation would re-send its full context. Send a message to continue.",
     ]);
+  });
+
+  it("continues a cold-cache conversation whose adapter does not ask for a cache review", async () => {
+    const system = await createSystem();
+    const seeded = await seedColdCacheClaudeThread(system, claudeWithoutCacheReview);
+    await system.startup([seeded.threadId]);
+    await system.run(system.restart.dispatchPending());
+    expect(await system.rowOf(seeded.threadId, seeded.turnId)).toMatchObject({
+      status: "dispatched",
+    });
+    expect(system.turnStarts()).toHaveLength(1);
   });
 
   it("leaves a delegated child whose result is still owed to its parent", async () => {

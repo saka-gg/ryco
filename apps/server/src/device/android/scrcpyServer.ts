@@ -14,6 +14,8 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
 
+import { resolveRycoBaseDir } from "../../os-jank.ts";
+
 export const SCRCPY_SERVER_VERSION = "5.0.1";
 export const SCRCPY_SERVER_SHA256 =
   "764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536";
@@ -26,8 +28,7 @@ const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 /** `<RYCO_HOME or ~/.ryco>/cache/android`: shared by every Android helper artifact. */
 export function androidCacheRoot(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
-  const base = env.RYCO_HOME?.trim() || path.join(home, ".ryco");
-  return path.join(base, "cache", "android");
+  return path.join(resolveRycoBaseDir(env.RYCO_HOME, home), "cache", "android");
 }
 
 export type FetchBytes = (url: string, signal: AbortSignal) => Promise<Uint8Array>;

@@ -49,7 +49,7 @@ import type {
   AgentControlSessionRegistryShape,
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
-import { ToolFailure } from "./threadReads.ts";
+import { ToolFailure, decodeToolArgs } from "./toolFailure.ts";
 import {
   modelSelectionSchema,
   submitAgentControlMutation,
@@ -439,17 +439,13 @@ export function withLocalTaskTools(
       yield* authorize(session, name, authority.value.turnId);
       return authority.value;
     });
-  const decode = <S extends Schema.Top>(schema: S, args: unknown) =>
-    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
-      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
-    ) as Effect.Effect<S["Type"], ToolFailure>;
   const tasks = deps.tasks;
   const task = <A>(effect: Effect.Effect<A, LocalTaskError>) =>
     effect.pipe(Effect.mapError(taskFailure));
 
   const list = (args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlListLocalTasksInput, args);
+      const input = yield* decodeToolArgs(AgentControlListLocalTasksInput, args);
       const limit = Math.min(
         input.limit ?? AGENT_CONTROL_LOCAL_TASK_LIST_DEFAULT,
         AGENT_CONTROL_LOCAL_TASK_LIST_MAX,
@@ -474,13 +470,13 @@ export function withLocalTaskTools(
 
   const read = (args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlReadLocalTaskInput, args);
+      const input = yield* decodeToolArgs(AgentControlReadLocalTaskInput, args);
       return { task: toTaskView(yield* task(tasks.get(input.taskId))) };
     });
 
   const create = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlCreateLocalTaskInput, args);
+      const input = yield* decodeToolArgs(AgentControlCreateLocalTaskInput, args);
       // One task per request: a retry of the same request finds it again.
       const taskId = `task-agent-${createHash("sha256")
         .update(JSON.stringify([session.threadId, input.requestId]))
@@ -527,13 +523,13 @@ export function withLocalTaskTools(
 
   const update = (args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlUpdateLocalTaskInput, args);
+      const input = yield* decodeToolArgs(AgentControlUpdateLocalTaskInput, args);
       return { task: toTaskView(yield* task(tasks.update(input))) };
     });
 
   const addFile = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlAddLocalTaskFileInput, args);
+      const input = yield* decodeToolArgs(AgentControlAddLocalTaskFileInput, args);
       if (deps.workspaceAccess === undefined || deps.taskFilesDir === undefined)
         return yield* Effect.fail(new ToolFailure("Task files are unavailable on this node."));
       const taskFilesDir = deps.taskFilesDir;
@@ -581,7 +577,7 @@ export function withLocalTaskTools(
 
   const removeFile = (args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlRemoveLocalTaskFileInput, args);
+      const input = yield* decodeToolArgs(AgentControlRemoveLocalTaskFileInput, args);
       return { task: toTaskView(yield* task(tasks.removeFile(input))) };
     });
 
@@ -593,7 +589,7 @@ export function withLocalTaskTools(
 
   const startChat = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlStartLocalTaskChatInput, args);
+      const input = yield* decodeToolArgs(AgentControlStartLocalTaskChatInput, args);
       const current = yield* task(tasks.get(input.taskId));
       if (current.state === "done")
         return yield* Effect.fail(
@@ -664,7 +660,7 @@ export function withLocalTaskTools(
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlProposeLocalTaskDeleteInput, args);
+      const input = yield* decodeToolArgs(AgentControlProposeLocalTaskDeleteInput, args);
       const current = yield* task(tasks.get(input.taskId));
       return yield* submitAgentControlMutation(deps, {
         session,

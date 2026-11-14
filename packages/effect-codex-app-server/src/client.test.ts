@@ -58,6 +58,33 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       assert.equal(yield* Deferred.await(seen), "still streaming");
     }),
   );
+  it.effect("treats a method named like an Object.prototype member as unknown", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const unknown = yield* Deferred.make<string>();
+      const client = yield* CodexClient.make(stdio);
+      yield* client.handleUnknownServerNotification((method) =>
+        Deferred.succeed(unknown, method).pipe(Effect.asVoid),
+      );
+      const encoder = new TextEncoder();
+      yield* Queue.offer(
+        input,
+        encoder.encode(JSON.stringify({ method: "constructor", params: {} }) + "\n"),
+      );
+      assert.equal(yield* Deferred.await(unknown), "constructor");
+      // A request named "toString" is answered as unknown; the transport stays up.
+      yield* Queue.offer(
+        input,
+        encoder.encode(JSON.stringify({ id: 7, method: "toString", params: {} }) + "\n"),
+      );
+      const answer = JSON.parse(yield* Queue.take(output)) as {
+        readonly id: number;
+        readonly error?: { readonly code: number };
+      };
+      assert.equal(answer.id, 7);
+      assert.equal(answer.error?.code, -32601);
+    }),
+  );
   const makeHandle = () =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;

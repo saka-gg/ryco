@@ -123,7 +123,7 @@ import {
   revokeOtherServerClientSessions,
   revokeServerClientSession,
   revokeServerPairingLink,
-  isLoopbackHostname,
+  isPrimaryLoopbackHostname,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,
 } from "~/environments/primary";
@@ -144,6 +144,7 @@ import { setSavedEnvironmentEnabled } from "~/environments/runtime/savedEnvironm
 import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
+import { errorMessage } from "~/lib/errorMessage";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 
@@ -361,7 +362,7 @@ function parseRemotePairingFields(input: { readonly host: string; readonly pairi
 
 function formatDesktopSshConnectionError(error: unknown): string {
   const fallback = "Failed to connect SSH host.";
-  const rawMessage = error instanceof Error ? error.message : fallback;
+  const rawMessage = errorMessage(error, fallback);
   const withoutIpcPrefix = rawMessage.replace(
     /^Error invoking remote method 'desktop:ensure-ssh-environment':\s*/u,
     "",
@@ -492,7 +493,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
     endpointPairingUrl ??
     (endpointUrl != null && endpointUrl !== ""
       ? (hostedPairingUrl ?? resolveDesktopPairingUrl(endpointUrl, pairingLink.credential))
-      : isLoopbackHostname(window.location.hostname)
+      : isPrimaryLoopbackHostname(window.location.hostname)
         ? null
         : currentOriginPairingUrl);
   // A QR code never encodes loopback. A saved loopback default still copies as
@@ -960,7 +961,7 @@ function PhonePairingLinkAction() {
         setDialogOpen(false);
       })
       .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+        const message = errorMessage(error, "Failed to create pairing URL.");
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -1574,8 +1575,7 @@ function useLocalBackendAccess() {
         setIsDesktopServerExposureDialogOpen(false);
         setIsUpdatingDesktopServerExposure(false);
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to update network exposure.";
+        const message = errorMessage(error, "Failed to update network exposure.");
         setIsDesktopServerExposureDialogOpen(false);
         setDesktopServerExposureError(message);
         toastManager.add(
@@ -1616,8 +1616,7 @@ function useLocalBackendAccess() {
       );
       setPendingTailscaleServeEndpoint(null);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to configure Tailscale HTTPS.";
+      const message = errorMessage(error, "Failed to configure Tailscale HTTPS.");
       setDesktopServerExposureError(message);
       toastManager.add(
         stackedThreadToast({
@@ -1659,7 +1658,7 @@ function useLocalBackendAccess() {
       );
       setDisableTailscaleServeDialogOpen(false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to disable Tailscale HTTPS.";
+      const message = errorMessage(error, "Failed to disable Tailscale HTTPS.");
       setDesktopServerExposureError(message);
       toastManager.add(
         stackedThreadToast({
@@ -1687,7 +1686,7 @@ function useLocalBackendAccess() {
           stackedThreadToast({
             type: "error",
             title: "Ryco could not restart",
-            description: error instanceof Error ? error.message : "Restart Ryco to apply it.",
+            description: errorMessage(error, "Restart Ryco to apply it."),
           }),
         );
       });
@@ -1705,9 +1704,7 @@ function useLocalBackendAccess() {
         await desktopBridge.setServerExposureMode(desktopServerExposureState.mode),
       );
     } catch (error) {
-      setDesktopServerExposureError(
-        error instanceof Error ? error.message : "Failed to update network exposure.",
-      );
+      setDesktopServerExposureError(errorMessage(error, "Failed to update network exposure."));
     } finally {
       setIsUpdatingDesktopServerExposure(false);
     }
@@ -1725,9 +1722,7 @@ function useLocalBackendAccess() {
         }),
       );
     } catch (error) {
-      setDesktopServerExposureError(
-        error instanceof Error ? error.message : "Failed to update Tailscale HTTPS.",
-      );
+      setDesktopServerExposureError(errorMessage(error, "Failed to update Tailscale HTTPS."));
     } finally {
       setIsUpdatingTailscaleServe(false);
     }
@@ -1762,7 +1757,7 @@ function useLocalBackendAccess() {
     try {
       await revokeServerPairingLink(id);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to revoke pairing link.";
+      const message = errorMessage(error, "Failed to revoke pairing link.");
       setDesktopAccessManagementError(message);
       toastManager.add(
         stackedThreadToast({
@@ -1783,7 +1778,7 @@ function useLocalBackendAccess() {
       try {
         await revokeServerClientSession(sessionId);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to revoke client access.";
+        const message = errorMessage(error, "Failed to revoke client access.");
         setDesktopAccessManagementError(message);
         toastManager.add(
           stackedThreadToast({
@@ -1810,7 +1805,7 @@ function useLocalBackendAccess() {
         description: "Other paired clients will need a new pairing link before reconnecting.",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to revoke other clients.";
+      const message = errorMessage(error, "Failed to revoke other clients.");
       setDesktopAccessManagementError(message);
       toastManager.add(
         stackedThreadToast({
@@ -1887,8 +1882,7 @@ function useLocalBackendAccess() {
         })
         .catch((error: unknown) => {
           if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load network exposure state.";
+          const message = errorMessage(error, "Failed to load network exposure state.");
           setDesktopServerExposureError(message);
         });
       void desktopBridge
@@ -1899,8 +1893,7 @@ function useLocalBackendAccess() {
         })
         .catch((error: unknown) => {
           if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
+          const message = errorMessage(error, "Failed to load reachable endpoints.");
           setDesktopServerExposureError(message);
         });
     } else {
@@ -1913,8 +1906,7 @@ function useLocalBackendAccess() {
         })
         .catch((error: unknown) => {
           if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
+          const message = errorMessage(error, "Failed to load reachable endpoints.");
           setDesktopServerExposureError(message);
         });
     }
@@ -2700,7 +2692,7 @@ export function ConnectedDevicesSettings() {
         description: `${record.label} is now saved and will reconnect on app startup.`,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to add backend.";
+      const message = errorMessage(error, "Failed to add backend.");
       setSavedBackendError(message);
       toastManager.add(
         stackedThreadToast({
@@ -2729,7 +2721,7 @@ export function ConnectedDevicesSettings() {
     } catch (error) {
       // Switched off while it connected: its row says so.
       if (error instanceof SavedEnvironmentSwitchedOffError) return;
-      const message = error instanceof Error ? error.message : "Failed to connect backend.";
+      const message = errorMessage(error, "Failed to connect backend.");
       setSavedBackendError(message);
       toastManager.add(
         stackedThreadToast({
@@ -2761,7 +2753,7 @@ export function ConnectedDevicesSettings() {
     try {
       await disconnectSavedEnvironment(environmentId);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to disconnect backend.";
+      const message = errorMessage(error, "Failed to disconnect backend.");
       setSavedBackendError(message);
       toastManager.add(
         stackedThreadToast({
@@ -2782,10 +2774,10 @@ export function ConnectedDevicesSettings() {
       try {
         await setSavedEnvironmentEnabled(environmentId, enabled);
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : `Failed to switch the environment ${enabled ? "on" : "off"}.`;
+        const message = errorMessage(
+          error,
+          `Failed to switch the environment ${enabled ? "on" : "off"}.`,
+        );
         setSavedBackendError(message);
         toastManager.add(
           stackedThreadToast({
@@ -2807,7 +2799,7 @@ export function ConnectedDevicesSettings() {
     try {
       await removeSavedEnvironment(environmentId);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to remove backend.";
+      const message = errorMessage(error, "Failed to remove backend.");
       setSavedBackendError(message);
       toastManager.add(
         stackedThreadToast({
@@ -2836,7 +2828,7 @@ export function ConnectedDevicesSettings() {
       setDiscoveredSshHosts(hosts);
       setHasLoadedDiscoveredSshHosts(true);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to discover SSH hosts.";
+      const message = errorMessage(error, "Failed to discover SSH hosts.");
       setDiscoveredSshHostsError(message);
       setHasLoadedDiscoveredSshHosts(true);
     } finally {

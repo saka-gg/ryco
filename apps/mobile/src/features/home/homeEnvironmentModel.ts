@@ -3,7 +3,7 @@ import {
   type EnvironmentThreadCapabilities,
   type ReportedThreadCapabilities,
 } from "@ryco/client-runtime/rpc";
-import type { EnvironmentId, ExecutionEnvironmentCapabilities } from "@ryco/contracts";
+import type { EnvironmentId, ExecutionEnvironmentCapabilities, SpaceRole } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 
 import {
@@ -50,7 +50,7 @@ export interface HostedHomeEnvironmentInput {
     | "replaying"
     | "delivery-unknown"
     | "closed";
-  readonly role: "viewer" | "operator" | "owner" | null;
+  readonly role: SpaceRole | null;
   readonly shellCurrent?: boolean;
   readonly apiAvailable?: boolean;
 }
@@ -65,7 +65,7 @@ export interface HostedHomeEnvironmentInput {
 export interface CachedHubNodeHomeEnvironmentInput {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  readonly role: "viewer" | "operator" | "owner";
+  readonly role: SpaceRole;
   readonly revokedAt: number | null;
   readonly presenceOnline: boolean;
   readonly lastHeartbeatAt: number | null;

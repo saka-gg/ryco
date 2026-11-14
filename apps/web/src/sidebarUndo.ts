@@ -13,6 +13,7 @@ import { selectSidebarThreadSummaryByRef, selectProjectByRef, useStore } from ".
 import { newCommandId } from "./lib/utils";
 import { stackedThreadToast } from "./components/ui/toastHelpers";
 import { toastManager } from "./components/ui/toastManager";
+import { errorMessage } from "~/lib/errorMessage";
 
 const labels = {
   archive: "Thread archived",
@@ -136,10 +137,10 @@ export const sidebarUndo = createSidebarUndoHistory({
       stackedThreadToast({
         type: "error",
         title: "Could not undo thread action",
-        description:
-          error instanceof Error
-            ? error.message
-            : "The request failed. Check the current thread state before trying again.",
+        description: errorMessage(
+          error,
+          "The request failed. Check the current thread state before trying again.",
+        ),
       }),
     ),
 });

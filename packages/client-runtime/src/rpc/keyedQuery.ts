@@ -783,16 +783,51 @@ export function createKeyedQueryRegistry<TState>(
   return registry;
 }
 
-interface KeyedQueryDefinition<TInput, TData, TControllerFields extends Record<string, unknown>> {
+/**
+ * `TInput` with the fields `K` proven present: what an `isEnabled` guard that
+ * null-checks those fields passes on to `buildKey`, `run` and the resolvers.
+ */
+export type KeyedQueryEnabledInput<TInput, K extends keyof TInput> = TInput & {
+  readonly [P in K]-?: NonNullable<TInput[P]>;
+};
+
+/**
+ * The `isEnabled` of a definition: a plain predicate when the callbacks take
+ * the input as is, a type guard when `TEnabled` narrows it.
+ */
+export type KeyedQueryIsEnabled<TInput, TEnabled extends TInput> = [TInput] extends [TEnabled]
+  ? (input: TInput) => boolean
+  : (input: TInput) => input is TEnabled;
+
+/**
+ * `isEnabled` gates every other callback. Given a narrower `TEnabled`, it is a
+ * type guard (`(input): input is TEnabled`) and the callbacks receive the
+ * narrowed input, so they need no casts for fields it already checked.
+ */
+export interface KeyedQueryDefinition<
+  TInput,
+  TData,
+  TControllerFields extends Record<string, unknown>,
+  TEnabled extends TInput = TInput,
+> {
   readonly label: string;
   readonly staleTime: number;
   readonly gcTime?: number;
-  readonly isEnabled: (input: TInput) => boolean;
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
-  readonly createControllerFields: (input: TInput) => TControllerFields;
-  readonly run: (input: TInput) => Promise<TData>;
+  readonly isEnabled: KeyedQueryIsEnabled<TInput, TEnabled>;
+  readonly buildKey: (input: TEnabled) => string;
+  readonly resolveEnvironmentId: (input: TEnabled) => EnvironmentId;
+  readonly createControllerFields: (input: TEnabled) => TControllerFields;
+  readonly run: (input: TEnabled) => Promise<TData>;
 }
+
+/**
+ * A query's own callbacks, for registry wrappers that add the controller
+ * fields themselves.
+ */
+export type KeyedQueryReadDefinition<TInput, TData, TEnabled extends TInput = TInput> = Omit<
+  KeyedQueryDefinition<TInput, TData, Record<string, never>, TEnabled>,
+  "createControllerFields"
+>;
 
 export interface KeyedQueryByKey<TInput, _TData, TState> {
   readonly keyOf: (input: TInput) => string | null;
@@ -808,16 +843,20 @@ export function defineKeyedQueryByKey<
   TData,
   TState,
   TControllerFields extends Record<string, unknown>,
+  TEnabled extends TInput = TInput,
 >(
   registry: KeyedQueryRegistry<TState>,
-  definition: KeyedQueryDefinition<TInput, TData, TControllerFields>,
+  definition: KeyedQueryDefinition<TInput, TData, TControllerFields, TEnabled>,
   shouldFetchOnWatch: (controller: KeyedQueryControllerBase & Record<string, unknown>) => boolean,
 ): KeyedQueryByKey<TInput, TData, TState> {
-  function keyOf(input: TInput): string | null {
-    if (!definition.isEnabled(input)) {
-      return null;
-    }
+  // Without a narrower `TEnabled` the predicate guards `TInput` itself.
+  const isEnabled = definition.isEnabled as (input: TInput) => input is TEnabled;
+  function enabledKeyOf(input: TEnabled): string {
     return `${definition.label}${KEY_SEP}${definition.buildKey(input)}`;
+  }
+
+  function keyOf(input: TInput): string | null {
+    return isEnabled(input) ? enabledKeyOf(input) : null;
   }
 
   function getAtom(compositeKey: string | null): Atom.Atom<TState> {
@@ -834,10 +873,10 @@ export function defineKeyedQueryByKey<
   }
 
   function watch(input: TInput): () => void {
-    const compositeKey = keyOf(input);
-    if (compositeKey === null) {
+    if (!isEnabled(input)) {
       return NOOP;
     }
+    const compositeKey = enabledKeyOf(input);
 
     let controller = registry.controllers.get(compositeKey);
     if (!controller) {
@@ -925,16 +964,20 @@ export function defineKeyedQueryByInput<
   TData,
   TState,
   TControllerFields extends Record<string, unknown>,
+  TEnabled extends TInput = TInput,
 >(
   registry: KeyedQueryRegistry<TState>,
-  definition: KeyedQueryDefinition<TInput, TData, TControllerFields>,
+  definition: KeyedQueryDefinition<TInput, TData, TControllerFields, TEnabled>,
   shouldFetchOnWatch: (controller: KeyedQueryControllerBase & Record<string, unknown>) => boolean,
 ): KeyedQueryByInput<TInput, TData, TState> {
-  function compositeKeyFor(input: TInput): string | null {
-    if (!definition.isEnabled(input)) {
-      return null;
-    }
+  // Without a narrower `TEnabled` the predicate guards `TInput` itself.
+  const isEnabled = definition.isEnabled as (input: TInput) => input is TEnabled;
+  function enabledKeyOf(input: TEnabled): string {
     return `${definition.label}${KEY_SEP}${definition.buildKey(input)}`;
+  }
+
+  function compositeKeyFor(input: TInput): string | null {
+    return isEnabled(input) ? enabledKeyOf(input) : null;
   }
 
   function atomFor(input: TInput): Atom.Atom<TState> {
@@ -956,10 +999,10 @@ export function defineKeyedQueryByInput<
     input: TInput,
     options?: ((data: TData | null) => number | false) | KeyedQueryWatchOptions<TData>,
   ): () => void {
-    const compositeKey = compositeKeyFor(input);
-    if (compositeKey === null) {
+    if (!isEnabled(input)) {
       return NOOP;
     }
+    const compositeKey = enabledKeyOf(input);
 
     let controller = registry.controllers.get(compositeKey);
     if (!controller) {

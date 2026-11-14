@@ -12,6 +12,7 @@ import {
   CommandId,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type ProviderInstanceId,
   type ThreadId,
   type TurnId,
 } from "@ryco/contracts";
@@ -36,6 +37,7 @@ import {
 } from "../../persistence/Layers/RestartContinuations.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import { ProviderEffectIntentRepository } from "../../persistence/Services/ProviderEffectIntents.ts";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { currentCommandReadModel } from "../currentCommandReadModel.ts";
@@ -156,6 +158,17 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
     const serverSettings = yield* ServerSettingsService;
     const liveness = yield* ThreadBackgroundLiveness.ThreadBackgroundLivenessService;
     const intents = yield* ProviderEffectIntentRepository;
+    const providerService = yield* ProviderService;
+
+    /**
+     * Whether the session's adapter asks for a cache review before an automatic resume. An
+     * instance that cannot be resolved (removed, failed to build) is treated as not asking.
+     */
+    const reviewsResumeCache = (instanceId: ProviderInstanceId) =>
+      providerService.getCapabilities(instanceId).pipe(
+        Effect.map((capabilities) => capabilities.resumeCacheReview === true),
+        Effect.orElseSucceed(() => false),
+      );
 
     const nowIso = Clock.currentTimeMillis.pipe(Effect.map((ms) => new Date(ms).toISOString()));
 
@@ -628,7 +641,12 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
               if (blocker !== null) return yield* skip(record, blocker);
             }
             if (thread === undefined) return yield* skip(record, "thread-closed");
-            if (thread.session?.providerName === "claudeAgent") {
+            if (
+              thread.session !== null &&
+              (yield* reviewsResumeCache(
+                thread.session.providerInstanceId ?? record.providerInstanceId,
+              ))
+            ) {
               const window = yield* readWindow(thread.id, CLAUDE_CACHE_REVIEW_WINDOW_LIMITS).pipe(
                 Effect.exit,
               );

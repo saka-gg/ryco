@@ -174,6 +174,7 @@ function highlightOptions(job: CodeHighlightJob, language: string) {
 }
 
 /** ANSI escape sequences: CSI (colors, cursor), OSC (titles, links) and two-character escapes. */
+// oxlint-disable-next-line no-control-regex -- ANSI escapes are control characters
 const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-_])/gu;
 
 /** `code` without its ANSI escape sequences. */

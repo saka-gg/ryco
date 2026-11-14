@@ -16,6 +16,7 @@ import {
   KEY_SEP,
   type KeyedQueryByKey,
   type RetainedKeyTracker,
+  type KeyedQueryReadDefinition,
 } from "@ryco/client-runtime/rpc";
 
 import { awaitSavedQueryStore, type SavedQueryCodec } from "./savedQueries";
@@ -63,15 +64,14 @@ export interface MobileQuery<TInput, TData> extends KeyedQueryByKey<
   readonly fence: (compositeKey: string | null) => void;
 }
 
-export interface MobileQueryDefinition<TInput, TData> {
-  readonly label: string;
-  readonly staleTime: number;
+export interface MobileQueryDefinition<
+  TInput,
+  TData,
+  TEnabled extends TInput = TInput,
+> extends Omit<KeyedQueryReadDefinition<TInput, TData, TEnabled>, "gcTime" | "buildKey"> {
   readonly retainedKeyLimit: number;
-  readonly isEnabled: (input: TInput) => boolean;
   /** Must start with the environment id (teardown matches on it). */
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
-  readonly run: (input: TInput) => Promise<TData>;
+  readonly buildKey: (input: TEnabled) => string;
   /** Keep the last live answer on the device and show it first (see savedQueries.ts). */
   readonly persist?: SavedQueryCodec<TData>;
   /**
@@ -87,13 +87,14 @@ export interface MobileQueryDefinition<TInput, TData> {
  * with write rules of its own): the screen writes each live answer with
  * `writeData(..., { live: true })` and shows the saved copy until one arrives.
  */
-export interface MobileSavedMirrorDefinition<TInput, TData> {
-  readonly label: string;
-  readonly retainedKeyLimit: number;
-  readonly isEnabled: (input: TInput) => boolean;
-  /** Must start with the environment id (teardown matches on it). */
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
+export interface MobileSavedMirrorDefinition<
+  TInput,
+  TData,
+  TEnabled extends TInput = TInput,
+> extends Pick<
+  MobileQueryDefinition<TInput, TData, TEnabled>,
+  "label" | "retainedKeyLimit" | "isEnabled" | "buildKey" | "resolveEnvironmentId"
+> {
   readonly persist: SavedQueryCodec<TData>;
 }
 
@@ -117,11 +118,11 @@ export function runWithRetry<T>(run: () => Promise<T>, retries = FETCH_RETRY_COU
 }
 
 export interface MobileQueryCache {
-  readonly defineQuery: <TInput, TData>(
-    definition: MobileQueryDefinition<TInput, TData>,
+  readonly defineQuery: <TInput, TData, TEnabled extends TInput = TInput>(
+    definition: MobileQueryDefinition<TInput, TData, TEnabled>,
   ) => MobileQuery<TInput, TData>;
-  readonly defineSavedMirror: <TInput, TData>(
-    definition: MobileSavedMirrorDefinition<TInput, TData>,
+  readonly defineSavedMirror: <TInput, TData, TEnabled extends TInput = TInput>(
+    definition: MobileSavedMirrorDefinition<TInput, TData, TEnabled>,
   ) => MobileQuery<TInput, TData>;
   /**
    * Marks every entry stale and fences reads in flight; observed entries read
@@ -321,8 +322,8 @@ export function createMobileQueryCache(
     return compositeKey.split(KEY_SEP)[1];
   }
 
-  function defineQuery<TInput, TData>(
-    definition: MobileQueryDefinition<TInput, TData>,
+  function defineQuery<TInput, TData, TEnabled extends TInput = TInput>(
+    definition: MobileQueryDefinition<TInput, TData, TEnabled>,
   ): MobileQuery<TInput, TData> {
     const query = defineKeyedQueryByKey(
       registry,
@@ -424,11 +425,11 @@ export function createMobileQueryCache(
 
   const mirrorFamilies = new Set<string>();
 
-  function defineSavedMirror<TInput, TData>(
-    definition: MobileSavedMirrorDefinition<TInput, TData>,
+  function defineSavedMirror<TInput, TData, TEnabled extends TInput = TInput>(
+    definition: MobileSavedMirrorDefinition<TInput, TData, TEnabled>,
   ): MobileQuery<TInput, TData> {
     mirrorFamilies.add(definition.label);
-    return defineQuery<TInput, TData>({
+    return defineQuery<TInput, TData, TEnabled>({
       ...definition,
       staleTime: Number.POSITIVE_INFINITY,
       fetchOnWatch: false,

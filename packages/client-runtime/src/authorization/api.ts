@@ -1,3 +1,4 @@
+import type { SpaceRole } from "@ryco/contracts";
 import { EnvironmentId } from "@ryco/contracts/base-schemas";
 import { RelayNodeId } from "@ryco/contracts/relay";
 import {
@@ -601,7 +602,7 @@ function nullableNumber(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isSafeInteger(value));
 }
 
-function roleValue(value: unknown): value is "viewer" | "operator" | "owner" {
+function roleValue(value: unknown): value is SpaceRole {
   return value === "viewer" || value === "operator" || value === "owner";
 }
 

@@ -9,6 +9,7 @@ import {
 } from "@ryco/client-runtime/relay";
 
 import type { DesktopAuthorizationVariant } from "./nativeAuthorization.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 const HELPER_FILE_NAME = "ryco-desktop-security-helper";
 const HELPER_TIMEOUT_MS = 5_000;
@@ -60,10 +61,6 @@ export type NativeSecurityHelperRunner = ((request: NativeSecurityRequest) => Pr
 
 function failure(code: DesktopNativeSecurityErrorCode): never {
   throw new DesktopNativeSecurityError(code);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

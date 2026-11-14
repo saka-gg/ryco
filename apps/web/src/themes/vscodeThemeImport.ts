@@ -12,6 +12,7 @@
  * Loaded through `import()` when a picked file is not a Ryco theme; never in boot.
  */
 import type { ThemeDefinition, ThemeTokenName, ThemeTokens, ThemeVariant } from "./types";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 type Rgba = { readonly r: number; readonly g: number; readonly b: number; readonly a: number };
 type Rgb = { readonly r: number; readonly g: number; readonly b: number };
@@ -19,10 +20,6 @@ type Rgb = { readonly r: number; readonly g: number; readonly b: number };
 const MAX_NAME_LENGTH = 48;
 /** How deep `include` chains (a theme built on a base theme) are followed. */
 const MAX_INCLUDE_DEPTH = 4;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * VS Code reads theme files as JSONC: `//` and `/* *\/` comments and trailing commas are

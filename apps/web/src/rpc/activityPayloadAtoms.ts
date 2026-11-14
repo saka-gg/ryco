@@ -9,6 +9,7 @@ import {
   defineKeyedQueryByKey,
   KEY_SEP,
   type KeyedQueryByKey,
+  type KeyedQueryEnabledInput,
 } from "@ryco/client-runtime/rpc";
 
 import { ensureEnvironmentApi } from "~/environmentApi";
@@ -58,6 +59,11 @@ export interface ActivityPayloadInput {
   readonly payloadBytes?: number | null | undefined;
 }
 
+type EnabledActivityPayloadInput = KeyedQueryEnabledInput<
+  ActivityPayloadInput,
+  "environmentId" | "threadId" | "activityId"
+>;
+
 /**
  * The stored payload of an activity a thread window sent as a preview, read
  * when its row expands (`orchestration.getActivityPayload`).
@@ -71,20 +77,19 @@ export const activityPayloadQuery: KeyedQueryByKey<
   {
     label: "activityPayload",
     staleTime: ACTIVITY_PAYLOAD_STALE_TIME_MS,
-    isEnabled: (input) =>
+    isEnabled: (input: ActivityPayloadInput): input is EnabledActivityPayloadInput =>
       input.environmentId !== null && input.threadId !== null && input.activityId !== null,
     buildKey: (input) =>
       `${input.environmentId}${KEY_SEP}${input.threadId}${KEY_SEP}${input.activityId}`,
-    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+    resolveEnvironmentId: (input) => input.environmentId,
     run: (input) => {
-      const read = ensureEnvironmentApi(input.environmentId as EnvironmentId).orchestration
-        .getActivityPayload;
+      const read = ensureEnvironmentApi(input.environmentId).orchestration.getActivityPayload;
       if (!read) {
         return Promise.reject(new Error("This environment cannot load full tool output."));
       }
       return read({
-        threadId: input.threadId as ThreadId,
-        activityId: EventId.make(input.activityId as string),
+        threadId: input.threadId,
+        activityId: EventId.make(input.activityId),
       });
     },
     createControllerFields: () => ({}),

@@ -1,6 +1,10 @@
 import * as Schema from "effect/Schema";
 
-import { rejectExcessProperties } from "./baseSchemas.ts";
+import {
+  ExecutionEnvironmentPlatformArch,
+  ExecutionEnvironmentPlatformOs,
+  rejectExcessProperties,
+} from "./baseSchemas.ts";
 import {
   NativeNodeClaimEnvironmentId,
   NativeNodeClaimFinishResponse,
@@ -31,8 +35,8 @@ export const DesktopNativeNodeClaimDescriptorResponse = rejectExcessProperties(
     hubOrigin: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(2_048)),
     environmentId: NativeNodeClaimEnvironmentId,
     label: Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(100)),
-    platformOs: Schema.Literals(["darwin", "linux", "windows", "unknown"]),
-    platformArch: Schema.Literals(["arm64", "x64", "other"]),
+    platformOs: ExecutionEnvironmentPlatformOs,
+    platformArch: ExecutionEnvironmentPlatformArch,
     clientVersion: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(64)),
     algorithm: Schema.Literal("ed25519"),
     publicKey: NativeNodeClaimPublicKey,

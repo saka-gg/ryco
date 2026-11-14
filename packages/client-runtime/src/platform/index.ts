@@ -22,10 +22,6 @@ export interface EndpointService {
   readonly resolveWsUrl: (wsBaseUrl: string) => string;
 }
 
-export class Endpoint extends Context.Service<Endpoint, EndpointService>()(
-  "@ryco/client-runtime/platform/Endpoint",
-) {}
-
 /** The WebSocket-constructor seam used by Effect socket layers and the relay. */
 export interface SocketService {
   readonly webSocketConstructor: (
@@ -33,10 +29,6 @@ export interface SocketService {
     protocols?: string | ReadonlyArray<string>,
   ) => unknown;
 }
-
-export class Socket extends Context.Service<Socket, SocketService>()(
-  "@ryco/client-runtime/platform/Socket",
-) {}
 
 /**
  * `network-changed`: the device stayed online but its network path changed
@@ -59,18 +51,12 @@ export interface AppLifecycleService {
   readonly subscribe: (listener: (event: AppLifecycleEvent) => void) => () => void;
 }
 
-export class AppLifecycle extends Context.Service<AppLifecycle, AppLifecycleService>()(
-  "@ryco/client-runtime/platform/AppLifecycle",
-) {}
-
 /** Plain asynchronous key-value storage for non-secret client state. */
 export interface KVService {
   readonly getItem: (key: string) => Promise<string | null>;
   readonly setItem: (key: string, value: string) => Promise<void>;
   readonly removeItem: (key: string) => Promise<void>;
 }
-
-export class KV extends Context.Service<KV, KVService>()("@ryco/client-runtime/platform/KV") {}
 
 /** Separate storage for bearer tokens and other secrets. */
 export interface SecretKVService {
@@ -79,10 +65,6 @@ export interface SecretKVService {
   readonly set: (key: string, value: string) => Promise<boolean>;
   readonly remove: (key: string) => Promise<void>;
 }
-
-export class SecretKV extends Context.Service<SecretKV, SecretKVService>()(
-  "@ryco/client-runtime/platform/SecretKV",
-) {}
 
 /** Minimal platform HTTP seam; runtime code never reads a global fetch implementation. */
 export interface HttpResponse {
@@ -144,10 +126,6 @@ export interface PasskeyCeremonyService {
   readonly register: (options: unknown, signal?: unknown) => Promise<RegistrationResponseJson>;
 }
 
-export class PasskeyCeremony extends Context.Service<PasskeyCeremony, PasskeyCeremonyService>()(
-  "@ryco/client-runtime/platform/PasskeyCeremony",
-) {}
-
 /**
  * Cookie or bearer session policy. Cookie adapters hold only the in-memory CSRF
  * token; bearer (native/DPoP) adapters additionally hold the native session
@@ -164,11 +142,6 @@ export interface SessionCredentialsService {
   readonly readBearerToken?: () => string | null;
   readonly writeBearerToken?: (token: string | null) => void;
 }
-
-export class SessionCredentials extends Context.Service<
-  SessionCredentials,
-  SessionCredentialsService
->()("@ryco/client-runtime/platform/SessionCredentials") {}
 
 /**
  * The per-request DPoP proof input the hosted API hands the signer. `token` is
@@ -193,10 +166,6 @@ export interface DpopProofInput {
 export interface DpopSignerService {
   readonly sign: (input: DpopProofInput) => Promise<string>;
 }
-
-export class DpopSigner extends Context.Service<DpopSigner, DpopSignerService>()(
-  "@ryco/client-runtime/platform/DpopSigner",
-) {}
 
 export interface NativeE2eeIdentityDescriptor {
   /** X9.63 uncompressed P-256 public key. The private key never crosses this seam. */
@@ -301,11 +270,6 @@ export interface PairingCredentialSourceService {
   readonly take: () => Promise<string | null>;
 }
 
-export class PairingCredentialSource extends Context.Service<
-  PairingCredentialSource,
-  PairingCredentialSourceService
->()("@ryco/client-runtime/platform/PairingCredentialSource") {}
-
 export type ComposerAttachment =
   | {
       readonly id: string;
@@ -326,25 +290,13 @@ export interface AttachmentCodecService {
   readonly decode: (attachment: ComposerAttachment) => Promise<unknown>;
 }
 
-export class AttachmentCodec extends Context.Service<AttachmentCodec, AttachmentCodecService>()(
-  "@ryco/client-runtime/platform/AttachmentCodec",
-) {}
-
 export interface ClockService {
   readonly now: () => number;
 }
 
-export class Clock extends Context.Service<Clock, ClockService>()(
-  "@ryco/client-runtime/platform/Clock",
-) {}
-
 export interface FrameSchedulerService {
   readonly scheduleFrame: (callback: () => void) => void;
 }
-
-export class FrameScheduler extends Context.Service<FrameScheduler, FrameSchedulerService>()(
-  "@ryco/client-runtime/platform/FrameScheduler",
-) {}
 
 export interface ObservabilityService {
   readonly tracingLayer: Layer.Layer<never, never, never>;
@@ -389,8 +341,3 @@ export interface ClientRuntimeConfigService {
   readonly devServerUrl?: string;
   readonly perfProfile?: string;
 }
-
-export class ClientRuntimeConfig extends Context.Service<
-  ClientRuntimeConfig,
-  ClientRuntimeConfigService
->()("@ryco/client-runtime/platform/ClientRuntimeConfig") {}

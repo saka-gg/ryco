@@ -72,6 +72,7 @@ export function TerminalWebView(props: {
     onSender(generation, (encoded) => {
       const webView = webViewRef.current;
       if (webView === null) return false;
+      // oxlint-disable-next-line unicorn/require-post-message-target-origin -- React Native WebView, not window
       webView.postMessage(encoded);
       return true;
     });

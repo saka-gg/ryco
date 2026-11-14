@@ -1,3 +1,4 @@
+import { isApprovalActivity, isUserInputActivity } from "@ryco/shared/threadActivityPayloads";
 import {
   MessageId,
   type TurnId,
@@ -181,13 +182,7 @@ export function missingHistoryActivities(
     // Transcript items cannot restore process-local callbacks or settle a live
     // callback that happens to reuse the same provider request ID. Lifecycle
     // cleanup is generated separately from the authoritative pending projection.
-    if (
-      activity.kind.startsWith("user-input.") ||
-      activity.kind.startsWith("approval.") ||
-      activity.kind === "provider.user-input.respond.failed" ||
-      activity.kind === "provider.approval.respond.failed"
-    )
-      return false;
+    if (isUserInputActivity(activity) || isApprovalActivity(activity)) return false;
     const id = key(activity);
     if (known.has(id)) return false;
     known.add(id);
