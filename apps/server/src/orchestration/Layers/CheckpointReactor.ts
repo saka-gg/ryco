@@ -1,5 +1,4 @@
 import {
-  CommandId,
   EventId,
   MessageId,
   type CheckpointRef,
@@ -13,6 +12,7 @@ import { Cause, Deferred, Effect, Layer, Option, Stream } from "effect";
 import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 
+import { serverCommandId } from "../commandOrigin.ts";
 import {
   checkpointRefForThreadTurn,
   resolveThreadWorkspaceCwd,
@@ -118,9 +118,6 @@ function checkpointStatusFromRuntime(status: string | undefined): "ready" | "mis
       return "ready";
   }
 }
-
-const serverCommandId = (tag: string): CommandId =>
-  CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
 export interface CheckpointReactorOptions {
   /** Loads the revert saga's module; tests make it fail. Defaults to `import()`. */

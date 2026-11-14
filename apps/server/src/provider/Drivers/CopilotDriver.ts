@@ -1,4 +1,4 @@
-import { CopilotSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
+import { CopilotSettings, ProviderDriverKind } from "@ryco/contracts";
 import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
@@ -20,7 +20,7 @@ import {
   type ProviderDriver,
   type ProviderInstance,
 } from "../ProviderDriver.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import { withInstanceIdentity } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -62,22 +62,6 @@ export type CopilotDriverEnv =
   | ServerConfig
   | ServerSettingsService;
 
-const withInstanceIdentity =
-  (input: {
-    readonly instanceId: ProviderInstance["instanceId"];
-    readonly displayName: string | undefined;
-    readonly accentColor: string | undefined;
-    readonly continuationGroupKey: string;
-  }) =>
-  (snapshot: ServerProviderDraft): ServerProvider => ({
-    ...snapshot,
-    instanceId: input.instanceId,
-    driver: DRIVER_KIND,
-    ...(input.displayName ? { displayName: input.displayName } : {}),
-    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
-    continuation: { groupKey: input.continuationGroupKey },
-  });
-
 export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
@@ -99,6 +83,7 @@ export const CopilotDriver: ProviderDriver<CopilotSettings, CopilotDriverEnv> = 
         instanceId,
       });
       const stampIdentity = withInstanceIdentity({
+        driver: DRIVER_KIND,
         instanceId,
         displayName,
         accentColor,

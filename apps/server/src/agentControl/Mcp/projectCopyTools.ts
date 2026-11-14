@@ -67,7 +67,7 @@ import type {
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
 import { modelSelectionSchema } from "./modelSelectionToolSchema.ts";
-import { ToolFailure } from "./toolFailure.ts";
+import { ToolFailure, decodeToolArgs } from "./toolFailure.ts";
 // Types only: a static import of the boot-loaded tool modules would split them into extra boot
 // chunks, so the mutation helpers come in through `ProjectCopyToolDeps.mutations`.
 import type {
@@ -495,10 +495,6 @@ export function withProjectCopyTools(
       yield* authorize(session, name, authority.value.turnId);
       return authority.value;
     });
-  const decode = <S extends Schema.Top>(schema: S, args: unknown) =>
-    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
-      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
-    ) as Effect.Effect<S["Type"], ToolFailure>;
   /** A plan built from the tool's input, decoded so every bound and brand of the contract holds. */
   const buildPlan = <S extends Schema.Top>(schema: S, plan: unknown) =>
     Schema.decodeUnknownEffect(schema)(plan).pipe(
@@ -589,7 +585,7 @@ export function withProjectCopyTools(
 
   const listNodes = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
-      yield* decode(AgentControlMcpListNodesInput, args);
+      yield* decodeToolArgs(AgentControlMcpListNodesInput, args);
       const directory = yield* listDirectory();
       const repositoryKey = yield* callerRepositoryKey(session);
       const nodes = directory.nodes.map((node) => ({
@@ -609,7 +605,7 @@ export function withProjectCopyTools(
 
   const suggestDestination = (args: unknown) =>
     Effect.gen(function* () {
-      const input = yield* decode(AgentControlMcpSuggestProjectDestinationInput, args);
+      const input = yield* decodeToolArgs(AgentControlMcpSuggestProjectDestinationInput, args);
       const nodePaths = yield* requireNodePaths();
       const roots = yield* nodePaths.resolveCodeRoots().pipe(Effect.mapError(copyFailure));
       const candidate = yield* nodePaths
@@ -695,7 +691,7 @@ export function withProjectCopyTools(
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decode(ProposeImportInput, args);
+      const input = yield* decodeToolArgs(ProposeImportInput, args);
       const caller = yield* callerThread(session);
       const remoteUrl = yield* sanitizeRemote(input.remoteUrl);
       const destination = yield* resolveLocalDestination(
@@ -778,7 +774,7 @@ export function withProjectCopyTools(
     args: unknown,
   ) =>
     Effect.gen(function* () {
-      const input = yield* decode(ProposeCopyInput, args);
+      const input = yield* decodeToolArgs(ProposeCopyInput, args);
       const caller = yield* callerThread(session);
       const repository =
         input.source !== undefined && "remoteUrl" in input.source ? input.source : null;

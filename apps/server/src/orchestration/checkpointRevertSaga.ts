@@ -24,6 +24,7 @@ import { Cause, Effect, Option, Schema } from "effect";
 import { getThreadLastActivityTimestamp } from "@ryco/shared/threadSettlement";
 import { laterIsoTimestamp } from "@ryco/shared/turnFinalization";
 
+import { serverCommandId } from "./commandOrigin.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import {
   checkpointRestoreConflictMessage,
@@ -70,9 +71,6 @@ import {
 } from "./Services/ProjectionSnapshotQuery.ts";
 import { threadShellSettlementInput } from "./threadSettlementInput.ts";
 import { userFacingFailureDetail } from "./userFacingErrors.ts";
-
-const serverCommandId = (tag: string): CommandId =>
-  CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
 export function providerRollbackEpochViolation(
   thread: OrchestrationThread,

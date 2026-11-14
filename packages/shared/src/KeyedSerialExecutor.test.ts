@@ -1,6 +1,6 @@
 import { it } from "@effect/vitest";
 import { describe, expect } from "vite-plus/test";
-import { Deferred, Effect, Fiber } from "effect";
+import { Deferred, Effect, Exit, Fiber } from "effect";
 
 import { makeKeyedSerialExecutor } from "./KeyedSerialExecutor.ts";
 
@@ -58,6 +58,119 @@ describe("makeKeyedSerialExecutor", () => {
       expect(result).toBe("boom");
       expect(yield* executor.activeKeyCount).toBe(0);
       expect(yield* executor.withLock("a", Effect.succeed(1))).toBe(1);
+    }),
+  );
+
+  it.live("releases the key when the guarded effect dies", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeKeyedSerialExecutor<string>();
+      const exit = yield* Effect.exit(executor.withLock("a", Effect.die("defect")));
+      expect(Exit.hasDies(exit)).toBe(true);
+      expect(yield* executor.activeKeyCount).toBe(0);
+      expect(yield* executor.withLock("a", Effect.succeed(1))).toBe(1);
+    }),
+  );
+
+  it.live("a waiter queued behind the holder shares its entry and runs in arrival order", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeKeyedSerialExecutor<string>();
+      const release = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      const order: string[] = [];
+      const holder = yield* Effect.forkChild(
+        executor.withLock(
+          "a",
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(Effect.sync(() => order.push("holder"))),
+          ),
+        ),
+      );
+      yield* Deferred.await(entered);
+      const waiters: Array<Fiber.Fiber<number>> = [];
+      for (const name of ["w1", "w2", "w3"]) {
+        waiters.push(
+          yield* Effect.forkChild(
+            executor.withLock(
+              "a",
+              Effect.sync(() => order.push(name)),
+            ),
+          ),
+        );
+        yield* Effect.yieldNow;
+      }
+      // Holder and waiters use one entry.
+      expect(yield* executor.activeKeyCount).toBe(1);
+      expect(order).toEqual([]);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      for (const waiter of waiters) yield* Fiber.join(waiter);
+      expect(order).toEqual(["holder", "w1", "w2", "w3"]);
+      expect(yield* executor.activeKeyCount).toBe(0);
+    }),
+  );
+
+  it.live("interrupting a waiter leaks neither its entry nor a permit", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeKeyedSerialExecutor<string>();
+      const release = yield* Deferred.make<void>();
+      const entered = yield* Deferred.make<void>();
+      const holder = yield* Effect.forkChild(
+        executor.withLock(
+          "a",
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        ),
+      );
+      yield* Deferred.await(entered);
+      let waiterRan = false;
+      const waiter = yield* Effect.forkChild(
+        executor.withLock(
+          "a",
+          Effect.sync(() => {
+            waiterRan = true;
+          }),
+        ),
+      );
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(waiter);
+      expect(waiterRan).toBe(false);
+      // Only the holder is left on the key, and it still excludes others.
+      expect(yield* executor.activeKeyCount).toBe(1);
+      const entries: string[] = [];
+      const next = yield* Effect.forkChild(
+        executor.withLock(
+          "a",
+          Effect.sync(() => {
+            entries.push("next");
+          }),
+        ),
+      );
+      yield* Effect.yieldNow;
+      expect(entries).toEqual([]);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(holder);
+      yield* Fiber.join(next);
+      expect(entries).toEqual(["next"]);
+      expect(yield* executor.activeKeyCount).toBe(0);
+    }),
+  );
+
+  it.live("interrupting the holder releases the key to the next waiter", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeKeyedSerialExecutor<string>();
+      const entered = yield* Deferred.make<void>();
+      const holder = yield* Effect.forkChild(
+        executor.withLock(
+          "a",
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+        ),
+      );
+      yield* Deferred.await(entered);
+      const waiter = yield* Effect.forkChild(executor.withLock("a", Effect.succeed("ran")));
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(holder);
+      expect(yield* Fiber.join(waiter)).toBe("ran");
+      expect(yield* executor.activeKeyCount).toBe(0);
     }),
   );
 });

@@ -25,6 +25,7 @@ import { DeviceRpcError } from "@ryco/contracts";
 import { Schema } from "effect";
 
 import type { DeviceManager } from "../device/DeviceManager.ts";
+import { readBoundedBody } from "../readBoundedBody.ts";
 import { agentDeviceRefusal, deviceToolAccess } from "./deviceToolAccess.ts";
 import type { DeviceSettleTiming, DeviceToolContent } from "../device/deviceObservation.ts";
 
@@ -386,16 +387,13 @@ function empty(response: ServerResponse, status: number): void {
   response.end();
 }
 
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
+/** Throws the message the gateway answers with: too large, the stream's error, or bad JSON. */
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += bytes.byteLength;
-    if (size > 1024 * 1024) throw new Error("MCP request body is too large.");
-    chunks.push(bytes);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const body = await readBoundedBody(request, MAX_REQUEST_BODY_BYTES);
+  if (body === null) throw new Error("MCP request body is too large.");
+  return JSON.parse(body);
 }
 
 function bearerToken(request: IncomingMessage): string | null {
