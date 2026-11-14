@@ -738,7 +738,12 @@ const make = Effect.fn("makeCheckpointReactor")(function* (options: CheckpointRe
             turnId: event.payload.turnId,
             detail: error.message,
             createdAt: new Date().toISOString(),
-          }).pipe(Effect.catch(() => Effect.void)),
+          }).pipe(
+            Effect.ignore({
+              log: "Warn",
+              message: "Checkpoint capture failure could not be recorded",
+            }),
+          ),
         ),
       );
     }
@@ -763,7 +768,12 @@ const make = Effect.fn("makeCheckpointReactor")(function* (options: CheckpointRe
             turnId,
             detail: error.message,
             createdAt: new Date().toISOString(),
-          }).pipe(Effect.catch(() => Effect.void)),
+          }).pipe(
+            Effect.ignore({
+              log: "Warn",
+              message: "Checkpoint capture failure could not be recorded",
+            }),
+          ),
         ),
       );
       return;

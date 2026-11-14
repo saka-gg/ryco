@@ -2,10 +2,8 @@
  * Test helpers for constructing a `ProviderAdapterRegistryShape` mock from a
  * kind-keyed adapter map.
  *
- * Tests historically assembled a `registry` object with only `getByProvider`
- * + `listProviders` populated. Slice D grew the shape with `getByInstance`
- * and `listInstances`; this helper fills both in from a single kind-keyed
- * input so individual fixtures can stay concise.
+ * Fills `getByInstance`, `getInstanceInfo` and `listInstances` in from a
+ * single kind-keyed input so individual fixtures can stay concise.
  *
  * Non-default instance ids (e.g. `codex_personal`) are not addressable via
  * the shim returned here — the legacy test fixtures only ever had
@@ -18,7 +16,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceId,
 } from "@ryco/contracts";
-import { Effect, PubSub, Record, Result, Stream } from "effect";
+import { Effect, PubSub, Stream } from "effect";
 
 import { ProviderUnsupportedError, type ProviderAdapterError } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
@@ -76,14 +74,6 @@ export const makeAdapterRegistryMock = (adapters: KindAdapterMap): ProviderAdapt
       });
     },
     listInstances: () => Effect.succeed(Array.from(byInstanceId.keys())),
-    listProviders: () =>
-      Effect.succeed(
-        Record.keys(
-          Record.filterMap(adapters, (adapter, kind) =>
-            adapter !== undefined ? Result.succeed(kind) : Result.failVoid,
-          ),
-        ),
-      ),
     // Static test fixtures don't reload; an empty stream is enough to
     // satisfy the shape. Tests exercising hot-reload build their own
     // stream via the real `ProviderInstanceRegistry`.

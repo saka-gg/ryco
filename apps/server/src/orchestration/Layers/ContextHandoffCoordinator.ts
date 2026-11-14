@@ -488,7 +488,12 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       createdAt: nowIso(),
       // Putting the source back is not new thread activity, even when it failed.
       wakesSnoozed: false,
-    }).pipe(Effect.catch(() => Effect.void));
+    }).pipe(
+      Effect.ignore({
+        log: "Warn",
+        message: "Context handoff could not put the source session back",
+      }),
+    );
   });
 
   /** Stops and retires the record's target epoch, if reserved, then puts the source back. */
@@ -507,12 +512,18 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         runtimeMode: input.thread.runtimeMode,
       });
       if (targetBinding) {
-        yield* providerService
-          .stopSessionBinding(targetBinding)
-          .pipe(Effect.catch(() => Effect.void));
-        yield* providerService
-          .retireSessionBinding(targetBinding)
-          .pipe(Effect.catch(() => Effect.void));
+        yield* providerService.stopSessionBinding(targetBinding).pipe(
+          Effect.ignore({
+            log: "Warn",
+            message: "Context handoff could not stop its target session",
+          }),
+        );
+        yield* providerService.retireSessionBinding(targetBinding).pipe(
+          Effect.ignore({
+            log: "Warn",
+            message: "Context handoff could not retire its target session",
+          }),
+        );
       }
       yield* restoreSource({
         thread: input.thread,
@@ -686,9 +697,12 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         yield* increment(contextHandoffsTotal, { status: "consumed" });
       }
       if (input.sourceBinding) {
-        yield* providerService
-          .stopSessionBinding(input.sourceBinding)
-          .pipe(Effect.catch(() => Effect.void));
+        yield* providerService.stopSessionBinding(input.sourceBinding).pipe(
+          Effect.ignore({
+            log: "Warn",
+            message: "Context handoff could not stop its source session",
+          }),
+        );
       }
     },
   );

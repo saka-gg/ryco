@@ -747,7 +747,12 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                   status: "rejected",
                   error: error.message,
                 })
-                .pipe(Effect.catch(() => Effect.void));
+                .pipe(
+                  Effect.ignore({
+                    log: "Warn",
+                    message: "Rejected command receipt could not be saved",
+                  }),
+                );
             }
           }
 
