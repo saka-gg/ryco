@@ -43,6 +43,7 @@ import {
   openCodeV2Question,
   type OpenCodeV2Form,
 } from "./openCodeV2Mapping.ts";
+import { isObjectLike } from "@ryco/shared/unknownValue";
 
 /** A 1.x event, as the 1.x SDK's `event.subscribe` stream yields it. */
 export type OpenCodeV1Event = Event;
@@ -365,22 +366,19 @@ const MAX_LIVE_MESSAGES = 256;
 
 const FAILED_EXECUTION_MESSAGE = "OpenCode session failed.";
 
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null;
-
 /**
  * A permission request or form carrying the fields the adapter reads without checking. One that
  * does not (a frame that did not decode) is skipped rather than half mapped.
  */
 const isPermissionRequest = (data: unknown) =>
-  isRecord(data) &&
+  isObjectLike(data) &&
   typeof data.id === "string" &&
   typeof data.sessionID === "string" &&
   typeof data.action === "string" &&
   Array.isArray(data.resources);
 
 const isForm = (form: unknown) =>
-  isRecord(form) &&
+  isObjectLike(form) &&
   typeof form.id === "string" &&
   typeof form.sessionID === "string" &&
   Array.isArray(form.fields);
@@ -395,7 +393,7 @@ function executionEnded(event: {
   readonly type: string;
   readonly data?: unknown;
 }): Array<OpenCodeV1Event> {
-  const data = isRecord(event.data) ? event.data : {};
+  const data = isObjectLike(event.data) ? event.data : {};
   if (typeof data.sessionID !== "string") return [];
   const id = typeof event.id === "string" ? event.id : "";
   if (event.type !== "session.execution.failed") {
@@ -407,7 +405,7 @@ function executionEnded(event: {
       },
     ];
   }
-  const message = isRecord(data.error) ? data.error.message : undefined;
+  const message = isObjectLike(data.error) ? data.error.message : undefined;
   return [
     {
       id,

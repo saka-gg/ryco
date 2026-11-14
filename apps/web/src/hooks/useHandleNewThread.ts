@@ -62,6 +62,7 @@ import {
 import { hostedWebConnectionScopes } from "../hostedHub/hostedConnectionScopes";
 import { useHostedHubStore } from "../hostedHub/state";
 import { usePrimaryEnvironmentId } from "../environments/primary";
+import { errorMessage } from "~/lib/errorMessage";
 
 function samePreferences(
   left: EffectiveProjectPreferences,
@@ -252,8 +253,7 @@ function useNewThreadState() {
         toastManager.add({
           type: "error",
           title: input.failureTitle,
-          description:
-            cause instanceof Error ? cause.message : "Reconnect to this node and try again.",
+          description: errorMessage(cause, "Reconnect to this node and try again."),
         });
       }),
     [router],

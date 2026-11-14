@@ -15,6 +15,7 @@ import { webChatFileUploadTransport } from "~/platform/attachmentUpload";
 
 import { toastManager } from "../ui/toast";
 import type { TaskFileView } from "./tasksViewModel";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Adding files to a task, the composer's way: bytes stream to the node's
@@ -185,7 +186,7 @@ async function sendTaskFile(input: {
     }
   } catch (cause) {
     if (signal.aborted) return dropPending(taskId, key);
-    const message = cause instanceof Error ? cause.message : "The upload failed.";
+    const message = errorMessage(cause, "The upload failed.");
     controllers.delete(key);
     updatePending(taskId, key, (file) => ({ ...file, error: message }));
     return;

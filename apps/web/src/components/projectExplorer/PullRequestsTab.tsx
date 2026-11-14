@@ -1,4 +1,4 @@
-import type { ChangeRequest, EnvironmentId, SourceControlIssueSummary } from "@ryco/contracts";
+import type { ChangeRequest, EnvironmentId } from "@ryco/contracts";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { SearchIcon, RotateCwIcon } from "lucide-react";
 import { useCallback, useMemo, type RefObject } from "react";
@@ -20,6 +20,7 @@ import {
   type ChangeRequestStateFilter,
 } from "./StateFilterButtons";
 import { usePrCheckPassNotifications } from "./usePrCheckPassNotifications";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface PullRequestsTabProps {
   environmentId: EnvironmentId | null;
@@ -63,13 +64,7 @@ export function PullRequestsTab(props: PullRequestsTabProps) {
 
   const cachedItems = useMemo(() => listQuery.data ?? [], [listQuery.data]);
   const filteredItems = useMemo(
-    () =>
-      // ChangeRequest has the same number/title shape as SourceControlIssueSummary
-      // for filtering purposes, so reuse the existing helper.
-      searchSourceControlSummaries(
-        cachedItems as unknown as ReadonlyArray<SourceControlIssueSummary>,
-        props.query,
-      ) as unknown as ReadonlyArray<ChangeRequest>,
+    () => searchSourceControlSummaries(cachedItems, props.query),
     [cachedItems, props.query],
   );
 
@@ -153,7 +148,7 @@ export function PullRequestsTab(props: PullRequestsTabProps) {
               props.density === "compact" ? "px-2.5 py-4" : "px-4 py-6",
             )}
           >
-            {error instanceof Error ? error.message : "Failed to load pull requests."}
+            {errorMessage(error, "Failed to load pull requests.")}
           </p>
         ) : (
           <PullRequestList

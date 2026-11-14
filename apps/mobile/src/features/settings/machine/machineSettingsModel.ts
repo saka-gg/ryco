@@ -10,14 +10,6 @@ export interface MachineListEntry {
   readonly role?: "viewer" | "operator" | "owner" | "client";
 }
 
-/** "Online" · "Viewer" · "Reconnecting" · "Offline": what a machine row says on the right. */
-export function machineStatusLabel(entry: MachineListEntry): string {
-  if (entry.connectionState === "offline") return "Offline";
-  if (entry.connectionState === "reconnecting") return "Reconnecting";
-  if (entry.role !== undefined && entry.role !== "owner") return "Viewer";
-  return "Online";
-}
-
 /** The Machine page's row values: providers turned on, and whether Agent Control is. */
 export function machineSettingsSummary(config: ServerConfig | null): {
   readonly providers: string;

@@ -2,6 +2,7 @@ import type { SecretKVService } from "@ryco/client-runtime/platform";
 import type { HubSessionIdentity } from "@ryco/contracts/hosted-identity";
 
 import type { MobileSessionCredentials } from "../../platform/sessionCredentials";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export const NATIVE_IDENTITY_COMPLETION_JOURNAL_KEY = "ryco.nativeIdentity.completion.v1";
 
@@ -21,10 +22,6 @@ export type NativeIdentityCompletionJournal =
       readonly token: string;
       readonly identity: HubSessionIdentity;
     };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasExactKeys(value: Record<string, unknown>, expected: ReadonlyArray<string>): boolean {
   const keys = Object.keys(value);

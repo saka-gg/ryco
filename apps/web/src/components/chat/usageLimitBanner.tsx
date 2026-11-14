@@ -19,6 +19,7 @@ import { newCommandId } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { claudeCacheReviewPresentation } from "./ClaudeCacheReview";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** setTimeout's largest delay; a later reset re-arms after the next render. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
@@ -109,7 +110,7 @@ export function useUsageLimitBannerItem(input: {
     } catch (cause) {
       setError({
         limitId,
-        message: cause instanceof Error ? cause.message : "The request failed.",
+        message: errorMessage(cause, "The request failed."),
       });
     } finally {
       // An action still in flight from the thread shown before a switch must
