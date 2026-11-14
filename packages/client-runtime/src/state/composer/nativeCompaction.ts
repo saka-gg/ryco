@@ -1,3 +1,4 @@
+import { readContextWindowActivityPayload } from "@ryco/shared/threadActivityPayloads";
 import type {
   AgentTokenMode,
   ClaudeResumeGuard,
@@ -119,16 +120,12 @@ export function nativeCompactionAdvertised(
 ): boolean {
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index]!;
-    if (activity.kind !== "context-window.updated") continue;
-    const payload = activity.payload as {
-      readonly usedTokens?: unknown;
-      readonly compactsAutomatically?: unknown;
-      readonly compactsOnRequest?: unknown;
-    } | null;
-    const used = payload?.usedTokens;
+    const payload = readContextWindowActivityPayload(activity);
+    if (payload === undefined) continue;
+    const used = payload.usedTokens;
     if (typeof used !== "number" || !Number.isFinite(used) || used < 0) continue;
     return (
-      (provider === "claudeAgent" ? payload?.compactsAutomatically : payload?.compactsOnRequest) ===
+      (provider === "claudeAgent" ? payload.compactsAutomatically : payload.compactsOnRequest) ===
       true
     );
   }

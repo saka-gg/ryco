@@ -7,6 +7,8 @@
  */
 import type { UserInputQuestion } from "@ryco/contracts/provider-runtime";
 
+import { hasActivityKind, readUserInputActivityPayload } from "./threadActivityPayloads.ts";
+
 export const USER_INPUT_REQUESTED_ACTIVITY_KIND = "user-input.requested";
 export const USER_INPUT_RESOLVED_ACTIVITY_KIND = "user-input.resolved";
 
@@ -132,16 +134,16 @@ export function readUserInputLifecycleRecord(activity: {
   readonly payload: unknown;
 }): UserInputLifecycleRecord | null {
   if (
-    activity.kind !== USER_INPUT_REQUESTED_ACTIVITY_KIND &&
-    activity.kind !== USER_INPUT_RESOLVED_ACTIVITY_KIND
+    !hasActivityKind(activity, USER_INPUT_REQUESTED_ACTIVITY_KIND) &&
+    !hasActivityKind(activity, USER_INPUT_RESOLVED_ACTIVITY_KIND)
   ) {
     return null;
   }
-  const payload = asRecord(activity.payload);
-  const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
+  const payload = readUserInputActivityPayload(activity);
+  const requestId = payload?.requestId;
   if (!requestId) return null;
-  const requestEventId = asRecord(payload?.userInputIdentity)?.requestEventId;
-  if (activity.kind === USER_INPUT_REQUESTED_ACTIVITY_KIND) {
+  const requestEventId = asRecord(payload.userInputIdentity)?.requestEventId;
+  if (hasActivityKind(activity, USER_INPUT_REQUESTED_ACTIVITY_KIND)) {
     return {
       kind: "requested",
       activityId: activity.id,
@@ -151,7 +153,7 @@ export function readUserInputLifecycleRecord(activity: {
     };
   }
   const answers: Record<string, string> = {};
-  for (const [key, value] of Object.entries(asRecord(payload?.answers) ?? {})) {
+  for (const [key, value] of Object.entries(asRecord(payload.answers) ?? {})) {
     const text = formatUserInputAnswer(value);
     if (text !== null) answers[key] = text;
   }
@@ -161,7 +163,7 @@ export function readUserInputLifecycleRecord(activity: {
     requestId,
     requestEventId: typeof requestEventId === "string" ? requestEventId : null,
     answers,
-    cancelled: payload?.cancelled === true,
+    cancelled: payload.cancelled === true,
   };
 }
 

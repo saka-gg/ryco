@@ -8,6 +8,7 @@
  * the fork key a retry reuses and one guarded call live here, so web and mobile behave the same.
  * Loaded only with the fork dialog (subpath `@ryco/client-runtime/state/threads/carriedFork`).
  */
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type {
   EnvironmentApi,
   EnvironmentId,
@@ -496,7 +497,7 @@ export function carriedForkKnownTurnOutcomes(input: {
 }): ReadonlyArray<CarriedThreadTurnOutcome> {
   const outcomes: CarriedThreadTurnOutcome[] = [];
   for (const activity of input.activities) {
-    if (activity.kind !== THREAD_FORKED_ACTIVITY_KIND) continue;
+    if (!hasActivityKind(activity, THREAD_FORKED_ACTIVITY_KIND)) continue;
     outcomes.push(...(readThreadForkedActivity(activity)?.inheritedTurnOutcomes ?? []));
   }
   const latest = input.latestTurn;

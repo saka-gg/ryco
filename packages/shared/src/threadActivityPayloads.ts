@@ -9,7 +9,8 @@
  *   runtime type, and drops a field whose type is wrong instead of failing the whole row. Strings,
  *   numbers and booleans are checked by `typeof`; arrays and records only by shape, their contents
  *   are trusted as written. The payload object itself is returned when every field checks out, so
- *   the common path allocates nothing.
+ *   the common path allocates nothing. Hot derivations that need a few fields of a large family
+ *   use a narrow reader over just those fields (`readTaskRowOwnership`).
  *
  * Pure module. Keep it small: the server imports it on its boot path.
  */
@@ -65,12 +66,6 @@ type PayloadFields<T> = {
   >;
 };
 
-function fieldMatches(value: unknown, type: FieldType): boolean {
-  if (type === "record") return activityPayloadRecord(value) !== null;
-  if (type === "array") return Array.isArray(value);
-  return typeof value === type;
-}
-
 /** A payload's own record: a non-null, non-array object. */
 export function activityPayloadRecord(payload: unknown): Readonly<Record<string, unknown>> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)
@@ -78,17 +73,55 @@ export function activityPayloadRecord(payload: unknown): Readonly<Record<string,
     : null;
 }
 
+/**
+ * A field table as parallel arrays, built once per reader: readers run for every activity a
+ * derivation walks, and an indexed loop over arrays is several times cheaper than `for…in` over
+ * the table.
+ */
+interface CompiledFields {
+  readonly keys: ReadonlyArray<string>;
+  readonly types: ReadonlyArray<FieldType>;
+}
+
+function compileFields<T>(fields: PayloadFields<T>): CompiledFields {
+  const keys = Object.keys(fields);
+  return { keys, types: keys.map((key) => (fields as Record<string, FieldType>)[key]!) };
+}
+
+function fieldMatches(value: unknown, type: FieldType): boolean {
+  switch (type) {
+    case "record":
+      return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "array":
+      return Array.isArray(value);
+    default:
+      return typeof value === type;
+  }
+}
+
+/**
+ * A hand-written check that every field of a reader's table is absent or of its type, reading
+ * each by name. The table loop reads fields by a varying key, which V8 cannot specialise: for the
+ * readers that hot derivations call on every row, this check lets a well-formed payload skip the
+ * loop. It decides nothing else; a payload it rejects goes through the loop, which drops the
+ * wrong fields. The tests hold each check to its table, field by field. Spelled out without
+ * helper calls: a phone's JavaScript interpreter does not inline them.
+ */
+type FastFieldCheck = (record: Readonly<Record<string, unknown>>) => boolean;
+
 function readPayloadFields<T>(
   payload: unknown,
-  fields: PayloadFields<T>,
+  { keys, types }: CompiledFields,
+  fastCheck: FastFieldCheck | undefined,
 ): ActivityPayloadView<T> | undefined {
   const record = activityPayloadRecord(payload);
   if (record === null) return undefined;
+  if (fastCheck?.(record)) return record as ActivityPayloadView<T>;
   let copy: Record<string, unknown> | null = null;
-  for (const key in fields) {
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
     const value = record[key];
-    if (value === undefined || fieldMatches(value, fields[key as keyof typeof fields] as FieldType))
-      continue;
+    if (value === undefined || fieldMatches(value, types[index]!)) continue;
     // Copy on the first wrong field only; a well-formed payload is returned as is.
     copy ??= { ...record };
     delete copy[key];
@@ -96,18 +129,33 @@ function readPayloadFields<T>(
   return (copy ?? record) as ActivityPayloadView<T>;
 }
 
+/**
+ * Whether an activity has this kind. Unlike `activity.kind === "…"`, the kind is checked against
+ * `ThreadActivityKind`, so a misspelt or retired kind fails to compile.
+ */
+export function hasActivityKind<A extends ActivityKindSource, const K extends ThreadActivityKind>(
+  activity: A,
+  kind: K,
+): activity is A & { readonly kind: K } {
+  return activity.kind === kind;
+}
+
 function kindGuard<const K extends ThreadActivityKind>(kinds: ReadonlyArray<K>) {
-  const set: ReadonlySet<string> = new Set(kinds);
+  // A family has at most a handful of kinds: scanning them is cheaper than hashing the kind for
+  // a Set, and a guard runs for every activity a derivation walks.
+  const list: ReadonlyArray<string> = kinds;
   return <A extends ActivityKindSource>(activity: A): activity is A & { readonly kind: K } =>
-    set.has(activity.kind);
+    list.includes(activity.kind);
 }
 
 function kindReader<const K extends ThreadActivityKind, T>(
   is: (activity: ActivityKindSource) => activity is ActivityKindSource & { readonly kind: K },
   fields: PayloadFields<T>,
+  fastCheck?: FastFieldCheck,
 ) {
+  const compiled = compileFields(fields);
   return (activity: ActivitySource): ActivityPayloadView<T> | undefined =>
-    is(activity) ? readPayloadFields(activity.payload, fields) : undefined;
+    is(activity) ? readPayloadFields<T>(activity.payload, compiled, fastCheck) : undefined;
 }
 
 // ── Approval and question requests ────────────────────────────────────
@@ -176,29 +224,66 @@ const REQUEST_FIELDS: PayloadFields<RequestActivityPayload> = {
   responseState: "string",
 };
 
-/** The payload of an approval activity (`APPROVAL_ACTIVITY_KINDS`), else undefined. */
-export const readApprovalActivityPayload = /* @__PURE__ */ kindReader<
-  ApprovalActivityKind,
-  ApprovalActivityPayload
->(isApprovalActivity, {
+function requestFieldsOk(record: Readonly<Record<string, unknown>>): boolean {
+  return (
+    (record.requestId === undefined || typeof record.requestId === "string") &&
+    (record.runtimeSessionId === undefined || typeof record.runtimeSessionId === "string") &&
+    (record.detail === undefined || typeof record.detail === "string") &&
+    (record.responseAttemptId === undefined || typeof record.responseAttemptId === "string") &&
+    (record.responseState === undefined || typeof record.responseState === "string")
+  );
+}
+
+/** Exported for the fast-check tests. */
+export const APPROVAL_FIELDS: PayloadFields<ApprovalActivityPayload> = {
   ...REQUEST_FIELDS,
   requestKind: "string",
   requestType: "string",
   reason: "string",
   decision: "string",
   acceptForSessionOffered: "boolean",
-});
+};
+
+export function approvalFieldsOk(record: Readonly<Record<string, unknown>>): boolean {
+  return (
+    requestFieldsOk(record) &&
+    (record.requestKind === undefined || typeof record.requestKind === "string") &&
+    (record.requestType === undefined || typeof record.requestType === "string") &&
+    (record.reason === undefined || typeof record.reason === "string") &&
+    (record.decision === undefined || typeof record.decision === "string") &&
+    (record.acceptForSessionOffered === undefined ||
+      typeof record.acceptForSessionOffered === "boolean")
+  );
+}
+
+/** The payload of an approval activity (`APPROVAL_ACTIVITY_KINDS`), else undefined. */
+export const readApprovalActivityPayload = /* @__PURE__ */ kindReader<
+  ApprovalActivityKind,
+  ApprovalActivityPayload
+>(isApprovalActivity, APPROVAL_FIELDS, approvalFieldsOk);
+
+/** Exported for the fast-check tests. */
+export const USER_INPUT_FIELDS: PayloadFields<UserInputActivityPayload> = {
+  ...REQUEST_FIELDS,
+  nonBlocking: "boolean",
+  itemId: "string",
+  cancelled: "boolean",
+};
+
+export function userInputFieldsOk(record: Readonly<Record<string, unknown>>): boolean {
+  return (
+    requestFieldsOk(record) &&
+    (record.nonBlocking === undefined || typeof record.nonBlocking === "boolean") &&
+    (record.itemId === undefined || typeof record.itemId === "string") &&
+    (record.cancelled === undefined || typeof record.cancelled === "boolean")
+  );
+}
 
 /** The payload of a question activity (`USER_INPUT_ACTIVITY_KINDS`), else undefined. */
 export const readUserInputActivityPayload = /* @__PURE__ */ kindReader<
   UserInputActivityKind,
   UserInputActivityPayload
->(isUserInputActivity, {
-  ...REQUEST_FIELDS,
-  nonBlocking: "boolean",
-  itemId: "string",
-  cancelled: "boolean",
-});
+>(isUserInputActivity, USER_INPUT_FIELDS, userInputFieldsOk);
 
 // ── Provider tasks ────────────────────────────────────────────────────
 
@@ -270,6 +355,39 @@ const TASK_FIELDS: PayloadFields<TaskActivityPayload> = {
 /** The payload of a task activity (`TASK_ACTIVITY_KINDS`), else undefined. */
 export const readTaskActivityPayload = /* @__PURE__ */ kindReader(isTaskActivity, TASK_FIELDS);
 
+/** What places a task row in a timeline: its task and the agent that owns it. */
+export type TaskRowOwnership = Pick<
+  TaskActivityPayload,
+  "taskId" | "agentId" | "agentKind" | "timelineBypass"
+>;
+
+/**
+ * The ownership fields of a task activity, else undefined: `readTaskActivityPayload` checks all
+ * of its 32 fields, which a timeline derivation would pay for every task row it walks.
+ */
+/** Exported for the fast-check tests. */
+export const TASK_ROW_OWNERSHIP_FIELDS: PayloadFields<TaskRowOwnership> = {
+  taskId: "string",
+  agentId: "string",
+  agentKind: "string",
+  timelineBypass: "boolean",
+};
+
+export function taskRowOwnershipFieldsOk(record: Readonly<Record<string, unknown>>): boolean {
+  return (
+    (record.taskId === undefined || typeof record.taskId === "string") &&
+    (record.agentId === undefined || typeof record.agentId === "string") &&
+    (record.agentKind === undefined || typeof record.agentKind === "string") &&
+    (record.timelineBypass === undefined || typeof record.timelineBypass === "boolean")
+  );
+}
+
+export const readTaskRowOwnership = /* @__PURE__ */ kindReader<TaskActivityKind, TaskRowOwnership>(
+  isTaskActivity,
+  TASK_ROW_OWNERSHIP_FIELDS,
+  taskRowOwnershipFieldsOk,
+);
+
 // ── Tool lifecycle ────────────────────────────────────────────────────
 
 export const TOOL_LIFECYCLE_ACTIVITY_KINDS = [
@@ -309,7 +427,8 @@ export interface ToolActivityPayload {
   readonly elapsedSeconds?: number | undefined;
 }
 
-const TOOL_FIELDS: PayloadFields<ToolActivityPayload> = {
+/** Exported for the fast-check tests. */
+export const TOOL_FIELDS: PayloadFields<ToolActivityPayload> = {
   itemType: "string",
   status: "string",
   title: "string",
@@ -323,8 +442,28 @@ const TOOL_FIELDS: PayloadFields<ToolActivityPayload> = {
   elapsedSeconds: "number",
 };
 
+export function toolFieldsOk(record: Readonly<Record<string, unknown>>): boolean {
+  return (
+    (record.itemType === undefined || typeof record.itemType === "string") &&
+    (record.status === undefined || typeof record.status === "string") &&
+    (record.title === undefined || typeof record.title === "string") &&
+    (record.detail === undefined || typeof record.detail === "string") &&
+    (record.providerItemId === undefined || typeof record.providerItemId === "string") &&
+    (record.agentId === undefined || typeof record.agentId === "string") &&
+    (record.parentToolUseId === undefined || typeof record.parentToolUseId === "string") &&
+    (record.toolName === undefined || typeof record.toolName === "string") &&
+    (record.toolUseId === undefined || typeof record.toolUseId === "string") &&
+    (record.taskId === undefined || typeof record.taskId === "string") &&
+    (record.elapsedSeconds === undefined || typeof record.elapsedSeconds === "number")
+  );
+}
+
 /** The payload of a tool activity (`TOOL_ACTIVITY_KINDS`), else undefined. */
-export const readToolActivityPayload = /* @__PURE__ */ kindReader(isToolActivity, TOOL_FIELDS);
+export const readToolActivityPayload = /* @__PURE__ */ kindReader(
+  isToolActivity,
+  TOOL_FIELDS,
+  toolFieldsOk,
+);
 
 // ── Subagents ─────────────────────────────────────────────────────────
 

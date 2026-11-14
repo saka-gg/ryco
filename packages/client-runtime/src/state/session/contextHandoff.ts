@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type { ContextHandoffId, MessageId, TurnId } from "@ryco/contracts";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
@@ -359,7 +360,7 @@ const decodeContextHandoffActivityPayload = Schema.decodeUnknownSync(ContextHand
 export function toContextHandoffTimelineEntry(
   activity: OrchestrationThreadActivity,
 ): ContextHandoffTimelineEntry | null {
-  if (activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND) {
+  if (!hasActivityKind(activity, CONTEXT_HANDOFF_ACTIVITY_KIND)) {
     return null;
   }
 

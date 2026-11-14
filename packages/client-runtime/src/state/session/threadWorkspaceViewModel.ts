@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type { OrchestrationLatestTurnState, OrchestrationThreadActivity } from "@ryco/contracts";
 
 import { deriveWorkLogEntries, type WorkLogEntry } from "./session-logic.ts";
@@ -493,16 +494,16 @@ function statusFromActivity(
   if (payload?.status === "inProgress") {
     return "running";
   }
-  if (activity.kind === "tool.started" || activity.kind === "tool.updated") {
+  if (hasActivityKind(activity, "tool.started") || hasActivityKind(activity, "tool.updated")) {
     return "running";
   }
-  if (activity.kind === "tool.completed") {
+  if (hasActivityKind(activity, "tool.completed")) {
     return activity.tone === "error" ? "failed" : "finished";
   }
-  if (activity.kind === "task.started") {
+  if (hasActivityKind(activity, "task.started")) {
     return "running";
   }
-  if (activity.kind === "task.progress") {
+  if (hasActivityKind(activity, "task.progress")) {
     return payload?.usageSnapshot === true ? null : "running";
   }
   return null;
@@ -616,7 +617,10 @@ function findSubagentByProviderThreadId(
 function messageFromActivity(
   activity: OrchestrationThreadActivity,
 ): InternalThreadSubagentMessageView | null {
-  if (activity.kind !== "agent.message" && !activity.kind.startsWith("subagent.message")) {
+  if (
+    !hasActivityKind(activity, "agent.message") &&
+    !activity.kind.startsWith("subagent.message")
+  ) {
     return null;
   }
   const payload = payloadFromActivity(activity);

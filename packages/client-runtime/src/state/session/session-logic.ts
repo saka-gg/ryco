@@ -15,6 +15,21 @@ import {
   compareThreadActivitiesInLifecycleOrder,
   isContextCompactionActivity,
 } from "@ryco/shared/threadActivity";
+import {
+  isApprovalActivity,
+  isUserInputActivity,
+  readApprovalActivityPayload,
+  readTaskRowOwnership,
+  readToolActivityPayload,
+  readTurnPlanActivityPayload,
+  readUserInputActivityPayload,
+  type ActivityPayloadView,
+  type ApprovalActivityKind,
+  type ApprovalActivityPayload,
+  type RequestActivityPayload,
+  type TaskRowOwnership,
+  type UserInputActivityKind,
+} from "@ryco/shared/threadActivityPayloads";
 import { readTurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 import { parseUserInputQuestions } from "@ryco/shared/userInputExchange";
 
@@ -30,6 +45,7 @@ import {
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
+  type ThreadActivityKind,
 } from "@ryco/contracts/orchestration";
 import { ProviderDriverKind } from "@ryco/contracts/provider-instance";
 import {
@@ -411,66 +427,54 @@ function isStalePendingRequestFailureDetail(detail: string | undefined): boolean
   );
 }
 
-function activityPayload(activity: OrchestrationThreadActivity): Record<string, unknown> | null {
-  return activity.payload && typeof activity.payload === "object"
-    ? (activity.payload as Record<string, unknown>)
-    : null;
-}
-
-function requestIdFromPayload(payload: Record<string, unknown> | null): ApprovalRequestId | null {
-  return payload && typeof payload.requestId === "string"
-    ? ApprovalRequestId.make(payload.requestId)
-    : null;
-}
-
-function detailFromPayload(payload: Record<string, unknown> | null): string | undefined {
-  return payload && typeof payload.detail === "string" ? payload.detail : undefined;
+function requestIdFromPayload(
+  payload: ActivityPayloadView<RequestActivityPayload>,
+): ApprovalRequestId | null {
+  return payload.requestId !== undefined ? ApprovalRequestId.make(payload.requestId) : null;
 }
 
 function requestKindFromPayload(
-  payload: Record<string, unknown> | null,
+  payload: ActivityPayloadView<ApprovalActivityPayload>,
 ): PendingApproval["requestKind"] | null {
   if (
-    payload &&
-    (payload.requestKind === "command" ||
-      payload.requestKind === "file-read" ||
-      payload.requestKind === "file-change")
+    payload.requestKind === "command" ||
+    payload.requestKind === "file-read" ||
+    payload.requestKind === "file-change"
   ) {
     return payload.requestKind;
   }
-  return payload ? requestKindFromRequestType(payload.requestType) : null;
+  return requestKindFromRequestType(payload.requestType);
 }
 
+/**
+ * Takes an approval row: the caller's `isApprovalActivity` narrows the kind, so each
+ * `activity.kind === "…"` below is checked against `ApprovalActivityKind`.
+ */
 function updatePendingApprovalState(
   openByRequestId: Map<ApprovalRequestId, PendingApproval>,
-  activity: OrchestrationThreadActivity,
-  payload: Record<string, unknown> | null,
+  activity: OrchestrationThreadActivity & { readonly kind: ApprovalActivityKind },
 ) {
-  if (
-    activity.kind !== "approval.requested" &&
-    activity.kind !== "approval.resolved" &&
-    activity.kind !== "approval.response.submitted" &&
-    activity.kind !== "provider.approval.respond.failed"
-  ) {
+  const payload = readApprovalActivityPayload(activity);
+  if (payload === undefined) {
     return;
   }
 
   const requestId = requestIdFromPayload(payload);
   const requestKind = requestKindFromPayload(payload);
-  const detail = detailFromPayload(payload);
+  const detail = payload.detail;
 
   if (activity.kind === "approval.requested" && requestId && requestKind) {
     openByRequestId.set(requestId, {
       requestId,
       requestKind,
-      ...(Schema.is(ApprovalResponseIdentity)(payload?.approvalIdentity)
+      ...(Schema.is(ApprovalResponseIdentity)(payload.approvalIdentity)
         ? { approvalIdentity: payload.approvalIdentity }
         : {}),
       createdAt: activity.createdAt,
       ...(activity.turnId ? { turnId: activity.turnId } : {}),
       ...(detail ? { detail } : {}),
-      ...(typeof payload?.reason === "string" ? { reason: payload.reason } : {}),
-      ...(payload?.acceptForSessionOffered === false ? { acceptForSessionOffered: false } : {}),
+      ...(payload.reason !== undefined ? { reason: payload.reason } : {}),
+      ...(payload.acceptForSessionOffered === false ? { acceptForSessionOffered: false } : {}),
     });
     return;
   }
@@ -481,8 +485,8 @@ function updatePendingApprovalState(
     requestId &&
     (activity.kind === "approval.response.submitted" ||
       activity.kind === "provider.approval.respond.failed") &&
-    Schema.is(ApprovalResponseIdentity)(payload?.approvalIdentity) &&
-    Schema.is(ApprovalResponseState)(payload?.responseState)
+    Schema.is(ApprovalResponseIdentity)(payload.approvalIdentity) &&
+    Schema.is(ApprovalResponseState)(payload.responseState)
   ) {
     const identity = payload.approvalIdentity;
     if (
@@ -500,21 +504,21 @@ function updatePendingApprovalState(
       openByRequestId.set(requestId, {
         ...current,
         responseState: payload.responseState,
-        ...(typeof payload.responseAttemptId === "string"
+        ...(payload.responseAttemptId !== undefined
           ? { responseAttemptId: payload.responseAttemptId }
           : {}),
       });
     return;
   }
   if (activity.kind === "approval.resolved" && requestId) {
-    if (current?.approvalIdentity?.runtimeSessionId !== payload?.runtimeSessionId) return;
+    if (current?.approvalIdentity?.runtimeSessionId !== payload.runtimeSessionId) return;
     if (
-      Schema.is(ApprovalResponseIdentity)(payload?.approvalIdentity) &&
+      Schema.is(ApprovalResponseIdentity)(payload.approvalIdentity) &&
       payload.approvalIdentity.requestEventId !== current?.approvalIdentity?.requestEventId
     )
       return;
     if (
-      typeof payload?.responseAttemptId === "string" &&
+      payload.responseAttemptId !== undefined &&
       payload.responseAttemptId !== current?.responseAttemptId
     )
       return;
@@ -546,7 +550,7 @@ export function derivePendingApprovals(
   const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
 
   for (const activity of ordered) {
-    updatePendingApprovalState(openByRequestId, activity, activityPayload(activity));
+    if (isApprovalActivity(activity)) updatePendingApprovalState(openByRequestId, activity);
   }
 
   return pendingApprovalsFromState(openByRequestId);
@@ -559,28 +563,24 @@ export function derivePendingUserInputs(
   const ordered = [...activities].toSorted(compareThreadActivitiesInLifecycleOrder);
 
   for (const activity of ordered) {
-    updatePendingUserInputState(openByRequestId, activity, activityPayload(activity));
+    if (isUserInputActivity(activity)) updatePendingUserInputState(openByRequestId, activity);
   }
 
   return pendingUserInputsFromState(openByRequestId);
 }
 
+/** Takes a question row; kinds are checked against `UserInputActivityKind`, as above. */
 function updatePendingUserInputState(
   openByRequestId: Map<ApprovalRequestId, PendingUserInput>,
-  activity: OrchestrationThreadActivity,
-  payload: Record<string, unknown> | null,
+  activity: OrchestrationThreadActivity & { readonly kind: UserInputActivityKind },
 ) {
-  if (
-    activity.kind !== "user-input.requested" &&
-    activity.kind !== "user-input.resolved" &&
-    activity.kind !== "user-input.response.submitted" &&
-    activity.kind !== "provider.user-input.respond.failed"
-  ) {
+  const payload = readUserInputActivityPayload(activity);
+  if (payload === undefined) {
     return;
   }
 
   const requestId = requestIdFromPayload(payload);
-  const detail = detailFromPayload(payload);
+  const detail = payload.detail;
 
   if (activity.kind === "user-input.requested" && requestId) {
     const questions = parseUserInputQuestions(payload);
@@ -589,13 +589,13 @@ function updatePendingUserInputState(
     }
     openByRequestId.set(requestId, {
       requestId,
-      ...(Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity)
+      ...(Schema.is(ApprovalResponseIdentity)(payload.userInputIdentity)
         ? { userInputIdentity: payload.userInputIdentity }
         : {}),
       createdAt: activity.createdAt,
       ...(activity.turnId ? { turnId: activity.turnId } : {}),
-      ...(payload?.nonBlocking === true ? { nonBlocking: true } : {}),
-      ...(payload?.nonBlocking === true && typeof payload.itemId === "string"
+      ...(payload.nonBlocking === true ? { nonBlocking: true } : {}),
+      ...(payload.nonBlocking === true && payload.itemId !== undefined
         ? { itemId: payload.itemId }
         : {}),
       questions,
@@ -609,8 +609,8 @@ function updatePendingUserInputState(
     requestId &&
     (activity.kind === "user-input.response.submitted" ||
       activity.kind === "provider.user-input.respond.failed") &&
-    Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity) &&
-    Schema.is(ApprovalResponseState)(payload?.responseState)
+    Schema.is(ApprovalResponseIdentity)(payload.userInputIdentity) &&
+    Schema.is(ApprovalResponseState)(payload.responseState)
   ) {
     const identity = payload.userInputIdentity;
     if (
@@ -628,21 +628,21 @@ function updatePendingUserInputState(
       openByRequestId.set(requestId, {
         ...current,
         responseState: payload.responseState,
-        ...(typeof payload.responseAttemptId === "string"
+        ...(payload.responseAttemptId !== undefined
           ? { responseAttemptId: payload.responseAttemptId }
           : {}),
       });
     return;
   }
   if (activity.kind === "user-input.resolved" && requestId) {
-    if (current?.userInputIdentity?.runtimeSessionId !== payload?.runtimeSessionId) return;
+    if (current?.userInputIdentity?.runtimeSessionId !== payload.runtimeSessionId) return;
     if (
-      Schema.is(ApprovalResponseIdentity)(payload?.userInputIdentity) &&
+      Schema.is(ApprovalResponseIdentity)(payload.userInputIdentity) &&
       payload.userInputIdentity.requestEventId !== current?.userInputIdentity?.requestEventId
     )
       return;
     if (
-      typeof payload?.responseAttemptId === "string" &&
+      payload.responseAttemptId !== undefined &&
       payload.responseAttemptId !== current?.responseAttemptId
     )
       return;
@@ -670,9 +670,9 @@ function toActivePlanState(activity: OrchestrationThreadActivity | null): Active
   if (!activity) {
     return null;
   }
-  const payload = activityPayload(activity);
+  const payload = readTurnPlanActivityPayload(activity);
   const rawPlan = payload?.plan;
-  if (!Array.isArray(rawPlan)) {
+  if (rawPlan === undefined) {
     return null;
   }
   const steps = rawPlan
@@ -719,7 +719,7 @@ export function deriveActivePlanState(
   let latestPlanActivityForTurn: OrchestrationThreadActivity | null = null;
 
   for (const activity of ordered) {
-    if (activity.kind !== "turn.plan.updated") {
+    if (activity.kind !== TURN_PLAN_UPDATED_KIND) {
       continue;
     }
     latestPlanActivity = activity;
@@ -793,6 +793,17 @@ export function hasActionableProposedPlan(
   return proposedPlan !== null && proposedPlan.implementedAt === null;
 }
 
+/**
+ * Kinds the per-row work-log and plan checks compare against, typed once here: a call per check
+ * (`hasActivityKind`) costs more than the comparison itself on a phone's interpreter, and these
+ * run for every activity of a thread.
+ */
+const TOOL_STARTED_KIND = "tool.started" satisfies ThreadActivityKind;
+const TASK_STARTED_KIND = "task.started" satisfies ThreadActivityKind;
+const TASK_PROGRESS_KIND = "task.progress" satisfies ThreadActivityKind;
+const TASK_UPDATED_KIND = "task.updated" satisfies ThreadActivityKind;
+const TURN_PLAN_UPDATED_KIND = "turn.plan.updated" satisfies ThreadActivityKind;
+
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
@@ -813,7 +824,7 @@ export function deriveWorkLogEntries(
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
     const visibleActivity =
-      options?.agentTimeline && activity.kind === "tool.started"
+      options?.agentTimeline && activity.kind === TOOL_STARTED_KIND
         ? { ...activity, kind: "tool.updated" }
         : activity;
     if (shouldIncludeActivityInWorkLog(visibleActivity, latestTurnId, options?.agentTimeline)) {
@@ -850,7 +861,7 @@ function collectToolStartTimestamps(
 ): ReadonlyMap<string, string> {
   const startedAtByToolCallId = new Map<string, string>();
   for (const activity of ordered) {
-    if (activity.kind !== "tool.started") {
+    if (activity.kind !== TOOL_STARTED_KIND) {
       continue;
     }
     const payload =
@@ -876,68 +887,43 @@ function collectToolStartTimestamps(
  * - task.updated / tool.progress are fold input only (not narrative).
  * Unattributed rows always stay: over-hiding loses the only terminal signal.
  */
-function isAgentTaskRowPayload(
-  activity: OrchestrationThreadActivity,
-): Record<string, unknown> | null {
-  const payload =
-    activity.payload && typeof activity.payload === "object"
-      ? (activity.payload as Record<string, unknown>)
-      : null;
-  if (!payload || typeof payload.taskId !== "string") {
-    return null;
-  }
-  return payload;
-}
+/** A task row's ownership fields, read once per row and passed to the checks below. */
+type TaskRowPayload = ActivityPayloadView<TaskRowOwnership> | undefined;
 
-/** Agent (non-background) task.started rows seed spawn CTA batches. */
-function isAgentTaskStartedActivity(activity: OrchestrationThreadActivity): boolean {
-  const payload = isAgentTaskRowPayload(activity);
-  return payload !== null && !isBackgroundTaskActivity(payload);
+/** An agent (non-background) task row: it has a task id and is not background work. */
+function isAgentTaskRow(task: TaskRowPayload): boolean {
+  return task?.taskId !== undefined && !isBackgroundTaskActivity(task);
 }
 
 /** Agent-stamped task lifecycle rows: exempt from the latest-turn filter so a
  * batch's CTA anchor and cross-turn completions survive turn settlement. */
-function isAgentTaskLifecycleActivity(activity: OrchestrationThreadActivity): boolean {
-  if (
-    activity.kind !== "task.started" &&
-    activity.kind !== "task.progress" &&
-    activity.kind !== "task.completed"
-  ) {
-    return false;
-  }
-  const payload = isAgentTaskRowPayload(activity);
-  return payload !== null && !isBackgroundTaskActivity(payload);
+function isAgentTaskLifecycleActivity(
+  activity: OrchestrationThreadActivity,
+  task: TaskRowPayload,
+): boolean {
+  return activity.kind !== TASK_UPDATED_KIND && isAgentTaskRow(task);
 }
 
-function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean {
+function isAgentInternalActivity(
+  activity: OrchestrationThreadActivity,
+  task: TaskRowPayload,
+): boolean {
   if (activity.kind.startsWith("background-work.")) return true;
-  const payload =
-    activity.payload && typeof activity.payload === "object"
-      ? (activity.payload as Record<string, unknown>)
-      : null;
-  if (!payload) {
-    return false;
-  }
-  const isTaskRow =
-    activity.kind === "task.started" ||
-    activity.kind === "task.progress" ||
-    activity.kind === "task.updated" ||
-    activity.kind === "task.completed";
   // Task rows classify by the server stamp: a subagent's own background
   // shell (agentId + "background") is agent-internal, but a nested AGENT
   // (agentId + "agent") stays visible so its rows can anchor a spawn CTA.
   // Bypassed agent lifecycle rows also pass — collapse folds every such
   // row into its batch's single CTA row, which is how Codex children
   // (whose rows are ALL bypassed) get an anchor at the spawn point.
-  if (isTaskRow) {
-    const ownedByAgent = typeof payload.agentId === "string" && payload.agentId.trim().length > 0;
-    if (ownedByAgent || payload.timelineBypass === true) {
-      const isAgentTaskRow =
-        activity.kind !== "task.updated" &&
-        typeof payload.taskId === "string" &&
-        !isBackgroundTaskActivity(payload);
-      return !isAgentTaskRow;
+  if (task !== undefined) {
+    const ownedByAgent = task.agentId !== undefined && task.agentId.trim().length > 0;
+    if (ownedByAgent || task.timelineBypass === true) {
+      return activity.kind === TASK_UPDATED_KIND || !isAgentTaskRow(task);
     }
+    return false;
+  }
+  const payload = asRecord(activity.payload);
+  if (!payload) {
     return false;
   }
   if (payload.timelineBypass === true) {
@@ -947,32 +933,73 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
   return typeof payload.agentId === "string" && payload.agentId.trim().length > 0;
 }
 
+/**
+ * Kind lists the work-log filter checks on every row, typed against `ThreadActivityKind`. One
+ * scan of a short list instead of a call per kind: this runs for every activity of a thread.
+ */
+const WORK_LOG_FOLD_INPUT_KINDS: ReadonlyArray<string> = [
+  // Status patches and heartbeats are not narrative.
+  "task.updated",
+  "tool.progress",
+] satisfies ReadonlyArray<ThreadActivityKind>;
+
+const WORK_LOG_HIDDEN_KINDS: ReadonlyArray<string> = [
+  "tool.started",
+  "agent.message",
+  "context-window.updated",
+  // `FAST_MODE_STATE_ACTIVITY_KIND` (`@ryco/shared/claudeFastMode`), spelled out: importing it
+  // here put that module, parser included, on the web boot path.
+  "fast-mode.state",
+  // `PROMPT_SUGGESTION_ACTIVITY_KIND` (`@ryco/shared/promptSuggestion`): the composer's
+  // predicted next prompt, never a timeline row.
+  "prompt.suggestion",
+  CONTEXT_HANDOFF_ACTIVITY_KIND,
+  THREAD_FORKED_ACTIVITY_KIND,
+] satisfies ReadonlyArray<ThreadActivityKind>;
+
+/** Task rows whose summary a work-log entry shows. */
+const WORK_LOG_TASK_SUMMARY_KINDS: ReadonlyArray<string> = [
+  "task.started",
+  "task.progress",
+  "task.completed",
+] satisfies ReadonlyArray<ThreadActivityKind>;
+
+const WORK_LOG_COMPLETED_KINDS: ReadonlyArray<string> = [
+  "tool.completed",
+  "task.completed",
+] satisfies ReadonlyArray<ThreadActivityKind>;
+
+const PLAN_BOUNDARY_TOOL_KINDS: ReadonlyArray<string> = [
+  "tool.updated",
+  "tool.completed",
+] satisfies ReadonlyArray<ThreadActivityKind>;
+
 function shouldIncludeActivityInWorkLog(
   activity: OrchestrationThreadActivity,
   latestTurnId: TurnId | undefined,
   agentTimeline = false,
 ): boolean {
+  const task = readTaskRowOwnership(activity);
   if (
     latestTurnId &&
     activity.turnId !== latestTurnId &&
     // Agent task rows carry the true spawn turn and batch by it: a CTA
     // anchored in turn N must survive turn N+1 starting, and Claude
     // background completions arrive under later synthetic turns.
-    !isAgentTaskLifecycleActivity(activity)
+    !isAgentTaskLifecycleActivity(activity, task)
   ) {
     return false;
   }
-  if (activity.kind === "task.started") {
+  if (activity.kind === TASK_STARTED_KIND) {
     // Agent task.started rows are CTA seeds: they carry the true spawn
     // turn, which is the batch key. They collapse into the batch's single
     // CTA row, never render standalone.
-    return isAgentTaskStartedActivity(activity);
+    return isAgentTaskRow(task);
   }
-  if (activity.kind === "task.updated" || activity.kind === "tool.progress") {
-    // Fold input only (status patches and heartbeats are not narrative).
+  if (WORK_LOG_FOLD_INPUT_KINDS.includes(activity.kind)) {
     return false;
   }
-  if (!agentTimeline && isAgentInternalActivity(activity)) {
+  if (!agentTimeline && isAgentInternalActivity(activity, task)) {
     return false;
   }
   // A deferred steer is not news: the message stays queued and is sent next.
@@ -980,17 +1007,7 @@ function shouldIncludeActivityInWorkLog(
     return false;
   }
   return (
-    activity.kind !== "tool.started" &&
-    activity.kind !== "agent.message" &&
-    activity.kind !== "context-window.updated" &&
-    // `FAST_MODE_STATE_ACTIVITY_KIND` (`@ryco/shared/claudeFastMode`), spelled out: importing it
-    // here put that module, parser included, on the web boot path.
-    activity.kind !== "fast-mode.state" &&
-    // `PROMPT_SUGGESTION_ACTIVITY_KIND` (`@ryco/shared/promptSuggestion`): the composer's
-    // predicted next prompt, never a timeline row.
-    activity.kind !== "prompt.suggestion" &&
-    activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND &&
-    activity.kind !== THREAD_FORKED_ACTIVITY_KIND &&
+    !WORK_LOG_HIDDEN_KINDS.includes(activity.kind) &&
     !isContextCompactionActivity(activity) &&
     activity.summary !== "Checkpoint captured" &&
     !isPlanBoundaryToolActivity(activity)
@@ -1004,19 +1021,14 @@ function toWorkLogEntries(entries: ReadonlyArray<DerivedWorkLogEntry>): WorkLogE
 }
 
 function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): boolean {
-  if (activity.kind !== "tool.updated" && activity.kind !== "tool.completed") {
+  if (!PLAN_BOUNDARY_TOOL_KINDS.includes(activity.kind)) {
     return false;
   }
-
-  const payload =
-    activity.payload && typeof activity.payload === "object"
-      ? (activity.payload as Record<string, unknown>)
-      : null;
-  return typeof payload?.detail === "string" && payload.detail.startsWith("ExitPlanMode:");
+  return readToolActivityPayload(activity)?.detail?.startsWith("ExitPlanMode:") === true;
 }
 
 /** Activity kind the server uses for one upserted reasoning block. */
-const REASONING_ACTIVITY_KIND = "reasoning";
+const REASONING_ACTIVITY_KIND = "reasoning" satisfies ThreadActivityKind;
 
 /**
  * A reasoning block (Claude thinking, Codex summary, ACP thought): `output`
@@ -1070,10 +1082,7 @@ function toDerivedWorkLogEntry(
   const changedFiles = extractChangedFiles(payload);
   const changedFileStats = extractChangedFileStats(payload);
   const title = extractToolTitle(payload);
-  const isTaskActivity =
-    activity.kind === "task.started" ||
-    activity.kind === "task.progress" ||
-    activity.kind === "task.completed";
+  const isTaskActivity = WORK_LOG_TASK_SUMMARY_KINDS.includes(activity.kind);
   const taskSummary =
     isTaskActivity && typeof payload?.summary === "string" && payload.summary.length > 0
       ? payload.summary
@@ -1100,7 +1109,7 @@ function toDerivedWorkLogEntry(
     createdAt: activity.createdAt,
     label: taskLabel || activity.summary,
     tone:
-      activity.kind === "task.progress"
+      activity.kind === TASK_PROGRESS_KIND
         ? "thinking"
         : activity.tone === "approval"
           ? "info"
@@ -1166,7 +1175,7 @@ function toDerivedWorkLogEntry(
   if (activity.turnId !== null) {
     entry.turnId = activity.turnId;
   }
-  if (activity.kind === "tool.completed" || activity.kind === "task.completed") {
+  if (WORK_LOG_COMPLETED_KINDS.includes(activity.kind)) {
     entry.completed = true;
   }
   if (activity.kind.startsWith("approval.")) {
@@ -2224,13 +2233,12 @@ export function deriveThreadActivityViewModel(
   let latestPlanActivityForTurn: OrchestrationThreadActivity | null = null;
 
   for (const activity of ordered) {
-    const payload = activityPayload(activity);
-
-    updatePendingApprovalState(pendingApprovalState, activity, payload);
-    updatePendingUserInputState(pendingUserInputState, activity, payload);
+    if (isApprovalActivity(activity)) updatePendingApprovalState(pendingApprovalState, activity);
+    else if (isUserInputActivity(activity))
+      updatePendingUserInputState(pendingUserInputState, activity);
     userInputExchanges.observe(activity);
 
-    if (activity.kind === "turn.plan.updated") {
+    if (activity.kind === TURN_PLAN_UPDATED_KIND) {
       latestPlanActivity = activity;
       if (effectiveLatestTurnId && activity.turnId === effectiveLatestTurnId) {
         latestPlanActivityForTurn = activity;

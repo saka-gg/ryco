@@ -18,6 +18,13 @@ import {
   type PendingThreadRequestActivity,
 } from "./pendingRequestOrder.ts";
 import { isForkBaseItemId } from "./threadFork.ts";
+import {
+  hasActivityKind,
+  readApprovalActivityPayload,
+  readUserInputActivityPayload,
+  type ActivityPayloadView,
+  type RequestActivityPayload,
+} from "./threadActivityPayloads.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
 
@@ -48,13 +55,13 @@ const decodeContextHandoffActivityPayload = Schema.decodeUnknownSync(ContextHand
 export function isContextCompactionActivity(
   activity: Pick<OrchestrationThreadActivity, "kind">,
 ): boolean {
-  return activity.kind === CONTEXT_COMPACTION_ACTIVITY_KIND;
+  return hasActivityKind(activity, CONTEXT_COMPACTION_ACTIVITY_KIND);
 }
 
 export function isTerminalContextHandoffActivity(
   activity: Pick<OrchestrationThreadActivity, "kind" | "payload">,
 ): boolean {
-  if (activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND) {
+  if (!hasActivityKind(activity, CONTEXT_HANDOFF_ACTIVITY_KIND)) {
     return false;
   }
 
@@ -78,7 +85,7 @@ export function isTerminalContextHandoffActivity(
 export function isThreadForkedActivity(
   activity: Pick<OrchestrationThreadActivity, "kind">,
 ): boolean {
-  return activity.kind === THREAD_FORKED_ACTIVITY_KIND;
+  return hasActivityKind(activity, THREAD_FORKED_ACTIVITY_KIND);
 }
 
 export function isThreadActivityMilestone(
@@ -89,11 +96,11 @@ export function isThreadActivityMilestone(
     isTerminalContextHandoffActivity(activity) ||
     isThreadForkedActivity(activity) ||
     // A move's record marks where the thread's usable checkpoints start, so it is never dropped.
-    activity.kind === THREAD_MOVED_ACTIVITY_KIND ||
+    hasActivityKind(activity, THREAD_MOVED_ACTIVITY_KIND) ||
     // Rare, small and long-lived (a request waits up to a day): the cap never drops a pending
     // secret request's card or the answer that closed it.
-    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
-    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
+    hasActivityKind(activity, SECRET_REQUESTED_ACTIVITY_KIND) ||
+    hasActivityKind(activity, SECRET_RESOLVED_ACTIVITY_KIND)
   );
 }
 
@@ -133,15 +140,17 @@ function openOptionalQuestionActivityIds(
   activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "id" | "kind" | "payload">>,
 ): Set<string> {
   const open = new Map<string, string>();
-  for (const { id, kind, payload } of activities) {
-    const requestId = activityRequestId(payload);
-    if (requestId === null) continue;
-    const fields = payload as { nonBlocking?: unknown; responseState?: unknown };
-    if (kind === "user-input.requested" && fields.nonBlocking === true) open.set(requestId, id);
+  for (const activity of activities) {
+    const payload = readUserInputActivityPayload(activity);
+    const requestId = nonEmptyRequestId(payload);
+    if (payload === undefined || requestId === null) continue;
+    if (hasActivityKind(activity, "user-input.requested") && payload.nonBlocking === true)
+      open.set(requestId, activity.id);
     else if (
-      kind === "user-input.requested" ||
-      kind === "user-input.resolved" ||
-      (kind === "provider.user-input.respond.failed" && fields.responseState === "invalidated")
+      hasActivityKind(activity, "user-input.requested") ||
+      hasActivityKind(activity, "user-input.resolved") ||
+      (hasActivityKind(activity, "provider.user-input.respond.failed") &&
+        payload.responseState === "invalidated")
     )
       open.delete(requestId);
   }
@@ -163,20 +172,16 @@ export const PENDING_REQUEST_ACTIVITY_KINDS = [
   SECRET_RESOLVED_ACTIVITY_KIND,
 ] as const satisfies ReadonlyArray<ThreadActivityKind>;
 
-function activityRequestId(payload: unknown): string | null {
-  if (typeof payload !== "object" || payload === null || !("requestId" in payload)) {
-    return null;
-  }
-  const requestId = (payload as { requestId?: unknown }).requestId;
-  return typeof requestId === "string" && requestId.length > 0 ? requestId : null;
+function nonEmptyRequestId(
+  payload: ActivityPayloadView<RequestActivityPayload> | undefined,
+): string | null {
+  return payload?.requestId ? payload.requestId : null;
 }
 
-function activityFailureDetail(payload: unknown): string | null {
-  if (typeof payload !== "object" || payload === null || !("detail" in payload)) {
-    return null;
-  }
-  const detail = (payload as { detail?: unknown }).detail;
-  return typeof detail === "string" ? detail.toLowerCase() : null;
+function activityFailureDetail(
+  payload: ActivityPayloadView<RequestActivityPayload>,
+): string | null {
+  return payload.detail?.toLowerCase() ?? null;
 }
 
 function isStaleRequestFailure(detail: string | null, requestKind: "approval" | "user-input") {
@@ -214,30 +219,35 @@ export function derivePendingProviderCallbackRequests(
   const optionalIds = new Set<string>();
 
   for (const activity of activities.toSorted(comparePendingRequestActivities)) {
-    const requestId = activityRequestId(activity.payload);
-    if (requestId === null) continue;
-
-    if (activity.kind === "approval.requested") {
-      approvalIds.set(requestId, activity.turnId ?? null);
-    } else if (activity.kind === "approval.resolved") {
-      approvalIds.delete(requestId);
+    const approval = readApprovalActivityPayload(activity);
+    const approvalRequestId = nonEmptyRequestId(approval);
+    if (approval !== undefined && approvalRequestId !== null) {
+      if (hasActivityKind(activity, "approval.requested")) {
+        approvalIds.set(approvalRequestId, activity.turnId ?? null);
+      } else if (hasActivityKind(activity, "approval.resolved")) {
+        approvalIds.delete(approvalRequestId);
+      } else if (
+        hasActivityKind(activity, "provider.approval.respond.failed") &&
+        isStaleRequestFailure(activityFailureDetail(approval), "approval")
+      ) {
+        approvalIds.delete(approvalRequestId);
+      }
+      continue;
+    }
+    const userInput = readUserInputActivityPayload(activity);
+    const userInputRequestId = nonEmptyRequestId(userInput);
+    if (userInput === undefined || userInputRequestId === null) continue;
+    if (hasActivityKind(activity, "user-input.requested")) {
+      userInputIds.set(userInputRequestId, activity.turnId ?? null);
+      if (userInput.nonBlocking === true) optionalIds.add(userInputRequestId);
+      else optionalIds.delete(userInputRequestId);
+    } else if (hasActivityKind(activity, "user-input.resolved")) {
+      userInputIds.delete(userInputRequestId);
     } else if (
-      activity.kind === "provider.approval.respond.failed" &&
-      isStaleRequestFailure(activityFailureDetail(activity.payload), "approval")
+      hasActivityKind(activity, "provider.user-input.respond.failed") &&
+      isStaleRequestFailure(activityFailureDetail(userInput), "user-input")
     ) {
-      approvalIds.delete(requestId);
-    } else if (activity.kind === "user-input.requested") {
-      userInputIds.set(requestId, activity.turnId ?? null);
-      if ((activity.payload as { nonBlocking?: unknown })?.nonBlocking === true)
-        optionalIds.add(requestId);
-      else optionalIds.delete(requestId);
-    } else if (activity.kind === "user-input.resolved") {
-      userInputIds.delete(requestId);
-    } else if (
-      activity.kind === "provider.user-input.respond.failed" &&
-      isStaleRequestFailure(activityFailureDetail(activity.payload), "user-input")
-    ) {
-      userInputIds.delete(requestId);
+      userInputIds.delete(userInputRequestId);
     }
   }
 
@@ -264,11 +274,11 @@ export function pendingRequestActivityInOrchestrationOrder(
   sequence: number,
 ): OrchestrationThreadActivity {
   return activity.kind.startsWith("approval.") ||
-    activity.kind === "provider.approval.respond.failed" ||
+    hasActivityKind(activity, "provider.approval.respond.failed") ||
     activity.kind.startsWith("user-input.") ||
-    activity.kind === "provider.user-input.respond.failed" ||
-    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
-    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
+    hasActivityKind(activity, "provider.user-input.respond.failed") ||
+    hasActivityKind(activity, SECRET_REQUESTED_ACTIVITY_KIND) ||
+    hasActivityKind(activity, SECRET_RESOLVED_ACTIVITY_KIND)
     ? { ...activity, sequence }
     : activity;
 }
@@ -329,7 +339,7 @@ export function latestCheckpointRevertActivity<
 >(activities: ReadonlyArray<T>, options?: { readonly skipFailed?: boolean }): T | null {
   let latest: T | null = null;
   for (const activity of activities) {
-    if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) continue;
+    if (!hasActivityKind(activity, CHECKPOINT_REVERT_ACTIVITY_KIND)) continue;
     if (options?.skipFailed === true && isFailedCheckpointRevert(activity)) continue;
     if (latest === null || compareThreadActivities(activity, latest) > 0) latest = activity;
   }

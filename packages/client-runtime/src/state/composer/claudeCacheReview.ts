@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type { ClaudeResumeGuard, OrchestrationThread } from "@ryco/contracts";
 import { CommandId, MessageId } from "@ryco/contracts/base-schemas";
 import {
@@ -183,7 +184,8 @@ export async function reviewClaudeResumeBeforeSend(
         snapshot.latestTurn.state !== "running"
       ) {
         const confirmed = snapshot.activities.some(
-          (activity) => activity.kind === "context-compaction" && activity.turnId === turnId,
+          (activity) =>
+            hasActivityKind(activity, "context-compaction") && activity.turnId === turnId,
         );
         if (snapshot.latestTurn.state !== "completed" || !confirmed) {
           throw new ClaudeResumeReviewError(

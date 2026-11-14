@@ -1085,6 +1085,9 @@ export const ThreadActivityKind = /* @__PURE__ */ Schema.Literals([
   "checkpoint.capture.failed",
   "checkpoint.baseline.unconfirmed",
   "checkpoint.revert",
+  // Legacy: what nodes before the revert journal (v0.1.30 and older) appended when a revert
+  // failed. Nothing writes it any more; clients still read old rows.
+  "checkpoint.revert.failed",
   "history.imported",
   "thread.moved",
   "thread.forked",

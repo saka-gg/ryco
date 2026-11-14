@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type { OrchestrationEvent, ThreadId } from "@ryco/contracts";
 import { CHECKPOINT_REVERT_ACTIVITY_KIND } from "@ryco/contracts/orchestration";
 
@@ -33,7 +34,7 @@ export interface OrchestrationBatchEffects {
 function isFinishedFilesRevert(event: OrchestrationEvent): boolean {
   if (event.type !== "thread.activity-appended") return false;
   const { activity } = event.payload;
-  if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) return false;
+  if (!hasActivityKind(activity, CHECKPOINT_REVERT_ACTIVITY_KIND)) return false;
   const payload = activity.payload as {
     readonly status?: unknown;
     readonly rollbackConversation?: unknown;

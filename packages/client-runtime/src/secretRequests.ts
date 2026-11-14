@@ -6,6 +6,7 @@
  *
  * @module secretRequests
  */
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import {
   SECRET_REQUESTED_ACTIVITY_KIND,
   SecretRequestFailureReason,
@@ -40,7 +41,7 @@ export const SECRET_REQUEST_FIELD_PLACEHOLDER = "Paste the value";
 export function hasSecretRequestActivity(
   activities: ReadonlyArray<Pick<SecretRequestActivity, "kind">>,
 ): boolean {
-  return activities.some((activity) => activity.kind === SECRET_REQUESTED_ACTIVITY_KIND);
+  return activities.some((activity) => hasActivityKind(activity, SECRET_REQUESTED_ACTIVITY_KIND));
 }
 
 /** The cards a thread shows: its unanswered, unexpired requests, oldest first. */

@@ -4,6 +4,7 @@
  * thread's `user-input.requested` / `user-input.resolved` activity pairs; the copy is shared so
  * web and mobile say the same thing.
  */
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type { TurnId } from "@ryco/contracts";
 import type { OrchestrationThreadActivity } from "@ryco/contracts/orchestration";
 import {
@@ -74,7 +75,10 @@ export function createUserInputExchangeCollector() {
   return {
     entries,
     observe(activity: OrchestrationThreadActivity): void {
-      if (activity.kind !== "user-input.requested" && activity.kind !== "user-input.resolved") {
+      if (
+        !hasActivityKind(activity, "user-input.requested") &&
+        !hasActivityKind(activity, "user-input.resolved")
+      ) {
         return;
       }
       const record = lifecycleRecord(activity);

@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type {
   ClientOrchestrationCommand,
   CommandId,
@@ -8,7 +9,10 @@ import type {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
-import { CHECKPOINT_REVERT_ACTIVITY_KIND } from "@ryco/contracts/orchestration";
+import {
+  CHECKPOINT_REVERT_ACTIVITY_KIND,
+  type ThreadActivityKind,
+} from "@ryco/contracts/orchestration";
 import { latestCheckpointRevertActivity } from "@ryco/shared/threadActivity";
 import { isCheckpointBeforeThreadMove } from "@ryco/shared/threadMove";
 
@@ -188,7 +192,7 @@ export function checkpointRevertJournalId(commandId: CommandId | string): string
 }
 
 /** What nodes before the journal (v0.1.30 and older) appended when a revert failed. */
-const LEGACY_REVERT_FAILED_ACTIVITY_KIND = "checkpoint.revert.failed";
+const LEGACY_REVERT_FAILED_ACTIVITY_KIND = "checkpoint.revert.failed" satisfies ThreadActivityKind;
 
 interface RevertRowPayload {
   readonly status?: unknown;
@@ -265,7 +269,7 @@ function captureRevertBaseline(
     earlierTurnIds,
     legacyFailureIds: new Set(
       thread.activities
-        .filter((activity) => activity.kind === LEGACY_REVERT_FAILED_ACTIVITY_KIND)
+        .filter((activity) => hasActivityKind(activity, LEGACY_REVERT_FAILED_ACTIVITY_KIND))
         .map((activity) => activity.id),
     ),
   };
@@ -347,7 +351,7 @@ export function waitForCheckpointRevertOutcome(input: {
       rewound ||= baseline !== null && isRewound(baseline, thread);
       const row = thread.activities.findLast(
         (activity) =>
-          activity.id === journalId && activity.kind === CHECKPOINT_REVERT_ACTIVITY_KIND,
+          activity.id === journalId && hasActivityKind(activity, CHECKPOINT_REVERT_ACTIVITY_KIND),
       );
       if (row !== undefined) {
         if (awaitingRow) {
@@ -364,7 +368,7 @@ export function waitForCheckpointRevertOutcome(input: {
       if (baseline !== null) {
         const legacyFailure = thread.activities.find(
           (activity) =>
-            activity.kind === LEGACY_REVERT_FAILED_ACTIVITY_KIND &&
+            hasActivityKind(activity, LEGACY_REVERT_FAILED_ACTIVITY_KIND) &&
             !baseline.legacyFailureIds.has(activity.id) &&
             rowPayload(activity).turnCount === input.turnCount,
         );
