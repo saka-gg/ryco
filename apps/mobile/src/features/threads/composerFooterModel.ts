@@ -10,16 +10,11 @@ import {
   type ReasoningTone,
   type SpeedTier,
 } from "@ryco/client-runtime/state/composer/modelTuning";
-import type {
-  AgentTokenMode,
-  ModelSelection,
-  ProviderOptionDescriptor,
-  RuntimeMode,
-} from "@ryco/contracts";
+import type { ModelSelection, ProviderOptionDescriptor, RuntimeMode } from "@ryco/contracts";
 import { buildProviderOptionSelectionsFromDescriptors } from "@ryco/shared/model";
 
 import { listModelPickerEntries, type ModelPickerModel } from "./modelPickerModel";
-import { CAUTION_RUNTIME_MODE, tokenModeConfig } from "./sessionPolicyPresentation";
+import { CAUTION_RUNTIME_MODE } from "./sessionPolicyPresentation";
 
 // What the composer card's footer shows, ported from the desktop composer (apps/web
 // ComposerFooter, ComposerPrimaryActions, ModelTriggerTraits, ModelTuningDial): the layout rule
@@ -70,10 +65,6 @@ export function composerCaptionLabel(
 /** The "More composer controls" ellipsis takes the caution tone while Full access is on. */
 export function composerControlsCaution(runtimeMode: RuntimeMode): boolean {
   return runtimeMode === CAUTION_RUNTIME_MODE;
-}
-
-export function composerTokenModeLabel(tokenMode: AgentTokenMode): string {
-  return tokenModeConfig[tokenMode].triggerLabel;
 }
 
 /** The selected model's dial state, from its capabilities and the selection's options. */

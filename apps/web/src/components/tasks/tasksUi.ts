@@ -32,7 +32,3 @@ export const TASK_POPOVER_ITEM_CLASS =
 
 /** The second line of a menu row. */
 export const TASK_MENU_DETAIL_CLASS = "mt-px block text-[11.5px] text-(--task-faint)";
-
-/** A text field inside a task popover. */
-export const TASK_POPOVER_INPUT_CLASS =
-  "tsk-pop-input h-[30px] w-full rounded-[7px] border border-border bg-transparent px-[9px] text-[12.5px] text-foreground outline-none";

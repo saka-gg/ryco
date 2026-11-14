@@ -4,11 +4,7 @@ import {
   PREFERS_REDUCED_MOTION_QUERY,
   resolveInactivePanelContentVisibilityStyle,
 } from "../lib/perf/motion";
-import type { RightPanelMode, RightPanelRouteSearch } from "../rightPanelRouteSearch";
-import {
-  buildCloseWorkspacePanelSearch,
-  type WorkspacePanelSearchKey,
-} from "../workspaceRouteSearch";
+import type { RightPanelMode } from "../rightPanelRouteSearch";
 import { Sidebar, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 import { useDelayedUnmount } from "~/hooks/useDelayedUnmount";
@@ -33,12 +29,6 @@ const RIGHT_PANEL_INLINE_EXIT_DURATION_MS = 360;
 const RIGHT_PANEL_RESIZE_RAIL_CLASS_NAME =
   "w-5 cursor-ew-resize after:w-px after:bg-border/50 hover:after:bg-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-0";
 const COMPOSER_COMPACT_MIN_LEFT_CONTROLS_WIDTH_PX = 208;
-
-export function closeRightPanelSearch<T extends Record<string, unknown>>(
-  params: T,
-): Omit<T, WorkspacePanelSearchKey> & RightPanelRouteSearch {
-  return buildCloseWorkspacePanelSearch(params);
-}
 
 const RightPanelLoadingFallback = (props: { mode: DiffPanelMode; label: string }) => {
   return (
