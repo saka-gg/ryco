@@ -238,7 +238,7 @@ export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => 
           <SlidingTabs
             tabs={ENROLLMENT_SOURCES}
             activeId={source}
-            onSelect={(id) => setSource(id as EnrollmentSource)}
+            onSelect={setSource}
             density="compact"
             aria-label="Where Ryco runs"
           />
@@ -322,9 +322,9 @@ export function HostedNodeEnrollmentFlow({ onClose }: { readonly onClose: () => 
 
 type EnrollmentSource = "desktop" | "terminal";
 
-const ENROLLMENT_SOURCES: readonly SlidingTab[] = [
-  { id: "desktop" satisfies EnrollmentSource, label: "Desktop app" },
-  { id: "terminal" satisfies EnrollmentSource, label: "Terminal" },
+const ENROLLMENT_SOURCES: readonly SlidingTab<EnrollmentSource>[] = [
+  { id: "desktop", label: "Desktop app" },
+  { id: "terminal", label: "Terminal" },
 ];
 
 /** The Hub a bare `--hub` already points at, so the command needs no origin. */

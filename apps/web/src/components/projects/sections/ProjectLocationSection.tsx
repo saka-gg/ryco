@@ -23,6 +23,7 @@ import { useEnvironmentPresence } from "../useEnvironmentPresence";
 import { ProjectNodeSettingsScope, useEnvironmentProjectChoices } from "./ProjectNodeSettingsScope";
 import { ProjectSection, useSavedFlash } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Where the checkout lives on its device, and where its worktrees go. Moving
@@ -64,7 +65,7 @@ export function ProjectLocationSection({ member, canEdit, canManageNode }: Proje
         stackedThreadToast({
           type: "error",
           title: "Failed to change the project root",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     } finally {

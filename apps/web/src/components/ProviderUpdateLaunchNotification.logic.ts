@@ -7,6 +7,7 @@ import {
   type ServerProvider,
 } from "@ryco/contracts";
 import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type ProviderUpdateCandidate = ServerProvider & {
   readonly versionAdvisory: NonNullable<ServerProvider["versionAdvisory"]> & {
@@ -246,10 +247,6 @@ export function providerUpdateDismissalKeys(
   ].filter((key): key is string => key !== null);
 }
 
-export function providerUpdateCandidateKey(provider: ProviderUpdateCandidate): string {
-  return providerUpdateNotificationKey([provider])!;
-}
-
 export function withProviderUpdateOrigin(
   view: ProviderUpdateToastView,
   origin: EnvironmentNotificationOrigin,
@@ -427,7 +424,7 @@ export function firstRejectedProviderUpdateMessage(
   if (!rejected) {
     return null;
   }
-  return rejected.reason instanceof Error ? rejected.reason.message : "Provider update failed.";
+  return errorMessage(rejected.reason, "Provider update failed.");
 }
 
 function getProviderUpdateInitialToastTitle(

@@ -110,6 +110,10 @@ export const makeNodePushRegistry = (options: {
     const find = (current: PushRegistrationState, enrollmentId: string) =>
       current.registrations.find((registration) => registration.enrollmentId === enrollmentId);
 
+    // A registration-file failure dies (`orDie`) on purpose: the push contract's only typed error,
+    // `PushRpcError`, means "this connection can never receive push" to the apps, which then stop
+    // retrying and treat a retired key as gone. A defect reaches them as an ordinary failed call,
+    // which they retry. A typed storage error needs a contract change first.
     const service: NodePushRegistryShape = {
       register: (device, input) =>
         update((current) => {

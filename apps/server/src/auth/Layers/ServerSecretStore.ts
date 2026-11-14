@@ -53,6 +53,9 @@ export const makeServerSecretStore = Effect.gen(function* () {
       ),
     );
 
+  // Deliberately not the shared `writeFileAtomically` (atomicWrite.ts): a credential store keeps
+  // its own short, auditable write path, with the temp file and the secret both chmod'ed to 0600
+  // explicitly inside the 0700 secrets folder.
   const set: ServerSecretStoreShape["set"] = (name, value) => {
     const secretPath = resolveSecretPath(name);
     const tempPath = `${secretPath}.${Crypto.randomUUID()}.tmp`;

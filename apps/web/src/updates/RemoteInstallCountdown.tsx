@@ -7,6 +7,7 @@ import {
   remoteInstallSecondsLeft,
   selectRemoteInstallCountdown,
 } from "./remoteInstallCountdown.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 const TICK_MS = 1_000;
 
@@ -21,7 +22,7 @@ function respond(action: "now" | "postpone"): void {
         stackedThreadToast({
           type: "error",
           title: action === "now" ? "Couldn't restart Ryco" : "Couldn't postpone the update",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          description: errorMessage(error, "An unexpected error occurred."),
         }),
       );
     });

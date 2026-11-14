@@ -45,6 +45,7 @@ import {
   setClientSettingsHydrated,
   writeClientSettingsHydrationPromise,
 } from "./clientSettingsStore";
+import { errorMessage } from "~/lib/errorMessage";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
@@ -145,7 +146,7 @@ function writePrimaryServerSettings(serverPatch: ServerSettingsPatch): void {
       toastManager.add({
         type: "error",
         title: "Could not save settings",
-        description: error instanceof Error ? error.message : "Your change was not saved.",
+        description: errorMessage(error, "Your change was not saved."),
       });
       try {
         applySettingsUpdated(await ensureLocalApi().server.getSettings());

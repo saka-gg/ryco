@@ -43,6 +43,7 @@ import {
   type TrackedProviderIntentEvent,
 } from "../providerEffectIntents.ts";
 import { serverWakeCopy, serverWakeSource } from "../serverWake.ts";
+import { isProviderOriginatedCommandId, serverCommandId } from "../commandOrigin.ts";
 import type { ServerWakeSource } from "@ryco/contracts";
 import { matchesApprovalAttempt, questionAsCallback } from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
@@ -363,12 +364,6 @@ function mapProviderSessionStatusToOrchestrationStatus(
 
 const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
   event.commandId !== null ? `command:${event.commandId}` : `event:${event.eventId}`;
-
-const serverCommandId = (tag: string): CommandId =>
-  CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
-
-const isProviderOriginatedCommandId = (commandId: CommandId | null): boolean =>
-  commandId !== null && String(commandId).startsWith("provider:");
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);

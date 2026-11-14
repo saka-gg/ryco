@@ -5,6 +5,7 @@ import {
   useLocation,
   useRouter,
 } from "@tanstack/react-router";
+import { isAppSessionGate } from "../routeAuthGate";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { AuthSessionState, ServerLifecycleWelcomePayload } from "@ryco/contracts";
 
@@ -32,6 +33,7 @@ import {
   shouldShowPhoneAppInterstitial,
 } from "../components/shell/phone/phoneAppInterstitial";
 import { PhoneGetAppInterstitialBackdrop } from "../components/shell/phone/PhoneGetAppInterstitialBackdrop";
+import { errorMessage } from "~/lib/errorMessage";
 
 // The shell surfaces load during the root `beforeLoad` and render directly once
 // resolved: a `React.lazy` boundary here committed its fallback on every boot
@@ -183,11 +185,7 @@ function resolveRootBeforeLoadContext(
   const pendingContext: Promise<RootBeforeLoadContext> = resolveRootBeforeLoadContextAsync(
     pathname,
   ).then((context) => {
-    if (
-      context.authGateState.status === "authenticated" ||
-      context.authGateState.status === "hosted-static" ||
-      context.authGateState.status === "hosted-hub"
-    ) {
+    if (isAppSessionGate(context.authGateState)) {
       cachedReadyRootContext = context;
     }
     return withRootSurfaceLoaded(pathname, context);
@@ -433,11 +431,7 @@ function RootRoutePendingView() {
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
-  const canShowInterstitial =
-    rendersRootSurface(pathname) &&
-    (authGateState.status === "authenticated" ||
-      authGateState.status === "hosted-static" ||
-      authGateState.status === "hosted-hub");
+  const canShowInterstitial = rendersRootSurface(pathname) && isAppSessionGate(authGateState);
   const [showInterstitial, setShowInterstitial] = useState(() => {
     if (!canShowInterstitial || !isPhoneAppInterstitialEnabled()) return false;
     return shouldShowPhoneAppInterstitial({
@@ -521,7 +515,7 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
       ? "A new version of the app is ready. Update to continue."
       : hosted
         ? "The hosted client could not continue. Retry or reload the app."
-        : errorMessage(error);
+        : errorMessage(error, "An unexpected router error occurred.");
   const details = errorDetails(error);
 
   return (
@@ -587,18 +581,6 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
  */
 function retryRootRoute(router: ReturnType<typeof useRouter>, reset: () => void): void {
   void router.invalidate().finally(reset);
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-
-  if (typeof error === "string" && error.trim().length > 0) {
-    return error;
-  }
-
-  return "An unexpected router error occurred.";
 }
 
 function errorDetails(error: unknown): string {
