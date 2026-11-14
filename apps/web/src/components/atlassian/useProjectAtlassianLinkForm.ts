@@ -15,13 +15,13 @@ import type { EnvironmentId, ProjectId, RepositoryIdentity } from "@ryco/contrac
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { readEnvironmentConnection } from "../../environments/runtime";
-import { useMutation, useQueryClient } from "../../rpc/queryClient";
 import {
   invalidateAtlassian,
   useAtlassianConnections,
   useAtlassianProjectLink,
 } from "../../rpc/useAtlassian";
-import { invalidateWorkItems } from "../../rpc/useWorkItems";
+import { useMutation } from "../../rpc/useMutation";
+import { invalidateWorkItemLocalBranches, invalidateWorkItems } from "../../rpc/useWorkItems";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { errorMessage } from "~/lib/errorMessage";
 
@@ -45,7 +45,6 @@ export function useProjectAtlassianLinkForm(input: {
   readonly repositoryIdentity: RepositoryIdentity | null | undefined;
 }) {
   const { environmentId, projectId, repositoryIdentity } = input;
-  const queryClient = useQueryClient();
   const connection = environmentId ? readEnvironmentConnection(environmentId) : null;
   const client = connection?.client ?? null;
   const ready = client !== null && environmentId !== null && projectId !== null;
@@ -121,8 +120,9 @@ export function useProjectAtlassianLinkForm(input: {
   const invalidateProjectSettings = () => {
     invalidateAtlassian({ environmentId });
     invalidateWorkItems({ environmentId, projectId });
-    void queryClient.invalidateQueries({ queryKey: ["atlassian"] });
-    void queryClient.invalidateQueries({ queryKey: ["workItems"] });
+    // The checkout's refs do not depend on the link, but the shared cache this
+    // replaced refetched them with the work items, so the link form still does.
+    invalidateWorkItemLocalBranches();
   };
 
   const saveMutation = useMutation({

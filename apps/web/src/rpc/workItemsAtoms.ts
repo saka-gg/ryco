@@ -2,12 +2,14 @@ import type {
   AtlassianConnectionId,
   EnvironmentId,
   ProjectId,
+  VcsRef,
   WorkItemDetail as WorkItemDetailModel,
   WorkItemProject,
   WorkItemStateFilter,
   WorkItemSummary,
 } from "@ryco/contracts";
 
+import { readEnvironmentApi } from "~/environmentApi";
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import {
   createKeyedQueryRegistry,
@@ -21,7 +23,9 @@ import {
   isPastStaleTime,
   KEYED_QUERY_STATE_BUILDERS,
   type KeyedQueryState,
+  LAST_RESULT_KEYED_QUERY_STATE_BUILDERS,
 } from "./keyedQueryState";
+import { currentReadGuard, runWithReadRetry } from "./readRetry";
 
 // ---------------------------------------------------------------------------
 // Atom-backed work-item reads.
@@ -37,6 +41,7 @@ const LIST_STALE_TIME_MS = 60_000;
 const SEARCH_STALE_TIME_MS = 30_000;
 const DETAIL_STALE_TIME_MS = 60_000;
 const PROJECTS_STALE_TIME_MS = 5 * 60_000;
+const LOCAL_BRANCHES_STALE_TIME_MS = 30_000;
 
 export type WorkItemQueryState<T> = KeyedQueryState<T>;
 
@@ -273,6 +278,77 @@ export function setWorkItemDetailCache(
 }
 
 // ---------------------------------------------------------------------------
+// Local branches (the checkout's refs that name a work item)
+// ---------------------------------------------------------------------------
+
+export interface WorkItemLocalBranchesInput {
+  readonly environmentId: EnvironmentId | null;
+  readonly cwd: string | null;
+  /** A work item's key: only refs matching it. Absent: the checkout's refs. */
+  readonly query?: string;
+}
+
+type EnabledWorkItemLocalBranchesInput = KeyedQueryEnabledInput<
+  WorkItemLocalBranchesInput,
+  "environmentId" | "cwd"
+>;
+
+/**
+ * Kept apart from the work items (`invalidateWorkItems` leaves it alone: the
+ * checkout's refs do not change with Jira), with the last-result state the
+ * panels had before: a failed read shows no refs.
+ */
+const workItemLocalBranchesRegistry = createKeyedQueryRegistry<WorkItemQueryState<unknown>>({
+  labelPrefix: "work-item-local-branches",
+  accountScoped: true,
+  ...LAST_RESULT_KEYED_QUERY_STATE_BUILDERS,
+});
+
+export const workItemLocalBranchesQuery = defineKeyedQueryByKey(
+  workItemLocalBranchesRegistry,
+  {
+    label: "localBranches",
+    staleTime: LOCAL_BRANCHES_STALE_TIME_MS,
+    isEnabled: (input: WorkItemLocalBranchesInput): input is EnabledWorkItemLocalBranchesInput =>
+      input.environmentId !== null && input.cwd !== null,
+    // An empty query lists every ref, like no query: one entry, one request.
+    buildKey: (input) =>
+      `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.query || ""}`,
+    resolveEnvironmentId: (input) => input.environmentId,
+    createControllerFields: () => ({}),
+    run: (input) =>
+      runWithReadRetry(
+        async (): Promise<ReadonlyArray<VcsRef>> => {
+          const api = readEnvironmentApi(input.environmentId);
+          if (!api) return [];
+          const result = await api.vcs.listRefs({
+            cwd: input.cwd,
+            ...(input.query ? { query: input.query } : {}),
+            limit: 100,
+          });
+          return result.refs;
+        },
+        3,
+        currentReadGuard(
+          workItemLocalBranchesRegistry.controllers,
+          workItemLocalBranchesQuery.keyOf(input),
+        ),
+      ),
+  },
+  isPastStaleTime,
+) as WorkItemQuery<WorkItemLocalBranchesInput, ReadonlyArray<VcsRef>>;
+
+/** Every local-branch read goes stale; observed ones read again. */
+export function invalidateWorkItemLocalBranches(): void {
+  for (const controller of workItemLocalBranchesRegistry.controllers.values()) {
+    controller.lastFetchedAt = 0;
+    if (controller.subscriberCount > 0) {
+      void workItemLocalBranchesRegistry.runController(controller);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Invalidation
 //
 // Mirrors React Query's "refetch active queries, drop the rest" invalidation
@@ -309,4 +385,5 @@ export function invalidateWorkItems(input?: {
 
 export function resetWorkItemsAtomsForTests(): void {
   workItemsRegistry.resetForTests();
+  workItemLocalBranchesRegistry.resetForTests();
 }

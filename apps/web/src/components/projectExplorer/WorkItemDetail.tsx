@@ -13,7 +13,6 @@ import type {
 } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { DateTime, Option } from "effect";
-import { useQuery } from "~/rpc/queryClient";
 import { useShallow } from "zustand/react/shallow";
 import {
   ArrowDownIcon,
@@ -32,7 +31,6 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { readEnvironmentApi } from "~/environmentApi";
 import { cn } from "~/lib/utils";
 import {
   findLinkedWorkItemBranches,
@@ -47,6 +45,7 @@ import {
   useTransitionWorkItemMutation,
   useUpdateWorkItemMutation,
   useWorkItemDetail,
+  useWorkItemLocalBranches,
 } from "~/rpc/useWorkItems";
 import { useSourceControlChangeRequestSearch } from "~/rpc/useSourceControl";
 import { selectSidebarWorktreesForProjectRef, useStore } from "~/store";
@@ -139,27 +138,11 @@ export function WorkItemDetail(props: WorkItemDetailProps) {
     limit: 8,
     enabled: props.cwd !== null,
   });
-  const localBranchQuery = useQuery({
-    queryKey: [
-      "workItems",
-      "localBranches",
-      props.environmentId,
-      props.cwd ?? null,
-      props.workItemKey,
-    ] as const,
+  const localBranchQuery = useWorkItemLocalBranches({
     environmentId: props.environmentId,
-    queryFn: async () => {
-      const api = props.environmentId ? readEnvironmentApi(props.environmentId) : null;
-      if (!api || !props.cwd) return [];
-      const result = await api.vcs.listRefs({
-        cwd: props.cwd,
-        query: props.workItemKey,
-        limit: 100,
-      });
-      return result.refs;
-    },
+    cwd: props.cwd ?? null,
+    query: props.workItemKey,
     enabled: props.environmentId !== null && props.cwd !== null,
-    staleTime: 30_000,
   });
   const projectWorktrees = useStore(
     useShallow((state) =>

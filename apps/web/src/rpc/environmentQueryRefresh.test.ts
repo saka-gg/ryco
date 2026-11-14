@@ -16,7 +16,6 @@ import {
   type HostedEnvironmentQueryRefreshState,
   type HostedRecordQueryRefreshState,
 } from "./environmentQueryRefresh";
-import { defaultQueryClient } from "./queryClient";
 
 const environmentId = EnvironmentId.make("environment-query-refresh-test");
 
@@ -304,13 +303,10 @@ describe("environment query refresh read epochs", () => {
 
   afterEach(() => {
     registry.dispose();
-    defaultQueryClient.clear();
     environmentQueryRefresh.resetForTests();
   });
 
   it("fetches a read admitted before the snapshot once per session generation", async () => {
-    const key = ["read-epoch", readEpochEnvironmentId] as const;
-    const run = vi.fn(() => Promise.resolve("query"));
     const keyedRun = vi.fn(() => Promise.resolve("keyed"));
     const keyed = defineKeyedQueryByInput(
       registry,
@@ -330,27 +326,18 @@ describe("environment query refresh read epochs", () => {
     // The new session's channel is online: the route mounts and its reads are
     // admitted before the shell snapshot is accepted.
     const first = environmentQueryRefresh.begin(readEpochEnvironmentId);
-    const removeObserver = defaultQueryClient.addObserver(key, {
-      environmentId: readEpochEnvironmentId,
-      staleTime: 0,
-      refetch: () => defaultQueryClient.fetch(key, run, { force: true }),
-    });
-    await defaultQueryClient.fetch(key, run);
     const release = keyed.watch(input);
     await registry.controllers.get(keyed.targetKey(input) as string)?.inFlightPromise;
 
-    // The session becomes ready: both reads already answered from it.
+    // The session becomes ready: the read already answered from it.
     await expect(environmentQueryRefresh.ready(readEpochEnvironmentId, first)).resolves.toBe(true);
-    expect(run).toHaveBeenCalledTimes(1);
     expect(keyedRun).toHaveBeenCalledTimes(1);
 
     // A new session generation refreshes them once more.
     const second = environmentQueryRefresh.begin(readEpochEnvironmentId);
     await expect(environmentQueryRefresh.ready(readEpochEnvironmentId, second)).resolves.toBe(true);
-    expect(run).toHaveBeenCalledTimes(2);
     expect(keyedRun).toHaveBeenCalledTimes(2);
 
     release();
-    removeObserver();
   });
 });

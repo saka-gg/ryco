@@ -57,3 +57,29 @@ export function isPastStaleTime(controller: {
 }): boolean {
   return !controller.hasData || Date.now() - controller.lastFetchedAt >= controller.staleTime;
 }
+
+/**
+ * Builders for reads moved off the former `queryClient` shim, whose `useQuery` showed data only
+ * while the last settled read had succeeded: a failed read drops the data, and the next read
+ * stays an error (`isError`, not `isLoading`) until it lands.
+ */
+export const LAST_RESULT_KEYED_QUERY_STATE_BUILDERS = {
+  ...KEYED_QUERY_STATE_BUILDERS,
+  buildFetchingState: (current: KeyedQueryState<unknown>): KeyedQueryState<unknown> => ({
+    data: current.data,
+    isLoading: current.data === null && !current.isError,
+    isFetching: true,
+    isError: current.isError,
+    error: null,
+  }),
+  buildErrorState: (
+    _current: KeyedQueryState<unknown>,
+    error: Error,
+  ): KeyedQueryState<unknown> => ({
+    data: null,
+    isLoading: false,
+    isFetching: false,
+    isError: true,
+    error,
+  }),
+};

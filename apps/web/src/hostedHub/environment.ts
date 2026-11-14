@@ -20,7 +20,7 @@ import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { threadReadingPositions } from "../persistence/threadReadingPositions";
 import { setModelPickerOpen } from "../modelPickerOpenState";
-import { clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
+import { clearAccountScopedKeyedQueries, clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
 import { clearProjectAtomState, clearProjectAtomStateForEnvironment } from "../rpc/projectAtoms";
 import { clearGitAtomState, clearGitAtomStateForEnvironment } from "../rpc/gitAtoms";
 import {
@@ -35,7 +35,6 @@ import {
   forgetEnvironmentServerConfig,
   isEnvironmentServerConfigShown,
 } from "../rpc/serverState";
-import { defaultQueryClient } from "../rpc/queryClient";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { clearShortcutModifierState } from "../shortcutModifierState";
 import { useStore } from "../store";
@@ -130,7 +129,9 @@ export function clearWebHostedAccountScopedState(): void {
     defaultAdvertisedEndpointKey: null,
   });
   threadReadingPositions.clear();
-  defaultQueryClient.clear();
+  // Path hints, export inspections, work-item refs and hub reads, of every
+  // node this account reached, including nodes no longer listed.
+  clearAccountScopedKeyedQueries();
   clearProjectAtomState();
   clearGitAtomState();
   clearCheckpointDiffState();

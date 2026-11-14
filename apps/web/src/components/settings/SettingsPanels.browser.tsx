@@ -21,7 +21,6 @@ import { DateTime, Option } from "effect";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import { QueryClient, QueryClientProvider } from "~/rpc/queryClient";
 
 import { __resetLocalApiForTests } from "../../localApi";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
@@ -2718,13 +2717,11 @@ describe("SourceControlSettingsPanel discovery states", () => {
     } as LocalApi;
   }
 
-  function renderSourceControlSettingsPanel(queryClient = new QueryClient()) {
+  function renderSourceControlSettingsPanel() {
     return render(
-      <QueryClientProvider client={queryClient}>
-        <AppAtomRegistryProvider>
-          <SourceControlSettingsPanel />
-        </AppAtomRegistryProvider>
-      </QueryClientProvider>,
+      <AppAtomRegistryProvider>
+        <SourceControlSettingsPanel />
+      </AppAtomRegistryProvider>,
     );
   }
 
@@ -2814,8 +2811,7 @@ describe("SourceControlSettingsPanel discovery states", () => {
       };
     });
 
-    const queryClient = new QueryClient();
-    mounted = await renderSourceControlSettingsPanel(queryClient);
+    mounted = await renderSourceControlSettingsPanel();
 
     await expect
       .element(page.getByRole("heading", { name: "Git", exact: true }))
@@ -2827,7 +2823,7 @@ describe("SourceControlSettingsPanel discovery states", () => {
     mounted = null;
     document.body.innerHTML = "";
 
-    mounted = await renderSourceControlSettingsPanel(queryClient);
+    mounted = await renderSourceControlSettingsPanel();
 
     await expect
       .element(page.getByRole("heading", { name: "Git", exact: true }))

@@ -15,9 +15,8 @@ import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "~/environments/runtime";
 import { createVisibilityAwarePoller } from "~/lib/visibilityPolling";
 import { webAppLifecycle } from "~/platform/appLifecycle";
-import { useQueryClient } from "~/rpc/queryClient";
 
-import { cliProxyHubsQueryKey } from "../../usage/cliProxyHubsQuery";
+import { seedCliProxyHubs } from "../../usage/cliProxyHubsQuery";
 import { selectConnections, useConnectedEnvironments } from "../useConnectedEnvironments";
 
 const NO_PROVIDERS: readonly ServerProvider[] = [];
@@ -63,7 +62,6 @@ export function useSubscriptionLimits(input: {
   // (it bails on value blocks inside try/catch). Oxc can, but its render reads
   // have not been audited for purity yet. Remove after that audit.
   "use no memo";
-  const queryClient = useQueryClient();
   const connections = useConnectedEnvironments();
   const selected = useMemo(
     () => selectConnections(connections, input.environmentIds),
@@ -132,14 +130,14 @@ export function useSubscriptionLimits(input: {
     if (!generations.current.isCurrent(generation)) return;
     for (const result of results) {
       if (result.status === "ok") {
-        queryClient.setQueryData(cliProxyHubsQueryKey(result.environmentId), result.hubs);
+        seedCliProxyHubs(result.environmentId, result.hubs);
       }
     }
     setHubResults(results);
     setReceivedAtMs(Date.now());
     setLoading(false);
     setRefreshing(false);
-  }, [queryClient, selected, unsupported]);
+  }, [selected, unsupported]);
 
   useEffect(() => {
     const poller = createVisibilityAwarePoller({

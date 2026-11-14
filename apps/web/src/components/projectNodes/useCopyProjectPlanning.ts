@@ -197,7 +197,7 @@ export function useCopySource(input: {
   // tree as it is, so an older cached one waits for the read it starts.
   const [openedAt] = useState(() => Date.now());
   const fresh =
-    query.data !== undefined && query.dataUpdatedAt >= openedAt - EXPORT_INSPECT_STALE_TIME_MS;
+    query.data !== null && query.dataUpdatedAt >= openedAt - EXPORT_INSPECT_STALE_TIME_MS;
   const inspectionData = fresh ? (query.data ?? null) : null;
   const inspectionError = query.isFetching ? null : query.error;
   const projectId = project?.id ?? null;

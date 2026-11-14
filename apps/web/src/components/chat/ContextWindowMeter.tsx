@@ -1,5 +1,5 @@
 import { AccountEmail, CliProxyAccountName } from "../usage/AccountEmail";
-import { cliProxyHubsQueryOptions } from "../usage/cliProxyHubsQuery";
+import { useCliProxyHubs } from "../usage/cliProxyHubsQuery";
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
 import { useRelativeLabelTick } from "../settings/settingsLayout";
 import {
@@ -25,7 +25,6 @@ import { type ReactNode, useMemo, useState } from "react";
 import { cn } from "~/lib/utils";
 import { formatTokenCount } from "@ryco/shared/tokenCount";
 import type { ContextWindowUsage } from "~/lib/contextWindow";
-import { useQuery } from "~/rpc/queryClient";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
@@ -327,8 +326,8 @@ function ContextWindowDetails(
 ) {
   const { usage, rateLimits, account, usedPercentage, normalizedPercentage } = props;
   const phone = usePresentationTier() === "phone";
-  const hubsQuery = useQuery(
-    cliProxyHubsQueryOptions(account?.checkCliProxyRoute && !phone ? account.environmentId : null),
+  const hubsQuery = useCliProxyHubs(
+    account?.checkCliProxyRoute && !phone ? account.environmentId : null,
   );
   const route =
     account && hubsQuery.data
@@ -397,7 +396,7 @@ function ContextWindowDetails(
           available={props.available === true}
           now={now}
         />
-      ) : hubsQuery.isFetching && hubsQuery.data === undefined ? (
+      ) : hubsQuery.isFetching && hubsQuery.data === null ? (
         <div className="mt-2.5 border-t border-border/60 pt-2 text-xs text-muted-foreground">
           Checking CLIProxyAPI hubs…
         </div>

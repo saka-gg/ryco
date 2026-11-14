@@ -14,7 +14,8 @@ import {
 import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
-import { render } from "vitest-browser-react";
+import type { ReactNode } from "react";
+import { render as renderUnwrapped } from "vitest-browser-react";
 
 import {
   __resetEnvironmentApiOverridesForTests,
@@ -22,9 +23,14 @@ import {
 } from "../../environmentApi";
 import { deriveContextWindowUsage } from "../../lib/contextWindow";
 import { syncDocumentPresentationTier } from "../../lib/presentationTier";
-import { defaultQueryClient } from "../../rpc/queryClient";
-import { cliProxyHubsQueryKey } from "../usage/cliProxyHubsQuery";
+import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
+import { expireCliProxyHubsForTests, resetCliProxyHubsForTests } from "../usage/cliProxyHubsQuery";
 import { type ContextWindowAccount, ContextWindowMeter } from "./ContextWindowMeter";
+
+/** The popup reads the hubs through the app's atom registry, as under the app root. */
+function render(ui: ReactNode) {
+  return renderUnwrapped(ui, { wrapper: AppAtomRegistryProvider });
+}
 
 const navigate = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -130,7 +136,7 @@ async function reopen() {
 /** Reopens once the last read is older than the reuse window, here by marking it stale. */
 async function reopenAfterReuseWindow() {
   await close();
-  await defaultQueryClient.invalidateQueries({ queryKey: cliProxyHubsQueryKey(environmentId) });
+  expireCliProxyHubsForTests(environmentId);
   await open();
 }
 
@@ -169,7 +175,7 @@ describe("ContextWindowMeter account details", () => {
     stopTierSync?.();
     stopTierSync = null;
     __resetEnvironmentApiOverridesForTests();
-    defaultQueryClient.clear();
+    resetCliProxyHubsForTests();
     navigate.mockReset();
     document.body.innerHTML = "";
   });

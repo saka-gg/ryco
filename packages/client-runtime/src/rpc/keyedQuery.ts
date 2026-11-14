@@ -133,6 +133,13 @@ export interface KeyedQueryRegistryConfig<TState> {
   readonly shouldFetchOnWatch?: (
     controller: KeyedQueryControllerBase & Record<string, unknown>,
   ) => boolean;
+  /**
+   * Account-scoped reads: kept when one environment is cleared
+   * (`clearKeyedQueriesForEnvironment`, e.g. a hosted node switch), and cleared
+   * whole, entries without a read included, by `clearAccountScopedKeyedQueries`
+   * at account teardown.
+   */
+  readonly accountScoped?: boolean;
 }
 
 export interface KeyedQueryRegistry<TState> {
@@ -171,20 +178,32 @@ export interface KeyedQueryRegistry<TState> {
   fenceActiveEnvironment(environmentId: EnvironmentId): void;
   refreshActiveEnvironment(environmentId: EnvironmentId): Promise<void>;
   clearEnvironment(environmentId: EnvironmentId): void;
+  /** Drops every entry and its state, as if the registry were new. */
+  clearAll(): void;
   resetForTests(): void;
   dispose(): void;
 }
 
 interface KeyedQueryEnvironmentCleanup {
   clearEnvironment(environmentId: EnvironmentId): void;
+  clearAll(): void;
   fenceActiveEnvironment(environmentId: EnvironmentId): void;
   refreshActiveEnvironment(environmentId: EnvironmentId): Promise<void>;
 }
 
 const keyedQueryEnvironmentCleanups = new Set<KeyedQueryEnvironmentCleanup>();
+const accountScopedRegistries = new Set<KeyedQueryEnvironmentCleanup>();
 
+/** Clears one environment's reads, except account-scoped registries'. */
 export function clearKeyedQueriesForEnvironment(environmentId: EnvironmentId): void {
-  for (const cleanup of keyedQueryEnvironmentCleanups) cleanup.clearEnvironment(environmentId);
+  for (const cleanup of keyedQueryEnvironmentCleanups) {
+    if (!accountScopedRegistries.has(cleanup)) cleanup.clearEnvironment(environmentId);
+  }
+}
+
+/** Account teardown: clears every account-scoped registry whole. */
+export function clearAccountScopedKeyedQueries(): void {
+  for (const registry of accountScopedRegistries) registry.clearAll();
 }
 
 export function fenceActiveKeyedQueriesForEnvironment(environmentId: EnvironmentId): void {
@@ -615,7 +634,7 @@ export function createKeyedQueryRegistry<TState>(
     }
   }
 
-  function resetForTests(): void {
+  function clearAll(): void {
     for (const controller of controllers.values()) {
       clearControllerPollTimer(controller);
       clearControllerGcTimer(controller);
@@ -678,8 +697,9 @@ export function createKeyedQueryRegistry<TState>(
     disposed = true;
     unsubscribeLifecycle();
     unsubscribeAdmission();
-    resetForTests();
+    clearAll();
     keyedQueryEnvironmentCleanups.delete(registry);
+    accountScopedRegistries.delete(registry);
   }
 
   function clearEnvironment(environmentId: EnvironmentId): void {
@@ -776,10 +796,12 @@ export function createKeyedQueryRegistry<TState>(
     fenceActiveEnvironment,
     refreshActiveEnvironment,
     clearEnvironment,
-    resetForTests,
+    clearAll,
+    resetForTests: clearAll,
     dispose,
   };
   keyedQueryEnvironmentCleanups.add(registry);
+  if (config.accountScoped) accountScopedRegistries.add(registry);
   return registry;
 }
 

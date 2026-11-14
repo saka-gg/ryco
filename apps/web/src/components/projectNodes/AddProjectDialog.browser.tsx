@@ -41,6 +41,7 @@ import {
   createWebProjectCopyIo,
 } from "./copyRuntime/webProjectCopyIo";
 import { readAddProjectLastUsed, rememberAddProjectLastUsed } from "./addProjectMemory";
+import { resetNodePathQueriesForTests } from "./nodePathQueries";
 import { openAddProject, useProjectNodesDialogStore } from "./projectNodesDialogStore";
 import {
   createFakeNodeApi,
@@ -233,6 +234,7 @@ describe("AddProjectDialog", () => {
   setupChatViewBrowserSuite();
   afterEach(() => {
     unpinSavedEnvironmentStates();
+    resetNodePathQueriesForTests();
     resetProjectCopyManagerForTests();
     setProjectCopyRuntimeForTests(null);
   });

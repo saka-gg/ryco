@@ -6,8 +6,6 @@ import {
 import type { HostedHubState } from "@ryco/client-runtime/authorization";
 import type { HostedEnvironmentSessionRecord } from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
 
-import { defaultQueryClient } from "./queryClient";
-
 export interface EnvironmentQueryRefreshBackend {
   /**
    * Fences the environment's active reads in flight and starts a new read
@@ -152,14 +150,6 @@ export function createEnvironmentQueryRefreshCoordinator(
 }
 
 export const environmentQueryRefresh = createEnvironmentQueryRefreshCoordinator({
-  fence: (environmentId) => {
-    defaultQueryClient.fenceActiveQueriesForEnvironment(environmentId);
-    fenceActiveKeyedQueriesForEnvironment(environmentId);
-  },
-  refresh: async (environmentId) => {
-    await Promise.all([
-      defaultQueryClient.refreshActiveQueriesForEnvironment(environmentId),
-      refreshActiveKeyedQueriesForEnvironment(environmentId),
-    ]);
-  },
+  fence: fenceActiveKeyedQueriesForEnvironment,
+  refresh: refreshActiveKeyedQueriesForEnvironment,
 });

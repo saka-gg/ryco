@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
   ProjectId,
+  VcsRef,
   WorkItemDetail as WorkItemDetailModel,
   WorkItemProject,
   WorkItemSummary,
@@ -15,17 +16,20 @@ import {
   setWorkItemDetailCache,
   type WorkItemDetailInput,
   type WorkItemListInput,
+  type WorkItemLocalBranchesInput,
   type WorkItemProjectsInput,
   type WorkItemQueryState,
   type WorkItemSearchInput,
   workItemDetailQuery,
   workItemListQuery,
+  workItemLocalBranchesQuery,
   workItemProjectsQuery,
   workItemSearchQuery,
 } from "./workItemsAtoms";
 import { useMutation } from "./useMutation";
 
 export {
+  invalidateWorkItemLocalBranches,
   invalidateWorkItems,
   setWorkItemDetailCache,
   type WorkItemDetailInput,
@@ -37,6 +41,33 @@ export {
 
 export interface WorkItemQueryResult<T> extends WorkItemQueryState<T> {
   readonly refetch: () => void;
+}
+
+/**
+ * The checkout's local refs (only those matching `query` when given). With
+ * `enabled` false nothing is read, but refs already cached for the input still
+ * show.
+ */
+export function useWorkItemLocalBranches(
+  input: WorkItemLocalBranchesInput & { readonly enabled: boolean },
+): WorkItemQueryState<ReadonlyArray<VcsRef>> {
+  const { environmentId, cwd, query, enabled } = input;
+  const cacheKey = workItemLocalBranchesQuery.keyOf({
+    environmentId,
+    cwd,
+    ...(query !== undefined ? { query } : {}),
+  });
+
+  useEffect(() => {
+    if (!enabled) return;
+    return workItemLocalBranchesQuery.watch({
+      environmentId,
+      cwd,
+      ...(query !== undefined ? { query } : {}),
+    });
+  }, [environmentId, cwd, query, enabled]);
+
+  return useAtomValue(workItemLocalBranchesQuery.getAtom(cacheKey));
 }
 
 /**

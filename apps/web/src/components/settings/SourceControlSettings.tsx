@@ -3,7 +3,7 @@ import { GitWritingSettingsSection } from "./GitWritingStyleSettings";
 import { KeyRoundIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { Option } from "effect";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { useMutation, useQueryClient } from "~/rpc/queryClient";
+import { useMutation } from "~/rpc/useMutation";
 import { invalidateAtlassian, useAtlassianConnections } from "~/rpc/useAtlassian";
 import type {
   AtlassianConnectionSummary,
@@ -72,7 +72,6 @@ const VCS_ICONS: Partial<Record<VcsDriverKind, Icon>> = {
 };
 
 const SOURCE_CONTROL_SKELETON_ROWS = ["primary", "secondary"] as const;
-const atlassianConnectionQueryKey = ["atlassian", "connections"] as const;
 
 function optionLabel(value: Option.Option<string>): string | null {
   return Option.getOrNull(value);
@@ -337,7 +336,6 @@ function AtlassianConfiguration({
 }: {
   readonly environmentId: EnvironmentId | null;
 }) {
-  const queryClient = useQueryClient();
   const [bitbucketLabel, setBitbucketLabel] = useState("Bitbucket");
   const [bitbucketEmail, setBitbucketEmail] = useState("");
   const [bitbucketToken, setBitbucketToken] = useState("");
@@ -370,9 +368,6 @@ function AtlassianConfiguration({
       setBitbucketToken("");
       setAdding(null);
       invalidateAtlassian({ environmentId });
-      void queryClient.invalidateQueries({
-        queryKey: atlassianConnectionQueryKey,
-      });
       void refreshSourceControlDiscovery({ environmentId });
       toastManager.add(
         stackedThreadToast({
@@ -411,9 +406,6 @@ function AtlassianConfiguration({
       setJiraToken("");
       setAdding(null);
       invalidateAtlassian({ environmentId });
-      void queryClient.invalidateQueries({
-        queryKey: atlassianConnectionQueryKey,
-      });
       toastManager.add(
         stackedThreadToast({
           type: "success",
@@ -440,9 +432,6 @@ function AtlassianConfiguration({
     },
     onSuccess: () => {
       invalidateAtlassian({ environmentId });
-      void queryClient.invalidateQueries({
-        queryKey: atlassianConnectionQueryKey,
-      });
       void refreshSourceControlDiscovery({ environmentId });
     },
     onError: (error) => {

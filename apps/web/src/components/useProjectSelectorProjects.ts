@@ -5,7 +5,6 @@
 //        node catalog's; nothing here connects to, wakes or retains a node.
 
 import type { EnvironmentId } from "@ryco/contracts";
-import type { NodePathHints } from "@ryco/contracts/project-copy";
 import { useMemo, useSyncExternalStore } from "react";
 
 import { useNodeCatalog } from "../environments/nodeCatalog";
@@ -21,8 +20,7 @@ import {
 } from "../platform/desktopWorkspace";
 import { withDirectDesktopExecutionMachine } from "../platform/desktopWorkspaceTarget";
 import { buildProjectCheckoutOptions } from "../projectCheckouts.logic";
-import { defaultQueryClient } from "../rpc/queryClient";
-import { nodePathHintsQueryKey } from "./projectNodes/nodePathQueries";
+import { readCachedNodePathHints } from "./projectNodes/nodePathQueries";
 import {
   buildProjectSelectorProjects,
   checkoutUnavailableReason,
@@ -37,10 +35,7 @@ const NO_PROJECTS: ReadonlyArray<ProjectSelectorProject> = [];
  * read them; this never asks the node.
  */
 function cachedHomeDirectory(environmentId: EnvironmentId): string | null {
-  return (
-    defaultQueryClient.getQueryData<NodePathHints>(nodePathHintsQueryKey(environmentId))
-      ?.homeDirectory ?? null
-  );
+  return readCachedNodePathHints(environmentId)?.homeDirectory ?? null;
 }
 
 // The hosted workspace republishes about every 100 ms while threads stream;
