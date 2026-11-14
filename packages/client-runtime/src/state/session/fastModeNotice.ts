@@ -3,6 +3,7 @@
  * composer requests. Read from the thread's one `fast-mode.state` activity, so web and mobile say
  * the same thing.
  */
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 import {
   classifyClaudeFastModeReport,
@@ -59,8 +60,8 @@ export function deriveClaudeFastModeNotice(input: {
   readonly model: string | null | undefined;
   readonly fastRequested: boolean;
 }): FastModeNotice | null {
-  const payload = input.activities.findLast(
-    (activity) => activity.kind === FAST_MODE_STATE_ACTIVITY_KIND,
+  const payload = input.activities.findLast((activity) =>
+    hasActivityKind(activity, FAST_MODE_STATE_ACTIVITY_KIND),
   )?.payload;
   const report = parseClaudeFastModeReport(payload);
   if (report === undefined) return null;

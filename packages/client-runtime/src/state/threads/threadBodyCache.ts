@@ -1,6 +1,9 @@
 import { EventId, TurnId, type ThreadId } from "@ryco/contracts/base-schemas";
 import type { EnvironmentId } from "@ryco/contracts/base-schemas";
-import type { OrchestrationThreadActivity } from "@ryco/contracts/orchestration";
+import type {
+  OrchestrationThreadActivity,
+  ThreadActivityKind,
+} from "@ryco/contracts/orchestration";
 
 import { scopeThreadRef } from "../../scoped.ts";
 import { derivePendingApprovals, derivePendingUserInputs } from "../session/session-logic.ts";
@@ -26,7 +29,7 @@ export const CACHED_THREAD_PROMPT_PAYLOAD_CHARS = 32_000;
 const PROMPT_REQUEST_KINDS: ReadonlySet<string> = new Set([
   "approval.requested",
   "user-input.requested",
-]);
+] satisfies ReadonlyArray<ThreadActivityKind>);
 const ACTIVITY_TONES: ReadonlySet<string> = new Set(["info", "tool", "approval", "error"]);
 
 /** The payload fields the card derivations read, by the type each must have. */

@@ -1,8 +1,5 @@
+import { readContextWindowActivityPayload } from "@ryco/shared/threadActivityPayloads";
 import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@ryco/contracts";
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
 
 function asFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -78,11 +75,11 @@ export function deriveLatestContextWindowSnapshot(
 ): ContextWindowSnapshot | null {
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const activity = activities[index];
-    if (!activity || activity.kind !== "context-window.updated") {
+    if (!activity) {
       continue;
     }
 
-    const payload = asRecord(activity.payload);
+    const payload = readContextWindowActivityPayload(activity);
     const usedTokens = asFiniteNumber(payload?.usedTokens);
     if (usedTokens === null || usedTokens < 0) {
       continue;

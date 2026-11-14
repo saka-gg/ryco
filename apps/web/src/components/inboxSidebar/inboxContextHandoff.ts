@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
@@ -35,7 +36,7 @@ export function latestInboxContextHandoff(activities: ReadonlyArray<Orchestratio
       b.id.localeCompare(a.id),
   );
   for (const activity of ordered) {
-    if (activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND) continue;
+    if (!hasActivityKind(activity, CONTEXT_HANDOFF_ACTIVITY_KIND)) continue;
     const decoded = decodeHandoff(activity.payload);
     if (
       decoded._tag === "Some" &&

@@ -18,6 +18,11 @@
  * metadata).
  */
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
+import {
+  hasActivityKind,
+  isTaskActivity,
+  type TaskActivityKind,
+} from "@ryco/shared/threadActivityPayloads";
 
 import {
   assignSubagentIdentities,
@@ -173,7 +178,7 @@ function capSubagentRoster<T extends RuntimeSubagent>(roster: ReadonlyArray<T>):
  * background by definition: they render in the ordinary work log, exactly
  * as they did before this feature existed.
  */
-export function isBackgroundTaskActivity(payload: Record<string, unknown>): boolean {
+export function isBackgroundTaskActivity(payload: { readonly agentKind?: unknown }): boolean {
   return payload.agentKind !== "agent";
 }
 
@@ -579,6 +584,12 @@ export function foldSubagentActivities(
   const agents = new Map<string, MutableAgent>();
 
   for (const activity of activities) {
+    // Fold input only: narrowing the kind makes each case a checked kind.
+    if (!isSubagentFoldActivity(activity)) {
+      continue;
+    }
+    // The record as written, not a payload reader's view: the roster classifies a row by which
+    // keys it carries (`parentAgentId !== undefined`), so a legacy row's null value still counts.
     if (typeof activity.payload !== "object" || activity.payload === null) {
       continue;
     }
@@ -743,8 +754,6 @@ export function foldSubagentActivities(
         agent.updatedAt = at;
         break;
       }
-      default:
-        break;
     }
   }
 
@@ -1341,15 +1350,16 @@ export function workflowCardMembers(
   };
 }
 
+/** The rows `foldSubagentActivities` reads: task rows and agent heartbeats. */
+function isSubagentFoldActivity<A extends Pick<OrchestrationThreadActivity, "kind">>(
+  activity: A,
+): activity is A & { readonly kind: TaskActivityKind | "tool.progress" } {
+  return isTaskActivity(activity) || hasActivityKind(activity, "tool.progress");
+}
+
 /** Kinds the timeline should not render as generic rows (fold input only). */
 export function isSubagentActivityKind(kind: string): boolean {
-  return (
-    kind === "task.started" ||
-    kind === "task.progress" ||
-    kind === "task.updated" ||
-    kind === "task.completed" ||
-    kind === "tool.progress"
-  );
+  return isSubagentFoldActivity({ kind });
 }
 
 /**

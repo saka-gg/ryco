@@ -18,7 +18,16 @@ import {
   PENDING_REQUEST_ACTIVITY_KINDS,
 } from "./threadActivity.ts";
 import {
+  APPROVAL_FIELDS,
+  TASK_ROW_OWNERSHIP_FIELDS,
+  TOOL_FIELDS,
+  USER_INPUT_FIELDS,
   activityPayloadRecord,
+  approvalFieldsOk,
+  hasActivityKind,
+  taskRowOwnershipFieldsOk,
+  toolFieldsOk,
+  userInputFieldsOk,
   isApprovalActivity,
   isTaskActivity,
   isThreadActivityKind,
@@ -65,6 +74,14 @@ describe("ThreadActivityKind", () => {
     expect(isThreadActivityKind("task.progres")).toBe(false);
     expect(isThreadActivityKind("future.kind")).toBe(false);
     expect(ThreadActivityKind.literals.length).toBe(new Set(ThreadActivityKind.literals).size);
+  });
+
+  it("checks one kind, misspelt kinds failing to compile", () => {
+    const activity: { readonly kind: string } = { kind: "checkpoint.revert.failed" };
+    expect(hasActivityKind(activity, "checkpoint.revert.failed")).toBe(true);
+    expect(hasActivityKind(activity, "checkpoint.revert")).toBe(false);
+    // @ts-expect-error a kind outside ThreadActivityKind
+    expect(hasActivityKind(activity, "checkpoint.revert.failure")).toBe(false);
   });
 
   it("narrows by kind family", () => {
@@ -162,5 +179,26 @@ describe("payload readers", () => {
     expect(
       readRuntimeErrorActivityPayload({ kind: "runtime.error", payload: { message: 5 } }),
     ).toEqual({});
+  });
+});
+
+describe("fast field checks", () => {
+  const right = { string: "x", number: 1, boolean: true, array: [], record: {} } as const;
+  const wrong = { string: 1, number: "1", boolean: "true", array: {}, record: [] } as const;
+  const cases = [
+    ["approval", APPROVAL_FIELDS, approvalFieldsOk],
+    ["question", USER_INPUT_FIELDS, userInputFieldsOk],
+    ["task ownership", TASK_ROW_OWNERSHIP_FIELDS, taskRowOwnershipFieldsOk],
+    ["tool", TOOL_FIELDS, toolFieldsOk],
+  ] as const;
+
+  it.each(cases)("holds the %s check to its field table, field by field", (_, fields, ok) => {
+    const table = fields as Readonly<Record<string, keyof typeof right>>;
+    expect(ok({})).toBe(true);
+    expect(ok({ unlisted: 5 })).toBe(true);
+    for (const [key, type] of Object.entries(table)) {
+      expect(ok({ [key]: right[type] }), key).toBe(true);
+      expect(ok({ [key]: wrong[type] }), key).toBe(false);
+    }
   });
 });

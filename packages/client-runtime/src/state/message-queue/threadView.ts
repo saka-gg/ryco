@@ -1,3 +1,4 @@
+import { hasActivityKind } from "@ryco/shared/threadActivityPayloads";
 import type {
   OrchestrationLatestTurnState,
   OrchestrationSessionStatus,
@@ -147,7 +148,7 @@ function readActivityView(
     const activity = byId[id];
     if (!activity) continue;
     activities.push(activity);
-    if (activity.kind === "provider.turn.start.failed") {
+    if (hasActivityKind(activity, "provider.turn.start.failed")) {
       const messageId = readPayloadString(activity.payload, "messageId");
       if (messageId !== null) {
         turnStartFailures.push({
@@ -156,7 +157,7 @@ function readActivityView(
           detail: readPayloadString(activity.payload, "detail"),
         });
       }
-    } else if (activity.kind === "provider.turn.start.cancelled") {
+    } else if (hasActivityKind(activity, "provider.turn.start.cancelled")) {
       const messageId = readPayloadString(activity.payload, "messageId");
       if (messageId !== null) turnStartCancelledMessageIds.add(messageId);
     }
