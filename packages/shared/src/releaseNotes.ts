@@ -32,6 +32,46 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.48",
+    date: "November 14, 2026",
+    dateTime: "2026-11-14",
+    summary:
+      "Send while a file is still uploading, move a thread to another project, an optional suggestion for your next prompt, and Statistics that count sessions run outside Ryco.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.48`,
+    highlights: [
+      {
+        title: "Send while attachments upload",
+        summary:
+          "Send no longer waits for a file to finish uploading. The message is held with its upload progress and goes out when the uploads are done; Cancel puts it back into the composer. If an upload fails you can retry, send without the file or cancel.",
+      },
+      {
+        title: "Move a thread to another project",
+        summary:
+          "A thread's menu has Move to project, with the machine's other projects and No project. The thread keeps its history and works in the new project from its next message. Undo and diffs for turns from before the move are no longer offered.",
+      },
+      {
+        title: "A suggestion for your next prompt",
+        summary:
+          "With Settings → Chat → Suggestions → Suggest next prompt turned on, the empty composer shows a predicted next message after a Claude or Codex turn. Tab fills it in and Escape hides it. It is off by default.",
+      },
+      {
+        title: "Statistics for the whole machine",
+        summary:
+          "Statistics → Activity has a Ryco | This machine switch. This machine also counts the Claude Code and Codex sessions run outside Ryco, with estimated tokens and cost split between Ryco and outside it.",
+      },
+      {
+        title: "Fixes in chats, diffs and terminals",
+        summary:
+          "A chat opened at its end stays at its end when the header grows. Jumping between changes in the Diff panel reaches files that were not drawn yet and no longer fights your scrolling. A terminal's history no longer prints stray answers at the prompt after a reconnect. A Claude error such as a missing model is no longer reported as a lost session, and a Cursor request fails at once when its agent has stopped instead of hanging.",
+      },
+      {
+        title: "Less kept in the browser on Ryco Cloud",
+        summary:
+          "On Ryco Cloud in the browser, messages waiting for their uploads, comparison selections and saved browser-panel sites now stay in memory instead of the browser's local storage. The desktop app writes its settings and saved machines readable by your user only.",
+      },
+    ],
+  },
+  {
     version: "0.1.47",
     date: "November 11, 2026",
     dateTime: "2026-11-11",
