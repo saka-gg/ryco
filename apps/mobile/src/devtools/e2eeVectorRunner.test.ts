@@ -57,7 +57,8 @@ vi.mock("@ryco/shared/relayE2eeNoise", async (importOriginal) => {
       seam.splits += 1;
       // The responder's outputs only: the case is the two roles DISAGREEING.
       if (seam.corruptSplitKey !== undefined && seam.splits === 2) {
-        keys[seam.corruptSplitKey][0] ^= 0x01;
+        const key = keys[seam.corruptSplitKey]!;
+        key[0] = key[0]! ^ 0x01;
       }
       return keys;
     }
@@ -330,8 +331,8 @@ describe("each check rejects what it exists to reject", () => {
         f15Ik: {
           ...vectors.f15Ik,
           handshakeMessages: [
-            flipHex(vectors.f15Ik.handshakeMessages[0]),
-            vectors.f15Ik.handshakeMessages[1],
+            flipHex(vectors.f15Ik.handshakeMessages[0]!),
+            vectors.f15Ik.handshakeMessages[1]!,
           ],
         },
       },
@@ -344,8 +345,8 @@ describe("each check rejects what it exists to reject", () => {
         f15Ik: {
           ...vectors.f15Ik,
           handshakeMessages: [
-            vectors.f15Ik.handshakeMessages[0],
-            flipHex(vectors.f15Ik.handshakeMessages[1]),
+            vectors.f15Ik.handshakeMessages[0]!,
+            flipHex(vectors.f15Ik.handshakeMessages[1]!),
           ],
         },
       },

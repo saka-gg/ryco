@@ -216,7 +216,7 @@ describe("buildProviderAccounts", () => {
         : "Sign in with its own CLI on Studio.",
     });
     const [cursor] = rowsOf([provider("cursor", { status: "unknown" })]);
-    expect(cursor.status).toBe("Sign-in unknown");
+    expect(cursor!.status).toBe("Sign-in unknown");
   });
 
   it("says a Claude whose check failed is unknown, with the node's reason, not signed out", () => {
