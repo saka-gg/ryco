@@ -15,7 +15,7 @@ import {
   resolveHubConnectorConfig,
   resolveNodeE2eePolicyConfig,
 } from "./config.ts";
-import { resolveServerConfig } from "./cli.ts";
+import { resolveServerConfig } from "./cli/serverConfig.ts";
 import { classifyFatalStartupError } from "./startupFailure.ts";
 import { hubIdentityHoldsKeyMaterial } from "./hubConnector/HubIdentityRuntime.ts";
 

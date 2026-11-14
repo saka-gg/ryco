@@ -24,7 +24,8 @@ import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
-import { cli, desktopOwnedNodeRefusal } from "./cli.ts";
+import { cli } from "./cli.ts";
+import { desktopOwnedNodeRefusal } from "./cli/serverConfig.ts";
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "./config.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";

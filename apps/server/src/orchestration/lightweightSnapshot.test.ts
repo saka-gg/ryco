@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { vi } from "vite-plus/test";
 
-import { getOfflineSnapshot } from "../cli.ts";
+import { getOfflineSnapshot } from "../cli/projectCommand.ts";
 import { loadOrchestrationHttpSnapshot } from "./http.ts";
 import {
   ProjectionSnapshotQuery,
