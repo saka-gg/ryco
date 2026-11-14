@@ -4,6 +4,7 @@ import type {
   ChatHtmlRenderMetadata,
   EnvironmentId,
   ModelSelection,
+  OrchestrationCheckpointStatus,
   OrchestrationLatestTurn,
   OrchestrationProposedPlanId,
   RepositoryIdentity,
@@ -142,7 +143,7 @@ export interface TurnDiffFileChange {
 export interface TurnDiffSummary {
   turnId: TurnId;
   completedAt: string;
-  status?: string | undefined;
+  status?: OrchestrationCheckpointStatus | undefined;
   files: TurnDiffFileChange[];
   checkpointRef?: CheckpointRef | undefined;
   assistantMessageId?: MessageId | undefined;

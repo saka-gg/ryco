@@ -4,7 +4,7 @@ import {
   createStopRequestRegistry,
   STOP_UNCONFIRMED_MS,
 } from "@ryco/client-runtime/state/session/subagentStop";
-import { OrchestrationStopBackgroundTaskError } from "@ryco/contracts";
+import { OrchestrationStopBackgroundTaskError, ThreadId } from "@ryco/contracts";
 
 import { startSubagentStop, type SubagentStopAlert } from "./subagentStopRequests";
 
@@ -64,7 +64,7 @@ describe("stopping an agent from the phone", () => {
         Promise.reject(
           new OrchestrationStopBackgroundTaskError({
             reason: "unsupported",
-            threadId: "thread-1",
+            threadId: ThreadId.make("thread-1"),
             taskId: "a",
           }),
         ),

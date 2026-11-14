@@ -12,7 +12,7 @@ import {
   type SecretRequestAnswerInput,
   type SecretRequestId,
 } from "@ryco/contracts/secret-request";
-import type { ThreadId } from "@ryco/contracts";
+import type { SpaceRole, ThreadId } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 import { secretRequestFailureMessage } from "@ryco/shared/secretRequests";
@@ -111,7 +111,7 @@ export interface SecretRequestAnswerAccess {
  */
 export function secretRequestAnswerAccess(input: {
   readonly nodeSupports: boolean;
-  readonly role: "viewer" | "operator" | "owner" | undefined;
+  readonly role: SpaceRole | undefined;
   readonly mutationReady: boolean;
   readonly mutationReason?: string | null;
 }): SecretRequestAnswerAccess {

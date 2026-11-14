@@ -20,7 +20,7 @@ import {
   type FollowUpQueueBadge,
 } from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { EnvironmentId, NodeSessionRole, ThreadId } from "@ryco/contracts";
 import type { ThreadLineage } from "@ryco/contracts/orchestration";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { isChatProject } from "@ryco/shared/projectKind";
@@ -65,7 +65,7 @@ export interface InboxEnvironment {
    * none; it is never defaulted, because "no role known" and "viewer" differ in
    * exactly what the user may do.
    */
-  readonly role?: "viewer" | "operator" | "owner" | "client";
+  readonly role?: NodeSessionRole;
   /**
    * Wave 4: per-node E2EE trust, DISPLAY ONLY (see `nodeTrustModel.ts`). Absent
    * whenever this device has no evidence to claim from — never defaulted to

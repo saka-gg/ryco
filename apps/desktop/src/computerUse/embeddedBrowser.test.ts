@@ -1,3 +1,4 @@
+import { TurnId, ThreadId } from "@ryco/contracts";
 import type { BrowserWindow } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { CdpLease } from "../browser/cdpLease.ts";
@@ -1638,7 +1639,13 @@ describe("element picker", () => {
     commands.filter(({ method }) => method.startsWith("Overlay.") || method.startsWith("DOM."));
   function agentContext(args: Record<string, unknown>): ComputerOperationContext {
     return {
-      request: { sessionId: "session", threadId: "thread", turnId: "turn", tool: "browser", args },
+      request: {
+        sessionId: "session",
+        threadId: ThreadId.make("thread"),
+        turnId: TurnId.make("turn"),
+        tool: "browser",
+        args,
+      },
       signal: signal(),
       check: vi.fn(),
       authorizeApp: vi.fn(async () => undefined),

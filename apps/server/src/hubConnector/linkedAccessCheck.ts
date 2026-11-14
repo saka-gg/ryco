@@ -17,7 +17,7 @@ import {
   NodeLinkedAccessSubject,
   type NodeLinkedAccessStatus,
 } from "@ryco/contracts/node-linked-access";
-import type { RelayCloseReason, RelayEffectiveRole } from "@ryco/contracts/relay";
+import { RelayEffectiveRole, type RelayCloseReason } from "@ryco/contracts/relay";
 import { Option, Schema } from "effect";
 
 import type { LinkedSessionSelector } from "../auth/Services/SessionCredentialService.ts";
@@ -67,7 +67,7 @@ const ROLE_RANK: Readonly<Record<RelayEffectiveRole, number>> = {
   operator: 1,
   owner: 2,
 };
-const ROLES: ReadonlyArray<RelayEffectiveRole> = ["viewer", "operator", "owner"];
+const ROLES: ReadonlyArray<RelayEffectiveRole> = RelayEffectiveRole.literals;
 
 /** The roles above `role`: the sessions an answer of `role` revokes. */
 export function rolesAbove(role: RelayEffectiveRole): ReadonlyArray<RelayEffectiveRole> {

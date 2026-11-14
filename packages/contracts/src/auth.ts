@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { AuthSessionId, EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { SpaceRole } from "./spaceRole.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 
 /**
@@ -278,7 +279,7 @@ export const AuthSessionState = Schema.Struct({
    * was issued, which the node enforces on this session. A phone on a linked
    * direct route reads it, since no relay reports a role there.
    */
-  linkedRole: Schema.optionalKey(Schema.Literals(["viewer", "operator", "owner"])),
+  linkedRole: Schema.optionalKey(SpaceRole),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

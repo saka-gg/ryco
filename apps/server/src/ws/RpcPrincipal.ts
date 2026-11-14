@@ -1,12 +1,12 @@
 import type * as Http from "node:http";
-import type { AuthSessionId, RelayEffectiveRole, TurnOrigin } from "@ryco/contracts";
+import type { AuthSessionId, RelayEffectiveRole, SpaceRole, TurnOrigin } from "@ryco/contracts";
 import { isTailscaleAddress } from "@ryco/tailscale";
 import type { HttpServerRequest } from "effect/http";
 
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
 import { isDirectLoopbackUpgrade, isLoopbackRangeAddress } from "../webSocketCompression.ts";
 
-export type RpcPrincipalRole = "viewer" | "operator" | "owner";
+export type RpcPrincipalRole = SpaceRole;
 
 /**
  * Who a relay channel's E2EE handshake authenticated, read when a request needs

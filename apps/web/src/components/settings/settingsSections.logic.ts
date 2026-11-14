@@ -1,3 +1,4 @@
+import type { SpaceRole } from "@ryco/contracts";
 import type { SettingsEditingScope, SettingsTarget } from "../../settingsTarget";
 import {
   settingsSection,
@@ -24,7 +25,7 @@ import {
  */
 
 /** The role a hosted grant carries, or `null` when no fresh snapshot exists. */
-export type HostedSettingsRole = "viewer" | "operator" | "owner" | null;
+export type HostedSettingsRole = SpaceRole | null;
 export type SettingsScope = "browser" | "device" | "account" | "node" | "mixed";
 
 export function settingsScopeLabel(

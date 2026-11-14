@@ -17,7 +17,7 @@ import {
   isTerminalSubagentStatus,
   type AgentPanelModel,
   type RuntimeSubagent,
-  type RuntimeSubagentStatus,
+  type SubagentViewStatus,
   type ThreadSubagentView,
 } from "../../../threadWorkspaceViewModel";
 import type { NotesPaneView } from "../notes/noteView";
@@ -164,12 +164,12 @@ type AuditMember = "map" | "types" | "card" | "alerts";
  */
 export function auditWorkflowAgents(
   statuses: {
-    readonly coordinator?: RuntimeSubagentStatus;
-    readonly members?: Partial<Record<AuditMember, RuntimeSubagentStatus>>;
+    readonly coordinator?: SubagentViewStatus;
+    readonly members?: Partial<Record<AuditMember, SubagentViewStatus>>;
   } = {},
 ): RuntimeSubagent[] {
   const member = (key: AuditMember, phaseIndex: number, agentIndex: number, title: string) => {
-    const defaults: Record<AuditMember, RuntimeSubagentStatus> = {
+    const defaults: Record<AuditMember, SubagentViewStatus> = {
       map: "completed",
       types: "failed",
       card: "running",
@@ -213,7 +213,7 @@ export function auditWorkflowAgents(
 
 /** Two direct spawns: Scout running, Docs writer completed. */
 export function crownDirectAgents(
-  statuses: { readonly scout?: RuntimeSubagentStatus; readonly docs?: RuntimeSubagentStatus } = {},
+  statuses: { readonly scout?: SubagentViewStatus; readonly docs?: SubagentViewStatus } = {},
 ): RuntimeSubagent[] {
   return [
     makeRuntimeAgent("agent-scout", {
