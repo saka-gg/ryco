@@ -13,14 +13,12 @@ import {
   NodeAutomationHooksSyncResult,
   type NodeAutomationHookDelivery,
 } from "@ryco/contracts/automation-hooks";
-import { RELAY_PROTOCOL_MAJOR, RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
 import { Effect, Option, Schema } from "effect";
 
 import type {
   AutomationHookAnswer,
   AutomationHookRequest,
 } from "../automationHooks/automationHookRequest.ts";
-import { fetchBoundedJson } from "../hubIdentity/BoundedHttp.ts";
 import type {
   AutomationHookDeliveryOutcome,
   AutomationHooksSyncDeps,
@@ -28,6 +26,7 @@ import type {
 } from "./automationHooksSync.ts";
 import type { HubConnector } from "./HubConnector.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
+import { postWithNodeProof } from "./nodeProofPost.ts";
 
 const decodeResult = Schema.decodeUnknownOption(NodeAutomationHooksSyncResult);
 
@@ -35,14 +34,6 @@ const decodeResult = Schema.decodeUnknownOption(NodeAutomationHooksSyncResult);
 const MAX_RESPONSE_BYTES =
   NODE_AUTOMATION_HOOKS_MAX_DELIVERIES * Math.ceil((AUTOMATION_HOOK_MAX_BODY_BYTES * 4) / 3) +
   256 * 1024;
-
-class SyncHttpFailure extends Error {
-  readonly status: number;
-  constructor(status: number) {
-    super("The automation hooks sync failed.");
-    this.status = status;
-  }
-}
 
 export function makeAutomationHooksSyncer(deps: {
   readonly hubOrigin: string;
@@ -52,56 +43,12 @@ export function makeAutomationHooksSyncer(deps: {
   readonly fetch?: typeof fetch;
 }): AutomationHooksSyncDeps["sync"] {
   return async ({ hookIds, acks }): Promise<AutomationHooksSyncOutcome> => {
-    let proof;
-    try {
-      proof = await deps.connector.asIdentityOwner(() =>
-        deps.identity.createRelayAuthenticationFrame(deps.hubOrigin, {
-          protocolMajor: RELAY_PROTOCOL_MAJOR,
-          protocolMinor: RELAY_PROTOCOL_MINOR,
-        }),
-      );
-    } catch {
-      return { kind: "failed" };
-    }
-    let body: string;
-    try {
-      body = JSON.stringify({
-        proof: {
-          nodeId: proof.nodeId,
-          protocolMajor: proof.protocolMajor,
-          protocolMinor: proof.protocolMinor,
-          nonce: Buffer.from(proof.nonce).toString("base64url"),
-          signature: Buffer.from(proof.signature).toString("base64url"),
-        },
-        hookIds,
-        acks,
-      });
-    } finally {
-      proof.nonce.fill(0);
-      proof.signature.fill(0);
-    }
-    let response;
-    try {
-      response = await fetchBoundedJson(
-        deps.fetch ?? fetch,
-        `${deps.hubOrigin}${NODE_AUTOMATION_HOOKS_SYNC_PATH}`,
-        {
-          method: "POST",
-          redirect: "error",
-          signal: deps.signal,
-          headers: { "content-type": "application/json" },
-          body,
-        },
-        // An older Hub's 404 need not be JSON: keep the status either way.
-        (failure) => {
-          throw new SyncHttpFailure(failure.kind === "invalid_response" ? failure.status : 0);
-        },
-        { timeoutMs: 60_000, maxResponseBytes: MAX_RESPONSE_BYTES },
-      );
-    } catch (error) {
-      const status = error instanceof SyncHttpFailure ? error.status : 0;
-      return status === 404 || status === 405 ? { kind: "unsupported" } : { kind: "failed" };
-    }
+    const response = await postWithNodeProof(deps, {
+      path: NODE_AUTOMATION_HOOKS_SYNC_PATH,
+      body: { hookIds, acks },
+      timeoutMs: 60_000,
+      maxResponseBytes: MAX_RESPONSE_BYTES,
+    });
     // 404 (no route, or `node_not_found`): stop until the next connect. Anything else, a
     // `node_rate_limited` 429 included, is tried again later.
     if (!response.ok) {

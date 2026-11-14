@@ -502,6 +502,8 @@ function copyAttachmentFile(source: string, destination: string, attachmentsDir:
         let written = 0;
         while (written < bytesRead) {
           const result = await output.write(chunk, written, bytesRead - written, offset + written);
+          // A write that makes no progress would spin here forever.
+          if (result.bytesWritten === 0) throw new Error("Attachment could not be stored.");
           written += result.bytesWritten;
         }
         offset += bytesRead;

@@ -9,11 +9,7 @@
  *
  * @module push/attentionSignalHttp
  */
-import {
-  NativeE2eeEnrollmentId,
-  RELAY_PROTOCOL_MAJOR,
-  RELAY_PROTOCOL_MINOR,
-} from "@ryco/contracts/relay";
+import { NativeE2eeEnrollmentId } from "@ryco/contracts/relay";
 import {
   PUSH_ACTIVITY_SIGNAL_PATH,
   PUSH_ATTENTION_SIGNAL_PATH,
@@ -25,7 +21,7 @@ import {
 } from "@ryco/contracts/push-hub";
 import { Option, Schema } from "effect";
 
-import { fetchBoundedJson } from "../hubIdentity/BoundedHttp.ts";
+import { postWithNodeProof } from "../hubConnector/nodeProofPost.ts";
 import type { HubIdentityRuntimeShape } from "../hubConnector/HubIdentityRuntime.ts";
 import type { HubConnector } from "../hubConnector/HubConnector.ts";
 import type {
@@ -33,14 +29,6 @@ import type {
   AttentionSendOutcome,
   HubSignalOutcome,
 } from "./attentionPublisher.ts";
-
-class SignalHttpFailure extends Error {
-  readonly status: number;
-  constructor(status: number) {
-    super("The push signal failed.");
-    this.status = status;
-  }
-}
 
 function classifyStatus(status: number): HubSignalOutcome<never> {
   if (status === 404 || status === 405) return { kind: "unsupported" };
@@ -68,53 +56,7 @@ function makeHubSignalSender<
 >(deps: HubSignalSenderDeps, path: string, resultSchema: Schema.Decoder<Result>) {
   const decodeResult = Schema.decodeUnknownOption(resultSchema);
   return async (signal: Input): Promise<HubSignalOutcome<Result>> => {
-    let proof;
-    try {
-      proof = await deps.connector.asIdentityOwner(() =>
-        deps.identity.createRelayAuthenticationFrame(deps.hubOrigin, {
-          protocolMajor: RELAY_PROTOCOL_MAJOR,
-          protocolMinor: RELAY_PROTOCOL_MINOR,
-        }),
-      );
-    } catch {
-      return { kind: "failed" };
-    }
-    let body: string;
-    try {
-      body = JSON.stringify({
-        ...signal,
-        proof: {
-          nodeId: proof.nodeId,
-          protocolMajor: proof.protocolMajor,
-          protocolMinor: proof.protocolMinor,
-          nonce: Buffer.from(proof.nonce).toString("base64url"),
-          signature: Buffer.from(proof.signature).toString("base64url"),
-        },
-      });
-    } finally {
-      proof.nonce.fill(0);
-      proof.signature.fill(0);
-    }
-    let response;
-    try {
-      response = await fetchBoundedJson(
-        deps.fetch ?? fetch,
-        `${deps.hubOrigin}${path}`,
-        {
-          method: "POST",
-          redirect: "error",
-          signal: deps.signal,
-          headers: { "content-type": "application/json" },
-          body,
-        },
-        // An older Hub's 404 need not be JSON: keep the status either way.
-        (failure) => {
-          throw new SignalHttpFailure(failure.kind === "invalid_response" ? failure.status : 0);
-        },
-      );
-    } catch (error) {
-      return classifyStatus(error instanceof SignalHttpFailure ? error.status : 0);
-    }
+    const response = await postWithNodeProof(deps, { path, body: signal });
     if (!response.ok) return classifyStatus(response.status);
     const decoded = decodeResult(response.value);
     return Option.isSome(decoded) && decoded.value.sequence === signal.sequence
