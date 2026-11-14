@@ -1,13 +1,15 @@
 import {
   ClientSettingsSchema,
   DEFAULT_CLIENT_SETTINGS,
-  EnvironmentId,
   type ClientSettings,
   type EnvironmentId as EnvironmentIdValue,
-  type PersistedSavedEnvironmentRecord,
 } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
-import { persistedSavedEnvironmentRecordFields } from "@ryco/shared/savedEnvironmentRecord";
+import { PersistedSavedEnvironmentRecord } from "@ryco/contracts/saved-environment";
+import {
+  decodeSavedEnvironmentRecords,
+  persistedSavedEnvironmentRecordFields,
+} from "@ryco/shared/savedEnvironmentRecord";
 import {
   BROWSER_SAVED_ENVIRONMENT_BEARER_TOKEN_MAX_AGE_MS,
   computeBearerTokenExpiresAt,
@@ -23,28 +25,7 @@ export const SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY = "ryco:saved-environment-re
 export { BROWSER_SAVED_ENVIRONMENT_BEARER_TOKEN_MAX_AGE_MS };
 
 const BrowserSavedEnvironmentRecordSchema = Schema.Struct({
-  environmentId: EnvironmentId,
-  label: Schema.String,
-  httpBaseUrl: Schema.String,
-  wsBaseUrl: Schema.String,
-  createdAt: Schema.String,
-  lastConnectedAt: Schema.NullOr(Schema.String),
-  desktopSsh: Schema.optionalKey(
-    Schema.Struct({
-      alias: Schema.String,
-      hostname: Schema.String,
-      username: Schema.NullOr(Schema.String),
-      port: Schema.NullOr(Schema.Number),
-    }),
-  ),
-  hubLink: Schema.optionalKey(
-    Schema.Struct({
-      hubEnvironmentId: Schema.String,
-      linkedAt: Schema.String,
-      nodeIdentityPublicKey: Schema.optionalKey(Schema.String),
-    }),
-  ),
-  disabledAt: Schema.optionalKey(Schema.String),
+  ...PersistedSavedEnvironmentRecord.fields,
   bearerToken: Schema.optionalKey(Schema.String),
   bearerTokenSavedAt: Schema.optionalKey(Schema.String),
   bearerTokenExpiresAt: Schema.optionalKey(Schema.String),
@@ -57,6 +38,12 @@ const BrowserSavedEnvironmentRegistryDocumentSchema = Schema.Struct({
 });
 type BrowserSavedEnvironmentRegistryDocument =
   typeof BrowserSavedEnvironmentRegistryDocumentSchema.Type;
+
+/** The stored document as read: its records are decoded one by one (`decodeSavedEnvironmentRecords`). */
+const StoredBrowserSavedEnvironmentRegistryDocumentSchema = Schema.Struct({
+  version: Schema.optionalKey(Schema.Number),
+  records: Schema.optionalKey(Schema.Unknown),
+});
 
 function hasWindow(): boolean {
   return typeof window !== "undefined";
@@ -129,9 +116,20 @@ function readBrowserSavedEnvironmentRegistryDocument(): BrowserSavedEnvironmentR
   try {
     const parsed = getLocalStorageItem(
       SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
-      BrowserSavedEnvironmentRegistryDocumentSchema,
+      StoredBrowserSavedEnvironmentRegistryDocumentSchema,
     );
-    return parsed ?? {};
+    if (parsed === null) return {};
+    return {
+      ...(parsed.version !== undefined ? { version: parsed.version } : {}),
+      ...(parsed.records !== undefined
+        ? {
+            records: decodeSavedEnvironmentRecords(
+              parsed.records,
+              BrowserSavedEnvironmentRecordSchema,
+            ),
+          }
+        : {}),
+    };
   } catch {
     return {};
   }

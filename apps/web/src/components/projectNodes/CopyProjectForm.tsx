@@ -126,6 +126,7 @@ import {
   type CopyDialogServices,
   type CopyUserChoices,
 } from "./useCopyProjectPlanning";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** A copy the form started, with what its progress view needs to word it. */
 export interface StartedProjectCopy {
@@ -729,7 +730,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
         }),
       });
     } catch (cause) {
-      setStartError(cause instanceof Error ? cause.message : "The copy did not start.");
+      setStartError(errorMessage(cause, "The copy did not start."));
       setStarting(false);
     }
   };

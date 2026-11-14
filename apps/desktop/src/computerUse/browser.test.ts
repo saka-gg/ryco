@@ -1,3 +1,4 @@
+import { TurnId, ThreadId } from "@ryco/contracts";
 import type { ComputerUseResult } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -41,8 +42,8 @@ it("requires a new observation when a replacement browser reuses tab and documen
   const context: ComputerOperationContext = {
     request: {
       sessionId: "session",
-      threadId: "thread",
-      turnId: "turn",
+      threadId: ThreadId.make("thread"),
+      turnId: TurnId.make("turn"),
       tool: "browser",
       args: { action: "observe", tab: "1" },
     },
@@ -79,7 +80,13 @@ it.each([
     send: vi.fn(),
   };
   const context: ComputerOperationContext = {
-    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args },
+    request: {
+      sessionId: "s",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
+      tool: "browser",
+      args,
+    },
     signal: new AbortController().signal,
     check: vi.fn(),
     authorizeApp: vi.fn(),
@@ -108,8 +115,8 @@ it("opens and navigates background tabs without requesting foreground control", 
   const context: ComputerOperationContext = {
     request: {
       sessionId: "s",
-      threadId: "t",
-      turnId: "u",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
       tool: "browser",
       args: { action: "open", url: tab.url },
     },
@@ -148,8 +155,8 @@ it("keeps Ryco visibility requests in the workspace without foreground consent",
   const context: ComputerOperationContext = {
     request: {
       sessionId: "s",
-      threadId: "t",
-      turnId: "u",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
       tool: "browser",
       args: { action: "open", url: tab.url, visible: true },
     },
@@ -210,8 +217,8 @@ it("brackets mutating actions with beginAgentMutation and leaves reads alone", a
   const context: ComputerOperationContext = {
     request: {
       sessionId: "s",
-      threadId: "t",
-      turnId: "u",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
       tool: "browser",
       args: { action: "navigate", tab: "1", url: tab.url },
     },
@@ -274,8 +281,8 @@ it("checks the operation again after a mutation bracket", async () => {
   const context: ComputerOperationContext = {
     request: {
       sessionId: "s",
-      threadId: "t",
-      turnId: "u",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
       tool: "browser",
       args: { action: "reload", tab: "1" },
     },
@@ -315,7 +322,13 @@ it("never lets the bracket's end replace the action's result or error", async ()
     beginAgentMutation: vi.fn(async () => end),
   };
   const context: ComputerOperationContext = {
-    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
+    request: {
+      sessionId: "s",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
+      tool: "browser",
+      args: {},
+    },
     signal: new AbortController().signal,
     check: vi.fn(),
     authorizeApp: vi.fn(),
@@ -380,7 +393,13 @@ it("reports a revived Ryco tab and requires a fresh observation", async () => {
     automation: vi.fn(() => undefined),
   };
   const context: ComputerOperationContext = {
-    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
+    request: {
+      sessionId: "s",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
+      tool: "browser",
+      args: {},
+    },
     signal: new AbortController().signal,
     check: vi.fn(),
     authorizeApp: vi.fn(),
@@ -601,7 +620,13 @@ function rycoFixture(
       : { automation: vi.fn(() => (state.live ? automation : undefined)) }),
   };
   const context: ComputerOperationContext = {
-    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
+    request: {
+      sessionId: "s",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
+      tool: "browser",
+      args: {},
+    },
     signal: new AbortController().signal,
     check: vi.fn(),
     authorizeApp: vi.fn(),
@@ -1382,8 +1407,8 @@ describe("upload", () => {
       {
         request: {
           sessionId: "s",
-          threadId: "t",
-          turnId: "u",
+          threadId: ThreadId.make("t"),
+          turnId: TurnId.make("u"),
           tool: "browser",
           args: { action: "observe", tab: "1" },
         },

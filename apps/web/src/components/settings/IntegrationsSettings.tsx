@@ -7,6 +7,7 @@ import {
   type AgentControlExternalProjectScope,
   ProjectId,
 } from "@ryco/contracts";
+import { confirmAction } from "../../confirmAction";
 import {
   applyExternalIntegrationList,
   applyExternalIntegrationPairing,
@@ -43,6 +44,7 @@ import {
 import { SettingsSelect } from "./SettingsSelect";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { retryAgentControlStartup } from "./agentControlStartupRetry";
+import { errorMessage } from "~/lib/errorMessage";
 
 export const AGENT_CONTROL_CLIENT_LABELS: Record<AgentControlExternalClientKind, string> = {
   codex: "Codex",
@@ -169,7 +171,7 @@ function showFailure(title: string, error: unknown) {
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : "The request failed.",
+      description: errorMessage(error, "The request failed."),
     }),
   );
 }
@@ -512,7 +514,13 @@ export function ExternalIntegrationsSettings() {
   const remove = async (detail: AgentControlExternalIntegrationDetail) => {
     if (!api) return;
     const integrationId = detail.integration.integrationId;
-    if (!window.confirm(`Delete ${detail.integration.displayName}? This cannot be undone.`)) return;
+    if (
+      !(await confirmAction(
+        `Delete ${detail.integration.displayName}? This cannot be undone.`,
+      ).catch(() => false))
+    ) {
+      return;
+    }
     try {
       setBusyId(integrationId);
       const result = await api.deleteIntegration({ integrationId });

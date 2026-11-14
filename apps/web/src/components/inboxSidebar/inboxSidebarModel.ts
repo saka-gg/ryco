@@ -72,6 +72,7 @@ import {
   type SidebarAutoSettleAfterDays,
   type ThreadId,
   type ThreadLineage,
+  type NodeSessionRole,
 } from "@ryco/contracts";
 
 export type InboxSidebarThreadState =
@@ -107,7 +108,7 @@ export interface InboxSidebarEnvironment {
   readonly queued?: boolean | undefined;
   readonly stale: boolean;
   readonly staleDetail?: string;
-  readonly role: "viewer" | "operator" | "owner" | "client" | null;
+  readonly role: NodeSessionRole | null;
   readonly trust:
     | "not-required"
     | "unknown"

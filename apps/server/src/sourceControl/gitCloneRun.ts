@@ -48,6 +48,7 @@ import {
   isGitCloneProgressLine,
   withGitCloneSlot,
 } from "./gitCloneCommon.ts";
+import { renameWithRetry } from "../renameWithRetry.ts";
 
 /** A clone no request has waited for during this long is stopped. */
 export const CLONE_ORPHAN_GRACE_MS = 10 * 60_000;
@@ -153,21 +154,6 @@ const liveStagingNames = new Set<string>();
 // ---------------------------------------------------------------------------------------------
 // Filesystem steps
 // ---------------------------------------------------------------------------------------------
-
-/** Renames, retrying the transient EPERM/EBUSY Windows reports while a scanner holds a file. */
-export const renameWithRetry = async (from: string, to: string): Promise<void> => {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(from, to);
-      return;
-    } catch (error) {
-      const code = errnoOf(error);
-      const transient = process.platform === "win32" && (code === "EPERM" || code === "EBUSY");
-      if (attempt >= 4 || !transient) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
-    }
-  }
-};
 
 /** Removes a staging folder, retried a few times; never fails (a leftover is only logged). */
 const removeStagingDirectory = (stagingPath: string): Effect.Effect<void> =>

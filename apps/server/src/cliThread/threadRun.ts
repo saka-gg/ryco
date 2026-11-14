@@ -11,7 +11,6 @@
  *
  * @module cliThread/threadRun
  */
-import path from "node:path";
 
 import {
   type AgentControlMcpReadThreadResult,
@@ -38,6 +37,7 @@ import { truncate } from "@ryco/shared/String";
 import { turnStartEndedMessageId } from "@ryco/shared/turnStart";
 import { isThreadTurnRunning } from "@ryco/shared/turnRunning";
 import { Option, Schema } from "effect";
+import { isPathInside } from "../pathContainment.ts";
 
 // ── Outcomes ──────────────────────────────────────────────────────────
 
@@ -544,13 +544,8 @@ export const threadTitleFromPrompt = (prompt: string): string =>
   );
 
 /** Whether `target` is `root` or a path inside it. */
-const containsPath = (root: string, target: string): boolean => {
-  const relative = path.relative(root, target);
-  return (
-    relative === "" ||
-    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-  );
-};
+const containsPath = (root: string, target: string): boolean =>
+  isPathInside({ root, candidate: target, allowRoot: true });
 
 /**
  * The project `--project` names: an exact id, else the deepest project whose folder holds

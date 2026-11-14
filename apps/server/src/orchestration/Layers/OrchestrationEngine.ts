@@ -1,4 +1,10 @@
 import {
+  isApprovalActivity,
+  isUserInputActivity,
+  readApprovalActivityPayload,
+  readUserInputActivityPayload,
+} from "@ryco/shared/threadActivityPayloads";
+import {
   storageLifecycleLock,
   storagePathBlocker,
   isWorktreeRelocationBlocked,
@@ -464,30 +470,28 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
 
         if (
           envelope.command.type === "thread.activity.append" &&
-          [
-            "approval.requested",
-            "approval.resolved",
-            "provider.approval.respond.failed",
-            "user-input.requested",
-            "user-input.resolved",
-            "provider.user-input.respond.failed",
-          ].includes(envelope.command.activity.kind)
+          (isApprovalActivity(envelope.command.activity) ||
+            isUserInputActivity(envelope.command.activity)) &&
+          !envelope.command.activity.kind.endsWith(".response.submitted")
         ) {
           const command = envelope.command;
-          const payload = command.activity.payload as Record<string, unknown> | null;
-          const isQuestion = command.activity.kind.includes("user-input");
+          const isQuestion = isUserInputActivity(command.activity);
+          const requestId = (
+            readUserInputActivityPayload(command.activity) ??
+            readApprovalActivityPayload(command.activity)
+          )?.requestId;
           const row =
-            typeof payload?.requestId === "string"
+            requestId !== undefined
               ? isQuestion
                 ? yield* questions
                     .getByRequestId({
                       threadId: command.threadId,
-                      requestId: ApprovalRequestId.make(payload.requestId),
+                      requestId: ApprovalRequestId.make(requestId),
                     })
                     .pipe(Effect.map(Option.map(questionAsCallback)))
                 : yield* approvals.getByRequestId({
                     threadId: command.threadId,
-                    requestId: ApprovalRequestId.make(payload.requestId),
+                    requestId: ApprovalRequestId.make(requestId),
                   })
               : Option.none();
           const seen = command.activity.kind.endsWith(".requested")
@@ -747,7 +751,12 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                   status: "rejected",
                   error: error.message,
                 })
-                .pipe(Effect.catch(() => Effect.void));
+                .pipe(
+                  Effect.ignore({
+                    log: "Warn",
+                    message: "Rejected command receipt could not be saved",
+                  }),
+                );
             }
           }
 

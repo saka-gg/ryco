@@ -18,7 +18,12 @@ function session(overrides: Record<string, unknown> = {}): AuthSessionState {
     role: "owner",
     sessionMethod: "bearer-session-token",
     expiresAt: new Date(NOW + 29.5 * DAY_MS).toISOString(),
-    auth: {},
+    auth: {
+      policy: "remote-reachable",
+      bootstrapMethods: ["one-time-token"],
+      sessionMethods: ["bearer-session-token"],
+      sessionCookieName: "ryco_session",
+    },
     ...overrides,
   } as unknown as AuthSessionState;
 }
@@ -102,6 +107,36 @@ describe("saved session hint store", () => {
     const hint = await hints.read(ENV);
     expect(typeof hint?.expiresAt).toBe("string");
     expect(usableSavedSessionHint(hint, Date.now())).not.toBeNull();
+  });
+
+  it("reads back hints written by earlier builds, record by record", async () => {
+    const stored = JSON.stringify({
+      version: 1,
+      sessions: {
+        // As an earlier build wrote it: the answer's JSON form, `expiresAt` an ISO string.
+        [ENV]: JSON.parse(JSON.stringify(session())),
+        // No auth descriptor: not a hint this build can trust.
+        "env-broken": { authenticated: true, sessionMethod: "bearer-session-token" },
+        "env-signed-out": JSON.parse(JSON.stringify(session({ authenticated: false }))),
+      },
+    });
+    const hints = createSavedSessionHints(memoryKv(stored).kv);
+
+    expect(await hints.read(ENV)).toEqual(JSON.parse(JSON.stringify(session())));
+    expect(await hints.read("env-broken" as EnvironmentId)).toBeNull();
+    expect(await hints.read("env-signed-out" as EnvironmentId)).toBeNull();
+    expect(usableSavedSessionHint(await hints.read(ENV), NOW)).not.toBeNull();
+  });
+
+  it("reads a record of another version or shape as no hints", async () => {
+    for (const stored of [
+      JSON.stringify({ version: 2, sessions: { [ENV]: session() } }),
+      JSON.stringify({ version: 1, sessions: [] }),
+      JSON.stringify([session()]),
+      "{",
+    ]) {
+      expect(await createSavedSessionHints(memoryKv(stored).kv).read(ENV)).toBeNull();
+    }
   });
 
   it("stores only the session fields it reads, never anything else the answer carried", async () => {

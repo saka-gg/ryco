@@ -1,4 +1,9 @@
-import type { PersistedSavedEnvironmentRecord, SavedEnvironmentHubLink } from "@ryco/contracts";
+import type {
+  PersistedSavedEnvironmentRecord,
+  SavedEnvironmentHubLink,
+} from "@ryco/contracts/saved-environment";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -41,4 +46,23 @@ export function persistedSavedEnvironmentRecordFields(
     ...(record.hubLink ? { hubLink: record.hubLink } : {}),
     ...(typeof record.disabledAt === "string" ? { disabledAt: record.disabledAt } : {}),
   };
+}
+
+/**
+ * The readable records of a stored saved-environment registry, decoded one by
+ * one through `record` (`PersistedSavedEnvironmentRecord`, or a store's
+ * extension of it with its credential fields). A record this build cannot read
+ * (corrupt, or written in a shape it does not know) is left out rather than
+ * half-trusted, and never hides the others; anything but an array reads as an
+ * empty registry.
+ */
+export function decodeSavedEnvironmentRecords<A>(value: unknown, record: Schema.Decoder<A>): A[] {
+  if (!Array.isArray(value)) return [];
+  const decode = Schema.decodeUnknownOption(record);
+  const records: A[] = [];
+  for (const item of value) {
+    const decoded = decode(item);
+    if (Option.isSome(decoded)) records.push(decoded.value);
+  }
+  return records;
 }

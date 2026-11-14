@@ -676,7 +676,7 @@ describe("AgentsPanel", () => {
     send.mockRejectedValueOnce(
       new OrchestrationMessageBackgroundTaskError({
         reason: "task-ended",
-        threadId: "thread-1",
+        threadId: ThreadId.make("thread-1"),
         taskId: "solo",
       }),
     );

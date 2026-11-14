@@ -15,7 +15,7 @@ import {
   summarizeAgentWorkflow,
   type AgentPanelModel,
   type RuntimeSubagent,
-  type RuntimeSubagentStatus,
+  type SubagentViewStatus,
 } from "../../../threadWorkspaceViewModel";
 import { formatElapsedDurationLabel } from "../../../timestampFormat";
 import { getOverviewSummary } from "../overviewSummary.logic";
@@ -106,7 +106,7 @@ export interface CrownSnapshot {
 export interface CrownWorkflowSnapshot {
   readonly name: string;
   /** The coordinator's status. */
-  readonly status: RuntimeSubagentStatus;
+  readonly status: SubagentViewStatus;
   readonly phaseCount: number;
   readonly memberCount: number;
   /** Failed member ids, in roster order. */
@@ -118,7 +118,7 @@ export interface CrownWorkflowSnapshot {
 /** Runtime agents by id: direct spawns alert one by one, workflows once per run. */
 export interface CrownAgentsSnapshot {
   readonly direct: Readonly<
-    Record<string, { readonly status: RuntimeSubagentStatus; readonly name: string }>
+    Record<string, { readonly status: SubagentViewStatus; readonly name: string }>
   >;
   readonly workflows: Readonly<Record<string, CrownWorkflowSnapshot>>;
 }
@@ -277,7 +277,7 @@ function buildAgentsSnapshot(model: AgentPanelModel): CrownAgentsSnapshot {
   if (!model.hasAgents) return { direct: {}, workflows: {} };
   const roster = buildAgentRosterIdentity(model);
   const label = (agent: RuntimeSubagent) => resolveAgentRowIdentity(agent, roster).label;
-  const direct: Record<string, { status: RuntimeSubagentStatus; name: string }> = {};
+  const direct: Record<string, { status: SubagentViewStatus; name: string }> = {};
   // Keyed canonically: a transcript row (`subagent:x`) yields to its native
   // row (`x`) once native activity lands, and that must not read as new.
   for (const agent of model.directAgents) {

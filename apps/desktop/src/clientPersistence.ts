@@ -1,26 +1,27 @@
 import * as FS from "node:fs";
-import * as Path from "node:path";
 
-import {
-  ClientSettingsSchema,
-  MAX_KEYBINDINGS_COUNT,
-  type ClientSettings,
-  type PersistedSavedEnvironmentRecord,
-} from "@ryco/contracts";
+import { ClientSettingsSchema, MAX_KEYBINDINGS_COUNT, type ClientSettings } from "@ryco/contracts";
+import { PersistedSavedEnvironmentRecord } from "@ryco/contracts/saved-environment";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import {
+  decodeSavedEnvironmentRecords,
   isSavedEnvironmentHubLink,
   persistedSavedEnvironmentRecordFields,
 } from "@ryco/shared/savedEnvironmentRecord";
+
+import { writeFileAtomicallySync } from "./atomicFileWrite.ts";
 
 interface ClientSettingsDocument {
   readonly settings: ClientSettings;
 }
 
-interface PersistedSavedEnvironmentStorageRecord extends PersistedSavedEnvironmentRecord {
-  readonly encryptedBearerToken?: string;
-}
+/** A record in the registry file: the shared fields and the `safeStorage`-encrypted bearer. */
+const PersistedSavedEnvironmentStorageRecord = Schema.Struct({
+  ...PersistedSavedEnvironmentRecord.fields,
+  encryptedBearerToken: Schema.optionalKey(Schema.String),
+});
+type PersistedSavedEnvironmentStorageRecord = typeof PersistedSavedEnvironmentStorageRecord.Type;
 
 interface SavedEnvironmentRegistryDocument {
   readonly records: readonly PersistedSavedEnvironmentStorageRecord[];
@@ -43,35 +44,9 @@ function readJsonFile<T>(filePath: string): T | null {
   }
 }
 
+/** Owner-only, and a failed write leaves the previous file and no temp file behind. */
 function writeJsonFile(filePath: string, value: unknown): void {
-  const directory = Path.dirname(filePath);
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  FS.mkdirSync(directory, { recursive: true });
-  FS.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  FS.renameSync(tempPath, filePath);
-}
-
-function isPersistedSavedEnvironmentStorageRecord(
-  value: unknown,
-): value is PersistedSavedEnvironmentStorageRecord {
-  return (
-    Predicate.isObject(value) &&
-    typeof value.environmentId === "string" &&
-    typeof value.label === "string" &&
-    typeof value.httpBaseUrl === "string" &&
-    typeof value.wsBaseUrl === "string" &&
-    typeof value.createdAt === "string" &&
-    (value.lastConnectedAt === null || typeof value.lastConnectedAt === "string") &&
-    (value.desktopSsh === undefined ||
-      (Predicate.isObject(value.desktopSsh) &&
-        typeof value.desktopSsh.alias === "string" &&
-        typeof value.desktopSsh.hostname === "string" &&
-        (value.desktopSsh.username === null || typeof value.desktopSsh.username === "string") &&
-        (value.desktopSsh.port === null || typeof value.desktopSsh.port === "number"))) &&
-    (value.hubLink === undefined || isSavedEnvironmentHubLink(value.hubLink)) &&
-    (value.disabledAt === undefined || typeof value.disabledAt === "string") &&
-    (value.encryptedBearerToken === undefined || typeof value.encryptedBearerToken === "string")
-  );
+  writeFileAtomicallySync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function readSavedEnvironmentRegistryDocument(filePath: string): SavedEnvironmentRegistryDocument {
@@ -81,9 +56,11 @@ function readSavedEnvironmentRegistryDocument(filePath: string): SavedEnvironmen
   }
 
   return {
-    records: Array.isArray(parsed.records)
-      ? parsed.records.filter(isPersistedSavedEnvironmentStorageRecord)
-      : [],
+    // A hub link this build cannot verify (no id, no parseable time) leaves its record out.
+    records: decodeSavedEnvironmentRecords(
+      parsed.records,
+      PersistedSavedEnvironmentStorageRecord,
+    ).filter((record) => record.hubLink === undefined || isSavedEnvironmentHubLink(record.hubLink)),
   };
 }
 
@@ -102,6 +79,21 @@ export function readClientSettings(settingsPath: string): ClientSettings | null 
     return Schema.decodeUnknownSync(ClientSettingsSchema)(raw);
   } catch {
     return null;
+  }
+}
+
+const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
+
+/**
+ * The settings a renderer sent, decoded with the schema `readClientSettings` reads them back
+ * with. Throws on anything else, so an invalid payload is refused instead of written and later
+ * read back as "no settings".
+ */
+export function decodeClientSettingsPayload(payload: unknown): ClientSettings {
+  try {
+    return decodeClientSettings(payload);
+  } catch {
+    throw new Error("Invalid client settings payload.");
   }
 }
 

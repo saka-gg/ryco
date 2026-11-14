@@ -20,6 +20,7 @@ import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { Cause, Context, Effect, Layer } from "effect";
 
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { currentCommandReadModel } from "../currentCommandReadModel.ts";
 import { heldOnlyAsGivenUpDelegation, heldOnlyForDelegationSlot } from "../delegationSlotHold.ts";
@@ -65,6 +66,7 @@ export const ServerQueueDrainLive = Layer.effect(
     const application = yield* OrchestrationCommandApplication;
     const fence = yield* ServerWakeFence;
     const startup = yield* ServerRuntimeStartup;
+    const providerService = yield* ProviderService;
     const readModel = currentCommandReadModel(engine, projections);
     // Read before any client command is admitted: these queues were left by an earlier process.
     const queuedAtBoot = threadsQueuedAtBoot(
@@ -110,6 +112,11 @@ export const ServerQueueDrainLive = Layer.effect(
                               observationKey: `${review.observation.observedAt}:${window.thread.session?.runtimeSessionId ?? ""}`,
                             };
                       }),
+                    ),
+                  resumeCacheReviewSupported: (instanceId) =>
+                    providerService.getCapabilities(instanceId).pipe(
+                      Effect.map((capabilities) => capabilities.resumeCacheReview === true),
+                      Effect.orElseSucceed(() => false),
                     ),
                 }),
           }),

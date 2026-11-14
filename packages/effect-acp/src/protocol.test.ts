@@ -1,4 +1,6 @@
 import * as Path from "effect/Path";
+import * as Cause from "effect/Cause";
+import * as Logger from "effect/Logger";
 import * as AcpError from "./errors.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -505,6 +507,155 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       );
       assert.instanceOf(error, AcpError.AcpProcessExitedError);
       assert.equal(error.code, 0);
+    }),
+  );
+  it.effect("fails requests and notifications made after termination at once", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        terminationError: Effect.succeed(new AcpError.AcpProcessExitedError({ code: 3 })),
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        serverRequestMethods: new Set(),
+      });
+      yield* Queue.end(input);
+      yield* Deferred.await(terminated);
+
+      const requestError = yield* transport
+        .request("x/test", { hello: "late" })
+        .pipe(Effect.asVoid, Effect.flip);
+      assert.instanceOf(requestError, AcpError.AcpProcessExitedError);
+      assert.equal(requestError.code, 3);
+      const notifyError = yield* transport
+        .notify("session/cancel", { sessionId: "session-1" })
+        .pipe(Effect.flip);
+      assert.instanceOf(notifyError, AcpError.AcpProcessExitedError);
+    }),
+  );
+
+  it.effect("treats a failed write to the agent as termination", () =>
+    Effect.gen(function* () {
+      const input = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
+      const stdio = Stdio.make({
+        args: Effect.succeed([]),
+        stdin: Stream.fromQueue(input),
+        stdout: () => Sink.forEach(() => Effect.die(new Error("write EPIPE"))),
+        stderr: () => Sink.drain,
+      });
+      const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        serverRequestMethods: new Set(),
+      });
+
+      const pending = yield* transport
+        .request("x/test", { hello: "world" })
+        .pipe(Effect.asVoid, Effect.flip);
+      assert.instanceOf(pending, AcpError.AcpTransportError);
+      assert.instanceOf(yield* Deferred.await(terminated), AcpError.AcpTransportError);
+      const late = yield* transport
+        .request("x/test", { hello: "again" })
+        .pipe(Effect.asVoid, Effect.flip);
+      assert.instanceOf(late, AcpError.AcpTransportError);
+    }),
+  );
+
+  const failingStdout = Effect.gen(function* () {
+    const input = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
+    return Stdio.make({
+      args: Effect.succeed([]),
+      stdin: Stream.fromQueue(input),
+      stdout: () => Sink.forEach(() => Effect.die(new Error("write EPIPE"))),
+      stderr: () => Sink.drain,
+    });
+  });
+
+  it.effect("reports the agent's exit, not the write error, when it dies mid-write", () =>
+    Effect.gen(function* () {
+      const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio: yield* failingStdout,
+        terminationError: Effect.succeed(new AcpError.AcpProcessExitedError({ code: 137 })),
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        serverRequestMethods: new Set(),
+      });
+      const pending = yield* transport
+        .request("x/test", { hello: "world" })
+        .pipe(Effect.asVoid, Effect.flip);
+      assert.instanceOf(pending, AcpError.AcpProcessExitedError);
+      const reported = yield* Deferred.await(terminated);
+      assert.instanceOf(reported, AcpError.AcpProcessExitedError);
+      assert.equal((reported as AcpError.AcpProcessExitedError).code, 137);
+    }),
+  );
+
+  it.effect("reports the write error when the agent stays alive after its input closed", () =>
+    Effect.gen(function* () {
+      const fire = yield* Deferred.make<void>();
+      const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio: yield* failingStdout,
+        // The process never exits: its exit status never arrives.
+        terminationError: Effect.never,
+        timeoutOrElse: timeoutOrElseOnSignal(fire),
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        serverRequestMethods: new Set(),
+      });
+      const pending = yield* transport
+        .request("x/test", { hello: "world" })
+        .pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+      yield* Deferred.succeed(fire, undefined);
+      assert.instanceOf(yield* Fiber.join(pending), AcpError.AcpTransportError);
+      assert.instanceOf(yield* Deferred.await(terminated), AcpError.AcpTransportError);
+    }),
+  );
+
+  it.effect("logs a failing notification handler and keeps dispatching", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const logged: Array<string> = [];
+      const second = yield* Deferred.make<void>();
+      const handled = yield* Ref.make(0);
+      yield* Effect.gen(function* () {
+        yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio,
+          serverRequestMethods: new Set(),
+          onNotification: () =>
+            Ref.updateAndGet(handled, (count) => count + 1).pipe(
+              Effect.flatMap((count) =>
+                count === 1
+                  ? Effect.fail(
+                      new AcpError.AcpTransportError({ detail: "projection failed", cause: null }),
+                    )
+                  : Deferred.succeed(second, undefined).pipe(Effect.asVoid),
+              ),
+            ),
+        });
+        for (const count of [1, 2]) {
+          yield* Queue.offer(
+            input,
+            new TextEncoder().encode(
+              JSON.stringify({ jsonrpc: "2.0", method: "x/note", params: { count } }) + "\n",
+            ),
+          );
+        }
+        yield* Deferred.await(second);
+      }).pipe(
+        Effect.provide(
+          Logger.layer([
+            Logger.make(({ message }) => {
+              logged.push(JSON.stringify(message));
+            }),
+          ]),
+        ),
+      );
+      assert.isTrue(
+        logged.some(
+          (line) => line.includes("ACP notification handler failed") && line.includes("x/note"),
+        ),
+      );
     }),
   );
 });
