@@ -54,6 +54,7 @@ import type { DeviceBackendDetail } from "./DeviceBackend.ts";
 /** Built by `build.sh` next to the helper; runs inside a simulator. */
 const SIM_SETTINGS_TOOL_NAME = "ryco-sim-settings";
 
+import { PNG_SIGNATURE } from "../imageMime.ts";
 import { runProcess, type ProcessRunResult } from "../processRunner.ts";
 import {
   DeviceBackendError,
@@ -1867,13 +1868,13 @@ const HID_MODIFIER_USAGES: Partial<Record<DeviceKeyModifier, number>> = {
   command: 0xe3,
 };
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE_BYTES = Buffer.from(PNG_SIGNATURE);
 
 /** Width/height live in the IHDR chunk at a fixed offset; no decoder needed. */
 export function readPngDimensions(
   bytes: Buffer,
 ): { readonly width: number; readonly height: number } | null {
-  if (bytes.byteLength < 24 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return null;
+  if (bytes.byteLength < 24 || !bytes.subarray(0, 8).equals(PNG_SIGNATURE_BYTES)) return null;
   const width = bytes.readUInt32BE(16);
   const height = bytes.readUInt32BE(20);
   return width > 0 && height > 0 ? { width, height } : null;

@@ -2,7 +2,6 @@ import { DateTime, Deferred, Effect, FileSystem, Layer, Option, Result, Schema }
 import {
   SourceControlProviderError,
   SOURCE_CONTROL_WORKFLOW_LOG_MAX_BYTES,
-  truncateSourceControlDetailContent,
   type ChangeRequest,
   type ChangeRequestState,
   type SourceControlChangeRequestDetail,
@@ -19,6 +18,7 @@ import {
   type SourceControlWorkflowRunListResult,
   type SourceControlWorkflowStep,
 } from "@ryco/contracts";
+import { truncateSourceControlDetailContent } from "@ryco/shared/sourceControlDetailContent";
 import {
   classifySourceControlCommentAuthorRole,
   parseGitHubRepositoryIdentityFromUrl,

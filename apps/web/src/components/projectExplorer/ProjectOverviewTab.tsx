@@ -34,6 +34,7 @@ import {
   PROJECT_OVERVIEW_LIST_LIMIT,
 } from "./ProjectOverviewTab.logic";
 import { changeRequestStateKind, StateBadge } from "./StateBadge";
+import { errorMessage } from "~/lib/errorMessage";
 
 const OVERVIEW_VISIBLE_LIMIT = 5;
 
@@ -347,7 +348,7 @@ function OverviewSection<TItem>(props: OverviewSectionProps<TItem>) {
       {props.error ? (
         <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-destructive text-xs">
           <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-          <span>{props.error instanceof Error ? props.error.message : "Failed to load."}</span>
+          <span>{errorMessage(props.error, "Failed to load.")}</span>
         </div>
       ) : props.isLoading && props.items.length === 0 ? (
         <p className="px-2 py-4 text-muted-foreground text-sm">Loading...</p>

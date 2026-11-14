@@ -1,5 +1,6 @@
 // Adapted from Synara (MIT) commit 8f6521a67 and main 299fd573b apps/desktop/src/browserAutomation/browserDiagnostics.ts and navigationTracker.ts; see docs/licenses/synara-computer-use.txt.
 import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
+import { truncateUtf8 } from "@ryco/shared/utf8Truncate";
 
 /** Entries kept per tab (console and network together); the oldest are dropped first. */
 export const MAX_DIAGNOSTIC_ENTRIES = 1_000;
@@ -57,17 +58,6 @@ interface TrackedRequest {
 
 type Params = Record<string, unknown>;
 
-/** At most `maximumBytes` of UTF-8, cut before a code point that would not fit. */
-export function truncateUtf8(value: string, maximumBytes: number): string {
-  // Each UTF-16 unit needs at most 3 bytes; shorter strings fit without encoding them.
-  if (value.length * 3 <= maximumBytes) return value;
-  const bytes = Buffer.from(value, "utf8");
-  if (bytes.byteLength <= maximumBytes) return value;
-  let end = maximumBytes;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString("utf8");
-}
-
 const boundedUtf8 = (value: unknown, maximumBytes: number, fallback = ""): string =>
   truncateUtf8(
     String(value ?? fallback)
@@ -76,7 +66,7 @@ const boundedUtf8 = (value: unknown, maximumBytes: number, fallback = ""): strin
       .replace(/\s+/gu, " ")
       .trim(),
     maximumBytes,
-  );
+  ).value;
 
 /** Credentials, fragments and every query value are removed; other schemes keep only their name. */
 export const boundedUrl = (value: unknown): string => {

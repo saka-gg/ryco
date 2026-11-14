@@ -91,6 +91,7 @@ import {
   APPEARANCE_TILE_IDLE_CLASS,
   APPEARANCE_TILE_SELECTED_CLASS,
 } from "./appearanceTiles";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function AppearanceSettingsPanel({
   surface = "phone",
@@ -285,7 +286,7 @@ export function AppearanceSettingsPanel({
       toastManager.add({
         type: "error",
         title: "Could not export theme",
-        description: error instanceof Error ? error.message : "Download failed.",
+        description: errorMessage(error, "Download failed."),
       });
     }
   }, []);
@@ -302,7 +303,7 @@ export function AppearanceSettingsPanel({
       toastManager.add({
         type: "error",
         title: "Could not copy theme",
-        description: error instanceof Error ? error.message : "Clipboard write failed.",
+        description: errorMessage(error, "Clipboard write failed."),
       });
     }
   }, []);
@@ -346,7 +347,7 @@ export function AppearanceSettingsPanel({
         toastManager.add({
           type: "error",
           title: "Could not import theme",
-          description: error instanceof Error ? error.message : "Invalid theme file.",
+          description: errorMessage(error, "Invalid theme file."),
         });
       }
     },

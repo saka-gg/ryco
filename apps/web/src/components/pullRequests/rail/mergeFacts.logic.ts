@@ -707,19 +707,6 @@ export function hostSupportsCommand(
   }
 }
 
-/** Commands that only move around the page (safe on hosts without lifecycle mutations). */
-export function isNavigationCommand(command: NextActionCommand): boolean {
-  switch (command.type) {
-    case "reveal-job":
-    case "open-checks":
-    case "open-files":
-    case "reveal-thread":
-      return true;
-    default:
-      return false;
-  }
-}
-
 export function sameCommand(left: NextActionCommand, right: NextActionCommand): boolean {
   if (left.type !== right.type) return false;
   if (left.type === "update-branch" && right.type === "update-branch") {

@@ -47,6 +47,7 @@ import {
   SettingsSection,
   SettingsBlock,
 } from "./settingsLayout";
+import { errorMessage } from "~/lib/errorMessage";
 
 function statusIcon(status: OpinionatedPluginStatus) {
   switch (status.state) {
@@ -200,7 +201,7 @@ export function OpinionatedPluginsSettingsPanel() {
           stackedThreadToast({
             type: "error",
             title: "Failed to load plugins",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       })
@@ -225,7 +226,7 @@ export function OpinionatedPluginsSettingsPanel() {
           stackedThreadToast({
             type: "error",
             title: "Failed to open plugin docs",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       });
@@ -276,7 +277,7 @@ export function OpinionatedPluginsSettingsPanel() {
               stackedThreadToast({
                 type: "error",
                 title: "Plugin install failed",
-                description: error instanceof Error ? error.message : "An error occurred.",
+                description: errorMessage(error, "An error occurred."),
               }),
             );
           })
@@ -287,7 +288,7 @@ export function OpinionatedPluginsSettingsPanel() {
           stackedThreadToast({
             type: "error",
             title: "Install confirmation failed",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       });

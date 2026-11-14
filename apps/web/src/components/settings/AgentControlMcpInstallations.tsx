@@ -4,6 +4,7 @@ import {
   type McpProviderSupport,
   type McpWorkspace,
 } from "@ryco/contracts";
+import { confirmAction } from "../../confirmAction";
 import {
   applyMcpInstallationList,
   applyMcpInstallationMutation,
@@ -48,6 +49,7 @@ import {
 } from "./IntegrationsSettings";
 import { retryAgentControlStartup } from "./agentControlStartupRetry";
 import { getDriverOption } from "./providerDriverMeta";
+import { errorMessage } from "~/lib/errorMessage";
 
 const EMPTY_PROVIDERS: readonly McpProviderSupport[] = [];
 const EMPTY_WORKSPACES: readonly McpWorkspace[] = [];
@@ -91,7 +93,7 @@ function failureToast(title: string, error: unknown) {
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : "The request failed.",
+      description: errorMessage(error, "The request failed."),
     }),
   );
 }
@@ -193,7 +195,12 @@ export function AgentControlMcpInstallations() {
 
   const disconnect = async (workspace: McpWorkspace, installation: AgentControlMcpInstallation) => {
     if (!agentControlApi) return;
-    if (!window.confirm(`Disconnect Agent Control from ${workspaceLabel(workspace)}?`)) return;
+    if (
+      !(await confirmAction(`Disconnect Agent Control from ${workspaceLabel(workspace)}?`).catch(
+        () => false,
+      ))
+    )
+      return;
     try {
       setBusyId(workspace.id);
       const result = await agentControlApi.disconnectMcpInstallation({

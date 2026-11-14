@@ -35,14 +35,13 @@ import {
   Option,
   PubSub,
   Scope,
-  Semaphore,
   Stream,
-  SynchronizedRef,
 } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
 
 import {
   attachmentPathLines,
@@ -361,7 +360,7 @@ export function makeCursorAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
 
     const sessions = new Map<ThreadId, CursorSessionContext>();
-    const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+    const threadLocks = yield* makeKeyedSerialExecutor<string>();
     const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(2_048);
     // Cursor's own commands per directory (`readLiveProjectCommands`): ACP lists them only
     // inside a session, so a stopped session's list keeps serving its directory.
@@ -384,26 +383,8 @@ export function makeCursorAdapter(
       ).pipe(Effect.asVoid);
     };
 
-    const getThreadSemaphore = (threadId: string) =>
-      SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
-        const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
-          current.get(threadId),
-        );
-        return Option.match(existing, {
-          onNone: () =>
-            Semaphore.make(1).pipe(
-              Effect.map((semaphore) => {
-                const next = new Map(current);
-                next.set(threadId, semaphore);
-                return [semaphore, next] as const;
-              }),
-            ),
-          onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
-        });
-      });
-
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
-      Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+      threadLocks.withLock(threadId, effect);
 
     const logNative = (
       threadId: ThreadId,
