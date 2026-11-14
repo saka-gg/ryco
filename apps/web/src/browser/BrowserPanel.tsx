@@ -30,6 +30,7 @@ import {
   useProjectBrowserTabs,
 } from "./browserState";
 import { isDesktopOwnBackend, useBrowserMode } from "./useBrowserMode";
+import { errorMessage } from "~/lib/errorMessage";
 
 // Node tabs load with the first panel that shows them; desktop and frame users never load them.
 const NodeBrowserPanel = preloadableLazy(() =>
@@ -163,7 +164,7 @@ function ProjectBrowserPanel({
     try {
       await operation();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Browser request failed.");
+      setError(errorMessage(error, "Browser request failed."));
     }
   };
   const discover = useCallback(async () => {
@@ -174,8 +175,7 @@ function ProjectBrowserPanel({
       const result = await api.discover(localCwd);
       if (generation === discovery.generation) setSites(result);
     } catch (error) {
-      if (generation === discovery.generation)
-        setError(error instanceof Error ? error.message : "Discovery failed.");
+      if (generation === discovery.generation) setError(errorMessage(error, "Discovery failed."));
     } finally {
       if (generation === discovery.generation) setDiscovering(false);
     }

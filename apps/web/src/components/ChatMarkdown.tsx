@@ -92,6 +92,7 @@ import {
   isSafeRemoteMarkdownImageSource,
   resolveMarkdownWorkspaceImagePath,
 } from "../markdown-images";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface ChatMarkdownProps {
   allowTerminalInsertion?: boolean;
@@ -319,8 +320,7 @@ function MarkdownCodeBlock({
                     stackedThreadToast({
                       type: "error",
                       title: "Unable to insert in terminal",
-                      description:
-                        error instanceof Error ? error.message : "Terminal insertion failed.",
+                      description: errorMessage(error, "Terminal insertion failed."),
                     }),
                   );
                 },
@@ -565,7 +565,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         stackedThreadToast({
           type: "error",
           title: "Unable to open file",
-          description: error instanceof Error ? error.message : "An error occurred.",
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     });
@@ -596,7 +596,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
           stackedThreadToast({
             type: "error",
             title: `Failed to copy ${title.toLowerCase()}`,
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       },

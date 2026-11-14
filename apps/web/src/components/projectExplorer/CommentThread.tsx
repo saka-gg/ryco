@@ -51,6 +51,7 @@ import {
 } from "./CommentThread.logic";
 import { MarkdownView } from "./MarkdownView";
 import { CommentAvatar } from "./CommentAvatar";
+import { errorMessage } from "~/lib/errorMessage";
 
 const dateTimeFmt = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
@@ -82,14 +83,8 @@ function createClientMutationId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) return error.message;
-  return "Failed to post comment.";
-}
-
 function reactionErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) return error.message;
-  return "Failed to update reaction.";
+  return errorMessage(error, "Failed to update reaction.");
 }
 
 export function AuthorAssociationBadge({
@@ -515,7 +510,7 @@ export function CommentComposer(props: {
       submittedBodyRef.current = null;
       setSuccessMessage("Comment posted.");
     } catch (error) {
-      setSubmitError(errorMessage(error));
+      setSubmitError(errorMessage(error, "Failed to post comment."));
     } finally {
       setIsSubmitting(false);
     }
