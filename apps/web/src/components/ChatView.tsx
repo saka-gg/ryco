@@ -94,11 +94,9 @@ import {
   type OrchestrationThreadMessageSearchResult,
   type ProjectId,
   ProviderInstanceId,
-  type ServerProvider,
   type ScopedThreadRef,
   type ThreadId,
   type TurnId,
-  OrchestrationThreadActivity,
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
@@ -147,8 +145,6 @@ import {
   shouldQueueFollowUpOnServer,
   type FollowUpQueueCommand,
   type FollowUpQueueRow,
-  type PendingFollowUpAdd,
-  type QueuedMessageSteerAttempts,
   awaitsUploads,
   queueHasUploadHeldSend,
 } from "@ryco/client-runtime/state/message-queue";
@@ -248,7 +244,6 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { usePresentationTier } from "../hooks/usePresentationTier";
-import type { PresentationTier } from "../lib/presentationTier";
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
@@ -256,13 +251,7 @@ import {
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { BranchToolbar, COMPOSER_TOOLBAR_ROW_CLASS_NAME, type ThreadDevice } from "./BranchToolbar";
 import { ExecutionTargetLabel } from "./chat/ExecutionTargetSelect";
-import {
-  hasOpenDialogShortcutTarget,
-  isDialogShortcutTarget,
-  isEditableShortcutTarget,
-  resolveShortcutCommand,
-  shortcutLabelForCommand,
-} from "../keybindings";
+import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import {
   ChevronDownIcon,
   CircleAlertIcon,
@@ -356,11 +345,7 @@ import {
 } from "./shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "./shell/phone/usePhoneThreadSurfaceReady";
 import { useChatSessionTabsPrefetch } from "./chat/useChatSessionTabsPrefetch";
-import {
-  createSessionTabsSelector,
-  draftThreadToSidebarSummary,
-  type SessionTabItem,
-} from "../sessionTabs.selectors";
+import { createSessionTabsSelector, draftThreadToSidebarSummary } from "../sessionTabs.selectors";
 import type { SidebarThreadSummary } from "../types";
 import { markTabSwitchClick, usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -440,7 +425,6 @@ import {
   executeChatSendTurn,
   restoreComposerContent,
   restoreUnsentComposerContent,
-  type ComposerDraftContent,
   type SendTurnComposerSnapshot,
   type SendTurnSettings,
 } from "../hooks/executeChatSendTurn";
@@ -593,106 +577,27 @@ import type {
   WorktreeSetupTimelineState,
 } from "./chat/worktreeLaunch/WorktreeSetupTimelineContext";
 import { errorMessage } from "~/lib/errorMessage";
-
-const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
-const EMPTY_PROVIDERS: ServerProvider[] = [];
-const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
-const EMPTY_SESSION_TABS: ReadonlyArray<SessionTabItem> = Object.freeze([]);
-const PROVIDER_STATUS_KEY_SEPARATOR = "\0";
-
-// Stable identity so the message-queue selector doesn't churn on empty threads.
-const EMPTY_QUEUED_MESSAGES: readonly QueuedMessage[] = Object.freeze([]);
-const EMPTY_PENDING_FOLLOW_UPS: readonly PendingFollowUpAdd[] = Object.freeze([]);
-const EMPTY_STEER_ATTEMPTS: QueuedMessageSteerAttempts = Object.freeze({});
-
-/** A launch handed off this recently is still being carried over by a new view. */
-const CONTINUED_LAUNCH_WINDOW_MS = 5_000;
-/** setTimeout's largest delay: an open thread's snooze ending later is not waited for. */
-const MAX_SNOOZE_WAKE_DELAY_MS = 2 ** 31 - 1;
-
-/**
- * Whether a thread opens with the overview rail docked: only where the rail
- * sits inline. Narrow viewports and split panes present right-hand panels as
- * sheets, and the phone tier's overview is a full-screen surface that never
- * opens on its own.
- */
-function overviewOpensByDefault(
-  shouldUseRightPanelSheet: boolean,
-  presentationTier: PresentationTier,
-): boolean {
-  return !shouldUseRightPanelSheet && presentationTier !== "phone";
-}
-
-function providerStatusesContentKey(providers: ReadonlyArray<ServerProvider>): string {
-  const parts: string[] = [`${providers.length}`];
-  for (const provider of providers) {
-    parts.push(
-      provider.instanceId,
-      provider.driver,
-      provider.displayName ?? "",
-      provider.accentColor ?? "",
-      provider.badgeLabel ?? "",
-      provider.continuation?.groupKey ?? "",
-      provider.showInteractionModeToggle ? "1" : "0",
-      provider.supportsAskMode ? "1" : "0",
-      provider.supportsTurnSteering ? "1" : "0",
-      provider.enabled ? "1" : "0",
-      provider.status,
-      provider.installed ? "1" : "0",
-      provider.availability ?? "",
-      provider.unavailableReason ?? "",
-      provider.auth.status,
-      provider.auth.type ?? "",
-      provider.auth.label ?? "",
-      provider.auth.email ?? "",
-      provider.message ?? "",
-      // The composer's usage popup reads limits from these snapshots.
-      provider.checkedAt,
-      JSON.stringify(provider.rateLimits) ?? "",
-    );
-    for (const model of provider.models) {
-      parts.push(
-        "model",
-        model.slug,
-        model.name,
-        model.shortName ?? "",
-        model.subProvider ?? "",
-        model.isCustom ? "1" : "0",
-        JSON.stringify(model.capabilities) ?? "",
-      );
-    }
-    for (const command of provider.slashCommands) {
-      parts.push("command", command.name, command.description ?? "", command.input?.hint ?? "");
-    }
-    for (const skill of provider.skills) {
-      parts.push(
-        "skill",
-        skill.name,
-        skill.path,
-        skill.enabled ? "1" : "0",
-        skill.scope ?? "",
-        skill.displayName ?? "",
-        skill.shortDescription ?? "",
-        skill.description ?? "",
-      );
-    }
-  }
-  return parts.join(PROVIDER_STATUS_KEY_SEPARATOR);
-}
-
-function stabilizeProviderStatusesSnapshot(
-  providers: ReadonlyArray<ServerProvider>,
-  cache: { key: string; snapshot: ServerProvider[] },
-): ServerProvider[] {
-  const key = providerStatusesContentKey(providers);
-  if (key === cache.key) {
-    return cache.snapshot;
-  }
-  const snapshot = providers as ServerProvider[];
-  cache.key = key;
-  cache.snapshot = snapshot;
-  return snapshot;
-}
+import { readComposerDraftContent } from "./ChatView.composerDraft";
+import {
+  CONTINUED_LAUNCH_WINDOW_MS,
+  EMPTY_ACTIVITIES,
+  EMPTY_PENDING_FOLLOW_UPS,
+  EMPTY_PROVIDER_SKILLS,
+  EMPTY_PROVIDERS,
+  EMPTY_QUEUED_MESSAGES,
+  EMPTY_SESSION_TABS,
+  EMPTY_STEER_ATTEMPTS,
+  MAX_SNOOZE_WAKE_DELAY_MS,
+  overviewOpensByDefault,
+  PROVIDER_SESSION_PREWARM_FOCUS_DWELL_MS,
+} from "./ChatView.defaults";
+import {
+  COMPOSER_CLEARANCE_PROPERTY,
+  HEADER_CLEARANCE_PROPERTY,
+  publishOverlayClearance,
+  shouldIgnoreThreadMessageSearchShortcut,
+} from "./ChatView.dom";
+import { stabilizeProviderStatusesSnapshot } from "./ChatView.providerStatuses";
 
 type ChatViewProps =
   | {
@@ -733,82 +638,6 @@ interface TerminalLaunchContext {
 interface ThreadMessageSearchTarget {
   messageId: MessageId;
   requestId: number;
-}
-
-function elementFromEventTarget(target: EventTarget | null | undefined): Element | null {
-  if (typeof Element === "undefined") return null;
-  return target instanceof Element ? target : null;
-}
-
-function isAllowedThreadSearchEditableTarget(target: EventTarget | null | undefined): boolean {
-  return (
-    elementFromEventTarget(target)?.closest(
-      '[data-chat-composer-form="true"], [data-thread-message-search="true"]',
-    ) !== null
-  );
-}
-
-/** A diff view (the Diff panel) runs its own find while focus is inside it. */
-function isDiffFindSurfaceTarget(target: EventTarget | null | undefined): boolean {
-  return elementFromEventTarget(target)?.closest("[data-diff-find-surface]") != null;
-}
-
-function shouldIgnoreThreadMessageSearchShortcut(
-  event: globalThis.KeyboardEvent & { isComposing?: boolean },
-): boolean {
-  if (event.type !== "keydown") return true;
-  if (event.isComposing) return true;
-  if (isTerminalFocused()) return true;
-  if (isDiffFindSurfaceTarget(event.target)) return true;
-  if (isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget()) return true;
-  if (
-    isEditableShortcutTarget(event.target) &&
-    !isAllowedThreadSearchEditableTarget(event.target)
-  ) {
-    return true;
-  }
-  return false;
-}
-
-/** Chat column custom properties carrying the floating bars' heights. */
-const COMPOSER_CLEARANCE_PROPERTY = "--chat-composer-clearance";
-const HEADER_CLEARANCE_PROPERTY = "--chat-header-clearance";
-
-/**
- * Publishes `bar`'s rendered height plus a small gap on `host` as a CSS
- * variable. The size comes from the observer's notifications, which run once
- * layout is clean and before the first paint: reading the height here
- * directly would force a layout of the freshly committed tree on every
- * switch. Returns the cleanup that drops the variable.
- */
-function publishOverlayClearance(
-  host: HTMLElement,
-  bar: HTMLElement,
-  property: string,
-): () => void {
-  const apply = () => host.style.setProperty(property, `${bar.offsetHeight + 8}px`);
-  const observer = new ResizeObserver(apply);
-  observer.observe(bar);
-  return () => {
-    observer.disconnect();
-    host.style.removeProperty(property);
-  };
-}
-
-/** How long the composer keeps focus on a thread before that focus prewarms its session. */
-const PROVIDER_SESSION_PREWARM_FOCUS_DWELL_MS = 400;
-
-/** A composer draft's stored content: what a send reads once its view shows another thread. */
-function readComposerDraftContent(target: ScopedThreadRef | DraftId): ComposerDraftContent | null {
-  const draft = useComposerDraftStore.getState().getComposerDraft(target);
-  return draft
-    ? {
-        prompt: draft.prompt,
-        images: draft.images,
-        terminalContexts: draft.terminalContexts,
-        fileReferences: draft.fileReferences,
-      }
-    : null;
 }
 
 export default function ChatView(props: ChatViewProps) {
