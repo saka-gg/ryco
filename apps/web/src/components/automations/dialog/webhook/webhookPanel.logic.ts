@@ -6,6 +6,7 @@
  * that name), so copying one never leaks it into a shell history or a file.
  */
 import type { AutomationHookRequestOutcome, AutomationHookView } from "@ryco/contracts";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 /** The address a sender reaches this machine at, when the app knows none it can use. */
 export const DIRECT_ORIGIN_PLACEHOLDER = "<this machine's address>";
@@ -77,12 +78,12 @@ export function hookCloudRow(
   }
 }
 
-/** Loopback hosts: an address only this machine reaches. */
+/**
+ * Loopback hosts: an address only this machine reaches. IPv4 keeps the `127.` prefix rule this
+ * hint had before `loopbackHost` existed.
+ */
 function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return (
-    host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127.")
-  );
+  return isLoopbackHostname(hostname, { ipv4: "127-prefix", localhostSubdomains: true });
 }
 
 /**

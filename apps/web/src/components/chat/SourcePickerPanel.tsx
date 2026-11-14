@@ -26,6 +26,7 @@ import { Input } from "../ui/input";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { Switch } from "../ui/switch";
 import { ContextPickerTabs } from "./ContextPickerTabs";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** What the user picked: a branch, a pull request, an issue or a Jira item. */
 export type NewThreadSource =
@@ -40,8 +41,6 @@ const SOURCE_TABS = [
   { id: "issues", label: "Issues" },
   { id: "jira", label: "Jira" },
 ] as const;
-
-export type SourcePickerSourceTab = (typeof SOURCE_TABS)[number]["id"];
 
 /** A tab a surface adds after the four sources (the Tasks page's chats and links). */
 export interface SourcePickerExtraTab {
@@ -301,7 +300,7 @@ function BranchSourceList({
       } catch (cause) {
         if (!cancelled) {
           initialFetch.current = null;
-          setError(cause instanceof Error ? cause.message : "Could not load branches.");
+          setError(errorMessage(cause, "Could not load branches."));
         }
       } finally {
         if (!cancelled) setPending(false);

@@ -16,10 +16,10 @@ import { usePullRequestSelection } from "../PullRequestsPageContext";
 import {
   COMPOSER_BOX_CLASS,
   COMPOSER_TEXTAREA_CLASS,
-  errorText,
   handleComposerKeys,
   SubmitKeyHint,
 } from "./MarkdownEditor";
+import { errorMessage } from "~/lib/errorMessage";
 
 export interface TimelineComposerHandle {
   /** Append a quote to the draft, then focus the composer and bring it into view. */
@@ -114,7 +114,7 @@ export function TimelineComposer(props: {
       if (close) await update.mutateAsync({ kind: "close" });
     } catch (submitError) {
       setError(
-        errorText(
+        errorMessage(
           submitError,
           close ? "Could not close the pull request." : "Could not post the comment.",
         ),

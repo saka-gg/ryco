@@ -40,6 +40,7 @@ import type {
   AgentControlMcpToolResult,
   AgentControlMcpTools,
 } from "./tools.ts";
+import { ToolFailure, decodeToolArgs } from "./toolFailure.ts";
 
 const listDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList,
@@ -106,14 +107,6 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
   isError: true,
 });
 
-class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
-
 export interface QueueToolDeps {
   readonly policy: Pick<AgentControlPolicyShape, "authorize" | "isEnabled">;
   readonly registry: Pick<AgentControlSessionRegistryShape, "getTurnAuthority">;
@@ -166,10 +159,6 @@ export function withQueueTools(
             : new ToolFailure("Capability denied."),
         ),
       );
-  const decode = <S extends Schema.Top>(schema: S, args: unknown) =>
-    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
-      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
-    ) as Effect.Effect<S["Type"], ToolFailure>;
   const exactAuthority = (session: AgentControlSessionRecord) =>
     deps.registry
       .getTurnAuthority(session.sessionId)
@@ -220,7 +209,7 @@ export function withQueueTools(
   const list = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* authorize(session, listDescriptor.name);
-      const input = yield* decode(AgentControlQueueListInput, args);
+      const input = yield* decodeToolArgs(AgentControlQueueListInput, args);
       const queue = yield* queueOf(input.threadId);
       return textResult({
         threadId: input.threadId,
@@ -231,7 +220,7 @@ export function withQueueTools(
   const edit = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* writeAuthority(session, editDescriptor.name);
-      const input = yield* decode(AgentControlQueueEditInput, args);
+      const input = yield* decodeToolArgs(AgentControlQueueEditInput, args);
       const queue = yield* queueOf(input.threadId);
       const entry = queue.entries.find((candidate) => candidate.messageId === input.messageId);
       if (entry === undefined || !ownEntry(entry, session)) {
@@ -274,7 +263,7 @@ export function withQueueTools(
   const remove = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* writeAuthority(session, removeDescriptor.name);
-      const input = yield* decode(AgentControlQueueRemoveInput, args);
+      const input = yield* decodeToolArgs(AgentControlQueueRemoveInput, args);
       const queue = yield* queueOf(input.threadId);
       const wanted = [...new Set<string>(input.messageIds)];
       const entries = queue.entries.filter((entry) => wanted.includes(entry.messageId));
@@ -304,7 +293,7 @@ export function withQueueTools(
   ): Effect.Effect<AgentControlMcpToolResult> =>
     effect.pipe(
       Effect.catch((error) =>
-        Effect.succeed(errorResult(error instanceof ToolFailure ? error.text : fallback)),
+        Effect.succeed(errorResult(error instanceof ToolFailure ? error.reason : fallback)),
       ),
     );
 

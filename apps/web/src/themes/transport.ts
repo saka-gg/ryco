@@ -10,6 +10,7 @@ import {
   updateCustomTheme,
 } from "./registry";
 import type { ThemeDefinition } from "./types";
+import { errorMessage } from "~/lib/errorMessage";
 
 export const THEME_FILE_EXTENSION = ".rycotheme.json";
 
@@ -37,10 +38,9 @@ export function parseTheme(raw: string): ThemeDefinition {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
-      `Could not parse theme JSON: ${error instanceof Error ? error.message : "invalid JSON"}`,
-      { cause: error },
-    );
+    throw new Error(`Could not parse theme JSON: ${errorMessage(error, "invalid JSON")}`, {
+      cause: error,
+    });
   }
   if (!isValidTheme(parsed)) {
     throw new Error(

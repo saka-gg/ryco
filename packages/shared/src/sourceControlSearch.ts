@@ -1,11 +1,15 @@
-import type { SourceControlIssueSummary } from "@ryco/contracts";
+/** What the search reads from a row; issues and change requests both have it. */
+export interface SourceControlSearchable {
+  readonly number: number;
+  readonly title: string;
+}
 
 /**
  * Narrows already-read issue or change request rows to a typed query, best
  * match first: a number (or its prefix), then a title prefix, then a title
  * substring; ties go to the shorter title. An empty query keeps every row.
  */
-export function searchSourceControlSummaries<T extends SourceControlIssueSummary>(
+export function searchSourceControlSummaries<T extends SourceControlSearchable>(
   items: ReadonlyArray<T>,
   query: string,
 ): ReadonlyArray<T> {

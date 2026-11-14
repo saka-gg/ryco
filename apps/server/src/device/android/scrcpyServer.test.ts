@@ -19,6 +19,13 @@ describe("scrcpy-server artifact", () => {
       path.join("/srv/ryco", "cache", "android"),
     );
     expect(androidCacheRoot({}, "/h")).toBe(path.join("/h", ".ryco", "cache", "android"));
+    // Resolved like the server's own base directory, not taken literally.
+    expect(androidCacheRoot({ RYCO_HOME: "~/nodes/two" }, "/h")).toBe(
+      path.join("/h", "nodes", "two", "cache", "android"),
+    );
+    expect(androidCacheRoot({ RYCO_HOME: "relative" }, "/h")).toBe(
+      path.join(path.resolve("relative"), "cache", "android"),
+    );
   });
 
   it("refuses a download whose checksum is wrong, and remembers the failure", async () => {

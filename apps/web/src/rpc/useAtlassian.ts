@@ -10,7 +10,7 @@ import { Atom } from "effect/reactivity";
 
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
-import { useAsyncMutation } from "./useWorkItems";
+import { useMutation } from "./useMutation";
 import { invalidateWorkItems } from "./workItemsAtoms";
 import {
   type AtlassianConnectionsInput,
@@ -176,7 +176,7 @@ export function useSaveAtlassianProjectLinkMutation(input: {
   readonly onSuccess?: () => void;
   readonly onError?: (error: Error) => void;
 }) {
-  return useAsyncMutation({
+  return useMutation({
     mutationFn: async (payload: AtlassianSaveProjectLinkInput) => {
       if (!input.environmentId) {
         throw new Error("No project connection is available.");

@@ -2,8 +2,9 @@ import type { KVService, SecretKVService } from "@ryco/client-runtime/platform";
 import {
   createSavedEnvironmentCatalog,
   type SavedEnvironmentKV,
-  type SavedEnvironmentRecord,
 } from "@ryco/client-runtime/connection";
+import { PersistedSavedEnvironmentRecord } from "@ryco/contracts/saved-environment";
+import { decodeSavedEnvironmentRecords } from "@ryco/shared/savedEnvironmentRecord";
 
 import { mobileKV, mobileSecretKV } from "../platform";
 
@@ -22,8 +23,8 @@ export function createMobileSavedEnvironmentKV(kv: RegistryKV = mobileKV): Saved
       const raw = await kv.getItem(REGISTRY_KEY);
       if (!raw) return [];
       try {
-        const parsed = JSON.parse(raw) as ReadonlyArray<SavedEnvironmentRecord>;
-        return Array.isArray(parsed) ? parsed : [];
+        // Record by record: one this build cannot read is left out, the rest still connect.
+        return decodeSavedEnvironmentRecords(JSON.parse(raw), PersistedSavedEnvironmentRecord);
       } catch {
         return [];
       }

@@ -4,6 +4,8 @@ import * as Schema from "effect/Schema";
 
 import {
   EnvironmentId,
+  ExecutionEnvironmentPlatformArch,
+  ExecutionEnvironmentPlatformOs,
   NonNegativeInt,
   PositiveInt,
   ProjectId,
@@ -11,16 +13,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 
-export const ExecutionEnvironmentPlatformOs = Schema.Literals([
-  "darwin",
-  "linux",
-  "windows",
-  "unknown",
-]);
-export type ExecutionEnvironmentPlatformOs = typeof ExecutionEnvironmentPlatformOs.Type;
-
-export const ExecutionEnvironmentPlatformArch = Schema.Literals(["arm64", "x64", "other"]);
-export type ExecutionEnvironmentPlatformArch = typeof ExecutionEnvironmentPlatformArch.Type;
+export { ExecutionEnvironmentPlatformArch, ExecutionEnvironmentPlatformOs };
 
 export const ENVIRONMENT_MACHINE_KINDS = [
   "laptop",

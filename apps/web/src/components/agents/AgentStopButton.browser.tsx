@@ -143,7 +143,7 @@ describe("AgentStopButton", () => {
         Promise.reject(
           new OrchestrationStopBackgroundTaskError({
             reason: "stop-failed",
-            threadId: "thread-stop",
+            threadId: ThreadId.make("thread-stop"),
             taskId: "live",
           }),
         ),
@@ -246,7 +246,7 @@ describe("AgentStopButton", () => {
     refuse(
       new OrchestrationStopBackgroundTaskError({
         reason: "session-not-found",
-        threadId: "thread-stop",
+        threadId: ThreadId.make("thread-stop"),
         taskId: "live",
       }),
     );

@@ -9,6 +9,7 @@ import type { ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { newCommandId } from "./lib/utils";
 import { readSidebarUndoContext, sidebarUndo } from "./sidebarUndo";
+import { errorMessage } from "~/lib/errorMessage";
 
 // The bulk half of threadLifecycleCommands.ts, which loads it with the first
 // bulk action and hands it the command to send, so the shell does not carry
@@ -19,8 +20,7 @@ export type ThreadBatchAction = "settle" | "unsettle" | "snooze" | "unsnooze";
 
 const threadCount = (count: number) => (count === 1 ? "1 thread" : `${count} threads`);
 
-const errorDescription = (error: unknown) =>
-  error instanceof Error ? error.message : "The request failed.";
+const errorDescription = (error: unknown) => errorMessage(error, "The request failed.");
 
 /** Says that a bulk action left `count` threads alone: their machine takes no changes now. */
 export function presentSkippedThreads(count: number): void {
