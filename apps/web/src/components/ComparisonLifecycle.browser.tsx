@@ -21,7 +21,7 @@ vi.mock("../environments/runtime", () => ({
     select({ byId: {} }),
 }));
 vi.mock("../platform/kv", () => ({
-  webKV: {
+  appKV: {
     getItem: async (key: string) => fixture.values.get(key) ?? null,
     setItem: async (key: string, value: string) => {
       fixture.values.set(key, value);

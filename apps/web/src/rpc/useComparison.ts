@@ -6,7 +6,7 @@ import {
 import { useMemo, useSyncExternalStore } from "react";
 import { ensureEnvironmentApi } from "../environmentApi";
 import { useEnvironmentServerConfigSelector } from "../hooks/useChatsAvailability";
-import { webKV } from "../platform/kv";
+import { appKV } from "../platform/kv";
 import { useRepositoryReadLifecycle } from "./useRepositoryReadLifecycle";
 
 // Module level, so unrelated config pushes (provider probes) never re-render.
@@ -24,7 +24,8 @@ export function useComparison(input: {
   const controller = useMemo(
     () =>
       createComparisonController({
-        storage: webKV,
+        // The key carries the node id and repository path: memory only in hosted builds.
+        storage: appKV,
         storageKey: comparisonStorageKey(environmentId ?? "", repositoryPath ?? ""),
         read: (selection, knownRevision) => {
           if (!environmentId || !cwd) return Promise.reject(new Error("Repository unavailable."));

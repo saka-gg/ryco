@@ -206,21 +206,6 @@ async function moveEntryToServer(
   );
 }
 
-const MOVED_QUEUES_STORAGE_KEY = "ryco:follow-up-queue-moved:v1";
-
-/** Records, in this browser, that every queued message for the node moved to it. */
-function recordServerQueueMigrated(environmentId: EnvironmentId): void {
-  try {
-    const raw = window.localStorage.getItem(MOVED_QUEUES_STORAGE_KEY);
-    const record = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-    if (record[environmentId] !== undefined) return;
-    record[environmentId] = new Date().toISOString();
-    window.localStorage.setItem(MOVED_QUEUES_STORAGE_KEY, JSON.stringify(record));
-  } catch {
-    // Storage unavailable: the record is informational, a later move is idempotent anyway.
-  }
-}
-
 /** Whether the thread already has the message, queued on the node or sent. */
 function followUpVisible(ref: ScopedThreadRef, messageId: string): boolean {
   const state = useStore.getState();
@@ -288,7 +273,6 @@ const webPlatform: MessageQueueDrainPlatform<SendTurnComposerSnapshot, SendTurnS
   // starts its turn once the uploads finished, as the timeline shows it.
   isEntryMovable: (entry) =>
     entry.uploadHold?.sentAs !== "send" && isWebFollowUpMovable(entry.composer, entry.settings),
-  onServerQueueMigrated: recordServerQueueMigrated,
   isServerQueueAddPending: (threadKey) => countPendingFollowUpAdds(threadKey) > 0,
 };
 
