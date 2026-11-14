@@ -16,6 +16,7 @@ import {
   type AcpAgentConfig,
 } from "@ryco/client-runtime/state/settings/acpAgentConfig";
 import { AcpLocalCommandSettings } from "./AcpLocalCommandSettings";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * An ACP agent instance's source: a pinned registry install or a local command. The source can
@@ -119,7 +120,7 @@ function AcpRegistryAgentPicker({
         })
         .catch((cause: unknown) => {
           if (generation.current === current)
-            setError(cause instanceof Error ? cause.message : "Could not load the registry.");
+            setError(errorMessage(cause, "Could not load the registry."));
         })
         .finally(() => {
           if (generation.current === current) setLoading(false);
@@ -151,8 +152,7 @@ function AcpRegistryAgentPicker({
         );
       })
       .catch((cause: unknown) => {
-        if (generation.current === current)
-          setError(cause instanceof Error ? cause.message : "Installation failed.");
+        if (generation.current === current) setError(errorMessage(cause, "Installation failed."));
       })
       .finally(() => {
         if (generation.current === current) setInstalling(null);

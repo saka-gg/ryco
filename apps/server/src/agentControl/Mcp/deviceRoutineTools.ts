@@ -68,24 +68,13 @@ import type {
   AgentControlSessionRegistryShape,
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
-import type { ToolFailure } from "./threadReads.ts";
 import type {
   AgentControlMcpToolDescriptor,
   AgentControlMcpToolResult,
   AgentControlMcpTools,
   submitAgentControlMutation,
 } from "./tools.ts";
-
-/** A refusal in words, shaped like the catalogue's own `ToolFailure`. */
-class DeviceToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly reason: string;
-  constructor(reason: string) {
-    this.reason = reason;
-  }
-}
-
-type Failure = DeviceToolFailure | ToolFailure;
+import { ToolFailure } from "./toolFailure.ts";
 
 export const RYCO_DEVICE_TOOL = AGENT_CONTROL_DEVICE_TOOL;
 
@@ -239,9 +228,9 @@ export function withDeviceRoutineTools(
     session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices) &&
     session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.readDeviceContent);
 
-  const decodeInput = (args: unknown): Effect.Effect<RoutineInput, DeviceToolFailure> => {
+  const decodeInput = (args: unknown): Effect.Effect<RoutineInput, ToolFailure> => {
     if (args === null || typeof args !== "object" || Array.isArray(args))
-      return Effect.fail(new DeviceToolFailure("Invalid tool arguments."));
+      return Effect.fail(new ToolFailure("Invalid tool arguments."));
     const { action, udid, ...rest } = args as Record<string, unknown>;
     const decodedUdid = decodeUdid(udid);
     if (
@@ -250,7 +239,7 @@ export function withDeviceRoutineTools(
       Option.isNone(decodedUdid) ||
       Object.keys(rest).some((name) => !ARGUMENT_NAMES.has(name))
     )
-      return Effect.fail(new DeviceToolFailure("Invalid tool arguments."));
+      return Effect.fail(new ToolFailure("Invalid tool arguments."));
     return Effect.succeed({ action: action as RycoDeviceAction, udid: decodedUdid.value, rest });
   };
 
@@ -266,9 +255,7 @@ export function withDeviceRoutineTools(
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(
-              new DeviceToolFailure("Exact active-turn device authority is unavailable."),
-            ),
+            Effect.fail(new ToolFailure("Exact active-turn device authority is unavailable.")),
           onSome: Effect.succeed,
         }),
       ),
@@ -291,18 +278,18 @@ export function withDeviceRoutineTools(
       .pipe(
         Effect.mapError((error) =>
           error._tag === "AgentControlDisabledError"
-            ? new DeviceToolFailure("Agent Control is disabled.")
-            : new DeviceToolFailure("Capability denied."),
+            ? new ToolFailure("Agent Control is disabled.")
+            : new ToolFailure("Capability denied."),
         ),
         Effect.flatMap(() =>
           // Input returns the screen, so it needs the content grant too.
           session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.readDeviceContent)
             ? Effect.void
-            : Effect.fail(new DeviceToolFailure("Capability denied.")),
+            : Effect.fail(new ToolFailure("Capability denied.")),
         ),
       );
 
-  const consentUnavailable = () => new DeviceToolFailure("Device consent state is unavailable.");
+  const consentUnavailable = () => new ToolFailure("Device consent state is unavailable.");
 
   /**
    * The user's answer for this task and device: granted, still pending,
@@ -313,7 +300,7 @@ export function withDeviceRoutineTools(
     session: AgentControlSessionRecord,
     authority: AgentControlTurnAuthority,
     udid: DeviceUdid,
-  ): Effect.Effect<ConsentAnswer, Failure> =>
+  ): Effect.Effect<ConsentAnswer, ToolFailure> =>
     Effect.gen(function* () {
       const thread = yield* deps.projections
         .getThreadShellById(session.threadId)
@@ -385,22 +372,22 @@ export function withDeviceRoutineTools(
   const run = (
     session: AgentControlSessionRecord,
     args: unknown,
-  ): Effect.Effect<AgentControlMcpToolResult, Failure> =>
+  ): Effect.Effect<AgentControlMcpToolResult, ToolFailure> =>
     Effect.gen(function* () {
       const input = yield* decodeInput(args);
       const authority = yield* requireAuthority(session);
       yield* authorize(session, authority);
       if (!deps.deviceService.supported)
         return yield* Effect.fail(
-          new DeviceToolFailure("Simulator or emulator device control is unavailable."),
+          new ToolFailure("Simulator or emulator device control is unavailable."),
         );
       // Never a device another thread also watches, and never one this thread lacks.
       // "Use simulators" / "Agents can use simulators" off: nothing reaches a device.
       const accessRefusal = agentDeviceRefusal();
-      if (accessRefusal !== null) return yield* Effect.fail(new DeviceToolFailure(accessRefusal));
+      if (accessRefusal !== null) return yield* Effect.fail(new ToolFailure(accessRefusal));
       // The shared core checks again right before every input ("require-attached").
       const refusal = attachmentFenceRefusal(manager, session.threadId, input.udid);
-      if (refusal !== null) return yield* Effect.fail(new DeviceToolFailure(refusal));
+      if (refusal !== null) return yield* Effect.fail(new ToolFailure(refusal));
 
       // The guide goes out with the first answer past the fences (often the consent
       // request), claimed before any await so concurrent first calls send it once. A
@@ -431,7 +418,7 @@ export function withDeviceRoutineTools(
     input: RoutineInput,
     authority: AgentControlTurnAuthority,
     guide: ReadonlyArray<string>,
-  ): Effect.Effect<AgentControlMcpToolResult, Failure> =>
+  ): Effect.Effect<AgentControlMcpToolResult, ToolFailure> =>
     Effect.gen(function* () {
       if (NEEDS_CONSENT.has(input.action)) {
         const consent = yield* requireConsent(session, authority, input.udid);
@@ -458,7 +445,7 @@ export function withDeviceRoutineTools(
         current.value.turnId !== authority.turnId ||
         current.value.threadId !== session.threadId
       )
-        return yield* Effect.fail(new DeviceToolFailure("This turn has ended; no input was sent."));
+        return yield* Effect.fail(new ToolFailure("This turn has ended; no input was sent."));
 
       const threadId: ThreadId = session.threadId;
       const result = yield* Effect.tryPromise({
@@ -476,7 +463,7 @@ export function withDeviceRoutineTools(
             maxImageBase64Chars: deps.maxImageBase64Chars,
             timing: deps.timing,
           }),
-        catch: () => new DeviceToolFailure("Device control failed."),
+        catch: () => new ToolFailure("Device control failed."),
       });
       return deviceResult(
         [...guide.map((text) => ({ type: "text" as const, text })), ...result.content],

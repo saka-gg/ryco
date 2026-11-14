@@ -16,6 +16,7 @@ import { PROJECT_COPY_MAX_CODE_ROOTS, type NodeCodeRootSource } from "@ryco/cont
 
 import { expandHomePath } from "../pathExpansion.ts";
 import { foldPathCase, hasGitEntry } from "./projectDestination.ts";
+import { isCanonicalPathInside } from "../pathContainment.ts";
 
 /**
  * Home folders people keep code in, in the order a default is picked from. Both `Code` and
@@ -132,14 +133,12 @@ const realDirectory = async (candidate: string): Promise<string | null> => {
 /** Paths cross the wire as trimmed strings; a folder whose name ends in a space cannot. */
 const isTrimmedPath = (candidate: string) => candidate === candidate.trim();
 
-const isWithin = (root: string, candidate: string, platform: NodeJS.Platform) => {
-  const foldedRoot = foldPathCase(root, platform);
-  const foldedCandidate = foldPathCase(candidate, platform);
-  return (
-    foldedCandidate === foldedRoot ||
-    foldedCandidate.startsWith(foldedRoot.endsWith(path.sep) ? foldedRoot : foldedRoot + path.sep)
-  );
-};
+const isWithin = (root: string, candidate: string, platform: NodeJS.Platform) =>
+  isCanonicalPathInside({
+    root: foldPathCase(root, platform),
+    candidate: foldPathCase(candidate, platform),
+    allowRoot: true,
+  });
 
 /** Projects rooted strictly below `root`, matched by the root as given and by its realpath. */
 const countProjectsBelow = (

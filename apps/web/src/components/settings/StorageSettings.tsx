@@ -44,6 +44,7 @@ import {
 } from "./settingsLayout";
 import { saveSharedSetting, useSharedSettingWriter } from "./sharedSettings/SharedSettingRow";
 import { SettingsSelect } from "./SettingsSelect";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** Node storage is separate from client/device cache and never appears in the frozen phone tier. */
 export function StorageSettings() {
@@ -113,7 +114,7 @@ function StorageEditor({
         await saveSharedSetting(sharedRetention.save, next);
       }
     } catch (cause) {
-      setSaveError(cause instanceof Error ? cause.message : "Could not save retention policy.");
+      setSaveError(errorMessage(cause, "Could not save retention policy."));
     } finally {
       setSaving(false);
     }
@@ -137,7 +138,7 @@ function StorageEditor({
   };
   const visibleEntries =
     state.snapshot?.entries.filter((entry) => !projectId || entry.projectId === projectId) ?? [];
-  const errorMessage = state.error ?? saveError;
+  const visibleError = state.error ?? saveError;
   return (
     <SettingsSection
       title="Storage"
@@ -476,7 +477,7 @@ function StorageEditor({
           </div>
         </SettingsBlock>
       ) : null}
-      {state.result?.results.length || errorMessage ? (
+      {state.result?.results.length || visibleError ? (
         <SettingsBlock className="flex flex-col gap-2">
           {state.result?.results.map((result) => (
             <p role="status" key={result.id} className="text-xs text-muted-foreground">
@@ -484,9 +485,9 @@ function StorageEditor({
               {result.detail}
             </p>
           ))}
-          {errorMessage ? (
+          {visibleError ? (
             <SettingsNotice tone="error" role="alert">
-              {errorMessage}
+              {visibleError}
             </SettingsNotice>
           ) : null}
         </SettingsBlock>

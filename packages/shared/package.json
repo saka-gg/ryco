@@ -20,6 +20,9 @@
     "./terminalPaste": "./src/terminalPaste.ts",
     "./terminalReports": "./src/terminalReports.ts",
     "./cliProxyHubUrl": "./src/cliProxyHubUrl.ts",
+    "./loopbackHost": "./src/loopbackHost.ts",
+    "./sourceControlDetailContent": "./src/sourceControlDetailContent.ts",
+    "./utf8Truncate": "./src/utf8Truncate.ts",
     "./cliProxyHubCredentials": "./src/cliProxyHubCredentials.ts",
     "./retiredFeatures": "./src/retiredFeatures.ts",
     "./backgroundWork": {
@@ -458,10 +461,6 @@
       "types": "./src/relayCodec.ts",
       "import": "./src/relayCodec.ts"
     },
-    "./nightlyFeatures": {
-      "types": "./src/nightlyFeatures.ts",
-      "import": "./src/nightlyFeatures.ts"
-    },
     "./nodeIdentity": {
       "types": "./src/nodeIdentity.ts",
       "import": "./src/nodeIdentity.ts"
@@ -769,6 +768,10 @@
     "./thirdPartyLicenses": {
       "types": "./src/thirdPartyLicenses.ts",
       "import": "./src/thirdPartyLicenses.ts"
+    },
+    "./unknownValue": {
+      "types": "./src/unknownValue.ts",
+      "import": "./src/unknownValue.ts"
     }
   },
   "scripts": {

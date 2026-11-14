@@ -34,6 +34,7 @@ import { useTerminalStateStore } from "../terminalStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "./useSettings";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 type DeleteThreadOptions = {
   /** Every thread deleted alongside this one, so the fallback route skips them too. */
@@ -54,8 +55,7 @@ export type DeleteThread = (
   opts?: DeleteThreadOptions,
 ) => Promise<DeletedThread | null>;
 
-const errorDescription = (error: unknown) =>
-  error instanceof Error ? error.message : "An error occurred.";
+const errorDescription = (error: unknown) => errorMessage(error, "An error occurred.");
 
 /** One toast per delete action (a single thread or a whole selection), with Undo for all of it. */
 function presentThreadDeleteToast(deleted: readonly DeletedThread[]): void {

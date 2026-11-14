@@ -16,6 +16,7 @@ import {
   type DeviceSettingsFileSection,
   type DeviceSettingsFileValues,
 } from "./deviceSettingsFile";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 /**
  * One settings file (port of T3 Code's device settings file, #23045): this app's own preferences
@@ -182,9 +183,6 @@ export interface ClientSettingsImportPlan {
   /** The file's shared device settings, checked; null when it holds none (older files). */
   readonly deviceSettings: DeviceSettingsFileValues | null;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const show = (value: unknown): string => {
   const text = JSON.stringify(value);

@@ -168,6 +168,7 @@ const rootConfig = {
       "ryco/no-partial-runtime-mock-in-browser-tests": "error",
       "ryco/no-raw-mcp-dispatch": "error",
       "ryco/no-real-time-wait-in-tests": "error",
+      "ryco/prefer-shared-error-message": "error",
       "ryco/require-suppression-reason": "error",
     },
     overrides: [

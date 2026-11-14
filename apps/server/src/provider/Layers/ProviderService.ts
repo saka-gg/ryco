@@ -92,6 +92,7 @@ import {
   ProviderValidationError,
 } from "../Errors.ts";
 import { runDetachedWithDeadline, runDetachedWithDeadlineOption } from "../detachedDeadline.ts";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import {
   providerOperationTimeoutDetail,
@@ -124,6 +125,7 @@ import {
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeRingBuffer } from "../../ringBuffer.ts";
+import { makeSharedPayloadSecretRedactor } from "../../agentControl/secretRedaction.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 
 /**
@@ -432,25 +434,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     pendingByInstance: new Map(),
     highWaterByInstance: new Map(),
   });
-  const sessionStartLocks = yield* SynchronizedRef.make(new Map<ThreadId, Semaphore.Semaphore>());
-
-  const getSessionStartLock = (threadId: ThreadId) =>
-    SynchronizedRef.modifyEffect(sessionStartLocks, (current) => {
-      const existing = current.get(threadId);
-      if (existing) {
-        return Effect.succeed([existing, current] as const);
-      }
-      return Semaphore.make(1).pipe(
-        Effect.map((semaphore) => {
-          const next = new Map(current);
-          next.set(threadId, semaphore);
-          return [semaphore, next] as const;
-        }),
-      );
-    });
+  const sessionStartLocks = yield* makeKeyedSerialExecutor<ThreadId>();
 
   const withSessionStartLock = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
-    Effect.flatMap(getSessionStartLock(threadId), (semaphore) => semaphore.withPermit(effect));
+    sessionStartLocks.withLock(threadId, effect);
 
   const serviceScope = yield* Effect.scope;
 
@@ -653,8 +640,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.asVoid,
     );
 
+  // Every adapter's events pass here: Agent Control tokens a tool echoed are redacted once, for
+  // every subscriber (persisted activities, the canonical log). Copy-on-write, and an SDK message
+  // several events share as `raw.payload` is walked once. That cache holds because adapters never
+  // mutate a payload object after emitting it; one that did could republish a token unredacted.
+  const runtimeEventSecretRedactor = makeSharedPayloadSecretRedactor();
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Effect.succeed(event).pipe(
+    Effect.sync(() => runtimeEventSecretRedactor.event(event)).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEvent.providerInstanceId === undefined
           ? Effect.void

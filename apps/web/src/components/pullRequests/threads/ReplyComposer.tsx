@@ -4,6 +4,7 @@ import { cn } from "../../../lib/utils";
 import { Button } from "../../ui/button";
 import { Spinner } from "../../ui/spinner";
 import { KeyHint } from "../primitives";
+import { errorMessage } from "~/lib/errorMessage";
 
 const SUBMIT_SHORTCUT_LABEL =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad/u.test(navigator.platform) ? "⌘↵" : "Ctrl↵";
@@ -107,7 +108,7 @@ export function ReplyComposer(props: {
       setBody("");
       props.onCancel();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not send the reply.");
+      setError(errorMessage(cause, "Could not send the reply."));
     } finally {
       submittingRef.current = false;
       setPending(false);

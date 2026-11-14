@@ -11,6 +11,12 @@ import type {
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { createKeyedQueryRegistry, defineKeyedQueryByKey, KEY_SEP } from "@ryco/client-runtime/rpc";
 
+import {
+  isPastStaleTime,
+  KEYED_QUERY_STATE_BUILDERS,
+  type KeyedQueryState,
+} from "./keyedQueryState";
+
 // ---------------------------------------------------------------------------
 // Atom-backed work-item reads.
 //
@@ -26,47 +32,11 @@ const SEARCH_STALE_TIME_MS = 30_000;
 const DETAIL_STALE_TIME_MS = 60_000;
 const PROJECTS_STALE_TIME_MS = 5 * 60_000;
 
-export interface WorkItemQueryState<T> {
-  readonly data: T | null;
-  readonly isLoading: boolean;
-  readonly isFetching: boolean;
-  readonly isError: boolean;
-  readonly error: Error | null;
-}
-
-const INITIAL_QUERY_STATE: WorkItemQueryState<never> = Object.freeze({
-  data: null,
-  isLoading: false,
-  isFetching: false,
-  isError: false,
-  error: null,
-});
+export type WorkItemQueryState<T> = KeyedQueryState<T>;
 
 const workItemsRegistry = createKeyedQueryRegistry<WorkItemQueryState<unknown>>({
   labelPrefix: "work-items",
-  initialState: INITIAL_QUERY_STATE,
-  buildFetchingState: (current) => ({
-    data: current.data,
-    isLoading: current.data === null,
-    isFetching: true,
-    isError: false,
-    error: null,
-  }),
-  buildSuccessState: (data) => ({
-    data,
-    isLoading: false,
-    isFetching: false,
-    isError: false,
-    error: null,
-  }),
-  buildErrorState: (current, error) => ({
-    data: current.data,
-    isLoading: false,
-    isFetching: false,
-    isError: true,
-    error,
-  }),
-  isErrorState: (state) => state.isError,
+  ...KEYED_QUERY_STATE_BUILDERS,
 });
 
 const { controllers, setQueryState, runController } = workItemsRegistry;
@@ -96,8 +66,7 @@ function defineQuery<TInput, TData>(
       ...definition,
       createControllerFields: (input) => ({ projectId: definition.resolveProjectId(input) }),
     },
-    (controller) =>
-      !controller.hasData || Date.now() - controller.lastFetchedAt >= controller.staleTime,
+    isPastStaleTime,
   ) as WorkItemQuery<TInput, TData>;
 }
 

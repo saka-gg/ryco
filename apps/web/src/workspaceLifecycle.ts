@@ -27,6 +27,7 @@ import { toastManager } from "./components/ui/toastManager";
 import { readEnvironmentApi } from "./environmentApi";
 import { buildProjectsPageLocation } from "./projectsRoute";
 import { undoThreadDeletes } from "./threadDeleteUndo";
+import { errorMessage } from "~/lib/errorMessage";
 
 export interface WorkspaceLifecycleTarget {
   readonly environmentId: EnvironmentId;
@@ -143,7 +144,7 @@ export function announceWorkspaceLifecycleResult(
                       deleted.length === 1
                         ? "Failed to restore conversation"
                         : "Failed to restore conversations",
-                    description: error instanceof Error ? error.message : "An error occurred.",
+                    description: errorMessage(error, "An error occurred."),
                   }),
                 ),
             ),
@@ -213,7 +214,7 @@ export async function runWorkspaceLifecycleBatch(
     } catch (error) {
       failed.push({
         target,
-        reason: error instanceof Error ? error.message : "An error occurred.",
+        reason: errorMessage(error, "An error occurred."),
       });
     }
   }
@@ -294,7 +295,7 @@ export async function runWorkspaceLifecycleAction(
       stackedThreadToast({
         type: "error",
         title: `${WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]} failed`,
-        description: error instanceof Error ? error.message : "An error occurred.",
+        description: errorMessage(error, "An error occurred."),
         actionProps: { children: "Retry", onClick: retry },
       }),
     );

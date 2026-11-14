@@ -61,6 +61,7 @@ import {
   useSharedSettingsSource,
   type SharedSettingsSnapshot,
 } from "./sharedSettings/sharedSettingsSource";
+import { errorMessage } from "~/lib/errorMessage";
 
 function Choice(props: {
   readonly label: string;
@@ -276,9 +277,7 @@ export function SettingsFileRows({
         );
         setPlan(next);
       })
-      .catch((cause: unknown) =>
-        setError(cause instanceof Error ? cause.message : "Could not read the file."),
-      );
+      .catch((cause: unknown) => setError(errorMessage(cause, "Could not read the file.")));
   };
 
   const deviceValues = plan?.deviceSettings?.values ?? null;
@@ -317,9 +316,7 @@ export function SettingsFileRows({
         });
         setAppRestored(true);
       } catch (cause) {
-        setError(
-          `Nothing was restored: ${cause instanceof Error ? cause.message : "saving failed."}`,
-        );
+        setError(`Nothing was restored: ${errorMessage(cause, "saving failed.")}`);
         setApplying(false);
         return;
       }
@@ -351,7 +348,7 @@ export function SettingsFileRows({
       try {
         runs.push({ command, result: await source.run(command, extra) });
       } catch (cause) {
-        const detail = cause instanceof Error ? cause.message : "The write failed.";
+        const detail = errorMessage(cause, "The write failed.");
         runs.push({
           command,
           result: {

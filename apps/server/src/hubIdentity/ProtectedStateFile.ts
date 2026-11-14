@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { syncDirectory } from "../fsDurability.ts";
+import { replaceFileAtomically } from "../fsDurability.ts";
 
 // The owner-only, crash-atomic JSON record discipline the node's durable
 // security state is held under.
@@ -286,24 +285,14 @@ export async function openProtectedStateFile(options: {
     convert(async () => {
       const encoded = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
       if (encoded.byteLength > maxBytes) return raise("operation_failed");
-      const temporaryPath = `${path}.${randomUUID()}.tmp`;
-      let file;
       try {
-        file = await open(
-          temporaryPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-          0o600,
-        );
-        await file.writeFile(encoded);
-        await file.sync();
-        await file.close();
-        file = undefined;
-        await rename(temporaryPath, path);
-        if (process.platform !== "win32") await chmod(path, 0o600);
-        await syncDirectory(directory);
+        await replaceFileAtomically({
+          filePath: path,
+          contents: encoded,
+          mode: 0o600,
+          durable: true,
+        });
       } catch (error: unknown) {
-        await file?.close().catch(() => undefined);
-        await rm(temporaryPath, { force: true }).catch(() => undefined);
         if (error instanceof ProtectedStateFileSignal) throw error;
         return raise("operation_failed");
       }

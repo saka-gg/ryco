@@ -17,6 +17,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { appLocalStorage } from "../hooks/useLocalStorage";
 import { useComposerContextIntakeAvailable } from "../composerContextIntake";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { useBrowserElementPicker } from "./BrowserElementPicker";
@@ -29,6 +30,7 @@ import {
   useProjectBrowserTabs,
 } from "./browserState";
 import { isDesktopOwnBackend, useBrowserMode } from "./useBrowserMode";
+import { errorMessage } from "~/lib/errorMessage";
 
 // Node tabs load with the first panel that shows them; desktop and frame users never load them.
 const NodeBrowserPanel = preloadableLazy(() =>
@@ -146,7 +148,7 @@ function ProjectBrowserPanel({
     setNewTab(false);
     try {
       const value: unknown = JSON.parse(
-        localStorage.getItem(`ryco:browser-sites:${project}`) ?? "[]",
+        appLocalStorage.getItem(`ryco:browser-sites:${project}`) ?? "[]",
       );
       setSaved(
         Array.isArray(value)
@@ -162,7 +164,7 @@ function ProjectBrowserPanel({
     try {
       await operation();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Browser request failed.");
+      setError(errorMessage(error, "Browser request failed."));
     }
   };
   const discover = useCallback(async () => {
@@ -173,8 +175,7 @@ function ProjectBrowserPanel({
       const result = await api.discover(localCwd);
       if (generation === discovery.generation) setSites(result);
     } catch (error) {
-      if (generation === discovery.generation)
-        setError(error instanceof Error ? error.message : "Discovery failed.");
+      if (generation === discovery.generation) setError(errorMessage(error, "Discovery failed."));
     } finally {
       if (generation === discovery.generation) setDiscovering(false);
     }
@@ -211,7 +212,7 @@ function ProjectBrowserPanel({
       ? saved.filter((url) => url !== active.url)
       : [active.url, ...saved].slice(0, 20);
     try {
-      localStorage.setItem(`ryco:browser-sites:${project}`, JSON.stringify(next));
+      appLocalStorage.setItem(`ryco:browser-sites:${project}`, JSON.stringify(next));
       setSaved(next);
     } catch {
       setError("Could not save this URL.");

@@ -5,6 +5,7 @@ import { Effect, Result } from "effect";
 import { createModelCapabilities } from "@ryco/shared/model";
 
 import {
+  buildPendingServerProvider,
   buildSelectOptionDescriptor,
   buildServerProvider,
   isCommandMissingCause,
@@ -164,34 +165,12 @@ export function makePendingCopilotProvider(settings: CopilotSettings): ServerPro
   const checkedAt = new Date().toISOString();
   const models = getCopilotFallbackModels(settings);
 
-  if (!settings.enabled) {
-    return buildServerProvider({
-      presentation: COPILOT_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "GitHub Copilot is disabled in Ryco settings.",
-      },
-    });
-  }
-
-  return buildServerProvider({
+  return buildPendingServerProvider({
     presentation: COPILOT_PRESENTATION,
-    enabled: true,
+    enabled: settings.enabled,
     checkedAt,
     models,
-    probe: {
-      installed: true,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
-      message: "Checking GitHub Copilot availability...",
-    },
+    pending: { installed: true, message: "Checking GitHub Copilot availability..." },
   });
 }
 

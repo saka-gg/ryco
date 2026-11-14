@@ -1,6 +1,5 @@
 import type { Readable, Writable } from "node:stream";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
 import * as path from "node:path";
 import { Schema } from "effect";
 import packageJson from "../../package.json" with { type: "json" };
@@ -8,6 +7,7 @@ import { localDeviceHost } from "./localDeviceHost.ts";
 import { HostDeviceBackend } from "./HostDeviceBackend.ts";
 import { DeviceManager } from "./DeviceManager.ts";
 import { makeBootOwnershipStore } from "./bootOwnership.ts";
+import { resolveRycoBaseDir } from "../os-jank.ts";
 import { DeviceBackendError, type DeviceBackend } from "./DeviceBackend.ts";
 import {
   DEVICE_HOST_PROTOCOL,
@@ -33,11 +33,7 @@ export async function runDeviceHostWorker(): Promise<void> {
   const manager = new DeviceManager({
     backend,
     bootOwnership: makeBootOwnershipStore(
-      path.join(
-        process.env.RYCO_HOME?.trim() || path.join(homedir(), ".ryco"),
-        "device-host",
-        "boot-ownership.json",
-      ),
+      path.join(resolveRycoBaseDir(process.env.RYCO_HOME), "device-host", "boot-ownership.json"),
     ),
   });
   const session = await startDeviceHostSession(

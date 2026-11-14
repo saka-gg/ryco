@@ -40,11 +40,12 @@ import { useDeviceScreenshotStream } from "./useDeviceScreenshotStream";
 import { useDeviceTouchInput, type DeviceTouchFallback } from "./useDeviceTouchInput";
 import { useDeviceKeyboardInput } from "./useDeviceKeyboardInput";
 import { DeviceScreen } from "./DeviceFrame";
-import { Control, errorMessage } from "./deviceControls";
+import { Control } from "./deviceControls";
 import { deviceFrameMetrics } from "./deviceFrameMetrics";
 import { DeviceView3D } from "./DeviceView3D";
 import { deviceTurn3d } from "./scene3d/deviceTurn";
 import { webglSupported } from "./webglSupport";
+import { errorMessage } from "~/lib/errorMessage";
 
 /*
  * One live, interactive device: the chassis with its streamed screen, touch,
