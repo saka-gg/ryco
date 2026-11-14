@@ -22,12 +22,14 @@ import {
 
 import {
   buildBooleanOptionDescriptor,
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
   buildSelectOptionDescriptor,
   buildServerProvider,
   collectStreamAsString,
+  type CommandResult,
   isCommandMissingCause,
   providerModelsFromSettings,
-  type CommandResult,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import {
@@ -69,34 +71,12 @@ export function buildInitialCursorProviderSnapshot(
   const checkedAt = new Date().toISOString();
   const models = getCursorFallbackModels(cursorSettings);
 
-  if (!cursorSettings.enabled) {
-    return buildServerProvider({
-      presentation: CURSOR_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Cursor is disabled in Ryco settings.",
-      },
-    });
-  }
-
-  return buildServerProvider({
+  return buildPendingServerProvider({
     presentation: CURSOR_PRESENTATION,
-    enabled: true,
+    enabled: cursorSettings.enabled,
     checkedAt,
     models,
-    probe: {
-      installed: true,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
-      message: "Checking Cursor Agent availability...",
-    },
+    pending: { installed: true, message: "Checking Cursor Agent availability..." },
   });
 }
 
@@ -994,18 +974,10 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
   const fallbackModels = getCursorFallbackModels(configuredCursorSettings);
 
   if (!configuredCursorSettings.enabled) {
-    return buildServerProvider({
+    return buildDisabledServerProvider({
       presentation: CURSOR_PRESENTATION,
-      enabled: false,
       checkedAt,
       models: fallbackModels,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Cursor is disabled in Ryco settings.",
-      },
     });
   }
 
