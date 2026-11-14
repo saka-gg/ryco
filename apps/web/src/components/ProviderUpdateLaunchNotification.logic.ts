@@ -247,10 +247,6 @@ export function providerUpdateDismissalKeys(
   ].filter((key): key is string => key !== null);
 }
 
-export function providerUpdateCandidateKey(provider: ProviderUpdateCandidate): string {
-  return providerUpdateNotificationKey([provider])!;
-}
-
 export function withProviderUpdateOrigin(
   view: ProviderUpdateToastView,
   origin: EnvironmentNotificationOrigin,

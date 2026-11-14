@@ -35,11 +35,6 @@ const PROJECT_SEARCH_ENTRIES_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 const PROJECT_SEARCH_ENTRIES_REFRESHING_REFETCH_MS = 400;
 const PROJECT_SEARCH_ENTRIES_REFRESHING_MAX_REFETCHES = 5;
 
-export const EMPTY_PROJECT_SEARCH_ENTRIES_RESULT: ProjectSearchEntriesResult = Object.freeze({
-  entries: [],
-  truncated: false,
-});
-
 /**
  * Reactive state for a project entry search scope. Mirrors the observable
  * surface previously provided by React Query's `useQuery`:

@@ -42,8 +42,6 @@ const SOURCE_TABS = [
   { id: "jira", label: "Jira" },
 ] as const;
 
-export type SourcePickerSourceTab = (typeof SOURCE_TABS)[number]["id"];
-
 /** A tab a surface adds after the four sources (the Tasks page's chats and links). */
 export interface SourcePickerExtraTab {
   readonly id: string;
