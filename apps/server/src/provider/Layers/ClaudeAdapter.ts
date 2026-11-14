@@ -7778,6 +7778,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       resumeSurvivesCwdChange: false,
       // Carried in systemPrompt.append, so slash commands such as /compact stay commands.
       attachmentInstructions: "session",
+      // Anthropic's prompt cache expires between turns; a cold resume re-sends the context.
+      resumeCacheReview: true,
     },
     startSession,
     sendTurn,

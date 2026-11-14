@@ -1338,6 +1338,7 @@ const startupShellStubs = (input: {
     Layer.succeed(ProviderService, {
       listSessions: input.listSessions ?? (() => Effect.succeed([])),
       stopSessionBinding: () => Effect.succeed("not-found" as const),
+      getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     } as unknown as ProviderServiceShape),
     Layer.succeed(AnalyticsService, AnalyticsService.disabled),
     Layer.succeed(ServerAuth, {

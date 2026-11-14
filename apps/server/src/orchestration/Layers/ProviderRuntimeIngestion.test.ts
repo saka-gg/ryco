@@ -2921,6 +2921,7 @@ describe("ProviderRuntimeIngestion", () => {
         status: "inProgress",
         title: "Subagent task",
         detail: "You are a researcher. Inspect the retry flow.",
+        receiverThreadIds: ["child-thread-1"],
         data: {
           item: {
             type: "collabAgentToolCall",
@@ -3031,6 +3032,7 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         itemType: "collab_agent_tool_call",
         status: "inProgress",
+        receiverThreadIds: ["child-thread-cap"],
         data: {
           item: {
             type: "collabAgentToolCall",
@@ -3128,6 +3130,7 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         itemType: "collab_agent_tool_call",
         status: "inProgress",
+        receiverThreadIds: ["child-thread-error-cleanup"],
         data: {
           item: {
             type: "collabAgentToolCall",
@@ -6563,6 +6566,7 @@ describe("ProviderRuntimeIngestion", () => {
           payload: {
             itemType: "collab_agent_tool_call",
             status: "inProgress",
+            receiverThreadIds: [childThreadId],
             data: {
               item: {
                 type: "collabAgentToolCall",

@@ -84,6 +84,14 @@ export interface ProviderAdapterCapabilities {
    * provider exactly as sent.
    */
   readonly attachmentInstructions?: "session" | "first-turn";
+  /**
+   * Whether the provider's prompt cache can go cold between turns, so a resume
+   * may re-send the whole context at full price. When `true`, Ryco reviews a
+   * resume against the latest cache observation before sending one
+   * automatically (restart continuation, queued follow-ups) and leaves a large
+   * conversation with a cold cache to the user. Missing is treated as `false`.
+   */
+  readonly resumeCacheReview?: boolean;
 }
 
 export type ProviderTurnSubmissionMode = "acceptance" | "completion";

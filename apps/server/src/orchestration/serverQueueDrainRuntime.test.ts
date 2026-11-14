@@ -77,6 +77,8 @@ const harness = (
     readonly receipts?: Receipts;
     readonly bootId?: string;
     readonly claudeResumeReview?: Parameters<typeof makeServerQueueDrain>[0]["claudeResumeReview"];
+    /** Instances whose adapter asks for a resume cache review; only Claude's by default. */
+    readonly resumeCacheReviewInstances?: ReadonlyArray<string>;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -188,7 +190,11 @@ const harness = (
       bootId: options.bootId ?? "42",
       ...(options.claudeResumeReview === undefined
         ? {}
-        : { claudeResumeReview: options.claudeResumeReview }),
+        : {
+            claudeResumeReview: options.claudeResumeReview,
+            resumeCacheReviewSupported: (instanceId) =>
+              Effect.succeed((options.resumeCacheReviewInstances ?? [CLAUDE]).includes(instanceId)),
+          }),
     });
     const sent = () =>
       dispatched.flatMap((command) =>
@@ -251,12 +257,14 @@ describe("ServerQueueDrain: Claude resume review", () => {
             return review;
           }),
       };
-      // A Codex session, or a Claude session while the head goes to another instance.
-      for (const session of [
-        { providerName: "codex", providerInstanceId: CLAUDE },
-        { providerName: "claudeAgent", providerInstanceId: CODEX },
-      ]) {
-        const h = yield* harness([entry("a")], [], reviewer);
+      // A session on an instance whose adapter does not ask for the review (the capability
+      // decides, not the provider's name), or a Claude session while the head goes to another
+      // instance.
+      for (const [session, resumeCacheReviewInstances] of [
+        [{ providerName: "claudeAgent", providerInstanceId: CLAUDE }, []],
+        [{ providerName: "claudeAgent", providerInstanceId: CODEX }, [CLAUDE]],
+      ] as const) {
+        const h = yield* harness([entry("a")], [], { ...reviewer, resumeCacheReviewInstances });
         h.state.session = session;
         yield* h.drain.drainThread(threadId);
         assert.deepEqual(h.sent(), ["a"]);
