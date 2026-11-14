@@ -1,13 +1,10 @@
 import { Cause, Exit } from "effect";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export type MetricAttributeValue = string;
 export type MetricAttributes = Readonly<Record<string, MetricAttributeValue>>;
 export type TraceAttributes = Readonly<Record<string, unknown>>;
 export type ObservabilityOutcome = "success" | "failure" | "interrupt";
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function markSeen(value: object, seen: WeakSet<object>): boolean {
   if (seen.has(value)) {
@@ -63,7 +60,7 @@ function normalizeJsonValue(value: unknown, seen: WeakSet<object> = new WeakSet(
     }
     return Array.from(value.values(), (entry) => normalizeJsonValue(entry, seen));
   }
-  if (!isPlainObject(value)) {
+  if (!isRecord(value)) {
     return String(value);
   }
   if (markSeen(value, seen)) {

@@ -30,6 +30,7 @@ import { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
 import { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";
 import { ProjectAtlassianLinkRepository } from "../persistence/Services/ProjectAtlassianLinks.ts";
 import { manualJiraTokenSecretName } from "./AtlassianConnectionService.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export interface JiraWorkItemServiceShape {
   readonly list: (
@@ -518,10 +519,6 @@ function mapTransitions(
       ? { toStateName: stateNameFromStatus(transition.to)! }
       : {}),
   }));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function stringArray(value: unknown): ReadonlyArray<string> {

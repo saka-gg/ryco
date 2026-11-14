@@ -3,6 +3,7 @@ import {
   type OrchestrationThreadHistoryCollection,
   type ThreadId,
 } from "@ryco/contracts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export type CreatedAtCursorOrder = {
   readonly createdAt: string;
@@ -36,10 +37,6 @@ export type ThreadHistoryCursorDecodeResult =
       readonly ok: false;
       readonly reason: "invalid-cursor" | "unsupported-version";
     };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isOrderForCollection(
   collection: OrchestrationThreadHistoryCollection,

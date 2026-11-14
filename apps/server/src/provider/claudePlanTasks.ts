@@ -14,6 +14,7 @@
  * @module claudePlanTasks
  */
 import type { RuntimePlanStep } from "@ryco/contracts";
+import { asRecord } from "@ryco/shared/unknownValue";
 
 /** The tools whose calls feed or describe the plan (exact, case-sensitive names). */
 export const CLAUDE_PLAN_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -95,12 +96,6 @@ const TASK_LIST_BLOCKED_BY_SUFFIX = / \[blocked by [^\]]*\]$/;
 interface PendingTaskToolCall {
   readonly toolName: string;
   readonly input: Record<string, unknown>;
-}
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 function readString(
@@ -188,7 +183,7 @@ function enforcePlanTasksCap(tasks: Map<string, ClaudePlanTask>): void {
 
 /** A seeded or persisted task, normalized; undefined when its id or status is not usable. */
 function readStoredTask(value: unknown): ClaudePlanTask | undefined {
-  const record = readRecord(value);
+  const record = asRecord(value);
   const id = typeof record?.id === "string" ? normalizeTaskId(record.id.trim()) : undefined;
   const status = readTaskStatus(record?.status);
   if (!id || status === undefined) return undefined;
@@ -297,8 +292,8 @@ export class ClaudePlanTaskTracker {
 
   private applyCreate(input: Record<string, unknown>, result: ClaudePlanToolResult): void {
     // Claude Code's own bookkeeping tasks; TaskList hides them too.
-    if (readRecord(input.metadata)?._internal) return;
-    const task = readRecord(result.structured?.task);
+    if (asRecord(input.metadata)?._internal) return;
+    const task = asRecord(result.structured?.task);
     const textMatch = TASK_CREATED_TEXT.exec(result.text.trim());
     const id = readTaskId(task) ?? normalizeTaskId(textMatch?.[1]);
     if (id === undefined) return;
@@ -322,7 +317,7 @@ export class ClaudePlanTaskTracker {
       readTaskId(input) ??
       normalizeTaskId(TASK_UPDATED_TEXT.exec(text)?.[1]);
     if (id === undefined) return;
-    const nextStatus = readString(readRecord(structured?.statusChange), "to") ?? input.status;
+    const nextStatus = readString(asRecord(structured?.statusChange), "to") ?? input.status;
     if (nextStatus === "deleted") {
       this.tasks.delete(id);
       return;
@@ -339,7 +334,7 @@ export class ClaudePlanTaskTracker {
         if (requestedId !== undefined) this.tasks.delete(requestedId);
         return;
       }
-      const task = readRecord(structured.task);
+      const task = asRecord(structured.task);
       const id = readTaskId(task) ?? requestedId;
       if (id === undefined) return;
       this.upsert(id, readString(task, "subject"), readTaskStatus(task?.status));
@@ -362,7 +357,7 @@ export class ClaudePlanTaskTracker {
     const next = new Map<string, ClaudePlanTask>();
     if (Array.isArray(listed)) {
       for (const entry of listed) {
-        const record = readRecord(entry);
+        const record = asRecord(entry);
         const id = readTaskId(record);
         if (id === undefined) continue;
         const known = this.tasks.get(id);
@@ -444,7 +439,7 @@ export function readClaudePlanTasksFromCursor(
   nativeSessionId: string | undefined,
 ): ClaudePlanTasksSeed | undefined {
   if (nativeSessionId === undefined) return undefined;
-  const field = readRecord(readRecord(cursor)?.planTasks);
+  const field = asRecord(asRecord(cursor)?.planTasks);
   if (field?.nativeSessionId !== nativeSessionId || !Array.isArray(field.tasks)) return undefined;
   return {
     tasks: orderTasks(readStoredTasks(field.tasks).values()),

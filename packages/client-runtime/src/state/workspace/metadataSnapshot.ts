@@ -6,29 +6,26 @@ import type {
   WorkspaceMetadataSnapshot,
 } from "./types.js";
 import { WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION } from "./types.js";
+import { isObjectLike } from "@ryco/shared/unknownValue";
 
 export const MAX_WORKSPACE_SNAPSHOT_THREADS_PER_ENVIRONMENT = 400;
 export const MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT = 2 * 1024 * 1024;
 export const MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS = 32;
 export const MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES = 16 * 1024 * 1024;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
 function hasEnvironment(value: unknown, environmentId: EnvironmentId): boolean {
-  return isRecord(value) && value.environmentId === environmentId;
+  return isObjectLike(value) && value.environmentId === environmentId;
 }
 
 export function isWorkspaceMetadataSnapshot(
   value: unknown,
   expectedEnvironmentId?: EnvironmentId,
 ): value is WorkspaceMetadataSnapshot {
-  if (!isRecord(value)) return false;
+  if (!isObjectLike(value)) return false;
   if (value.schemaVersion !== WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION) return false;
   if (!isNonEmptyString(value.environmentId)) return false;
   const environmentId = value.environmentId as EnvironmentId;

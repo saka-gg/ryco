@@ -26,6 +26,7 @@ import type {
   ProviderThreadSnapshot,
   ProviderThreadTurnSnapshot,
 } from "../src/provider/Services/ProviderAdapter.ts";
+import { isObjectLike } from "@ryco/shared/unknownValue";
 
 export interface TestTurnResponse {
   readonly events: ReadonlyArray<FixtureProviderRuntimeEvent>;
@@ -58,10 +59,6 @@ interface SessionState {
   turnCount: number;
   readonly queuedResponses: Array<TestTurnResponse>;
   readonly rollbackCalls: Array<ProviderRollbackInput>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function normalizeTurnState(value: unknown): "completed" | "failed" | "interrupted" | "cancelled" {
@@ -105,13 +102,13 @@ function normalizeFixtureEvent(rawEvent: Record<string, unknown>): ProviderRunti
       return {
         ...rawEvent,
         type: "turn.started",
-        payload: isRecord(rawEvent.payload) ? rawEvent.payload : {},
+        payload: isObjectLike(rawEvent.payload) ? rawEvent.payload : {},
       } as ProviderRuntimeEvent;
     case "turn.completed":
       return {
         ...rawEvent,
         type: "turn.completed",
-        payload: isRecord(rawEvent.payload)
+        payload: isObjectLike(rawEvent.payload)
           ? rawEvent.payload
           : {
               state: normalizeTurnState(rawEvent.status),

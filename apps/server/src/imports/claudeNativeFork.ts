@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { isObjectLike } from "@ryco/shared/unknownValue";
+
 import { runProcess } from "../processRunner.ts";
 
 // Run the SDK in an isolated process: its configuration-directory cache must not
@@ -52,9 +54,6 @@ async function runClaudeSdkScript(
   );
   return JSON.parse(result.stdout);
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
 
 const SESSION_ID_PATTERN = /^[a-f0-9-]{36}$/i;
 const PROJECT_KEY_PATTERN = /^[a-zA-Z0-9-]+$/;
@@ -144,7 +143,7 @@ try {
 `,
     { root, environment, request, maxBufferBytes: 16 * 1024 },
   );
-  if (!isRecord(response) || typeof response.ok !== "boolean") {
+  if (!isObjectLike(response) || typeof response.ok !== "boolean") {
     throw new Error("Invalid native fork response.");
   }
   if (response.ok) {
@@ -208,7 +207,7 @@ process.stdout.write(JSON.stringify({ compatible: messages.length > 0 && message
 `,
     { root, environment, request, maxBufferBytes: 4096 },
   );
-  if (!isRecord(response) || typeof response.compatible !== "boolean")
+  if (!isObjectLike(response) || typeof response.compatible !== "boolean")
     throw new Error("Invalid native verification response.");
   return response.compatible;
 }
@@ -268,7 +267,7 @@ process.stdout.write(JSON.stringify({ found: true, file, sameSession, chain }));
       maxBufferBytes: 8 * 1024 * 1024,
     },
   );
-  if (!isRecord(response) || typeof response.found !== "boolean")
+  if (!isObjectLike(response) || typeof response.found !== "boolean")
     throw new Error("Invalid transcript response.");
   if (!response.found) return { found: false };
   if (

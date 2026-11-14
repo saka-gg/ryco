@@ -52,6 +52,7 @@ import {
   openCodeV2Session,
   type OpenCodeV2Form,
 } from "./openCodeV2Mapping.ts";
+import { isObjectLike } from "@ryco/shared/unknownValue";
 
 /** A stream gets this long for its first event, as the adapter allows a 1.x stream. */
 const STREAM_OPEN_TIMEOUT_MS = 10_000;
@@ -93,9 +94,6 @@ type CallOptions = { readonly signal?: AbortSignal | null | undefined } | undefi
 const requestOptions = (options: CallOptions) =>
   options?.signal ? { signal: options.signal } : undefined;
 
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null;
-
 /** Sets `key` as the newest entry, dropping the oldest past {@link MEMO_LIMIT}. */
 function remember<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.delete(key);
@@ -109,7 +107,7 @@ function remember<K, V>(map: Map<K, V>, key: K, value: V): void {
  * `cause.status`).
  */
 function withNotFoundStatus(error: unknown): unknown {
-  const tag = isRecord(error) ? error._tag : undefined;
+  const tag = isObjectLike(error) ? error._tag : undefined;
   if (typeof tag !== "string" || !tag.endsWith("NotFoundError")) return error;
   return new Error(error instanceof Error && error.message ? error.message : tag, {
     cause: { status: 404, error },
@@ -446,7 +444,7 @@ export function makeOpenCodeV2Api(input: OpenCodeV2ApiInput): OpenCodeApi {
       } catch {
         continue;
       }
-      if (isRecord(event) && typeof event.type === "string") yield event as OpenCodeEvent;
+      if (isObjectLike(event) && typeof event.type === "string") yield event as OpenCodeEvent;
     }
   }
 
@@ -516,7 +514,7 @@ export function makeOpenCodeV2Api(input: OpenCodeV2ApiInput): OpenCodeApi {
       if (event.type === "form.created" && mapped.length > 0) rememberForm(event.data.form);
       else if (
         (event.type === "form.replied" || event.type === "form.cancelled") &&
-        isRecord(data) &&
+        isObjectLike(data) &&
         typeof data.id === "string"
       ) {
         forms.delete(data.id);

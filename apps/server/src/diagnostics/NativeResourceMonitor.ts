@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { access } from "node:fs/promises";
 import path from "node:path";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export interface NativeResourceProcess {
   readonly pid: number;
@@ -71,8 +72,6 @@ const REQUEST_TIMEOUT_MS = 5_000;
 const BACKGROUND_AFTER_IDLE_MS = 90_000;
 /** After this long without a request the sidecar is stopped; the next request starts it again. */
 const STOP_AFTER_IDLE_MS = 10 * 60_000;
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 const numeric = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
 const integer = (value: unknown): value is number => numeric(value) && Number.isSafeInteger(value);

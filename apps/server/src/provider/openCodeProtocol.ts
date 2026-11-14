@@ -41,6 +41,7 @@ import {
   OPENCODE_NON_JSON_HEALTH_MESSAGE,
   type OpenCodeGeneration,
 } from "./openCodeVersion.ts";
+import { isObjectLike } from "@ryco/shared/unknownValue";
 
 export type OpenCodeApiDetection =
   | { readonly generation: "v1" }
@@ -72,9 +73,6 @@ interface ProbeResponse {
 export const openCodeBasicAuthorization = (password: string) =>
   `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
 /** Fixed text for a failed request: the underlying error can carry the URL or its credentials. */
 function requestFailure(cause: unknown): Error {
   // Node's fetch refuses `http://user:pass@host` URLs.
@@ -96,14 +94,14 @@ function parseJson(text: string): unknown {
 
 /** True for a healthy `/global/health` answer that reports a 1.x version. */
 const isV1Health = (json: unknown): boolean =>
-  isRecord(json) &&
+  isObjectLike(json) &&
   json.healthy === true &&
   typeof json.version === "string" &&
   classifyOpenCodeGeneration(json.version) === "v1";
 
 /** The version in a `/api/info` answer (`{ version, pid }`); otherwise undefined. */
 const infoVersion = (json: unknown): string | undefined =>
-  isRecord(json) && typeof json.version === "string" && Number.isInteger(json.pid)
+  isObjectLike(json) && typeof json.version === "string" && Number.isInteger(json.pid)
     ? json.version
     : undefined;
 
