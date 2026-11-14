@@ -29,6 +29,7 @@ import type {
   AgentControlMcpToolResult,
   AgentControlMcpTools,
 } from "./tools.ts";
+import { ToolFailure } from "./toolFailure.ts";
 
 const statusDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus,
@@ -82,14 +83,6 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
   content: [{ type: "text", text }],
   isError: true,
 });
-
-class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
 
 export interface DelegationToolDeps {
   readonly policy: Pick<AgentControlPolicyShape, "authorize" | "isEnabled">;
@@ -223,7 +216,7 @@ export function withDelegationTools(
         Effect.succeed(
           errorResult(
             error instanceof ToolFailure
-              ? error.text
+              ? error.reason
               : error instanceof DelegatedTaskNotOwned
                 ? NOT_OWNED
                 : "Task cancel failed.",

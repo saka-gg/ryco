@@ -48,6 +48,7 @@ import type {
   AgentControlMcpToolResult,
   AgentControlMcpTools,
 } from "./tools.ts";
+import { ToolFailure, decodeToolArgs } from "./toolFailure.ts";
 
 /** T3 Code's default interval. */
 const DEFAULT_EVERY_MINUTES = 10;
@@ -124,14 +125,6 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
   isError: true,
 });
 
-class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
-
 export interface CommandWatchToolDeps {
   readonly policy: Pick<AgentControlPolicyShape, "authorize" | "isEnabled">;
   readonly registry: Pick<AgentControlSessionRegistryShape, "getTurnAuthority">;
@@ -199,11 +192,6 @@ export function withCommandWatchTools(
       yield* authorize(session, name, authority.value.turnId);
     });
 
-  const decode = <S extends Schema.Top>(schema: S, args: unknown) =>
-    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
-      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
-    ) as Effect.Effect<S["Type"], ToolFailure>;
-
   const failed = Effect.mapError(
     (error: { readonly detail: string }) => new ToolFailure(error.detail),
   );
@@ -211,7 +199,7 @@ export function withCommandWatchTools(
   const watch = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* writeAuthority(session, watchDescriptor.name);
-      const input = yield* decode(WatchInput, args);
+      const input = yield* decodeToolArgs(WatchInput, args);
       const shell = Option.getOrNull(
         yield* deps.projections
           .getThreadShellById(session.threadId)
@@ -267,7 +255,7 @@ export function withCommandWatchTools(
   const unwatch = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* writeAuthority(session, unwatchDescriptor.name);
-      const input = yield* decode(UnwatchInput, args);
+      const input = yield* decodeToolArgs(UnwatchInput, args);
       const runtime = yield* deps.watches.runtime;
       const result = yield* runtime
         .stop({ threadId: session.threadId, watchId: input.watchId })
@@ -281,14 +269,14 @@ export function withCommandWatchTools(
   const list = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* authorize(session, listDescriptor.name);
-      yield* decode(ListInput, args);
+      yield* decodeToolArgs(ListInput, args);
       const runtime = yield* deps.watches.runtime;
       return textResult(view(yield* runtime.list(session.threadId)));
     });
 
   const run = (effect: Effect.Effect<AgentControlMcpToolResult, ToolFailure>, fallback: string) =>
     effect.pipe(
-      Effect.catch((error) => Effect.succeed(errorResult(error.text))),
+      Effect.catch((error) => Effect.succeed(errorResult(error.reason))),
       Effect.catchCause(() => Effect.succeed(errorResult(fallback))),
     );
 

@@ -7,11 +7,11 @@ import {
   ThreadReadCacheBeginResponse,
   ThreadReadCacheSnapshotResponse,
 } from "@ryco/contracts/thread-read-cache-upload";
-import { RELAY_PROTOCOL_MAJOR, RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
 import type { HubConnector } from "./HubConnector.ts";
 import { fetchBoundedJson } from "../hubIdentity/BoundedHttp.ts";
+import { createNodeProof, discardNodeProof, serializeWithNodeProof } from "./nodeProofPost.ts";
 import {
   createThreadReadCachePublisher,
   THREAD_READ_CACHE_PUBLISH_INTERVAL_MS,
@@ -98,12 +98,15 @@ export function startThreadReadCacheSync(deps: {
   const post = async (action: "begin" | "snapshot", body: Record<string, unknown>) => {
     const expectedNode = currentNodeId;
     const proof = await untilStopped(() =>
-      deps.connector.asIdentityOwner(() => {
+      createNodeProof(deps, () => {
         if (stopped) throw new ThreadReadCacheHttpError(0);
-        return deps.identity.createRelayAuthenticationFrame(deps.hubOrigin, {
-          protocolMajor: RELAY_PROTOCOL_MAJOR,
-          protocolMinor: RELAY_PROTOCOL_MINOR,
-        });
+      }).then((created) => {
+        // A proof that arrives after the stop is never sent (untilStopped already settled).
+        if (stopped) {
+          discardNodeProof(created);
+          throw new ThreadReadCacheHttpError(0);
+        }
+        return created;
       }),
     );
     if (
@@ -112,18 +115,10 @@ export function startThreadReadCacheSync(deps: {
       proof.nodeId !== expectedNode ||
       deps.connector.status().state !== "online"
     ) {
+      discardNodeProof(proof);
       throw new ThreadReadCacheHttpError(0);
     }
-    const json = JSON.stringify({
-      ...body,
-      proof: {
-        nodeId: proof.nodeId,
-        protocolMajor: proof.protocolMajor,
-        protocolMinor: proof.protocolMinor,
-        nonce: Buffer.from(proof.nonce).toString("base64url"),
-        signature: Buffer.from(proof.signature).toString("base64url"),
-      },
-    });
+    const json = serializeWithNodeProof(proof, body);
     // Compressed only for a Hub that announced it; the inflated body keeps the plain limit.
     const compress = action === "snapshot" && hubFeatures.includes("deflate");
     const payload = compress ? new Uint8Array(await deflate(json)) : json;

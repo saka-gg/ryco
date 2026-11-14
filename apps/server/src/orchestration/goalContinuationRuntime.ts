@@ -422,7 +422,9 @@ export const makeGoalContinuation = (deps: GoalContinuationDeps) => {
       stopped.clear();
       for (const [threadId, stopKey] of stops) {
         dirty.delete(threadId);
-        yield* pauseAfterStop(threadId, stopKey, nowMs).pipe(Effect.catch(() => Effect.void));
+        yield* pauseAfterStop(threadId, stopKey, nowMs).pipe(
+          Effect.ignore({ log: "Warn", message: "Goal continuation could not pause after a stop" }),
+        );
       }
       const threadIds = new Set(dirty);
       dirty.clear();

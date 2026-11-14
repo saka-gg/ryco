@@ -24,6 +24,7 @@ import {
 } from "@ryco/shared/settingsSharing";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 /**
  * The device part of the settings file: the settings every device shares
@@ -121,9 +122,6 @@ export interface DeviceSettingsFileValues {
   readonly values: DeviceSettingsFileSection;
   readonly warnings: ReadonlyArray<string>;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
  * Reads a file's device section. Untrusted: each value is checked against its setting's schema

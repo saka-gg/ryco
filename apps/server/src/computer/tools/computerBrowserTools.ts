@@ -74,6 +74,7 @@ import {
   canonicalComputerWorkspaceRoot,
   type ComputerWorkspaceRootResolver,
 } from "./computerWorkspacePath.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export interface AgentGatewayComputerBrowserToolsOptions {
   readonly manager: ComputerManager;
@@ -244,10 +245,6 @@ const MAX_LISTED_TABS = 10;
 const MAX_REMEMBERED_TABS = 100;
 const KNOWN_TARGETS_PER_THREAD = 4;
 const KNOWN_THREADS_MAX = 32;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function browserTabsFrom(
   structured: Record<string, unknown> | undefined,

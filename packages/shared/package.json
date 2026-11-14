@@ -769,6 +769,10 @@
     "./thirdPartyLicenses": {
       "types": "./src/thirdPartyLicenses.ts",
       "import": "./src/thirdPartyLicenses.ts"
+    },
+    "./unknownValue": {
+      "types": "./src/unknownValue.ts",
+      "import": "./src/unknownValue.ts"
     }
   },
   "scripts": {
