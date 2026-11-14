@@ -38,6 +38,8 @@
 import { type EventId, type OrchestrationEvent, type ThreadId } from "@ryco/contracts";
 import { Cause, Deferred, Effect, Option, Ref, Schema } from "effect";
 
+import { isProviderOriginatedCommandId } from "./commandOrigin.ts";
+
 export type ProviderIntentEvent = Extract<
   OrchestrationEvent,
   {
@@ -199,7 +201,7 @@ export interface ThreadLaneControl {
 }
 
 const isProviderOriginated = (event: ProviderIntentEvent): boolean =>
-  event.commandId !== null && String(event.commandId).startsWith("provider:");
+  isProviderOriginatedCommandId(event.commandId);
 
 /** An agent's approved interrupt: it interrupts a turn, it does not stop the thread. */
 const isAgentControlOriginated = (event: ProviderIntentEvent): boolean =>

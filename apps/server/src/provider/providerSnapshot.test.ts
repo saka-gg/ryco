@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderDriverKind, type ModelCapabilities } from "@ryco/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
 
-import { parseGenericCliVersion, providerModelsFromSettings } from "./providerSnapshot.ts";
+import {
+  buildServerProvider,
+  parseGenericCliVersion,
+  providerModelsFromSettings,
+  withInstanceIdentity,
+} from "./providerSnapshot.ts";
 
 const OPENCODE_CUSTOM_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [
@@ -62,5 +67,63 @@ describe("parseGenericCliVersion", () => {
     expect(parseGenericCliVersion("2.1.111 (Claude Code)\n\n(node:1) Warning: node v20.1.0")).toBe(
       "2.1.111",
     );
+  });
+});
+
+describe("withInstanceIdentity", () => {
+  const draft = buildServerProvider({
+    presentation: { displayName: "Codex" },
+    enabled: true,
+    checkedAt: "2026-11-14T00:00:00.000Z",
+    models: [],
+    probe: { installed: true, version: "1.0.0", status: "ready", auth: { status: "unknown" } },
+  });
+  const identity = {
+    driver: ProviderDriverKind.make("codex"),
+    instanceId: ProviderInstanceId.make("codex_work"),
+    continuationGroupKey: "codex:home",
+  };
+
+  it("stamps the instance, driver, display name, accent color and continuation group", () => {
+    const stamped = withInstanceIdentity({
+      ...identity,
+      displayName: "Work",
+      accentColor: "#ff0000",
+    })(draft);
+    expect(stamped).toEqual({
+      ...draft,
+      instanceId: identity.instanceId,
+      driver: identity.driver,
+      displayName: "Work",
+      accentColor: "#ff0000",
+      continuation: { groupKey: "codex:home" },
+    });
+  });
+
+  it("keeps the snapshot's own display name and adds no accent color when none is set", () => {
+    for (const unset of [undefined, ""]) {
+      const stamped = withInstanceIdentity({
+        ...identity,
+        displayName: unset,
+        accentColor: unset,
+      })(draft);
+      expect(stamped.displayName).toBe("Codex");
+      expect("accentColor" in stamped).toBe(false);
+      expect(stamped.continuation).toEqual({ groupKey: "codex:home" });
+    }
+  });
+
+  it("replaces an identity the snapshot already carries", () => {
+    const stale = {
+      ...draft,
+      continuation: { groupKey: "old" },
+    };
+    const stamped = withInstanceIdentity({
+      ...identity,
+      displayName: undefined,
+      accentColor: undefined,
+    })(stale);
+    expect(stamped.continuation).toEqual({ groupKey: "codex:home" });
+    expect(stamped.instanceId).toBe(identity.instanceId);
   });
 });

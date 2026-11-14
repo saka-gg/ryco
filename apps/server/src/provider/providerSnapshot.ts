@@ -1,5 +1,6 @@
 import type {
   ProviderDriverKind,
+  ProviderInstanceId,
   ModelCapabilities,
   ServerProvider,
   ServerProviderAuth,
@@ -44,6 +45,27 @@ export interface ServerProviderPresentation {
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
+
+/**
+ * Stamps an instance's identity onto its driver's probed snapshots: the instance id, the driver,
+ * the configured display name and accent color (each only when set) and the continuation group.
+ */
+export const withInstanceIdentity =
+  (input: {
+    readonly driver: ProviderDriverKind;
+    readonly instanceId: ProviderInstanceId;
+    readonly displayName: string | undefined;
+    readonly accentColor: string | undefined;
+    readonly continuationGroupKey: string;
+  }) =>
+  (snapshot: ServerProviderDraft): ServerProvider => ({
+    ...snapshot,
+    instanceId: input.instanceId,
+    driver: input.driver,
+    ...(input.displayName ? { displayName: input.displayName } : {}),
+    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
+    continuation: { groupKey: input.continuationGroupKey },
+  });
 
 export function nonEmptyTrimmed(value: string | undefined): string | undefined {
   if (!value) return undefined;

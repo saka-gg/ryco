@@ -13,7 +13,7 @@
  *
  * @module provider/Drivers/ClaudeDriver
  */
-import { ClaudeSettings, ProviderDriverKind, type ServerProvider } from "@ryco/contracts";
+import { ClaudeSettings, ProviderDriverKind } from "@ryco/contracts";
 import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
 import {
   Cache,
@@ -52,7 +52,7 @@ import {
   type ProviderDriver,
   type ProviderInstance,
 } from "../ProviderDriver.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import { withInstanceIdentity } from "../providerSnapshot.ts";
 import type { ServerProviderShape } from "../Services/ServerProvider.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
@@ -131,22 +131,6 @@ export type ClaudeDriverEnv =
   | ServerConfig
   | ServerSettingsService;
 
-const withInstanceIdentity =
-  (input: {
-    readonly instanceId: ProviderInstance["instanceId"];
-    readonly displayName: string | undefined;
-    readonly accentColor: string | undefined;
-    readonly continuationGroupKey: string;
-  }) =>
-  (snapshot: ServerProviderDraft): ServerProvider => ({
-    ...snapshot,
-    instanceId: input.instanceId,
-    driver: DRIVER_KIND,
-    ...(input.displayName ? { displayName: input.displayName } : {}),
-    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
-    continuation: { groupKey: input.continuationGroupKey },
-  });
-
 export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
@@ -191,6 +175,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         processEnv,
       );
       const stampIdentity = withInstanceIdentity({
+        driver: DRIVER_KIND,
         instanceId,
         displayName,
         accentColor,

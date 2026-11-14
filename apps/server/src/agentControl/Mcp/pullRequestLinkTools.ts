@@ -17,7 +17,7 @@ import {
   AgentControlLinkPullRequestInput,
   type TurnId,
 } from "@ryco/contracts";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option } from "effect";
 
 import type { PullRequestWatchServiceShape } from "../../sourceControl/PullRequestWatchService.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
@@ -30,6 +30,7 @@ import type {
   AgentControlMcpToolResult,
   AgentControlMcpTools,
 } from "./tools.ts";
+import { ToolFailure, decodeToolArgs } from "./toolFailure.ts";
 
 const linkDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_LINK_PULL_REQUEST_TOOL,
@@ -55,14 +56,6 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
   content: [{ type: "text", text }],
   isError: true,
 });
-
-class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
 
 export interface PullRequestLinkToolDeps {
   readonly policy: Pick<AgentControlPolicyShape, "authorize" | "isEnabled">;
@@ -113,9 +106,7 @@ export function withPullRequestLinkTools(
         );
       if (Option.isNone(authority)) return yield* Effect.fail(new ToolFailure(NO_AUTHORITY));
       yield* authorize(session, authority.value.turnId);
-      const input = yield* Schema.decodeUnknownEffect(AgentControlLinkPullRequestInput)(
-        args ?? {},
-      ).pipe(Effect.mapError(() => new ToolFailure("Invalid tool arguments.")));
+      const input = yield* decodeToolArgs(AgentControlLinkPullRequestInput, args);
       // Only the calling chat: an agent links to its own workspace, never another chat's.
       const linked = yield* deps.pullRequestWatch
         .linkPullRequest({
@@ -146,7 +137,7 @@ export function withPullRequestLinkTools(
             Effect.catch((error) =>
               Effect.succeed(
                 errorResult(
-                  error instanceof ToolFailure ? error.text : "Linking the pull request failed.",
+                  error instanceof ToolFailure ? error.reason : "Linking the pull request failed.",
                 ),
               ),
             ),

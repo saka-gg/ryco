@@ -94,6 +94,38 @@ describe("device tool gateway", () => {
     expect((await post(binding.url, binding.headers, "tools/list")).status).toBe(401);
   });
 
+  it("answers a body over 1 MiB and unparsable JSON with a JSON-RPC parse error", async () => {
+    manager = new DeviceManager({ backend: new FakeDeviceBackend() });
+    gateway = await startDeviceToolGateway(manager);
+    const binding = gateway.createBinding({ threadId: "thread-a", isTurnActive: () => true });
+    const send = async (body: string) => {
+      const response = await fetch(binding.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...binding.headers },
+        body,
+        signal: AbortSignal.timeout(5_000),
+      });
+      return { status: response.status, body: JSON.parse(await response.text()) as unknown };
+    };
+    const ping = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    // Padded with trailing whitespace, so the body is still valid JSON at exactly the bound.
+    expect(await send(ping.padEnd(1024 * 1024))).toEqual({
+      status: 200,
+      body: { jsonrpc: "2.0", id: 1, result: {} },
+    });
+    expect(await send(ping.padEnd(1024 * 1024 + 1))).toEqual({
+      status: 400,
+      body: {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32700, message: "MCP request body is too large." },
+      },
+    });
+    const invalid = await send("{");
+    expect(invalid.status).toBe(400);
+    expect(invalid.body).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32700 } });
+  });
+
   it("splits the actions into a read-only device_read and a device tool that changes devices", () => {
     const [read, act] = DEVICE_TOOL_DEFINITIONS;
     const actions = (tool: (typeof DEVICE_TOOL_DEFINITIONS)[number] | undefined) =>

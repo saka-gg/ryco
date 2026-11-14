@@ -7,7 +7,6 @@ import {
   CONTEXT_HANDOFF_CONTEXT_VERSION,
   CONTEXT_HANDOFF_ERROR_MAX_CHARS,
   CONTEXT_HANDOFF_SCHEMA_VERSION,
-  CommandId,
   ContextHandoffActivityPayload,
   type ContextHandoffInspectionSummaryMetadata,
   DEFAULT_AGENT_TOKEN_MODE,
@@ -28,6 +27,7 @@ import { DEFAULT_CONTEXT_HANDOFF_INPUT_BUDGET } from "@ryco/shared/contextWindow
 import { getModelDisplayLabel } from "@ryco/shared/model";
 import { Cause, Effect, Layer, Option, Ref, Schema } from "effect";
 
+import { serverCommandId } from "../commandOrigin.ts";
 import { ModelManifest, BUNDLED_MODEL_MANIFEST } from "../../provider/ModelManifest.ts";
 import { resolveHandoffBudgetFromManifest } from "../../provider/ModelContextWindow.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
@@ -119,9 +119,6 @@ function deliveryArtifactFromRecord(
     Schema.decodeUnknownOption(ContextHandoffDeliveryArtifact)(record.deliveryArtifact),
   );
 }
-
-const serverCommandId = (tag: string): CommandId =>
-  CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
 
 const nowIso = () => new Date().toISOString();
 

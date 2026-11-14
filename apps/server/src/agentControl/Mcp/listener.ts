@@ -21,6 +21,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { Effect, Option, Redacted, Schema, Scope } from "effect";
 
+import { readBoundedBody } from "../../readBoundedBody.ts";
 import type { AgentControlSessionRegistryShape } from "../Services/AgentControlSessionRegistry.ts";
 import {
   JSON_RPC_ERROR_CODES,
@@ -126,25 +127,6 @@ const endJson = (response: ServerResponse, status: number, body: JsonRpcResponse
   response.writeHead(status, { ...RESPONSE_HEADERS, "content-type": "application/json" });
   response.end(serialized);
 };
-
-/** Read the request body, resolving `null` when it exceeds `maxBytes`. */
-const readBoundedBody = (request: IncomingMessage, maxBytes: number): Promise<string | null> =>
-  new Promise((resolve, reject) => {
-    const chunks: Array<Buffer> = [];
-    let total = 0;
-    request.on("data", (chunk: Buffer) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        request.removeAllListeners("data");
-        request.removeAllListeners("end");
-        resolve(null);
-        return;
-      }
-      chunks.push(chunk);
-    });
-    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", (error) => reject(error));
-  });
 
 const negotiateProtocolVersion = (requested: unknown): string => {
   const versions: ReadonlyArray<string> = AGENT_CONTROL_MCP_PROTOCOL_VERSIONS;

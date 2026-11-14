@@ -43,7 +43,6 @@ import {
   AuthRpcError,
   AuthSessionId,
   USAGE_CONTRACT_VERSION,
-  CommandId,
   type DiagnosticsProviderProcess,
   type GitRunStackedActionInput,
   type IssueState,
@@ -78,6 +77,7 @@ import { makeGrokMcpAdapter } from "../mcp/adapters/GrokMcpAdapter.ts";
 import { makeOpenCodeMcpAdapter } from "../mcp/adapters/OpenCodeMcpAdapter.ts";
 import { makeProviderMcpRegistry } from "../mcp/ProviderMcpRegistry.ts";
 import { Open, resolveAvailableEditors } from "../open.ts";
+import { serverCommandId } from "../orchestration/commandOrigin.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../orchestration/Services/ThreadDeletionReactor.ts";
 import { OrchestrationModelSwitchBlockedError } from "../orchestration/Errors.ts";
@@ -375,7 +375,6 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const diagnostics = yield* Diagnostics;
     const localDiagnosticsMetrics = yield* LocalDiagnosticsMetrics;
     const advertisedEndpointRegistry = yield* AdvertisedEndpointRegistry;
-    const serverCommandId = (tag: string) => CommandId.make(`server:${tag}:${crypto.randomUUID()}`);
     const chatBootstrap: ChatBootstrapDependencies = {
       chatFolders: Option.getOrUndefined(chatFolders),
       projects: projectionSnapshotQuery,
