@@ -10,6 +10,7 @@ import {
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  decodeClientSettingsPayload,
   readClientSettings,
   readAppKeybindings,
   writeAppKeybindings,
@@ -117,6 +118,42 @@ describe("clientPersistence", () => {
 
     expect(readClientSettings(settingsPath)).toEqual(clientSettings);
   });
+
+  it("decodes a renderer's settings payload with the schema it is read back with", () => {
+    expect(decodeClientSettingsPayload(clientSettings)).toEqual(clientSettings);
+    // Decoding defaults fill what an older renderer left out, as on read.
+    expect(decodeClientSettingsPayload({}).chatWidth).toBe("comfortable");
+  });
+
+  it.each([
+    { name: "null", payload: null },
+    { name: "a string", payload: "settings" },
+    { name: "an unknown option value", payload: { ...clientSettings, chatWidth: "huge" } },
+    { name: "a wrongly typed field", payload: { ...clientSettings, diffWordWrap: "yes" } },
+  ])("refuses a settings payload that is $name", ({ payload }) => {
+    const settingsPath = makeTempPath("client-settings.json");
+    writeClientSettings(settingsPath, clientSettings);
+    expect(() => writeClientSettings(settingsPath, decodeClientSettingsPayload(payload))).toThrow(
+      "Invalid client settings payload.",
+    );
+    expect(readClientSettings(settingsPath)).toEqual(clientSettings);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "writes the settings and registry files owner-only, leaving no temp file",
+    () => {
+      const registryPath = makeTempPath("saved-environments.json");
+      const settingsPath = path.join(path.dirname(registryPath), "client-settings.json");
+      writeSavedEnvironmentRegistry(registryPath, [savedRegistryRecord]);
+      writeClientSettings(settingsPath, clientSettings);
+      expect(fs.statSync(registryPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(settingsPath).mode & 0o777).toBe(0o600);
+      expect(fs.readdirSync(path.dirname(registryPath)).toSorted()).toEqual([
+        "client-settings.json",
+        "saved-environments.json",
+      ]);
+    },
+  );
 
   it("persists and reloads saved environment metadata", () => {
     const registryPath = makeTempPath("saved-environments.json");
