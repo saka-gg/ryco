@@ -574,6 +574,7 @@ export function runShellEnvironmentWorker(): void {
     ...boundedShellEnvironmentReaders(env),
     logWarning: (message) => warnings.push(message),
   });
+  // oxlint-disable-next-line unicorn/require-post-message-target-origin -- a worker port has no origin
   parentPort?.postMessage({ environment, warnings } satisfies CapturedShellEnvironment);
 }
 
