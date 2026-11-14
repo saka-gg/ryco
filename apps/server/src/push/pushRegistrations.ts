@@ -11,6 +11,7 @@
  *
  * @module push/pushRegistrations
  */
+import { SpaceRole } from "@ryco/contracts/space-role";
 import {
   PUSH_ACTION_ALERT_KINDS,
   PushAlertKind,
@@ -41,7 +42,7 @@ export const PushRegistration = Schema.Struct({
   accountId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64))),
   keyId: PushKeyId,
   publicKey: PushPublicKey,
-  role: Schema.Literals(["viewer", "operator", "owner"]),
+  role: SpaceRole,
   kinds: Schema.Array(PushAlertKind),
   sound: Schema.Boolean,
   /**

@@ -256,3 +256,16 @@ export const ApprovalRequestId = makeEntityId("ApprovalRequestId");
 export type ApprovalRequestId = typeof ApprovalRequestId.Type;
 export const CheckpointRef = makeEntityId("CheckpointRef");
 export type CheckpointRef = typeof CheckpointRef.Type;
+
+/** A machine's operating system, as every node, claim and enrollment reports it. */
+export const ExecutionEnvironmentPlatformOs = Schema.Literals([
+  "darwin",
+  "linux",
+  "windows",
+  "unknown",
+]);
+export type ExecutionEnvironmentPlatformOs = typeof ExecutionEnvironmentPlatformOs.Type;
+
+/** A machine's CPU architecture, as every node, claim and enrollment reports it. */
+export const ExecutionEnvironmentPlatformArch = Schema.Literals(["arm64", "x64", "other"]);
+export type ExecutionEnvironmentPlatformArch = typeof ExecutionEnvironmentPlatformArch.Type;

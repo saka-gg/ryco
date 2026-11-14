@@ -12,6 +12,7 @@ import { useSettingsTarget } from "../../settingsTarget";
 import { Button } from "../ui/button";
 import { SettingsSection } from "./settingsLayout";
 import { formatBytes, formatPercent, relativeTimeLabel } from "./DiagnosticsSettings.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function ProcessDiagnosticsSection({
   snapshot,
@@ -79,7 +80,7 @@ export function ProcessDiagnosticsSection({
       await refresh();
     } catch (error) {
       if (mountedRef.current && currentRef.current.target?.environmentId === environmentId)
-        setMessage(error instanceof Error ? error.message : "Could not signal process.");
+        setMessage(errorMessage(error, "Could not signal process."));
     } finally {
       busyRef.current = false;
       if (mountedRef.current) setPending(null);

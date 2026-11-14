@@ -127,7 +127,8 @@ function redactSshErrorOutput(output: string): string {
     : redacted;
 }
 
-function normalizeSshErrorMessage(input: {
+/** Prefers trimmed stderr, then trimmed stdout, then the fallback. */
+export function normalizeSshErrorMessage(input: {
   readonly stdout?: string;
   readonly stderr: string;
   readonly fallbackMessage: string;
@@ -141,7 +142,7 @@ function normalizeSshErrorMessage(input: {
   return cleanedStdout.length > 0 ? cleanedStdout : input.fallbackMessage;
 }
 
-function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
+export function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
   return {
     alias: target.alias,
     hostname: target.hostname,

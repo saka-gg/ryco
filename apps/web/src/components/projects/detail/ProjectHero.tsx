@@ -47,13 +47,14 @@ import { displayProjectPath, projectRepositoryLabel } from "../projectsModel.log
 import { useProjectsSelection } from "../ProjectsPageContext";
 import { SavedTick, useSavedFlash } from "../sections/ProjectSection";
 import { useHeroSentinel } from "./ProjectDetailContext";
+import { errorMessage } from "~/lib/errorMessage";
 
 function toastFailure(title: string, error: unknown) {
   toastManager.add(
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : "An error occurred.",
+      description: errorMessage(error, "An error occurred."),
     }),
   );
 }

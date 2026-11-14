@@ -35,11 +35,13 @@ import {
   buildSshHostSpecEffect,
   collectProcessOutput,
   getLastNonEmptyOutputLine,
+  normalizeSshErrorMessage,
   remoteStateKey,
   resolveSshTarget,
   RYCO_CLI_PACKAGE_NAME,
   runSshCommand,
   SSH_COMMAND,
+  sshTargetLogFields,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -51,6 +53,7 @@ import {
   SshPasswordPromptError,
   SshReadinessError,
 } from "./errors.ts";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 export const DEFAULT_REMOTE_PORT = 3773;
 const REMOTE_PORT_SCAN_WINDOW = 200;
@@ -113,15 +116,6 @@ function makeSshTunnelCancelledError(target: DesktopSshEnvironmentTarget): SshCo
     stderr: "",
     message: `SSH environment connection was cancelled for ${target.alias || target.hostname}.`,
   });
-}
-
-function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
-  return {
-    alias: target.alias,
-    hostname: target.hostname,
-    username: target.username,
-    port: target.port,
-  };
 }
 
 function sshRunnerLogFields(runner: RemoteRycoRunnerOptions | undefined) {
@@ -199,11 +193,6 @@ const RemoteHttpError = Schema.Struct({
 const decodeRemoteLaunchResult = Schema.decodeEffect(fromLenientJson(RemoteLaunchResult));
 const decodeRemotePairingResult = Schema.decodeEffect(fromLenientJson(RemotePairingResult));
 const decodeRemoteHttpError = Schema.decodeEffect(Schema.fromJsonString(RemoteHttpError));
-
-export function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): string {
-  const cleaned = stderr.trim();
-  return cleaned.length > 0 ? cleaned : fallbackMessage;
-}
 
 function stripTrailingNewlines(value: string): string {
   return value.replace(/\n+$/u, "");
@@ -921,14 +910,6 @@ export const waitForHttpReady = Effect.fn("ssh/tunnel.waitForHttpReady")(functio
   });
 });
 
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname
-    .trim()
-    .toLowerCase()
-    .replace(/^\[(.*)\]$/, "$1");
-  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
-}
-
 function resolveLoopbackSshHttpUrl(
   rawHttpBaseUrl: unknown,
   pathname: string,
@@ -939,7 +920,7 @@ function resolveLoopbackSshHttpUrl(
         throw new Error("Invalid SSH forwarded http base URL.");
       }
       const baseUrl = new URL(rawHttpBaseUrl);
-      if (!isLoopbackHostname(baseUrl.hostname)) {
+      if (!isLoopbackHostname(baseUrl.hostname, { ipv4: "127.0.0.1" })) {
         throw new Error("SSH desktop bridge only supports loopback forwarded URLs.");
       }
       const url = new URL(baseUrl.toString());
@@ -1153,10 +1134,10 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
         command: tunnelCommand,
         exitCode,
         stderr,
-        message: normalizeSshErrorMessage(
+        message: normalizeSshErrorMessage({
           stderr,
-          `SSH tunnel exited unexpectedly for ${input.resolvedTarget.alias} (exit ${exitCode}).`,
-        ),
+          fallbackMessage: `SSH tunnel exited unexpectedly for ${input.resolvedTarget.alias} (exit ${exitCode}).`,
+        }),
       });
       return Effect.logWarning("ssh.tunnel.process.exited", {
         ...sshTargetLogFields(input.resolvedTarget),

@@ -464,7 +464,9 @@ function rawPayloadThreadId(event: ProviderRuntimeEvent): string | undefined {
   return asTrimmedString(asRecord(event.raw?.payload)?.threadId);
 }
 
-function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): string[] {
+function collabReceiverThreadIdsFromRuntimeEvent(
+  event: ProviderRuntimeEvent,
+): ReadonlyArray<string> {
   if (
     event.type === "subagent.started" ||
     event.type === "subagent.updated" ||
@@ -483,16 +485,7 @@ function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): s
   if (event.payload.itemType !== "collab_agent_tool_call") {
     return [];
   }
-
-  const data = asRecord(event.payload.data);
-  const item = asRecord(data?.item);
-  const receiverThreadIds = item?.type === "collabAgentToolCall" ? item.receiverThreadIds : [];
-  return Array.isArray(receiverThreadIds)
-    ? receiverThreadIds.flatMap((entry) => {
-        const threadId = asTrimmedString(entry);
-        return threadId ? [threadId] : [];
-      })
-    : [];
+  return event.payload.receiverThreadIds ?? [];
 }
 
 /**
@@ -688,12 +681,6 @@ export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskTitle?: string,
 ): ReadonlyArray<OrchestrationThreadActivity> {
-  const maybeSequence = (() => {
-    const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
-    return eventWithSequence.sessionSequence !== undefined
-      ? { sequence: eventWithSequence.sessionSequence }
-      : {};
-  })();
   switch (event.type) {
     case "session.started":
     case "session.exited":
@@ -716,7 +703,6 @@ export function runtimeEventToActivities(
             state: event.type === "session.started" ? "started" : "stopped",
           },
           turnId: null,
-          ...maybeSequence,
         },
       ];
     }
@@ -753,7 +739,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -778,7 +763,6 @@ export function runtimeEventToActivities(
             ...(event.payload.decision ? { decision: event.payload.decision } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -802,7 +786,6 @@ export function runtimeEventToActivities(
                 message: truncateDetail(event.payload.message),
               },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -822,7 +805,6 @@ export function runtimeEventToActivities(
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -841,7 +823,6 @@ export function runtimeEventToActivities(
               ? { detail: truncateActivityText(event.payload.detail, RUNTIME_NOTICE_DETAIL_LIMIT) }
               : {},
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -859,7 +840,6 @@ export function runtimeEventToActivities(
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -879,7 +859,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -903,7 +882,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -928,7 +906,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -955,7 +932,6 @@ export function runtimeEventToActivities(
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1008,7 +984,6 @@ export function runtimeEventToActivities(
                   ...identityLinkage,
                 },
                 turnId: toTurnId(event.turnId) ?? null,
-                ...maybeSequence,
               },
             ]
           : []),
@@ -1028,7 +1003,6 @@ export function runtimeEventToActivities(
                   typedUsage: event.payload.typedUsage,
                 },
                 turnId: toTurnId(event.turnId) ?? null,
-                ...maybeSequence,
               },
             ]
           : []),
@@ -1061,7 +1035,6 @@ export function runtimeEventToActivities(
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1095,7 +1068,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1130,7 +1102,6 @@ export function runtimeEventToActivities(
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1149,7 +1120,6 @@ export function runtimeEventToActivities(
             subagent: event.payload.subagent,
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1171,7 +1141,6 @@ export function runtimeEventToActivities(
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1197,7 +1166,6 @@ export function runtimeEventToActivities(
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1219,7 +1187,6 @@ export function runtimeEventToActivities(
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1242,7 +1209,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1263,7 +1229,6 @@ export function runtimeEventToActivities(
           summary: "Suggested next prompt",
           payload: { suggestion: event.payload.suggestion },
           turnId,
-          ...maybeSequence,
         },
       ];
     }
@@ -1289,7 +1254,6 @@ export function runtimeEventToActivities(
             statisticsProvider: event.provider,
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1320,7 +1284,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         }),
       ];
     }
@@ -1351,7 +1314,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1382,7 +1344,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -2002,8 +1963,6 @@ const make = Effect.gen(function* () {
     streaming: boolean;
     createdAt: string;
   }): ActivityAppendCommand => {
-    const sessionSequence = (input.event as ProviderRuntimeEvent & { sessionSequence?: number })
-      .sessionSequence;
     const commandKey = `${input.providerThreadId}:${input.providerItemId}`;
     return {
       type: "thread.activity.append",
@@ -2029,7 +1988,6 @@ const make = Effect.gen(function* () {
           ...(input.event.providerRefs ? { providerRefs: input.event.providerRefs } : {}),
         },
         turnId: toTurnId(input.event.turnId) ?? null,
-        ...(sessionSequence !== undefined ? { sequence: sessionSequence } : {}),
       },
       createdAt: input.createdAt,
     };

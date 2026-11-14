@@ -1,3 +1,5 @@
+import { isRecord } from "./unknownValue.ts";
+
 /**
  * The open source license manifest a Ryco client ships: its shape, the compact form the build
  * writes, and the lookups the license screens use. Adapted from pingdotgg/t3code
@@ -52,10 +54,6 @@ export function encodeThirdPartyLicenseManifest(
     return { ...entry, notice };
   });
   return { schemaVersion: 1, notices, entries };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isStringArray(value: unknown): value is ReadonlyArray<string> {

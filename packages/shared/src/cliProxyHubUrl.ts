@@ -5,12 +5,17 @@
  * @module cliProxyHubUrl
  */
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
+import { isLoopbackHostname, type LoopbackHostnameOptions } from "./loopbackHost.ts";
 
-/** Whether a URL hostname names the local machine. */
-export function isLoopbackHost(hostname: string): boolean {
-  return LOOPBACK_HOSTS.has(hostname);
-}
+/**
+ * Which hub URL hostnames name the local machine (`isLoopbackHostname` options). `0.0.0.0`
+ * counts: a hub bound to every interface is reached here. IPv4 is `127.0.0.1` only, as these
+ * checks answered before `loopbackHost` existed.
+ */
+export const HUB_LOOPBACK_HOST = {
+  ipv4: "127.0.0.1",
+  unspecified: true,
+} as const satisfies LoopbackHostnameOptions;
 
 /**
  * The hub's base URL, or null when unusable. Accepts a pasted management URL
@@ -46,6 +51,6 @@ export function hubKeyAddress(raw: string): string | null {
     return null;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  if (isLoopbackHost(url.hostname)) url.hostname = "localhost";
+  if (isLoopbackHostname(url.hostname, HUB_LOOPBACK_HOST)) url.hostname = "localhost";
   return `${url.protocol}//${url.host}`;
 }

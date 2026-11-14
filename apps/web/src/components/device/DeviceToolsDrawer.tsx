@@ -22,7 +22,6 @@ import { createVisibilityAwarePoller } from "~/lib/visibilityPolling";
 import { webAppLifecycle } from "~/platform/appLifecycle";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
-import { errorMessage } from "./deviceControls";
 import {
   ACCESSIBILITY_TOGGLES,
   ANDROID_PERMISSIONS,
@@ -38,6 +37,7 @@ import {
   isBundleId,
   parseCoordinates,
 } from "./deviceTools.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** The device calls the drawer makes; the panel passes the environment's. */
 export interface DeviceToolsApi {

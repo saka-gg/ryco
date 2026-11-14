@@ -1,7 +1,7 @@
 import { isHostedHubMode } from "../../env";
 import { isHostedStaticApp } from "../../hostedPairing";
 import {
-  isLoopbackHostname,
+  isPrimaryLoopbackHostname,
   readPrimaryEnvironmentTarget,
 } from "../../environments/primary/target";
 
@@ -10,7 +10,9 @@ export function isLocalOnboardingClient(): boolean {
   if (typeof window === "undefined" || isHostedHubMode() || isHostedStaticApp()) return false;
   try {
     const target = readPrimaryEnvironmentTarget();
-    return target !== null && isLoopbackHostname(new URL(target.target.httpBaseUrl).hostname);
+    return (
+      target !== null && isPrimaryLoopbackHostname(new URL(target.target.httpBaseUrl).hostname)
+    );
   } catch {
     return false;
   }
