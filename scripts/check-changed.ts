@@ -227,6 +227,9 @@ function main(): void {
     const skip = [...(options.fmt ? [] : ["--no-fmt"]), ...(options.lint ? [] : ["--no-lint"])];
     results.push(run("format and lint", "vp", ["check", "--quiet", ...skip], env));
   }
+  if (options.lint) {
+    results.push(run("test casts", "node", ["scripts/check-test-casts.ts"], env));
+  }
   if (options.types) {
     // Not --affected: Turbo's cache already skips every package whose inputs were checked before,
     // and its hashes also cover inputs outside a package's directory (the server checks
