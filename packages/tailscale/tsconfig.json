@@ -1,20 +1,7 @@
 {
   "extends": "../../tsconfig.node.json",
   "compilerOptions": {
-    "types": ["node"],
-    "plugins": [
-      {
-        "name": "@effect/language-service",
-        "includeSuggestionsInTsc": false,
-        "diagnosticSeverity": {
-          "unstableApiUsage": "off",
-          "experimentalApiUsage": "off",
-          "anyUnknownInErrorContext": "warning",
-          "instanceOfSchema": "warning",
-          "deterministicKeys": "off"
-        }
-      }
-    ]
+    "types": ["node"]
   },
   "include": ["src"]
 }

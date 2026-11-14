@@ -261,6 +261,7 @@ it("turns response version decoding failures into an update instruction without 
         invoke({
           [WS_METHODS.serverGetConfig]: () => Effect.succeed({ usageContractVersion: 2 }),
           [WS_METHODS.serverGetUsageSummary]: () =>
+            // @effect-diagnostics-next-line globalErrorInEffectFailure:off - fakes a decode failure, which reaches the client as a plain Error
             Effect.fail(new Error("Schema decode: contractVersion expected 2, actual 1")),
         }),
       ),
