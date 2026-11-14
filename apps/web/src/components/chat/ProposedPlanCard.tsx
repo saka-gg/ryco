@@ -28,6 +28,7 @@ import {
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { readEnvironmentApi } from "~/environmentApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { errorMessage } from "~/lib/errorMessage";
 
 export const ProposedPlanCard = memo(function ProposedPlanCard({
   planMarkdown,
@@ -50,7 +51,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
         stackedThreadToast({
           type: "error",
           title: "Could not copy plan",
-          description: error instanceof Error ? error.message : "An error occurred while copying.",
+          description: errorMessage(error, "An error occurred while copying."),
         }),
       );
     },
@@ -122,7 +123,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
           stackedThreadToast({
             type: "error",
             title: "Could not save plan",
-            description: error instanceof Error ? error.message : "An error occurred while saving.",
+            description: errorMessage(error, "An error occurred while saving."),
           }),
         );
       })

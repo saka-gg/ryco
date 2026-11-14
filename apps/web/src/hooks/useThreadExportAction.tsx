@@ -5,6 +5,7 @@ import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { exportThreadMarkdown } from "../lib/threadExport";
 import { toastManager } from "../components/ui/toast";
 import { ITEM_ICON_CLASS, type CommandPaletteActionItem } from "../components/CommandPalette.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function useThreadExportAction(thread: ScopedThreadRef | null): CommandPaletteActionItem {
   const controllerRef = useRef<AbortController | null>(null);
@@ -50,8 +51,7 @@ export function useThreadExportAction(thread: ScopedThreadRef | null): CommandPa
           toastManager.add({
             type: "error",
             title: "Export failed",
-            description:
-              error instanceof Error ? error.message : "No file was saved. Retry the export.",
+            description: errorMessage(error, "No file was saved. Retry the export."),
           });
       } finally {
         toastManager.close(toastId);

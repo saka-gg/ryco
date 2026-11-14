@@ -13,6 +13,7 @@
 import path from "node:path";
 
 import type { ThreadId } from "@ryco/contracts";
+import { isPathInside } from "../pathContainment.ts";
 
 export interface CheckoutPathOps {
   /** Resolves symlinks (`canonicalizeFilesystemPath`). */
@@ -31,14 +32,7 @@ function trimTrailingSeparators(value: string): string {
 }
 
 function isStrictlyInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return (
-    relative.length > 0 &&
-    relative !== "." &&
-    relative !== ".." &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
-  );
+  return isPathInside({ root: parent, candidate: child, allowRoot: false });
 }
 
 /**

@@ -32,6 +32,7 @@ import {
   shouldShowPhoneAppInterstitial,
 } from "../components/shell/phone/phoneAppInterstitial";
 import { PhoneGetAppInterstitialBackdrop } from "../components/shell/phone/PhoneGetAppInterstitialBackdrop";
+import { errorMessage } from "~/lib/errorMessage";
 
 // The shell surfaces load during the root `beforeLoad` and render directly once
 // resolved: a `React.lazy` boundary here committed its fallback on every boot
@@ -521,7 +522,7 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
       ? "A new version of the app is ready. Update to continue."
       : hosted
         ? "The hosted client could not continue. Retry or reload the app."
-        : errorMessage(error);
+        : errorMessage(error, "An unexpected router error occurred.");
   const details = errorDetails(error);
 
   return (
@@ -587,18 +588,6 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
  */
 function retryRootRoute(router: ReturnType<typeof useRouter>, reset: () => void): void {
   void router.invalidate().finally(reset);
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-
-  if (typeof error === "string" && error.trim().length > 0) {
-    return error;
-  }
-
-  return "An unexpected router error occurred.";
 }
 
 function errorDetails(error: unknown): string {

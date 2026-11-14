@@ -20,19 +20,17 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as SynchronizedRef from "effect/SynchronizedRef";
 import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
 
 import {
   attachmentPathLines,
@@ -226,7 +224,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     const managedNativeEventLogger =
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const sessions = new Map<ThreadId, AcpSessionContext>();
-    const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
+    const threadLocks = yield* makeKeyedSerialExecutor<string>();
     const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(2_048);
     // The agent's own commands per directory (`readLiveProjectCommands`): ACP lists them only
     // inside a session, so a stopped session's list keeps serving its directory.
@@ -258,26 +256,8 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       ).pipe(Effect.asVoid);
     };
 
-    const getThreadSemaphore = (threadId: string) =>
-      SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
-        const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
-          current.get(threadId),
-        );
-        return Option.match(existing, {
-          onNone: () =>
-            Semaphore.make(1).pipe(
-              Effect.map((semaphore) => {
-                const next = new Map(current);
-                next.set(threadId, semaphore);
-                return [semaphore, next] as const;
-              }),
-            ),
-          onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
-        });
-      });
-
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
-      Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
+      threadLocks.withLock(threadId, effect);
 
     const logNative = (threadId: ThreadId, method: string, payload: unknown) =>
       Effect.gen(function* () {

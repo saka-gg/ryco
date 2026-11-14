@@ -59,6 +59,7 @@ import type { SidebarThreadSummary } from "../../../types";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { attemptThreadArchive, requestThreadArchive } from "../../../threadLifecycleCommands";
 import { requestThreadPinChange } from "../../../threadPinning";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type { ThreadMenuActionId, ThreadMenuActionItem };
 
@@ -248,7 +249,7 @@ export function useThreadMenuActions(params: {
           stackedThreadToast({
             type: "error",
             title: "Failed to rename thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       }
@@ -349,7 +350,7 @@ export function useThreadMenuActions(params: {
           stackedThreadToast({
             type: "error",
             title: "Failed to move thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       }
@@ -531,7 +532,7 @@ export function useThreadMenuActions(params: {
             stackedThreadToast({
               type: "error",
               title: "Failed to unarchive thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              description: errorMessage(error, "An error occurred."),
             }),
           );
         }

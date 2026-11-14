@@ -20,7 +20,7 @@
  * @module ProjectImportsLive
  */
 import type { BigIntStats } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, rm, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, rmdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -59,12 +59,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { detectAllowedRasterImageMimeType } from "../../imageMime.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
 import { TerminalOutputTail } from "../../project/worktreeSetupOutputTail.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { renameWithRetry } from "../../renameWithRetry.ts";
 import { RestartSensitiveWork } from "../../updates/restartSensitiveWork.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
@@ -117,6 +119,7 @@ import {
 } from "../Services/ProjectTransfers.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import { NodePaths } from "../Services/NodePaths.ts";
+import { isPathInside } from "../../pathContainment.ts";
 
 /** Output and clone progress are published, and subscribers get a snapshot, at most this often. */
 const DEFAULT_SNAPSHOT_THROTTLE_MS = 1_000;
@@ -250,24 +253,13 @@ const sameOrInside = (candidate: string, directory: string): boolean => {
       ? resolved.toLowerCase()
       : resolved;
   };
-  const relative = path.relative(fold(directory), fold(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return isPathInside({ root: fold(directory), candidate: fold(candidate), allowRoot: true });
 };
 
 /** The image types the avatar pipeline accepts, by their magic bytes. */
-const avatarContentType = (bytes: Buffer): string | null => {
-  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return "image/png";
-  }
-  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
-  if (
-    bytes.subarray(0, 4).toString("latin1") === "RIFF" &&
-    bytes.subarray(8, 12).toString("latin1") === "WEBP"
-  ) {
-    return "image/webp";
-  }
-  return null;
-};
+const AVATAR_IMAGE_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/webp"]);
+const avatarContentType = (bytes: Buffer): string | null =>
+  detectAllowedRasterImageMimeType(bytes, AVATAR_IMAGE_TYPES);
 
 /**
  * The scripts to save: the source's, plus the import's setup command as the worktree setup
@@ -2069,21 +2061,6 @@ export const newestAtMostEvery =
     const pause = Stream.fromEffectDrain(Effect.sleep(intervalMs));
     return newest.pipe(Stream.flatMap((value) => Stream.concat(Stream.succeed(value), pause)));
   };
-
-/** Renames, retrying the transient EPERM/EBUSY Windows reports while a scanner holds a file. */
-const renameWithRetry = async (from: string, to: string): Promise<void> => {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(from, to);
-      return;
-    } catch (error) {
-      const code = errnoOf(error);
-      const transient = process.platform === "win32" && (code === "EPERM" || code === "EBUSY");
-      if (attempt >= 4 || !transient) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
-    }
-  }
-};
 
 export const makeProjectImportsLive = (options: ProjectImportsLiveOptions = {}) =>
   Layer.effect(ProjectImports, makeProjectImports(options));
