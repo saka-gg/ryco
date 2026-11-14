@@ -11,18 +11,18 @@ import { persistedSavedEnvironmentRecordFields } from "@ryco/shared/savedEnviron
 import type { SecretKVService } from "../platform/index.ts";
 import type { SavedEnvironmentFailureKind } from "./connectFailure.ts";
 
-export interface SavedEnvironmentRecord {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly wsBaseUrl: string;
-  readonly httpBaseUrl: string;
-  readonly createdAt: string;
-  readonly lastConnectedAt: string | null;
-  readonly desktopSsh?: PersistedSavedEnvironmentRecord["desktopSsh"];
-  readonly hubLink?: PersistedSavedEnvironmentRecord["hubLink"];
-  /** When the user switched the machine off; absent while it is on. */
-  readonly disabledAt?: string;
-}
+/**
+ * A saved environment as the catalog holds it: the stored record, whose
+ * optional SSH target and Hub link may also be set to `undefined` (dropped
+ * when stored).
+ */
+export type SavedEnvironmentRecord = Omit<
+  PersistedSavedEnvironmentRecord,
+  "desktopSsh" | "hubLink"
+> & {
+  readonly desktopSsh?: PersistedSavedEnvironmentRecord["desktopSsh"] | undefined;
+  readonly hubLink?: PersistedSavedEnvironmentRecord["hubLink"] | undefined;
+};
 
 /**
  * The user switched this saved machine off: it stays saved with its credential

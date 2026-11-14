@@ -89,6 +89,31 @@ describe("clientPersistenceStorage", () => {
     });
   });
 
+  it("reads stored records one by one: an unreadable one never hides the others", async () => {
+    const testWindow = getTestWindow();
+    const { SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY, readBrowserSavedEnvironmentRegistry } =
+      await import("./clientPersistenceStorage");
+    const linked = {
+      ...savedRegistryRecord,
+      environmentId: EnvironmentId.make("environment-linked"),
+      // Saved before the node identity proof existed.
+      hubLink: { hubEnvironmentId: "env_hub_m4", linkedAt: "2026-10-14T00:00:00.000Z" },
+    };
+    testWindow.localStorage.setItem(
+      SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        records: [
+          savedRegistryRecord,
+          { ...savedRegistryRecord, environmentId: "environment-broken", wsBaseUrl: 42 },
+          linked,
+        ],
+      }),
+    );
+
+    expect(readBrowserSavedEnvironmentRegistry()).toEqual([savedRegistryRecord, linked]);
+  });
+
   it("keeps a switched-off machine off and its browser credential stored", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-09T00:00:00.000Z"));

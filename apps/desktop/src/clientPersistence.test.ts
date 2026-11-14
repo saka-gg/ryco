@@ -183,6 +183,28 @@ describe("clientPersistence", () => {
     expect(readSavedEnvironmentRegistry(registryPath)).toEqual([linked]);
   });
 
+  it("reads stored records one by one and leaves out a Hub link it cannot verify", () => {
+    const registryPath = makeTempPath("saved-environments.json");
+    const linked = {
+      ...savedRegistryRecord,
+      environmentId: "environment-linked",
+      hubLink: { hubEnvironmentId: "env_hub_m4", linkedAt: "2026-10-14T00:00:00.000Z" },
+    };
+    fs.writeFileSync(
+      registryPath,
+      JSON.stringify({
+        records: [
+          { ...savedRegistryRecord, encryptedBearerToken: "ZW5jOnRva2Vu" },
+          { ...savedRegistryRecord, environmentId: "environment-broken", label: null },
+          { ...linked, environmentId: "environment-bad-link", hubLink: { linkedAt: "never" } },
+          linked,
+        ],
+      }),
+    );
+
+    expect(readSavedEnvironmentRegistry(registryPath)).toEqual([savedRegistryRecord, linked]);
+  });
+
   it("keeps a switched-off machine off and its credential stored through rewrites", () => {
     const registryPath = makeTempPath("saved-environments.json");
     const secretStorage = makeSecretStorage(true);
