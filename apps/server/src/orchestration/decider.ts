@@ -2,6 +2,7 @@ import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
 } from "@ryco/shared/retiredFeatures";
+import { activityPayloadRecord } from "@ryco/shared/threadActivityPayloads";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
 import { isChatProject, isChatsAutomationScope, projectKindOf } from "@ryco/shared/projectKind";
 import {
@@ -3778,13 +3779,11 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         command,
         threadId: command.threadId,
       });
+      // Any kind may name the request it belongs to (approvals, questions, secrets).
+      const payloadRecord = activityPayloadRecord(command.activity.payload);
       const requestId =
-        typeof command.activity.payload === "object" &&
-        command.activity.payload !== null &&
-        "requestId" in command.activity.payload &&
-        typeof (command.activity.payload as { requestId?: unknown }).requestId === "string"
-          ? ((command.activity.payload as { requestId: string })
-              .requestId as OrchestrationEvent["metadata"]["requestId"])
+        typeof payloadRecord?.requestId === "string"
+          ? (payloadRecord.requestId as OrchestrationEvent["metadata"]["requestId"])
           : undefined;
       const activity =
         command.activity.kind === "approval.requested" ||
@@ -3792,19 +3791,13 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           ? {
               ...command.activity,
               payload: {
-                ...(typeof command.activity.payload === "object" &&
-                command.activity.payload !== null
-                  ? command.activity.payload
-                  : {}),
+                ...payloadRecord,
                 [command.activity.kind === "approval.requested"
                   ? "approvalIdentity"
                   : "userInputIdentity"]: {
                   requestEventId: command.activity.id,
-                  ...(typeof command.activity.payload === "object" &&
-                  command.activity.payload !== null &&
-                  "runtimeSessionId" in command.activity.payload &&
-                  typeof command.activity.payload.runtimeSessionId === "string"
-                    ? { runtimeSessionId: command.activity.payload.runtimeSessionId }
+                  ...(typeof payloadRecord?.runtimeSessionId === "string"
+                    ? { runtimeSessionId: payloadRecord.runtimeSessionId }
                     : {}),
                 },
               },

@@ -1,5 +1,13 @@
 import { pendingRequestActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
 import {
+  isApprovalActivity,
+  readApprovalActivityPayload,
+  readUserInputActivityPayload,
+  type ActivityPayloadView,
+  type ApprovalActivityPayload,
+  type RequestActivityPayload,
+} from "@ryco/shared/threadActivityPayloads";
+import {
   ApprovalResponseIdentity,
   ApprovalResponseState,
   SECRET_REQUESTED_ACTIVITY_KIND,
@@ -260,12 +268,10 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
     Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
 
-function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
-  if (typeof payload !== "object" || payload === null) {
-    return null;
-  }
-  const requestId = (payload as Record<string, unknown>).requestId;
-  return typeof requestId === "string" ? ApprovalRequestId.make(requestId) : null;
+function activityRequestId(
+  payload: Pick<RequestActivityPayload, "requestId"> | undefined,
+): ApprovalRequestId | null {
+  return payload?.requestId !== undefined ? ApprovalRequestId.make(payload.requestId) : null;
 }
 
 function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
@@ -297,15 +303,12 @@ function derivePendingUserInputStatesFromActivities(
   );
 
   for (const activity of ordered) {
-    const requestId = extractActivityRequestId(activity.payload);
+    const payload = readUserInputActivityPayload(activity);
+    const requestId = activityRequestId(payload);
     if (requestId === null) {
       continue;
     }
-    const payload =
-      typeof activity.payload === "object" && activity.payload !== null
-        ? (activity.payload as Record<string, unknown>)
-        : null;
-    const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
+    const detail = payload?.detail?.toLowerCase() ?? null;
 
     const isPending = userInputActivityPendingState({
       kind: activity.kind,
@@ -1839,17 +1842,10 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
         }
 
         case "thread.activity-appended": {
-          const requestId = extractActivityRequestId(event.payload.activity.payload);
-          const activityPayload =
-            typeof event.payload.activity.payload === "object" &&
-            event.payload.activity.payload !== null
-              ? (event.payload.activity.payload as Record<string, unknown>)
-              : null;
+          const activityPayload = readUserInputActivityPayload(event.payload.activity);
+          const requestId = activityRequestId(activityPayload);
           const kind = event.payload.activity.kind;
-          if (
-            requestId !== null &&
-            (kind.startsWith("user-input.") || kind === "provider.user-input.respond.failed")
-          ) {
+          if (requestId !== null && activityPayload !== undefined) {
             const existing = yield* projectionThreadUserInputRequestRepository.getByRequestId({
               threadId: event.payload.threadId,
               requestId,
@@ -1885,13 +1881,13 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
               if (!wasPending) return;
               if (identity && !sameApprovalIdentity(row.userInputIdentity, identity)) return;
               if (
-                typeof activityPayload?.responseAttemptId === "string" &&
+                activityPayload.responseAttemptId !== undefined &&
                 row.responseAttemptId !== activityPayload.responseAttemptId
               )
                 return;
               if (
                 kind === "user-input.resolved" &&
-                (row.userInputIdentity?.runtimeSessionId !== activityPayload?.runtimeSessionId ||
+                (row.userInputIdentity?.runtimeSessionId !== activityPayload.runtimeSessionId ||
                   (row.settlementRequiresIdentity && !identity))
               )
                 return;
@@ -1899,7 +1895,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
                 kind === "provider.user-input.respond.failed" &&
                 row.userInputIdentity &&
                 (!sameApprovalIdentity(row.userInputIdentity, identity) ||
-                  row.responseAttemptId !== activityPayload?.responseAttemptId)
+                  row.responseAttemptId !== activityPayload.responseAttemptId)
               )
                 return;
               const terminal =
@@ -1907,8 +1903,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
                 responseState === "invalidated" ||
                 userInputActivityPendingState({
                   kind,
-                  detail:
-                    typeof activityPayload?.detail === "string" ? activityPayload.detail : null,
+                  detail: activityPayload.detail ?? null,
                 }) === false;
               yield* projectionThreadUserInputRequestRepository.upsert({
                 ...row,
@@ -2408,10 +2403,14 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
           return;
 
         case "thread.activity-appended": {
-          const requestId =
-            extractActivityRequestId(event.payload.activity.payload) ??
-            event.metadata.requestId ??
-            null;
+          // Only approval activities change a pending-approval row; others that happen to
+          // carry a requestId (questions, secrets) keep their own accounting.
+          if (!isApprovalActivity(event.payload.activity)) {
+            return;
+          }
+          const activityPayload: ActivityPayloadView<ApprovalActivityPayload> =
+            readApprovalActivityPayload(event.payload.activity) ?? {};
+          const requestId = activityRequestId(activityPayload) ?? event.metadata.requestId ?? null;
           if (requestId === null) {
             return;
           }
@@ -2419,11 +2418,6 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             threadId: event.payload.threadId,
             requestId,
           });
-          const activityPayload =
-            typeof event.payload.activity.payload === "object" &&
-            event.payload.activity.payload !== null
-              ? (event.payload.activity.payload as Record<string, unknown>)
-              : {};
           const identity = Schema.is(ApprovalResponseIdentity)(activityPayload.approvalIdentity)
             ? activityPayload.approvalIdentity
             : undefined;
@@ -2446,9 +2440,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
               !matchesApprovalAttempt(
                 existingRow.value,
                 identity,
-                typeof activityPayload.responseAttemptId === "string"
-                  ? activityPayload.responseAttemptId
-                  : undefined,
+                activityPayload.responseAttemptId,
               )
             )
               return;
@@ -2475,7 +2467,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
                 return;
               if (existingRow.value.settlementRequiresIdentity && identity === undefined) return;
               if (
-                typeof activityPayload.responseAttemptId === "string" &&
+                activityPayload.responseAttemptId !== undefined &&
                 existingRow.value.responseAttemptId !== activityPayload.responseAttemptId
               )
                 return;
@@ -2484,12 +2476,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
               Option.isSome(existingRow) && existingRow.value.status === "pending",
               false,
             );
-            const resolvedDecisionRaw =
-              typeof event.payload.activity.payload === "object" &&
-              event.payload.activity.payload !== null &&
-              "decision" in event.payload.activity.payload
-                ? (event.payload.activity.payload as { decision?: unknown }).decision
-                : null;
+            const resolvedDecisionRaw = activityPayload.decision;
             const resolvedDecision =
               resolvedDecisionRaw === "accept" ||
               resolvedDecisionRaw === "acceptForSession" ||
@@ -2518,13 +2505,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
           }
           if (event.payload.activity.kind === "provider.approval.respond.failed") {
             if (Option.isSome(existingRow) && existingRow.value.responseAttemptId) return;
-            const payload =
-              typeof event.payload.activity.payload === "object" &&
-              event.payload.activity.payload !== null
-                ? (event.payload.activity.payload as Record<string, unknown>)
-                : null;
-            const detail =
-              typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
+            const detail = activityPayload.detail?.toLowerCase() ?? null;
             if (isStalePendingApprovalFailureDetail(detail)) {
               if (Option.isNone(existingRow)) {
                 return;
