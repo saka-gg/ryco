@@ -68,11 +68,9 @@ import {
   computerSetupToolNote,
   type ComputerSetupSignal,
 } from "../computerSetupSignal.ts";
-import {
-  ComputerLeaseError,
-  ComputerManager,
-  type ComputerActionObservation,
-} from "../ComputerManager.ts";
+import { ComputerManager } from "../ComputerManager.ts";
+import { ComputerLeaseError } from "../computerLease.ts";
+import type { ComputerActionObservation } from "../computerManagerTypes.ts";
 import {
   computerAuditGatewayRequestId,
   summarizeComputerAuditArgs,

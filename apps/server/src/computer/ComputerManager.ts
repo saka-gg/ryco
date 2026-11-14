@@ -13,7 +13,6 @@ import type {
 import { currentComputerTask } from "./computerTaskContext.ts";
 import { CursorActivity } from "./cursorActivity.ts";
 import { waitForWindow } from "./waitForWindow.ts";
-import { observedComputerTargetNode } from "./computerElementIdentity.ts";
 import {
   ComputerId,
   ComputerPoint,
@@ -23,7 +22,6 @@ import {
   ThreadId,
   type ComputerAccessibilityTreeResult,
   type ComputerActionResult,
-  type ComputerApp,
   type ComputerControlMode,
   type ComputerAvailability,
   type ComputerBuildSignature,
@@ -58,9 +56,7 @@ import {
   computerLanesCover,
   computerReadLane,
   computerWindowLane,
-  type ComputerLaneClaim,
 } from "@ryco/shared/computerLanes";
-
 import {
   DesktopOperationQueue,
   withDesktopDeliveryMode,
@@ -96,27 +92,14 @@ import {
   timedComputerLeg,
   withComputerCallContext,
 } from "./computerCallContext.ts";
-import {
-  rectContainsPoint,
-  topmostWindowAtPoint,
-  windowsCoveringPoint,
-} from "./computerGeometry.ts";
+import { rectContainsPoint, topmostWindowAtPoint } from "./computerGeometry.ts";
 import { decodePngLuma, estimateVerticalTravel, ScrollGearingStore } from "./scrollCalibration.ts";
 import { ScrollGearingFile } from "./scrollGearingFile.ts";
-import {
-  ComputerTargetError,
-  activationPointForNode,
-  computerTargetCandidates,
-  resolveComputerPoint,
-  resolveComputerSemanticTarget,
-  resolveComputerUniqueTextTarget,
-  resolveComputerWindowTarget,
-} from "./uiTreeTargeting.ts";
+import { ComputerTargetError, resolveComputerWindowTarget } from "./uiTreeTargeting.ts";
 import { ComputerAuditLog, type ComputerAuditEntry } from "./computerAuditLog.ts";
-import { ComputerDenylistError, computerDenylistMatch } from "./computerDenylist.ts";
+import { ComputerDenylistError } from "./computerDenylist.ts";
 import { CuaActionError } from "./CuaComputerBackend.ts";
 import {
-  COMPUTER_FOREGROUND_NOT_REQUESTED_CODE,
   COMPUTER_FOREGROUND_USER_INTERACTION_CODE,
   COMPUTER_USER_INTERACTION_QUIET_MS,
   type ComputerForegroundAuthorization,
@@ -128,474 +111,80 @@ import {
 } from "./computerShield.ts";
 import { describeComputerUiTree } from "./uiTreeText.ts";
 import { clampTextToLength } from "./utf8Truncation.ts";
-
-export const COMPUTER_FRAME_QUEUE_LIMIT = 8;
-export const COMPUTER_FRAME_SOCKET_BUDGET_BYTES = 2 * 1024 * 1024;
-
-/**
- * Crash backstop for the desktop lease, not the normal release path.
- *
- * Foreground input, clipboard and complete gestures share one exclusive
- * desktop lease. A backend proving exact background delivery instead owns
- * its application's keyboard/modal state, or one window for pure semantic
- * writes. Unrelated applications can progress between atomic native actions.
- * Ownership is released the moment the owner's turn ends
- * (`releaseDesktopControl`, driven by the provider
- * runtime's terminal turn and session events), because a takeover mid-turn
- * corrupts the owner: its drag is teleported, its typing is retargeted. Idle
- * expiry only covers the case where that signal never arrives — a provider
- * process that died without a terminal event — and so is deliberately long: a
- * model can think for minutes between two tool calls, and expiring under a live
- * turn is the failure this whole mechanism exists to prevent. Five minutes
- * leaves a long-running model's legitimate thinking time undisturbed.
- */
-export const COMPUTER_LEASE_IDLE_MS = 300_000;
-
-/**
- * How long a conflicting claim waits for another conversation's lease (an app,
- * a window, or the whole desktop) before it gives up. Waiters queue FIFO per
- * target and hold no operation lane while they wait, so the owner keeps
- * working. Stop, a revoked turn or shutdown end the wait at once.
- */
-export const COMPUTER_LEASE_WAIT_MS = 45_000;
-
-/**
- * Which lane one agent tool call runs in (see `@ryco/shared/computerLanes`):
- * observation runs beside everything except whole-desktop work, background
- * input to one app runs beside other apps, and everything else holds the
- * whole desktop. A string is a scoped key (`runScoped`).
- */
-export type ComputerAgentLane =
-  | { readonly kind: "read" }
-  | { readonly kind: "exclusive" }
-  | { readonly kind: "app"; readonly pid: number }
-  | { readonly kind: "scoped"; readonly key: string };
-
-/** Pure observation tools: they read the desktop and send no input. */
-const COMPUTER_READ_LANE_TOOLS: ReadonlySet<string> = new Set([
-  "computer_get_state",
-  "computer_screenshot",
-  "computer_get_accessibility_tree",
-  "computer_list_windows",
-  "computer_list_apps",
-  "computer_get_screen_size",
-  "computer_verify_state",
-  "computer_zoom",
-  "computer_get_cursor_position",
-  "computer_wait",
-  "computer_help",
-]);
-
-/**
- * Plain single-target input that, delivered in the background to an exact
- * window, touches only that window's application. Drag, paste and clipboard,
- * launch, window frame/visibility, kill, menus, batches and Space tools stay
- * whole-desktop.
- */
-const COMPUTER_APP_LANE_TOOLS: ReadonlySet<string> = new Set([
-  "computer_click",
-  "computer_move_cursor",
-  "computer_scroll",
-  "computer_type_text",
-  "computer_press_key",
-  "computer_set_value",
-  "computer_select_text",
-  "computer_perform_action",
-]);
-
-/** The pid a Cua window id (`cua:<pid>:<window>`) names, if it names one. */
-function pidFromWindowId(windowId: string): number | undefined {
-  const match = /^cua:(\d+):/.exec(windowId);
-  const pid = match ? Number(match[1]) : Number.NaN;
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
-
-/** The application an operation's held lanes reserve exclusively, if any. */
-function heldAppLanePid(claims: readonly ComputerLaneClaim[] | undefined): number | undefined {
-  if (!claims) return undefined;
-  for (const claim of claims) {
-    if (claim.mode !== "exclusive") continue;
-    const match = /^app:(\d+)$/.exec(claim.resource);
-    if (match) return Number(match[1]);
-  }
-  return undefined;
-}
-
-/**
- * Inside an application's lane the resolved target must be that application:
- * a window that now belongs to another process is refused before dispatch.
- */
-function assertScheduledApp(scheduledPid: number | undefined, pid: number | undefined): void {
-  if (scheduledPid === undefined || pid === scheduledPid) return;
-  throw new ComputerTargetError({
-    code: "computer_target_invalid",
-    message:
-      "The target changed: the window no longer belongs to the application this call was " +
-      "scheduled for; nothing was sent. Observe again with computer_get_state.",
-  });
-}
-
-/** A one-shot deadline for a lease wait; `expired` flips when it fires. */
-function leaseDeadline(ms: number): {
-  expired: boolean;
-  readonly promise: Promise<void>;
-  cancel(): void;
-} {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = {
-    expired: false,
-    promise: undefined as unknown as Promise<void>,
-    cancel: () => {
-      if (timer !== undefined) clearTimeout(timer);
-      timer = undefined;
-    },
-  };
-  deadline.promise = new Promise<void>((resolve) => {
-    timer = setTimeout(() => {
-      deadline.expired = true;
-      resolve();
-    }, ms);
-  });
-  return deadline;
-}
-
-/**
- * Sleep until a lease changes, the conflicting lease would go stale, or the
- * wait's deadline passes; rejects with the signal's reason on abort.
- */
-function sleepForLease(
-  changed: Promise<void>,
-  deadline: Promise<void>,
-  expiryDelayMs: number | undefined,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  if (signal?.aborted) return Promise.reject(signal.reason);
-  return new Promise<void>((resolve, reject) => {
-    let expiry: ReturnType<typeof setTimeout> | undefined;
-    const finish = (error?: unknown) => {
-      if (expiry !== undefined) clearTimeout(expiry);
-      signal?.removeEventListener("abort", onAbort);
-      if (error === undefined) resolve();
-      else reject(error);
-    };
-    const onAbort = () => finish(signal?.reason ?? new Error("The lease wait was cancelled."));
-    signal?.addEventListener("abort", onAbort, { once: true });
-    // A few ms past the idle limit, so the re-check sees the lease as stale.
-    if (expiryDelayMs !== undefined) expiry = setTimeout(() => finish(), expiryDelayMs + 5);
-    void changed.then(() => finish());
-    void deadline.then(() => finish());
-  });
-}
-
-/**
- * How long the enable path waits for in-flight stops and the durable
- * preference write before giving up. The write is a local file store and a
- * stop is a bounded native round trip, so anything past this is wedged — and
- * a wedged enable must fail closed (staying disabled) rather than wedge the
- * caller or open authority on an unrecorded preference.
- */
-export const COMPUTER_CONTROL_ENABLE_TIMEOUT_MS = 30_000;
-
-/**
- * How long the desktop is given to settle before the screenshot that rides on
- * an action result is captured. Long enough for a menu to open or a keystroke
- * to paint, short enough not to throttle the action loop the screenshot exists
- * to speed up.
- */
-export const COMPUTER_ACTION_SETTLE_MS = 300;
-
-/**
- * The driver-observed settle that replaces the fixed wait when the backend
- * exposes `waitForSettle`: the AX observer debounces
- * the configured `actionSettleMs` of notification silence after a
- * mutation, bounded by `COMPUTER_ACTION_OBSERVER_SETTLE_TIMEOUT_MS` when the
- * surface keeps churning (a busy indicator, a repeating animation). A
- * settled verdict usually lands faster than the fixed budget; a busy surface
- * waits longer than it — both better than the blind sleep they replace.
- */
-export const COMPUTER_ACTION_OBSERVER_SETTLE_TIMEOUT_MS = 5_000;
-export const COMPUTER_ACTION_OBSERVER_SETTLE_QUIET_MS = COMPUTER_ACTION_SETTLE_MS;
-
-/**
- * How long paste waits before restoring the user's previous clipboard. The
- * target application reads the pasteboard off the keystroke asynchronously, so
- * restoring immediately would hand it the old contents. There is no observable
- * "the app read it" event, so this is a fixed settle like the action-screenshot
- * one above — long enough for the paste to land, short enough that a user who
- * reaches for their own clipboard next is not racing us.
- */
-export const COMPUTER_PASTE_RESTORE_MS = 250;
-
-/**
- * Trailing-edge window on the republish that a backend window change triggers.
- *
- * A publish costs one availability read, one window read and one screen-size
- * read per thread, and the window read is itself what reports a change — so a
- * desktop with a ticking window title (a clock, a download percentage, a video
- * player's timer) publishes, observes its own read as a change, and publishes
- * again, once per thread, without ever settling. Coalescing turns that into at
- * most one pass per window, which is the only rate that is bounded by something
- * other than how fast D-Bus answers.
- *
- * The window list itself is not delayed by this: `computer.windows-changed` is
- * emitted immediately from the event, with no backend call at all.
- */
-export const COMPUTER_WINDOWS_PUBLISH_DEBOUNCE_MS = 250;
-
-/**
- * The first vertical scroll into a window whose gearing is unknown is split:
- * this many requested pixels go first as a probe whose travel is measured and
- * learned, and the remainder is delivered pre-corrected. Sized so that even a
- * client gearing pixels up by the largest believable ratio keeps the probe's
- * travel inside the correlator's measurable band, while staying above the
- * store's minimum learnable injection.
- */
-export const SCROLL_PROBE_PX = 48;
-/**
- * Requests at or below this skip the probe: they are already probe-sized, and
- * even a heavily geared client keeps their travel measurable. Anything larger
- * into an unmeasured window is split — a 90 px request at 7x already travels
- * past what a window-height capture pair can correlate.
- */
-export const SCROLL_PROBE_TRIGGER_PX = SCROLL_PROBE_PX;
-
-/**
- * How close a leg's measured travel must land to its predicted distance before
- * that measurement itself counts as the settle evidence
- * (`SYNARA_CUA_CONDITIONAL_SETTLE`): the relative slack covers animation and
- * delivery residue on long legs, the floor covers the correlator's row
- * quantization on short ones.
- */
-export const SCROLL_SETTLE_ARRIVAL_TOLERANCE = 0.15;
-export const SCROLL_SETTLE_ARRIVAL_MIN_PX = 4;
-
-/**
- * How long recordError waits before republishing the threads it touched, so an
- * outage that fails ten calls in a burst costs one publish, not ten.
- */
-export const COMPUTER_ERROR_REPUBLISH_DEBOUNCE_MS = 250;
-
-/**
- * How long the running-app inventory a denylist window check resolves pids
- * through may be reused. `list_windows` carries an app name and a pid but no
- * bundle id, so a name that does not itself match the denylist is resolved
- * through `list_apps` — the same read `computer_list_apps` makes. Caching it
- * keeps every click and keystroke from paying for a process enumeration;
- * thirty seconds is short enough that a freshly-installed password manager is
- * still refused on essentially the next call.
- */
-const COMPUTER_DENYLIST_APP_CACHE_MS = 30_000;
-
-export type ComputerEventListener = (event: ComputerEvent) => void;
-
-interface ThreadComputerRuntimeState {
-  version: number;
-  lastError: string | null;
-  /**
-   * An error reported by a caller (stream attach, device surface), not by
-   * the physical read — `publishNow` owns `lastError` and would erase it.
-   * The next publish carries it in the snapshot's `lastError` slot, then it
-   * is consumed and cleared.
-   */
-  reportedError: string | null;
-  inputPause?: NonNullable<ThreadComputerState["inputPause"]>;
-  windows: readonly ComputerWindow[];
-  screenSize: ComputerScreenSize;
-  availability: ComputerAvailability;
-  cursor?: ComputerPoint;
-  /**
-   * Whether this thread's agent activity has already asked the UI to open the
-   * computer pane. Actions arrive every few seconds, so surfacing is once per
-   * thread: repeating the request would emit an event per click and could yank
-   * a user who deliberately closed the pane back to it.
-   */
-  paneSurfaced: boolean;
-}
-
-/** The single desktop's exclusive owner, and when it last drove it. */
-interface DesktopLease {
-  readonly threadId: string;
-  readonly turnId?: string;
-  lastActivityMs: number;
-  releaseRequested?: boolean;
-  /** The turn the deferred release was requested for — a renewed lease ignores it. */
-  releaseRequestedTurnId?: string | undefined;
-}
-
-/** Semantic writes own a window; keyboard and modal state belong to its process. */
-interface BackgroundControlTarget {
-  readonly key: string;
-  readonly pid?: number;
-  readonly windowId?: string;
-}
-
-interface BackgroundLease extends DesktopLease {
-  readonly target: BackgroundControlTarget;
-}
-
-/** What a lease claim needs: the whole desktop, or one app/window target. */
-type LeaseScope =
-  | { readonly kind: "desktop" }
-  | { readonly kind: "target"; readonly target: BackgroundControlTarget };
-
-interface LeaseWaiter {
-  readonly owner: string;
-  scope: LeaseScope;
-}
-
-/** The live lease a claim conflicts with. */
-interface LeaseConflict {
-  readonly targetOnly: boolean;
-  /** The contested app or window, for the timeout message. */
-  readonly label?: string;
-  /** When the conflicting lease goes stale, if nothing of its owner is in flight. */
-  readonly expiresAtMs?: number;
-}
-
-function leaseChangeSignal(): { readonly promise: Promise<void>; readonly fire: () => void } {
-  let fire = () => {};
-  const promise = new Promise<void>((resolve) => {
-    fire = resolve;
-  });
-  return { promise, fire };
-}
-
-/** Whether two background targets touch the same app keyboard or window. */
-function backgroundTargetsConflict(
-  a: BackgroundControlTarget,
-  b: BackgroundControlTarget,
-): boolean {
-  if (a.key === b.key) return true;
-  return a.pid !== undefined && a.pid === b.pid && (!a.windowId || !b.windowId);
-}
-
-function leaseScopesConflict(a: LeaseScope, b: LeaseScope): boolean {
-  if (a.kind === "desktop" || b.kind === "desktop") return true;
-  return backgroundTargetsConflict(a.target, b.target);
-}
-
-export interface ComputerManagerOptions {
-  readonly backend: ComputerBackend;
-  readonly controlStatePath?: string;
-  /**
-   * Where the mutating-call audit log appends — beside the control state in
-   * the server state dir. Absent means no audit file: tests and in-memory
-   * embeddings get the same behavior the feature had before it existed.
-   */
-  readonly auditLogPath?: string;
-  readonly transport?: FrameTransport<string, ComputerStreamFrame>;
-  /** Injected for tests; the lease is the only clock-dependent state here. */
-  readonly now?: () => number;
-  readonly leaseIdleMs?: number;
-  /** How long a conflicting lease claim waits; defaults to `COMPUTER_LEASE_WAIT_MS`. */
-  readonly leaseWaitMs?: number;
-  /** Injected for tests, so action-screenshot tests do not sleep for real. */
-  readonly actionSettleMs?: number;
-  /** Injected for tests, so window-churn tests do not wait out the real window. */
-  readonly windowsPublishDebounceMs?: number;
-  /** Injected for tests; decodes and correlates two PNG captures. */
-  readonly measureScrollTravel?: (
-    before: Uint8Array,
-    after: Uint8Array,
-  ) => number | undefined | Promise<number | undefined>;
-}
-
-/**
- * A resolved pointer target, plus what the window read taken while resolving it
- * showed covering the point. The covering list rides along so the raise-failure
- * path can decide whether to refuse without paying a second window read.
- */
-interface ResolvedPointTarget {
-  readonly point: ComputerPoint;
-  readonly windowId?: string;
-  readonly covering?: readonly ComputerWindow[];
-  readonly semantic?: ComputerResolvedTarget;
-}
-
-/**
- * What the raise/focus step needs. The point is optional because keyboard
- * actions name a window without one, and with no point there is nothing an
- * occlusion check could be about.
- */
-type PreparedTarget = Omit<ResolvedPointTarget, "point"> & {
-  readonly point?: ComputerPoint;
-};
-
-/**
- * The click variants `computer_click` folds into one call: which button, and
- * how many presses. The driver exposes left x1-3 and a single right click;
- * every other combination is refused before a target is even resolved.
- */
-export interface ComputerClickGesture {
-  readonly count?: 1 | 2 | 3;
-  readonly button?: "left" | "right" | "middle";
-}
-
-/** A capture plus which window it covers, when it covers one at all. */
-export interface ComputerCapturedWindow {
-  readonly screenshot: ComputerScreenshot;
-  readonly windowId?: string;
-}
-
-/** The action's captured window, or confirmation that it closed. */
-export type ComputerActionObservation =
-  | ComputerCapturedWindow
-  | { readonly targetWindowClosed: true };
-
-/**
- * Refusal raised when another conversation kept an application, a window or
- * the whole desktop for longer than a conflicting claim may wait
- * (`COMPUTER_LEASE_WAIT_MS`). It extends `ComputerBackendError` so every
- * existing catch site keeps classifying it. Nothing was sent, and the call is
- * retryable: the other conversation keeps its lease only until its turn ends.
- * The message names the contested app or window when it is known, never the
- * other conversation (thread labels do not cross conversations).
- */
-export class ComputerLeaseError extends ComputerBackendError {
-  readonly code = "computer_controlled_by_other_thread";
-  /** How long the refused claim waited before giving up. */
-  readonly waitedMs: number;
-
-  constructor(
-    input: {
-      /** An app or window lease, rather than the whole desktop. */
-      readonly targetOnly?: boolean;
-      /** The contested app or window, when known (e.g. "Safari"). */
-      readonly target?: string;
-      readonly waitedMs?: number;
-    } = {},
-  ) {
-    const waitedMs = Math.max(0, input.waitedMs ?? 0);
-    const subject = input.target
-      ? `${JSON.stringify(input.target)} is`
-      : input.targetOnly
-        ? "This application or window is"
-        : "The shared pointer and focused keyboard are";
-    const waited = waitedMs > 0 ? `waited ${Math.round(waitedMs / 1000)} s and ` : "";
-    super(
-      `${subject} being used by another conversation; ${waited}no input was sent. ` +
-        "That conversation keeps it until its turn ends. Retry later, or work on another " +
-        "application meanwhile; reading the desktop still works. Do not switch tools to " +
-        "bypass the lease.",
-      { retryable: true },
-    );
-    this.name = "ComputerLeaseError";
-    this.waitedMs = waitedMs;
-  }
-}
-
-/** Whether the window found frontmost before an activation was put back. */
-export type ForegroundRestoreStatus =
-  | "restored"
-  | "restore-missed"
-  | "already-frontmost"
-  | "frontmost-unobservable";
-
-/** Which window a foreground excursion restored, and whether that succeeded. */
-export interface ForegroundRestoreInfo {
-  readonly restoredWindowId: string | null;
-  readonly restoreStatus: ForegroundRestoreStatus;
-}
+import { ComputerDenylistGuard } from "./computerDenylistGuard.ts";
+import {
+  COMPUTER_APP_LANE_TOOLS,
+  COMPUTER_LEASE_IDLE_MS,
+  COMPUTER_LEASE_WAIT_MS,
+  COMPUTER_READ_LANE_TOOLS,
+  ComputerLeaseError,
+  agentThreadId,
+  assertScheduledApp,
+  backgroundTargetsConflict,
+  heldAppLanePid,
+  leaseChangeSignal,
+  leaseDeadline,
+  leaseScopesConflict,
+  pidFromWindowId,
+  sleepForLease,
+  type BackgroundControlTarget,
+  type BackgroundLease,
+  type ComputerAgentLane,
+  type DesktopLease,
+  type LeaseConflict,
+  type LeaseScope,
+  type LeaseWaiter,
+} from "./computerLease.ts";
+import {
+  COMPUTER_ACTION_OBSERVER_SETTLE_TIMEOUT_MS,
+  COMPUTER_ACTION_SETTLE_MS,
+  COMPUTER_CONTROL_ENABLE_TIMEOUT_MS,
+  COMPUTER_ERROR_REPUBLISH_DEBOUNCE_MS,
+  COMPUTER_FRAME_QUEUE_LIMIT,
+  COMPUTER_FRAME_SOCKET_BUDGET_BYTES,
+  COMPUTER_PASTE_RESTORE_MS,
+  COMPUTER_WINDOWS_PUBLISH_DEBOUNCE_MS,
+  SCROLL_PROBE_PX,
+  SCROLL_PROBE_TRIGGER_PX,
+  SCROLL_SETTLE_ARRIVAL_MIN_PX,
+  SCROLL_SETTLE_ARRIVAL_TOLERANCE,
+} from "./computerManagerConstants.ts";
+import {
+  activationUnsupportedError,
+  clipboardUnsupportedError,
+  errorMessage,
+  healthUnavailableMessage,
+  occludedTargetError,
+  refusedInjectionError,
+  windowNotFoundError,
+} from "./computerManagerErrors.ts";
+import type {
+  ComputerActionObservation,
+  ComputerCapturedWindow,
+  ComputerClickGesture,
+  ComputerEventListener,
+  ComputerManagerOptions,
+  ForegroundRestoreInfo,
+  ThreadComputerRuntimeState,
+} from "./computerManagerTypes.ts";
+import {
+  assertTargetCanUseCoordinates,
+  clickInjector,
+  coveringWindowsAt,
+  hasCoordinates,
+  hasLabelFields,
+  hasSemanticFields,
+  keyboardTargetWindow,
+  raiseTargetWindow,
+  resolveCoordinatePoint,
+  resolveMenuAppTarget,
+  resolveSemanticTarget,
+  scopedPointOcclusion,
+  semanticPointTarget,
+  type ComputerTargetingDeps,
+  type PreparedTarget,
+  type ResolvedPointTarget,
+} from "./computerTargetResolution.ts";
 
 /** Thread state, targeting, action dispatch, and stream ownership for a computer. */
 export class ComputerManager {
@@ -756,14 +345,9 @@ export class ComputerManager {
   private disposed = false;
   private readonly disabledThreads = new Set<string>();
   private readonly controlState: ComputerControlState;
+  private readonly denylist: ComputerDenylistGuard;
+  private readonly targeting: ComputerTargetingDeps;
   private readonly auditLog: ComputerAuditLog;
-  /**
-   * The running-app inventory the denylist's pid resolution reuses; see
-   * `COMPUTER_DENYLIST_APP_CACHE_MS` for the bound.
-   */
-  private deniedAppsCache:
-    | { readonly at: number; readonly apps: readonly ComputerApp[] }
-    | undefined;
   private readonly pendingControlWrites = new Map<string, Promise<void>>();
   private readonly suspendedThreads = new Set<string>();
   private readonly authorityRevocations = new Map<string, AbortController>();
@@ -841,52 +425,6 @@ export class ComputerManager {
   }
 
   /**
-   * The denylist check for the admission/consent keys, which are the raw
-   * strings a tool call declared — an app name, a bundle id, an executable
-   * path, or the `pid <n>` fallback consent uses when a pid could not be
-   * named. Synchronous by contract: both call sites are consent bookkeeping
-   * that cannot await a process enumeration, so the pid fallback resolves
-   * only against the last cached inventory rather than paying for a fresh
-   * one inside the serialized operation queue.
-   */
-  private assertDrivenAppAllowed(app: string): void {
-    const direct = computerDenylistMatch({ name: app });
-    if (direct) throw new ComputerDenylistError(direct.app, direct.matched);
-    const pidMatch = /^pid ([1-9]\d*)$/.exec(app.trim().toLowerCase());
-    if (pidMatch === null) return;
-    const pid = Number(pidMatch[1]);
-    const owner = this.deniedAppsCache?.apps.find((candidate) => candidate.pid === pid);
-    if (owner === undefined) return;
-    const resolved = computerDenylistMatch({
-      name: owner.name,
-      bundleId: owner.bundleId,
-    });
-    if (resolved) throw new ComputerDenylistError(resolved.app, resolved.matched);
-  }
-
-  /**
-   * The running-app inventory a window's pid resolves through. A window row
-   * carries a name and a pid but no bundle id, so a name that does not itself
-   * match is checked against the app's bundle id — how `com.dashlane.*` is
-   * caught when the reported appName is just "Dashlane". The list is cached
-   * briefly rather than enumerated per input; a failed enumeration reuses the
-   * stale copy rather than closing the check open.
-   */
-  private async runningAppsForDenylist(): Promise<readonly ComputerApp[]> {
-    const listApps = this.backend.listApps?.bind(this.backend);
-    if (listApps === undefined) return this.deniedAppsCache?.apps ?? [];
-    const now = this.now();
-    const cached = this.deniedAppsCache;
-    if (cached !== undefined && now - cached.at < COMPUTER_DENYLIST_APP_CACHE_MS) {
-      return cached.apps;
-    }
-    const apps = await listApps().catch(() => undefined);
-    if (apps === undefined) return cached?.apps ?? [];
-    this.deniedAppsCache = { at: now, apps };
-    return apps;
-  }
-
-  /**
    * The app names a call's targets belong to, for per-app approval before dispatch. Windows
    * resolve through the last listing (a fresh one only on a miss), pids and app identities
    * through the cached running-app inventory. It reads; it never claims the desktop.
@@ -908,7 +446,9 @@ export class ComputerManager {
       else unresolved = true;
     }
     const running =
-      pidsToName.length > 0 || targets.apps.length > 0 ? await this.runningAppsForDenylist() : [];
+      pidsToName.length > 0 || targets.apps.length > 0
+        ? await this.denylist.runningAppsForDenylist()
+        : [];
     for (const pid of pidsToName) {
       const owner = running.find((app) => app.pid === pid);
       if (owner?.name) names.push(owner.name);
@@ -925,73 +465,6 @@ export class ComputerManager {
     return { names, unresolved };
   }
 
-  /** How a listed window's owning app matches the denylist, or nothing. */
-  private async deniedMatchForWindow(
-    window: ComputerWindow,
-  ): Promise<ReturnType<typeof computerDenylistMatch>> {
-    const direct = computerDenylistMatch({ name: window.appName });
-    if (direct) return direct;
-    if (window.pid === undefined) return undefined;
-    const owner = (await this.runningAppsForDenylist()).find(
-      (candidate) => candidate.pid === window.pid,
-    );
-    if (owner === undefined) return undefined;
-    return computerDenylistMatch({
-      name: owner.name,
-      bundleId: owner.bundleId,
-    });
-  }
-
-  /** How a pid-grain target's owning app matches the denylist, or nothing. */
-  private async deniedMatchForPid(
-    pid: number,
-    name: string | undefined,
-  ): Promise<ReturnType<typeof computerDenylistMatch>> {
-    const direct = computerDenylistMatch({ name });
-    if (direct) return direct;
-    const owner = (await this.runningAppsForDenylist()).find((candidate) => candidate.pid === pid);
-    if (owner === undefined) return undefined;
-    return computerDenylistMatch({
-      name: owner.name,
-      bundleId: owner.bundleId,
-    });
-  }
-
-  /**
-   * Refuse an agent's input bound for a denylisted window. The human's own
-   * pane input is exempt — `threadId` undefined identifies the person at the
-   * keyboard, the same exemption the lease makes — while every agent-driven
-   * path resolves the window's app before a raise, a focus pin, or a dispatch
-   * can touch it.
-   */
-  private async assertWindowInputAllowed(
-    threadId: string | undefined,
-    windowId: string,
-  ): Promise<void> {
-    if (agentThreadId(threadId) === undefined) return;
-    const window = (await this.readWindows()).find((candidate) => candidate.id === windowId);
-    if (window === undefined) return;
-    await this.assertWindowInputAllowedWindow(threadId, window);
-  }
-
-  /**
-   * The same input check for a window the caller already listed — the
-   * window-grain mutation paths resolve their target before consent, so they
-   * check the row they hold rather than paying for a second enumeration.
-   */
-  private async assertWindowInputAllowedWindow(
-    threadId: string | undefined,
-    window: ComputerWindow,
-  ): Promise<void> {
-    if (agentThreadId(threadId) === undefined) return;
-    const match = await this.deniedMatchForWindow(window);
-    if (match) throw new ComputerDenylistError(match.app, match.matched);
-    await this.spaceBroker.assertWindowAllowed(
-      { threadId: threadId!, turnId: currentComputerTask()?.turnId ?? null },
-      window,
-    );
-  }
-
   private async assertSpaceAppMutationAllowed(
     threadId: string | undefined,
     pid: number,
@@ -1002,59 +475,6 @@ export class ComputerManager {
       { threadId: owner, turnId: currentComputerTask()?.turnId ?? null },
       pid,
     );
-  }
-
-  /**
-   * Refuse a scoped read of a denylisted window — state, element tree, zoomed
-   * capture, verify — for every caller, pane included. The accessibility tree
-   * of a password manager carries field values, so scoping into the window is
-   * refused outright; presence stays visible through `list_windows`.
-   */
-  private async assertWindowContentAllowed(windowId: string): Promise<void> {
-    const window = (await this.readWindows()).find((candidate) => candidate.id === windowId);
-    if (window === undefined) return;
-    const match = await this.deniedMatchForWindow(window);
-    if (match) throw new ComputerDenylistError(match.app, match.matched);
-  }
-
-  /**
-   * The visible denylisted windows, when any are on screen. Unscoped content
-   * reads — a workspace screenshot, a desktop-wide tree on dialects that
-   * answer one — cannot exclude a visible denied surface's pixels or
-   * elements, so they refuse while one is shown.
-   */
-  private async deniedVisibleWindows(): Promise<
-    ReadonlyArray<{
-      readonly window: ComputerWindow;
-      readonly match: NonNullable<ReturnType<typeof computerDenylistMatch>>;
-    }>
-  > {
-    const denied: Array<{
-      readonly window: ComputerWindow;
-      readonly match: NonNullable<ReturnType<typeof computerDenylistMatch>>;
-    }> = [];
-    for (const window of await this.readWindows()) {
-      if (!window.visible || window.minimized) continue;
-      const match = await this.deniedMatchForWindow(window);
-      if (match) denied.push({ window, match });
-    }
-    return denied;
-  }
-
-  private async deniedVisibleWindow(): Promise<
-    | {
-        readonly window: ComputerWindow;
-        readonly match: NonNullable<ReturnType<typeof computerDenylistMatch>>;
-      }
-    | undefined
-  > {
-    return (await this.deniedVisibleWindows())[0];
-  }
-
-  /** Whether a window id names a denylisted surface; for best-effort observation skips. */
-  private async windowIsDenied(windowId: string): Promise<boolean> {
-    const window = (await this.readWindows()).find((candidate) => candidate.id === windowId);
-    return window !== undefined && (await this.deniedMatchForWindow(window)) !== undefined;
   }
 
   async admitControl(
@@ -1352,6 +772,18 @@ export class ComputerManager {
         return { inventory, windows };
       },
     });
+    this.denylist = new ComputerDenylistGuard({
+      backend: this.backend,
+      now: () => this.now(),
+      readWindows: () => this.readWindows(),
+      spaceBroker: this.spaceBroker,
+    });
+    this.targeting = {
+      backend: this.backend,
+      agentDialect: () => this.agentDialect,
+      readWindows: () => this.readWindows(),
+      denylist: this.denylist,
+    };
     this.controlState = new ComputerControlState(options.controlStatePath);
     // Beside the control state file: same directory, same local-only lifetime.
     this.auditLog = new ComputerAuditLog(options.auditLogPath);
@@ -1595,13 +1027,13 @@ export class ComputerManager {
     // on dialects whose backend walks one (macOS answers unscoped reads with
     // window metadata alone, which is presence — allowed).
     if (options.windowId !== undefined) {
-      await this.assertWindowContentAllowed(options.windowId);
+      await this.denylist.assertWindowContentAllowed(options.windowId);
     } else if (
       options.includeScreenshot === true ||
       ((options.includeTree === true || options.includeText === true) &&
         this.agentDialect !== "macos")
     ) {
-      const denied = await this.deniedVisibleWindow();
+      const denied = await this.denylist.deniedVisibleWindow();
       if (denied) throw new ComputerDenylistError(denied.match.app, denied.match.matched);
     }
     // Availability rides alongside, as it already does on the window-list and
@@ -1644,11 +1076,11 @@ export class ComputerManager {
   async captureScreenshot(request: ComputerCaptureRequest): Promise<ComputerScreenshot> {
     this.engageBackend();
     if (request.kind === "window") {
-      await this.assertWindowContentAllowed(request.windowId);
+      await this.denylist.assertWindowContentAllowed(request.windowId);
     } else {
       // A region photographs whatever its rect covers: it is refused only
       // where a visible denied window's bounds actually intersect it.
-      const denied = (await this.deniedVisibleWindows()).find(
+      const denied = (await this.denylist.deniedVisibleWindows()).find(
         (entry) =>
           entry.window.bounds !== undefined && rectsOverlap(entry.window.bounds, request.region),
       );
@@ -1726,7 +1158,7 @@ export class ComputerManager {
     const limit = maxDimension === undefined ? {} : { maxDimension };
     const window = await this.focusedCapturableWindow(options.agentFocusOnly === true);
     if (window) {
-      const denied = await this.deniedMatchForWindow(window);
+      const denied = await this.denylist.deniedMatchForWindow(window);
       if (denied) throw new ComputerDenylistError(denied.app, denied.matched);
       return {
         screenshot: await this.backend.captureScreenshot({
@@ -1739,7 +1171,7 @@ export class ComputerManager {
     }
     // The whole-workspace fallback photographs every visible window, so a
     // denied one on screen refuses the capture entirely.
-    const deniedVisible = await this.deniedVisibleWindow();
+    const deniedVisible = await this.denylist.deniedVisibleWindow();
     if (deniedVisible)
       throw new ComputerDenylistError(deniedVisible.match.app, deniedVisible.match.matched);
     const screenSize = await this.backend.getScreenSize();
@@ -1867,7 +1299,7 @@ export class ComputerManager {
       // An action's own observation must not become a way to photograph a
       // denied surface: the action already ran, so the miss reports no
       // screenshot rather than refusing the call.
-      if (await this.windowIsDenied(windowIdHint)) return undefined;
+      if (await this.denylist.windowIsDenied(windowIdHint)) return undefined;
       try {
         return await this.observeActionCapture(
           {
@@ -1895,7 +1327,7 @@ export class ComputerManager {
     if (actionPoint) {
       const pointWindowId = await this.windowIdAtActionPoint(actionPoint);
       if (pointWindowId !== undefined) {
-        if (await this.windowIsDenied(pointWindowId)) return undefined;
+        if (await this.denylist.windowIsDenied(pointWindowId)) return undefined;
         try {
           return await this.observeActionCapture(
             {
@@ -1954,7 +1386,7 @@ export class ComputerManager {
     if (appeared === undefined) return observation;
     // A denied window the action opened — a password prompt, a security
     // dialog — is never photographed either; the original capture stands.
-    if ((await this.deniedMatchForWindow(appeared)) !== undefined) return observation;
+    if ((await this.denylist.deniedMatchForWindow(appeared)) !== undefined) return observation;
     try {
       return {
         screenshot: await this.backend.captureScreenshot({
@@ -2081,7 +1513,7 @@ export class ComputerManager {
     return this.withBackgroundAppControl(threadId, app, async () => {
       markComputerCall("computer_launch_app");
       assertDesktopOperationActive();
-      this.assertDrivenAppAllowed(app);
+      this.denylist.assertDrivenAppAllowed(app);
       this.spaceBroker.assertNativeLaunchAllowed(agentThreadId(threadId));
       const result = await timedComputerLeg("dispatch", () =>
         this.backend.launchApp(app, args, options),
@@ -2150,8 +1582,8 @@ export class ComputerManager {
     threadId: string | undefined,
     target: ComputerWindow,
   ): Promise<void> {
-    this.assertDrivenAppAllowed(target.appName ?? target.id);
-    await this.assertWindowInputAllowedWindow(threadId, target);
+    this.denylist.assertDrivenAppAllowed(target.appName ?? target.id);
+    await this.denylist.assertWindowInputAllowedWindow(threadId, target);
   }
 
   /**
@@ -2228,12 +1660,12 @@ export class ComputerManager {
           // Application-level: the denylist keys on the app this target
           // provably names, the same split set_app_visibility makes.
           const resolved = await timedComputerLeg("resolve", () =>
-            this.resolveMenuAppTarget(target),
+            resolveMenuAppTarget(this.targeting, target),
           );
           const consentKey = "app" in target ? target.app : (resolved.name ?? `pid ${target.pid}`);
-          this.assertDrivenAppAllowed(consentKey);
+          this.denylist.assertDrivenAppAllowed(consentKey);
           if (agentThreadId(threadId) !== undefined) {
-            const denied = await this.deniedMatchForPid(resolved.pid, resolved.name);
+            const denied = await this.denylist.deniedMatchForPid(resolved.pid, resolved.name);
             if (denied) throw new ComputerDenylistError(denied.app, denied.matched);
           }
           await this.assertSpaceAppMutationAllowed(threadId, resolved.pid);
@@ -2244,46 +1676,6 @@ export class ComputerManager {
         }),
       authorization,
     );
-  }
-
-  /**
-   * The live process an application-level menu target names. An `app` is
-   * resolved through the same running-app inventory the consent path
-   * consults — exact name or bundle id, case-insensitive — and refuses when
-   * nothing matches; a `pid` is passed through with whatever name the
-   * inventory has for it, because an unknown pid is the driver's refusal to
-   * make, matching set_app_visibility.
-   */
-  private async resolveMenuAppTarget(
-    target: Exclude<ComputerMenuTarget, { readonly windowId: string }>,
-  ): Promise<{ readonly pid: number; readonly name?: string }> {
-    const listApps = this.backend.listApps?.bind(this.backend);
-    if (listApps === undefined) {
-      throw new ComputerBackendError(
-        "This backend cannot enumerate applications, so a menu target has to name an exact window.",
-      );
-    }
-    if ("pid" in target) {
-      // The tool layer already refuses a malformed pid; this is the direct
-      // caller's backstop, matching setAppVisibility's own validation gap.
-      if (!Number.isSafeInteger(target.pid) || target.pid <= 0) {
-        throw new ComputerTargetError({
-          code: "computer_target_invalid",
-          message: `"pid" must be a positive integer; got ${JSON.stringify(target.pid)}.`,
-        });
-      }
-      const owner = (await listApps()).find((app) => app.pid === target.pid && app.running);
-      return { pid: target.pid, ...(owner !== undefined ? { name: owner.name } : {}) };
-    }
-    const spelling = target.app.trim();
-    const owner = (await listApps()).find(
-      (app) =>
-        app.running &&
-        (app.name.trim().toLowerCase() === spelling.toLowerCase() ||
-          (app.bundleId !== undefined && app.bundleId.toLowerCase() === spelling.toLowerCase())),
-    );
-    if (owner === undefined) throw menuAppNotFoundError(spelling);
-    return { pid: owner.pid, name: owner.name };
   }
 
   /**
@@ -2337,9 +1729,9 @@ export class ComputerManager {
         const apps = await listApps().catch(() => undefined);
         return apps?.find((app) => app.pid === pid && app.running)?.name;
       });
-      this.assertDrivenAppAllowed(named ?? `pid ${pid}`);
+      this.denylist.assertDrivenAppAllowed(named ?? `pid ${pid}`);
       if (agentThreadId(threadId) !== undefined) {
-        const denied = await this.deniedMatchForPid(pid, named);
+        const denied = await this.denylist.deniedMatchForPid(pid, named);
         if (denied) throw new ComputerDenylistError(denied.app, denied.matched);
       }
       await this.assertSpaceAppMutationAllowed(threadId, pid);
@@ -2374,7 +1766,7 @@ export class ComputerManager {
     const windows = await this.readWindows();
     if (!windows.some((candidate) => candidate.id === windowId))
       throw windowNotFoundError(windowId);
-    await this.assertWindowContentAllowed(windowId);
+    await this.denylist.assertWindowContentAllowed(windowId);
   }
 
   async verifyState(
@@ -2536,7 +1928,7 @@ export class ComputerManager {
   ): Promise<ComputerActionResult> {
     return this.withBackgroundProcessControl(threadId, target.windowId, async () => {
       markComputerCall("computer_click");
-      const inject = this.clickInjector(gesture);
+      const inject = clickInjector(this.targeting, gesture);
       const resolved = await timedComputerLeg("resolve", () =>
         this.resolvePointTarget(target, threadId),
       );
@@ -2567,7 +1959,7 @@ export class ComputerManager {
           resolved.windowId,
         );
       }
-      this.assertTargetCanUseCoordinates(target);
+      assertTargetCanUseCoordinates(target);
       const result = await this.injectScoped("computer_click", resolved, () =>
         inject(resolved.point, resolved.windowId, modifiers),
       );
@@ -2579,42 +1971,6 @@ export class ComputerManager {
         resolved.windowId,
       );
     });
-  }
-
-  /**
-   * The backend call behind one click gesture, refused up front when the
-   * driver exposes no such path: a left click repeats up to three times and
-   * a right click exists only once — every other combination is a refusal
-   * before any target resolution, never an approximation. The triple click
-   * is also optional on the backend itself, and its absence is a real
-   * refusal rather than a degradation: three separate clicks are three
-   * carets, not a line selection, so approximating it would answer a request
-   * the application never received.
-   */
-  private clickInjector(
-    gesture: ComputerClickGesture | undefined,
-  ): (
-    point: ComputerPoint,
-    windowId: string | undefined,
-    modifiers: readonly ComputerInputModifier[] | undefined,
-  ) => Promise<ComputerBackendActionResult | void> {
-    const button = gesture?.button ?? "left";
-    const count = gesture?.count ?? 1;
-    if (button === "left") {
-      if (count === 1) {
-        return (point, windowId, modifiers) => this.backend.click(point, windowId, modifiers);
-      }
-      if (count === 2) {
-        return (point, windowId, modifiers) => this.backend.doubleClick(point, windowId, modifiers);
-      }
-      const tripleClick = this.backend.tripleClick?.bind(this.backend);
-      if (!tripleClick) throw tripleClickUnsupportedError();
-      return (point, windowId, modifiers) => tripleClick(point, windowId, modifiers);
-    }
-    if (button === "right" && count === 1) {
-      return (point, windowId, modifiers) => this.backend.rightClick(point, windowId, modifiers);
-    }
-    throw clickGestureUnsupportedError(button, count);
   }
 
   /**
@@ -2701,8 +2057,8 @@ export class ComputerManager {
         }
         const previousId =
           windows.find((candidate) => candidate.visible && !candidate.minimized)?.id ?? null;
-        this.assertDrivenAppAllowed(target.appName ?? windowId);
-        await this.assertWindowInputAllowedWindow(threadId, target);
+        this.denylist.assertDrivenAppAllowed(target.appName ?? windowId);
+        await this.denylist.assertWindowInputAllowedWindow(threadId, target);
         if (target.pid !== undefined)
           await this.assertSpaceAppMutationAllowed(threadId, target.pid);
         // The masked-activation shield arms after admission and before the
@@ -2929,7 +2285,9 @@ export class ComputerManager {
     if (optIn.size === 0) return undefined;
     const owner =
       target.pid !== undefined
-        ? (await this.runningAppsForDenylist()).find((candidate) => candidate.pid === target.pid)
+        ? (await this.denylist.runningAppsForDenylist()).find(
+            (candidate) => candidate.pid === target.pid,
+          )
         : undefined;
     if (!maskedActivationOptedIn(optIn, owner?.bundleId)) return undefined;
     const engage = this.backend.engageShield?.bind(this.backend);
@@ -2980,7 +2338,7 @@ export class ComputerManager {
     threadId: string | undefined,
     target: ComputerTarget,
   ): Promise<ComputerActionResult> {
-    this.assertTargetCanUseCoordinates(target);
+    assertTargetCanUseCoordinates(target);
     return this.withBackgroundProcessControl(threadId, target.windowId, async () => {
       const resolved = await timedComputerLeg("resolve", () =>
         this.resolvePointTarget(target, threadId),
@@ -3005,8 +2363,8 @@ export class ComputerManager {
     to: ComputerTarget,
     durationMs = 250,
   ): Promise<ComputerActionResult> {
-    this.assertTargetCanUseCoordinates(from);
-    this.assertTargetCanUseCoordinates(to);
+    assertTargetCanUseCoordinates(from);
+    assertTargetCanUseCoordinates(to);
     return this.withDesktopControl(threadId, async () => {
       const [resolvedFrom, resolvedTo] = await timedComputerLeg("resolve", () =>
         Promise.all([
@@ -3322,7 +2680,7 @@ export class ComputerManager {
     ) {
       return this.resolvePointTarget(target, threadId);
     }
-    await this.assertWindowInputAllowed(threadId, windowId);
+    await this.denylist.assertWindowInputAllowed(threadId, windowId);
     const state = await this.backend.getState({ includeTree: false });
     const match = state.root ? resolveComputerWindowTarget(state.root, windowId) : undefined;
     const windows = match ? undefined : await this.readWindows();
@@ -3599,7 +2957,7 @@ export class ComputerManager {
     const windowId = target.windowId;
     return this.withBackgroundWindowControl(threadId, windowId, async () => {
       const resolved = await timedComputerLeg("resolve", () =>
-        this.resolveSemanticTarget(target, true),
+        resolveSemanticTarget(this.targeting, target, true),
       );
       assertDesktopOperationActive();
       const result = await timedComputerLeg("dispatch", () =>
@@ -3615,10 +2973,11 @@ export class ComputerManager {
     windowId?: string,
     target?: ComputerTarget,
   ): Promise<ComputerActionResult> {
-    const exactWindow = this.keyboardTargetWindow(windowId, target);
+    const exactWindow = keyboardTargetWindow(windowId, target);
     return this.withBackgroundProcessControl(threadId, exactWindow, async () => {
       const resolved = target
-        ? await this.resolveSemanticTarget(
+        ? await resolveSemanticTarget(
+            this.targeting,
             { ...target, ...(exactWindow ? { windowId: exactWindow } : {}) },
             true,
           )
@@ -3642,10 +3001,11 @@ export class ComputerManager {
     windowId?: string,
     target?: ComputerTarget,
   ): Promise<ComputerActionResult> {
-    const exactWindow = this.keyboardTargetWindow(windowId, target);
+    const exactWindow = keyboardTargetWindow(windowId, target);
     return this.withBackgroundProcessControl(threadId, exactWindow, async () => {
       const resolved = target
-        ? await this.resolveSemanticTarget(
+        ? await resolveSemanticTarget(
+            this.targeting,
             { ...target, ...(exactWindow ? { windowId: exactWindow } : {}) },
             true,
           )
@@ -3662,19 +3022,6 @@ export class ComputerManager {
         exactWindow,
       );
     });
-  }
-
-  private keyboardTargetWindow(
-    windowId: string | undefined,
-    target: ComputerTarget | undefined,
-  ): string | undefined {
-    if (windowId !== undefined && target?.windowId !== undefined && target.windowId !== windowId) {
-      throw new ComputerTargetError({
-        code: "computer_target_invalid",
-        message: "The keyboard window and element target name different windows; nothing was sent.",
-      });
-    }
-    return windowId ?? target?.windowId;
   }
 
   /**
@@ -4213,7 +3560,7 @@ export class ComputerManager {
     return this.withBackgroundResourceControl(
       threadId,
       async () => {
-        this.assertDrivenAppAllowed(app);
+        this.denylist.assertDrivenAppAllowed(app);
         const apps = await this.backend.listApps?.();
         const spelling = app.trim().toLowerCase();
         const matches =
@@ -5112,30 +4459,13 @@ export class ComputerManager {
     this.transport.publish(this.computerId, frame);
   }
 
-  /**
-   * Coordinates plus a window id are a window-scoped click: the point is
-   * resolved exactly as a bare coordinate, and the window id only decides which
-   * window is raised and receives the input. A label or role instead means the
-   * coordinate is at most a hint, so those keep going through AT-SPI
-   * resolution, which owns the final point.
-   */
-  private assertTargetCanUseCoordinates(target: ComputerTarget): void {
-    if (observedComputerTargetNode(target)) {
-      throw new ComputerTargetError({
-        code: "computer_target_refused",
-        message:
-          "This observed element does not support the requested exact pointer action. Use an advertised semantic action or explicitly target a current screenshot; no coordinate fallback was sent.",
-      });
-    }
-  }
-
   private async resolvePointTarget(
     target: ComputerTarget,
     threadId: string | undefined,
   ): Promise<ResolvedPointTarget> {
     if (hasCoordinates(target) && !hasLabelFields(target)) {
       this.spaceBroker.assertTargetBound(agentThreadId(threadId), target.windowId);
-      const point = await this.resolveCoordinatePoint(target);
+      const point = await resolveCoordinatePoint(this.targeting, target);
       if (target.windowId === undefined) {
         // The compositor routes a bare point to whatever is topmost at it, so
         // the denylist answers the same question the occlusion rules already
@@ -5146,18 +4476,18 @@ export class ComputerManager {
         const windows = await this.readWindows();
         const topmost = topmostWindowAtPoint(windows, point);
         if (topmost !== undefined) {
-          await this.assertWindowInputAllowed(threadId, topmost.id);
+          await this.denylist.assertWindowInputAllowed(threadId, topmost.id);
         } else {
           for (const window of windows) {
             if (!window.visible || window.minimized) continue;
             if (!rectContainsPoint(window.bounds, point)) continue;
-            await this.assertWindowInputAllowedWindow(threadId, window);
+            await this.denylist.assertWindowInputAllowedWindow(threadId, window);
           }
         }
         return { point };
       }
-      const occlusion = await this.scopedPointOcclusion(point, target.windowId);
-      await this.assertWindowInputAllowed(threadId, target.windowId);
+      const occlusion = await scopedPointOcclusion(this.targeting, point, target.windowId);
+      await this.denylist.assertWindowInputAllowed(threadId, target.windowId);
       // A denied surface sitting over the scoped point can still take the
       // input — the raise the covering list waits on may fail, and an
       // unranked window list cannot even prove what covers what — so the
@@ -5180,15 +4510,15 @@ export class ComputerManager {
                     rectContainsPoint(window.bounds, point),
                 );
         for (const window of suspects) {
-          await this.assertWindowInputAllowedWindow(threadId, window);
+          await this.denylist.assertWindowInputAllowedWindow(threadId, window);
         }
       }
       return { point, windowId: target.windowId, covering: occlusion.covering };
     }
     if (hasSemanticFields(target)) {
-      const resolved = await this.resolveSemanticTarget(target);
+      const resolved = await resolveSemanticTarget(this.targeting, target);
       if (resolved.node.windowId) {
-        await this.assertWindowInputAllowed(threadId, resolved.node.windowId);
+        await this.denylist.assertWindowInputAllowed(threadId, resolved.node.windowId);
       }
       return {
         point: resolved.point,
@@ -5200,114 +4530,6 @@ export class ComputerManager {
       code: "computer_target_invalid",
       message: "Computer actions require x/y coordinates or a labelled target.",
     });
-  }
-
-  private async resolveCoordinatePoint(target: ComputerTarget): Promise<ComputerPoint> {
-    if (target.windowId && hasCoordinates(target)) {
-      const window = (await this.readWindows()).find((window) => window.id === target.windowId);
-      const bounds = window?.bounds;
-      const observed = (target as ComputerTarget & { observedWindowBounds?: ComputerRect })
-        .observedWindowBounds;
-      if (window && !bounds)
-        throw new ComputerTargetError({
-          code: "computer_target_offscreen",
-          message: "The target window exposes no geometry.",
-        });
-      if (
-        !bounds ||
-        (observed &&
-          (bounds.x !== observed.x ||
-            bounds.y !== observed.y ||
-            bounds.width !== observed.width ||
-            bounds.height !== observed.height))
-      )
-        throw new ComputerTargetError({
-          code: "computer_target_not_found",
-          message:
-            "The exact window closed or moved since this screenshot. Observe again before acting.",
-        });
-      if (
-        target.x < bounds.x ||
-        target.y < bounds.y ||
-        target.x >= bounds.x + bounds.width ||
-        target.y >= bounds.y + bounds.height
-      )
-        throw new ComputerTargetError({
-          code: "computer_target_offscreen",
-          message: "The coordinate is outside the exact target window.",
-        });
-      return { x: target.x, y: target.y };
-    }
-    try {
-      return resolveComputerPoint(target, await this.backend.getScreenSize());
-    } catch (error) {
-      if (!(error instanceof ComputerTargetError) || error.code !== "computer_target_offscreen") {
-        throw error;
-      }
-      const state = await this.backend
-        .getState({
-          includeTree: true,
-          ...(target.windowId ? { windowId: target.windowId } : {}),
-        })
-        .catch(() => undefined);
-      throw new ComputerTargetError({
-        code: error.code,
-        message: error.message,
-        candidates: state?.root ? computerTargetCandidates(state.root) : [],
-      });
-    }
-  }
-
-  /**
-   * Checks a scoped coordinate against the window it names, and reports the
-   * windows stacked above it that also contain the point.
-   *
-   * A scoped click is refused rather than redirected. Input is routed to the
-   * named window regardless of what covers that coordinate, so a point outside
-   * its bounds would deliver a click to a part of the window that does not
-   * exist — the one failure mode scoping is meant to remove. The covering list
-   * comes from the same window read, so the raise path downstream never has to
-   * repeat it.
-   */
-  private async scopedPointOcclusion(
-    point: ComputerPoint,
-    windowId: string,
-  ): Promise<{
-    readonly covering: readonly ComputerWindow[];
-    readonly windows: readonly ComputerWindow[];
-    readonly ranked: boolean;
-  }> {
-    const windows = await this.readWindows();
-    const window = windows.find((candidate) => candidate.id === windowId);
-    if (!window) throw windowNotFoundError(windowId);
-    const bounds = window.bounds;
-    if (!bounds) {
-      // Scoping exists to guarantee the point is inside the named window. A
-      // display server with no geometry cannot answer that, and letting the
-      // click through unchecked would silently drop the guarantee the caller
-      // asked for by passing window_id at all.
-      throw new ComputerTargetError({
-        code: "computer_target_offscreen",
-        message:
-          `This desktop reports no geometry for window ${JSON.stringify(windowId)}, so a coordinate ` +
-          "cannot be checked against it. Drop window_id to click whatever is topmost at that point, " +
-          "or target the control by label instead.",
-      });
-    }
-    if (!rectContainsPoint(bounds, point)) {
-      throw new ComputerTargetError({
-        code: "computer_target_offscreen",
-        message:
-          `Computer target (${point.x}, ${point.y}) is outside window ${JSON.stringify(windowId)}, ` +
-          `which covers ${bounds.width}x${bounds.height} at (${bounds.x}, ${bounds.y}). ` +
-          "Pass a coordinate inside those bounds, or drop window_id to click whatever is topmost.",
-      });
-    }
-    return {
-      covering: windowsCoveringPoint(windows, windowId, point),
-      windows,
-      ranked: window.stackingIndex !== undefined,
-    };
   }
 
   /**
@@ -5328,7 +4550,7 @@ export class ComputerManager {
   ): Promise<void> {
     const windowId = target?.windowId;
     this.spaceBroker.assertTargetBound(agentThreadId(threadId), windowId);
-    if (windowId !== undefined) await this.assertWindowInputAllowed(threadId, windowId);
+    if (windowId !== undefined) await this.denylist.assertWindowInputAllowed(threadId, windowId);
     if (windowId === undefined) {
       assertDesktopOperationActive();
       await this.backend.clearFocusWindow?.();
@@ -5347,9 +4569,10 @@ export class ComputerManager {
     const windowId = target?.windowId;
     if (windowId === undefined) return;
     assertDesktopOperationActive();
-    const raiseFailure = await this.raiseTargetWindow(windowId);
+    const raiseFailure = await raiseTargetWindow(this.targeting, windowId);
     if (raiseFailure !== undefined && target?.point) {
-      const covering = target.covering ?? (await this.coveringWindowsAt(target.point, windowId));
+      const covering =
+        target.covering ?? (await coveringWindowsAt(this.targeting, target.point, windowId));
       if (covering.length > 0) {
         throw occludedTargetError(windowId, target.point, covering, raiseFailure);
       }
@@ -5419,10 +4642,10 @@ export class ComputerManager {
     allowUniqueTextTarget = false,
   ): Promise<ComputerResolvedTarget> {
     const resolved = await timedComputerLeg("resolve", () =>
-      this.resolveSemanticTarget(target, allowUniqueTextTarget),
+      resolveSemanticTarget(this.targeting, target, allowUniqueTextTarget),
     );
     if (this.canUseBackgroundTarget() && target.windowId) {
-      await this.assertWindowInputAllowed(threadId, target.windowId);
+      await this.denylist.assertWindowInputAllowed(threadId, target.windowId);
     } else {
       await timedComputerLeg("resolve", () =>
         this.prepareResolvedTarget(semanticPointTarget(resolved), threadId),
@@ -5430,18 +4653,6 @@ export class ComputerManager {
     }
     assertDesktopOperationActive();
     return resolved;
-  }
-
-  /** The restack, or the reason this desktop did not perform one. */
-  private async raiseTargetWindow(windowId: string): Promise<string | undefined> {
-    const raise = this.backend.raiseWindow?.bind(this.backend);
-    if (!raise) return "this backend exposes no stacking control";
-    try {
-      await raise(windowId);
-      return undefined;
-    } catch (error) {
-      return errorMessage(error);
-    }
   }
 
   /**
@@ -5477,113 +4688,6 @@ export class ComputerManager {
         throw error;
       }
       throw refusedInjectionError(action, windowId, point);
-    }
-  }
-
-  private async coveringWindowsAt(
-    point: ComputerPoint,
-    windowId: string,
-  ): Promise<readonly ComputerWindow[]> {
-    const windows = await this.readWindows().catch(() => []);
-    return windowsCoveringPoint(windows, windowId, point);
-  }
-
-  private async resolveSemanticTarget(
-    target: ComputerTarget,
-    allowUniqueTextTarget = false,
-  ): Promise<ComputerResolvedTarget> {
-    const unnamedTarget = target.label === undefined && target.role === undefined;
-    // Without a label or role the query matches every control in scope, and
-    // the ambiguity refusal that follows would dump the whole tree at the
-    // caller. Refuse up front, before paying for the accessibility walk, with
-    // what is actually missing.
-    if (unnamedTarget && (!allowUniqueTextTarget || !target.windowId)) {
-      throw new ComputerTargetError({
-        code: "computer_target_invalid",
-        message:
-          "This target does not name a control: window_id or coordinates alone match everything in scope. " +
-          "Pass label (optionally with role and window_id) to pick a control, or use x/y coordinates " +
-          "with the pointer tools. Only computer_scroll takes window_id alone, scrolling that window itself.",
-      });
-    }
-    // A semantic resolve walks the accessibility tree before any input check
-    // runs, and a denied app's tree is itself refused — ambiguity and
-    // not-found errors otherwise carry its labels back as candidates. macOS
-    // only answers scoped trees, so an unscoped walk there is already empty;
-    // a desktop-wide tree on other dialects refuses while a denied window is
-    // visible.
-    if (target.windowId !== undefined) {
-      await this.assertWindowContentAllowed(target.windowId);
-    } else if (this.agentDialect !== "macos") {
-      const denied = await this.deniedVisibleWindow();
-      if (denied) throw new ComputerDenylistError(denied.match.app, denied.match.matched);
-    }
-    const observedNode = observedComputerTargetNode(target);
-    if (observedNode) {
-      if (!observedNode.windowId || observedNode.windowId !== target.windowId) {
-        throw new ComputerTargetError({
-          code: "computer_target_invalid",
-          message: "The observed element and target name different windows; nothing was sent.",
-        });
-      }
-      // The backend revalidates this original native token's window ancestry
-      // and freshness at dispatch. Re-resolving a label/ordinal here could
-      // silently give a stale ref the token of a different control.
-      return { target, node: observedNode, point: activationPointForNode(observedNode) };
-    }
-    let state = await this.backend.getState({
-      includeTree: true,
-      reuseRecentTree: true,
-      ...(target.windowId ? { windowId: target.windowId } : {}),
-    });
-    if (!state.root) {
-      throw new ComputerTargetError({
-        code: "computer_target_not_found",
-        message: "Computer accessibility state did not include a target tree.",
-        notFound: true,
-      });
-    }
-    const resolve = (root: NonNullable<ComputerState["root"]>): ComputerResolvedTarget => ({
-      target,
-      ...(unnamedTarget
-        ? resolveComputerUniqueTextTarget(root, target.windowId!, allowUniqueTextTarget)
-        : resolveComputerSemanticTarget(root, target, allowUniqueTextTarget)),
-    });
-    try {
-      return resolve(state.root);
-    } catch (error) {
-      // A tree served from the recent cache can miss a control that only just
-      // appeared. Pay for one fresh walk before declaring it absent; on a
-      // genuinely-missing target the extra walk is a rare error-path cost.
-      // Other failure shapes (ambiguity, bad target) retrying cannot fix.
-      if (error instanceof ComputerTargetError && error.code === "computer_target_not_found") {
-        state = await this.backend.getState({
-          includeTree: true,
-          ...(target.windowId ? { windowId: target.windowId } : {}),
-        });
-        try {
-          if (state.root) return resolve(state.root);
-        } catch (freshError) {
-          // The miss is confirmed against fresh state; report its candidates.
-          // oxlint-disable-next-line no-ex-assign -- the fresh miss replaces the cached one below
-          if (freshError instanceof ComputerTargetError) error = freshError;
-        }
-      }
-      // A truncated tree may simply not contain the control: name the narrow
-      // query so the miss is recoverable instead of a dead end.
-      if (
-        error instanceof ComputerTargetError &&
-        error.code === "computer_target_not_found" &&
-        state.root?.truncated === true
-      ) {
-        throw new ComputerTargetError({
-          code: error.code,
-          message: `${error.message} The accessibility tree was truncated; use computer_get_state with label_contains to narrow the list and check whether the control is present.`,
-          candidates: error.candidates,
-          notFound: true,
-        });
-      }
-      throw error;
     }
   }
 
@@ -5969,11 +5073,6 @@ function settlePermanentlyUnsupported(error: unknown): boolean {
   return message.startsWith("Unknown tool:") || message === "Unsupported computer host request.";
 }
 
-/**
- * The caller as an agent thread, or undefined for desktop input that belongs to
- * no thread — the human at the computer pane. Attribution and the desktop lease
- * must agree on who that is, so both read it here.
- */
 function windowIdSet(windows: readonly ComputerWindow[]): ReadonlySet<string> {
   return new Set(windows.map((window) => window.id));
 }
@@ -5986,174 +5085,6 @@ function rectsOverlap(first: ComputerRect, second: ComputerRect): boolean {
     first.y < second.y + second.height &&
     second.y < first.y + first.height
   );
-}
-
-function agentThreadId(threadId: string | undefined): string | undefined {
-  const trimmed = threadId?.trim();
-  return trimmed ? trimmed : undefined;
-}
-
-/**
- * Why a healthy-looking availability is being withheld. The failure text comes
- * from the display server, so the whole message is clamped rather than only the
- * part this composes.
- */
-function healthUnavailableMessage(health: ComputerHealth): string {
-  const reason =
-    health.status === "reconnecting"
-      ? "Reconnecting to the desktop."
-      : "The desktop backend is not connected.";
-  return clampComputerMessage(
-    health.lastFailure ? `${reason} Last failure: ${health.lastFailure.message}` : reason,
-    reason,
-  );
-}
-
-function windowNotFoundError(windowId: string): ComputerTargetError {
-  return new ComputerTargetError({
-    code: "computer_target_not_found",
-    message:
-      `No desktop window has id ${JSON.stringify(windowId)}. ` +
-      "Call computer_list_windows for the current window ids.",
-    notFound: true,
-  });
-}
-
-/**
- * Refusal for an app-named menu target the running inventory does not know.
- * The name may be a bundle id or a display name, so the message names both
- * spellings the caller can check against computer_list_apps.
- */
-function menuAppNotFoundError(app: string): ComputerTargetError {
-  return new ComputerTargetError({
-    code: "computer_target_not_found",
-    message:
-      `No running application matches ${JSON.stringify(app)}. ` +
-      "Call computer_list_apps for the running apps and their pids, then name one by app or pid.",
-    notFound: true,
-  });
-}
-
-/**
- * The raise/focus target for a control resolved through the accessibility tree.
- * The point comes along so a failed raise is still checked for occlusion:
- * nothing consulted the stacking order while matching the label, and the click
- * that follows is as misroutable as any other.
- */
-function semanticPointTarget(resolved: ComputerResolvedTarget): PreparedTarget {
-  return {
-    point: resolved.point,
-    ...(resolved.node.windowId ? { windowId: resolved.node.windowId } : {}),
-  };
-}
-
-/**
- * Refusal for a scoped action whose window is covered at the point and could
- * not be raised out from under the windows covering it.
- *
- * Refusing beats warning. The input would land in another application, and a
- * warning read after the fact cannot undo a click that already fired — the live
- * failure this exists for was a model clicking a buried window repeatedly and
- * concluding the button was broken. The message names what is in the way and
- * both ways out, so the next call is a correct one rather than a retry.
- */
-function occludedTargetError(
-  windowId: string,
-  point: ComputerPoint,
-  covering: readonly ComputerWindow[],
-  reason: string,
-): ComputerTargetError {
-  const blockers = covering
-    .slice(0, 4)
-    .map((window) => `${JSON.stringify(window.title || window.id)} (${window.id})`)
-    .join(", ");
-  return new ComputerTargetError({
-    code: "computer_target_occluded",
-    message:
-      `Window ${JSON.stringify(windowId)} is covered at (${point.x}, ${point.y}) by ${blockers}, ` +
-      `and this desktop could not raise it: ${reason}. The input would go to the covering window. ` +
-      "Aim at a part of the target window that nothing covers, or move the covering window out of " +
-      "the way first; or drop window_id to act on whatever is topmost at that point.",
-  });
-}
-
-/**
- * Refusal for a scoped pointer action the desktop declined to deliver.
- *
- * A coordinate is validated against the window's frame, which includes the
- * invisible resize and shadow margins around it, so a point can sit inside
- * those bounds and still be outside the region the window accepts input in.
- * The window may equally have closed since it was listed. Either way the
- * remedy is the same, and it is not retrying the identical coordinate.
- */
-function refusedInjectionError(
-  action: string,
-  windowId: string,
-  point: ComputerPoint,
-): ComputerTargetError {
-  return new ComputerTargetError({
-    code: "computer_target_refused",
-    message:
-      `The desktop refused to deliver ${action} to window ${JSON.stringify(windowId)} at ` +
-      `(${point.x}, ${point.y}), so no input was sent. The window is not accepting input at that ` +
-      "point: a window's bounds include invisible resize and shadow margins, and the window may " +
-      "also have closed since it was listed. Aim nearer the middle of the control, target it by " +
-      "label instead of a coordinate, or drop window_id to act on whatever is topmost there.",
-  });
-}
-
-function tripleClickUnsupportedError(): ComputerBackendError {
-  return new ComputerBackendError(
-    "This desktop backend cannot send a triple click. Select the line another way — " +
-      "click at its start and shift-click at its end, or use the application's own " +
-      "select-all shortcut with computer_press_key.",
-  );
-}
-
-/**
- * The click combinations the driver has no dispatch for at all — a middle
- * button, or a right button pressed more than once. Named in the refusal so
- * the model can pick a supported gesture instead of retrying.
- */
-function clickGestureUnsupportedError(
-  button: "right" | "middle",
-  count: 1 | 2 | 3,
-): ComputerBackendError {
-  return new ComputerBackendError(
-    `This desktop backend cannot send a ${button} click with count ${count}. ` +
-      "Supported gestures are a left click with count 1-3 and a single right click.",
-  );
-}
-
-function activationUnsupportedError(): ComputerBackendError {
-  return new ComputerBackendError(
-    "This desktop backend cannot bring a window forward. Ask the user to click the window " +
-      "they want in front, or aim the action at it with window_id instead.",
-  );
-}
-
-function clipboardUnsupportedError(): ComputerBackendError {
-  return new ComputerBackendError("This computer backend does not support clipboard access.");
-}
-
-function hasCoordinates(target: ComputerTarget): target is ComputerTarget & ComputerPoint {
-  return typeof target.x === "number" && typeof target.y === "number";
-}
-
-/** Fields that only the accessibility tree can resolve. */
-function hasLabelFields(target: ComputerTarget): boolean {
-  return target.label !== undefined || target.role !== undefined;
-}
-
-function hasSemanticFields(target: ComputerTarget): boolean {
-  return hasLabelFields(target) || target.windowId !== undefined;
-}
-
-export function errorMessage(error: unknown): string {
-  if (error instanceof ComputerBackendError || error instanceof ComputerTargetError) {
-    return error.message;
-  }
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**
