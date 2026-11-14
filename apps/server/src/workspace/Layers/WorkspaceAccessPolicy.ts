@@ -7,14 +7,10 @@ import {
   type WorkspaceAccessPathInput,
   type WorkspaceAccessPolicyShape,
 } from "../Services/WorkspaceAccessPolicy.ts";
+import { isPathInside } from "../../pathContainment.ts";
 
 function isWithinOrEqual(path: Path.Path, root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return (
-    relative.length === 0 ||
-    relative === "." ||
-    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
-  );
+  return isPathInside({ root, candidate: target, allowRoot: true, path });
 }
 
 export const makeWorkspaceAccessPolicy = (configuredRoot: string | undefined) =>

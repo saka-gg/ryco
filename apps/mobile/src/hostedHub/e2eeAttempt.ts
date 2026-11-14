@@ -1,10 +1,5 @@
 import { hostedEnvironmentSessionsMode, hostedHubStore } from "@ryco/client-runtime/authorization";
-import {
-  relayE2eeUnresolvedAttemptFailure,
-  type RelayE2eeChannel,
-  type RelayE2eeHost,
-  type RelayE2eeProvider,
-} from "@ryco/client-runtime/relay";
+import { type RelayE2eeProvider, unresolvedRelayE2eeChannel } from "@ryco/client-runtime/relay";
 import type {
   RelayE2eeInitiatorAttempt,
   RelayE2eeSelectionClass,
@@ -831,15 +826,7 @@ export function disposeMobileRelayE2eeAttemptFor(environmentId: EnvironmentId): 
  * altogether — a warm-up race would take the whole hosted session down instead
  * of costing one channel.
  */
-function unresolvedAttemptChannel(host: RelayE2eeHost): RelayE2eeChannel {
-  host.close(relayE2eeUnresolvedAttemptFailure());
-  return {
-    intercept: async () => ({ kind: "rejected" }),
-    submit: () => false,
-    beginClose: async () => "refused",
-    dispose: () => undefined,
-  };
-}
+const unresolvedAttemptChannel: RelayE2eeProvider = unresolvedRelayE2eeChannel;
 
 /**
  * The `RelayE2eeProvider` the hosted socket is built with, resolved

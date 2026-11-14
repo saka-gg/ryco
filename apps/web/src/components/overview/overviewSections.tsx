@@ -49,6 +49,7 @@ import type {
   OverviewLayoutProps,
   OverviewPullRequestCheckRun,
 } from "./overviewTypes";
+import { errorMessage } from "~/lib/errorMessage";
 
 export {
   getOverviewSummary,
@@ -668,7 +669,7 @@ export function ProposedPlanDisclosure({
           stackedThreadToast({
             type: "error",
             title: "Could not save plan",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       })

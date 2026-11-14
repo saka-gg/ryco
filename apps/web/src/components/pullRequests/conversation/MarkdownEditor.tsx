@@ -4,6 +4,7 @@ import { cn } from "../../../lib/utils";
 import { Button } from "../../ui/button";
 import { Spinner } from "../../ui/spinner";
 import { KeyHint } from "../primitives";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * The bordered box every composer and inline editor in Conversation uses —
@@ -23,11 +24,6 @@ export function SubmitKeyHint() {
       <KeyHint className="border-primary-foreground/25 text-primary-foreground/70">⌘↵</KeyHint>
     </span>
   );
-}
-
-export function errorText(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message.trim().length > 0) return error.message;
-  return fallback;
 }
 
 /** ⌘↵ / Ctrl↵ submits; Esc cancels. Returns true when the key was handled. */
@@ -92,7 +88,7 @@ export function MarkdownEditor(props: {
     try {
       await props.onSubmit(trimmed);
     } catch (submitError) {
-      setError(errorText(submitError, "Could not save."));
+      setError(errorMessage(submitError, "Could not save."));
       setPending(false);
     }
   };

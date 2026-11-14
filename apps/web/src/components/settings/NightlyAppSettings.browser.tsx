@@ -24,22 +24,28 @@ function install(state: DesktopNightlyState) {
   const switchBack = vi.fn(async () => {});
   const openExternal = vi.fn(async () => true);
   const getState = vi.fn(async () => state);
+  const confirm = vi.fn<(message: string) => Promise<boolean>>();
   window.desktopBridge = {
     nightly: { getState, open, switchBack },
     openExternal,
+    confirm,
+    // Read by the local API that `confirmAction` asks through.
+    getLocalEnvironmentBootstrap: () => null,
   } as unknown as DesktopBridge;
-  return { open, switchBack, openExternal, getState };
+  return { open, switchBack, openExternal, getState, confirm };
 }
 
 it("opens Ryco Nightly as it is, or with a copy of Ryco's data once confirmed", async () => {
-  const { open } = install(stable);
-  const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  // The desktop app asks through its native dialog, not the renderer's window.confirm.
+  const { open, confirm } = install(stable);
+  confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
   const view = await render(<NightlyAppSettings scope="This device" />);
 
   await view.getByRole("button", { name: "Open Ryco Nightly" }).click();
   expect(open).toHaveBeenLastCalledWith({ copyData: false });
 
   await view.getByRole("button", { name: "Copy my data and open" }).click();
+  await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
   expect(open).toHaveBeenCalledTimes(1);
   await view.getByRole("button", { name: "Copy my data and open" }).click();
   expect(confirm).toHaveBeenCalledTimes(2);
@@ -77,7 +83,7 @@ it("switches back from Ryco Nightly and says how the last copy went", async () =
 });
 
 it("looks again when the window comes back, so quitting Ryco Nightly frees the copy", async () => {
-  const { getState } = install({ ...stable, nightlyRunning: true });
+  const { getState, confirm } = install({ ...stable, nightlyRunning: true });
   const view = await render(<NightlyAppSettings scope="This device" />);
   const copy = view.getByRole("button", { name: "Copy my data and open" });
   await expect.element(copy).toBeDisabled();
@@ -85,8 +91,9 @@ it("looks again when the window comes back, so quitting Ryco Nightly frees the c
   window.dispatchEvent(new Event("focus"));
   await expect.element(copy).toBeEnabled();
   // The confirmation says what really comes over.
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  confirm.mockResolvedValue(false);
   await copy.click();
+  await vi.waitFor(() => expect(confirm).toHaveBeenCalled());
   expect(confirm).toHaveBeenCalledWith(
     expect.stringContaining("schedules and chat goals come over paused"),
   );
@@ -104,4 +111,14 @@ it("says so when it cannot check for Ryco Nightly, and when Ryco is missing on t
   install({ ...stable, flavor: "nightly", otherAppInstalled: false });
   const nightly = await render(<NightlyAppSettings scope="This device" />);
   await expect.element(nightly.getByText("Ryco is not in Applications.")).toBeVisible();
+});
+
+it("treats a desktop dialog that fails as not confirmed", async () => {
+  const { open, confirm } = install(stable);
+  confirm.mockRejectedValueOnce(new Error("The dialog could not open."));
+  const view = await render(<NightlyAppSettings scope="This device" />);
+
+  await view.getByRole("button", { name: "Copy my data and open" }).click();
+  await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  expect(open).not.toHaveBeenCalled();
 });

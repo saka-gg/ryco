@@ -26,6 +26,7 @@ import {
   decodeGitHubPullRequestEntryValue,
   type NormalizedGitHubPullRequestRecord,
 } from "./gitHubPullRequests.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 /** GitHub's GraphQL connection maximum; also the client's superset list size. */
 export const GITHUB_REPOSITORY_LIST_PAGE_SIZE = 100;
@@ -295,10 +296,6 @@ export interface GitHubListPage<T> {
 export interface GitHubPullRequestListRow {
   readonly record: NormalizedGitHubPullRequestRecord;
   readonly stackSummary: SourceControlChangeRequestStackSummary | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** `gh`'s author shape: bot accounts read as `app/<login>`, as `gh pr view` reports them. */

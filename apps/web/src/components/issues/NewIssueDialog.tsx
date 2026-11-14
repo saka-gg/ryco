@@ -23,6 +23,7 @@ import { Textarea } from "../ui/textarea";
 import { IssueAssigneePicker } from "./IssueAssigneePicker";
 import { IssueLabelPicker } from "./IssueLabelPicker";
 import { canSubmit, initialNewIssueState, newIssueDialogReducer } from "./newIssueDialogReducer";
+import { errorMessage } from "~/lib/errorMessage";
 
 export interface NewIssueDialogProps {
   open: boolean;
@@ -65,7 +66,7 @@ export function NewIssueDialog(props: NewIssueDialogProps) {
       .catch((e: unknown) =>
         dispatch({
           type: "aiBranchFailed",
-          error: e instanceof Error ? e.message : "Failed to generate branch name.",
+          error: errorMessage(e, "Failed to generate branch name."),
         }),
       );
   }, [
@@ -94,7 +95,7 @@ export function NewIssueDialog(props: NewIssueDialogProps) {
     } catch (e) {
       dispatch({
         type: "aiPolishFailed",
-        error: e instanceof Error ? e.message : "Polish failed.",
+        error: errorMessage(e, "Polish failed."),
       });
     }
   };
@@ -111,7 +112,7 @@ export function NewIssueDialog(props: NewIssueDialogProps) {
     } catch (e) {
       dispatch({
         type: "aiTitleFailed",
-        error: e instanceof Error ? e.message : "Title suggest failed.",
+        error: errorMessage(e, "Title suggest failed."),
       });
     }
   };
@@ -127,7 +128,7 @@ export function NewIssueDialog(props: NewIssueDialogProps) {
     } catch (e) {
       dispatch({
         type: "aiBranchFailed",
-        error: e instanceof Error ? e.message : "Branch generation failed.",
+        error: errorMessage(e, "Branch generation failed."),
       });
     }
   };
@@ -150,7 +151,7 @@ export function NewIssueDialog(props: NewIssueDialogProps) {
     } catch (e) {
       dispatch({
         type: "submitFailed",
-        error: e instanceof Error ? e.message : "Create issue failed.",
+        error: errorMessage(e, "Create issue failed."),
       });
     }
   };

@@ -30,10 +30,6 @@ export interface AcpAgentOptions {
 export interface AcpAgentShape {
   readonly raw: {
     /**
-     * Stream of inbound ACP notifications observed on the connection.
-     */
-    readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
-    /**
      * Sends a generic ACP extension request.
      * @see https://agentclientprotocol.com/protocol/extensibility
      */
@@ -367,7 +363,6 @@ export const make = Effect.fn("effect-acp/AcpAgent.make")(function* (
 
   return AcpAgent.of({
     raw: {
-      notifications: transport.incoming,
       request: transport.request,
       notify: transport.notify,
     },

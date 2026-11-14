@@ -9,11 +9,8 @@ import {
 } from "@ryco/shared/browserUpload";
 import { Data } from "effect";
 
-import {
-  isInside,
-  stageWorkspaceFile,
-  WorkspaceFileSizeError,
-} from "../../assistantAttachments.ts";
+import { stageWorkspaceFile, WorkspaceFileSizeError } from "../../assistantAttachments.ts";
+import { isPathInside } from "../../pathContainment.ts";
 
 /** Bytes per upload (Synara `workspaceUpload.ts` DEFAULT_MAX_UPLOAD_INVOCATION_BYTES). */
 export const BROWSER_UPLOAD_MAX_BYTES = 256 * 1024 * 1024;
@@ -114,7 +111,11 @@ export async function stageBrowserUpload(input: {
     const uploadRoot = await privateUploadRoot(input.uploadDir);
     const root = await fs.realpath(input.cwd);
     // A workspace that contains the staging area (or lies in it) would let the agent write there.
-    if (root === uploadRoot || isInside(root, uploadRoot) || isInside(uploadRoot, root))
+    if (
+      root === uploadRoot ||
+      isPathInside({ root, candidate: uploadRoot, allowRoot: false }) ||
+      isPathInside({ root: uploadRoot, candidate: root, allowRoot: false })
+    )
       throw refused();
     // Fails rather than reuses a directory that exists; mkdir's mode is narrowed by the umask only.
     const created = path.join(uploadRoot, newBrowserUploadId());

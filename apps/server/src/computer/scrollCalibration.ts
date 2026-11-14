@@ -16,6 +16,8 @@ import { setImmediate as yieldToIO } from "node:timers/promises";
 import { inflate } from "node:zlib";
 import { promisify } from "node:util";
 
+import { PNG_SIGNATURE } from "../imageMime.ts";
+
 // The async form dispatches to the libuv threadpool: a multi-megapixel
 // capture's inflate must not stall the event loop the frame publisher and
 // every RPC response share.
@@ -27,8 +29,6 @@ export interface LumaImage {
   readonly height: number;
   readonly luma: Uint8Array;
 }
-
-const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 
 /** Color types a backend image encoder can produce, and their sample counts. */
 const CHANNELS_BY_COLOR_TYPE = new Map<number, number>([

@@ -4,16 +4,7 @@ import {
   DIAGNOSTICS_OUTPUT_MAX_BYTES,
   MAX_DIAGNOSTIC_ENTRIES,
   boundedUrl,
-  truncateUtf8,
 } from "./browserDiagnostics.ts";
-
-it("cuts text to a UTF-8 byte budget without splitting a code point", () => {
-  expect(truncateUtf8("short", 100)).toBe("short");
-  expect(truncateUtf8("ééé", 5)).toBe("éé");
-  expect(truncateUtf8("a😀b", 4)).toBe("a");
-  expect(truncateUtf8("a😀b", 5)).toBe("a😀");
-  expect(Buffer.byteLength(truncateUtf8("é".repeat(2_600), 4_096), "utf8")).toBe(4_096);
-});
 
 function recorder() {
   let time = 1_000;

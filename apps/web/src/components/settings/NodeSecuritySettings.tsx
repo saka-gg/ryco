@@ -147,6 +147,7 @@ import {
   NODE_SESSION_WEB_ROW_DESCRIPTION,
   NODE_SESSION_WEB_SAS_UNAVAILABLE,
 } from "./NodeSecuritySettings.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * The node's E2EE operator surface, as a panel.
@@ -566,7 +567,7 @@ function PrimaryNodeSecuritySettings() {
         await refreshCurrent();
       } catch (cause) {
         if (!mountedRef.current) return;
-        setError(cause instanceof Error ? cause.message : "That didn't work.");
+        setError(errorMessage(cause, "That didn't work."));
       } finally {
         if (mountedRef.current) setBusy(false);
       }
@@ -625,7 +626,7 @@ function PrimaryNodeSecuritySettings() {
         });
       } catch (cause) {
         if (!mountedRef.current) return;
-        setError(cause instanceof Error ? cause.message : "Unable to preview that change.");
+        setError(errorMessage(cause, "Unable to preview that change."));
       } finally {
         if (mountedRef.current) setBusy(false);
       }
@@ -744,7 +745,7 @@ function PrimaryNodeSecuritySettings() {
       }
     } catch (cause) {
       if (mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : "Unable to create the phone QR code.");
+        setError(errorMessage(cause, "Unable to create the phone QR code."));
       }
     } finally {
       if (mountedRef.current) setBusy(false);
