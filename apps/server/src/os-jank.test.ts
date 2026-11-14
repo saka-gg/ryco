@@ -11,7 +11,7 @@ import {
   writeShellEnvironmentCache,
 } from "@ryco/shared/shellEnvironment";
 
-import { fixPath, resolveShellEnvironmentCachePath } from "./os-jank.ts";
+import { fixPath, resolveRycoBaseDir, resolveShellEnvironmentCachePath } from "./os-jank.ts";
 
 const tempDirectories: string[] = [];
 afterEach(() => {
@@ -476,5 +476,28 @@ describe("fixPath", () => {
     expect(resolveShellEnvironmentCachePath({})).toBe(
       path.join(os.homedir(), ".ryco", "userdata", "shell-environment-cache.json"),
     );
+  });
+});
+
+describe("resolveRycoBaseDir", () => {
+  const home = path.resolve("/home/someone");
+
+  it("defaults to ~/.ryco when the value is missing or blank", () => {
+    expect(resolveRycoBaseDir(undefined, home)).toBe(path.join(home, ".ryco"));
+    expect(resolveRycoBaseDir("", home)).toBe(path.join(home, ".ryco"));
+    expect(resolveRycoBaseDir("   ", home)).toBe(path.join(home, ".ryco"));
+  });
+
+  it("expands ~ and ~/ against the home directory", () => {
+    expect(resolveRycoBaseDir("~", home)).toBe(home);
+    expect(resolveRycoBaseDir(" ~/x ", home)).toBe(path.join(home, "x"));
+    expect(resolveRycoBaseDir("~\\x", home)).toBe(path.join(home, "x"));
+    // Like the server's own `resolveBaseDir` (`expandHomePath` joins): still under home.
+    expect(resolveRycoBaseDir("~//srv/ryco", home)).toBe(path.join(home, "srv", "ryco"));
+  });
+
+  it("resolves an absolute value as is and a relative one against the working directory", () => {
+    expect(resolveRycoBaseDir("/srv/ryco", home)).toBe(path.resolve("/srv/ryco"));
+    expect(resolveRycoBaseDir("state", home)).toBe(path.resolve("state"));
   });
 });

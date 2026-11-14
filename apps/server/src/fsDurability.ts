@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, rename, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 
 /**
  * Durability helpers for files that must survive a crash or power loss once written: flush a
@@ -32,4 +34,43 @@ export async function syncDirectory(path: string): Promise<void> {
   } finally {
     await directory.close();
   }
+}
+
+/**
+ * Replaces `filePath` through a fresh temp file next to it and a rename, so a reader sees the
+ * old contents or the new ones, never a half-written file. The promise-based twin of
+ * `writeFileAtomically` (`atomicWrite.ts`).
+ *
+ * - `mode`: the file's permission bits, set exactly (the umask cannot narrow them) before the
+ *   rename. Windows only keeps the read-only bit, so it is not set there.
+ * - `durable`: flushes the file before the rename and the directory after it.
+ *
+ * The directory must exist. On failure the temp file is removed and the error is rethrown.
+ */
+export async function replaceFileAtomically(input: {
+  readonly filePath: string;
+  readonly contents: string | Uint8Array;
+  readonly mode?: number;
+  readonly durable?: boolean;
+}): Promise<void> {
+  const temporaryPath = `${input.filePath}.${randomUUID()}.tmp`;
+  let file: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    file = await open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      input.mode ?? 0o666,
+    );
+    if (input.mode !== undefined && process.platform !== "win32") await file.chmod(input.mode);
+    await file.writeFile(input.contents);
+    if (input.durable === true) await file.sync();
+    await file.close();
+    file = undefined;
+    await rename(temporaryPath, input.filePath);
+  } catch (error: unknown) {
+    await file?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  if (input.durable === true) await syncDirectory(dirname(input.filePath));
 }

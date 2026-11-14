@@ -51,7 +51,8 @@ export function makeBootOwnershipStore(
     const temporaryPath = `${filePath}.${processId}.tmp`;
     await writeFile(temporaryPath, contents, "utf8");
     // Rename is atomic within a filesystem, so a reader sees the old file or
-    // the new one, never a half-written one.
+    // the new one, never a half-written one. Not `replaceFileAtomically`: this module is on
+    // the boot path and that helper is not (`serverBundleBoundaries.test.ts` boot budget).
     await rename(temporaryPath, filePath);
   };
 
