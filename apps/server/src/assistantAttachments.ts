@@ -15,6 +15,8 @@ import {
 import { Data, Schema } from "effect";
 import { REGULAR_FILE_READ_FLAGS } from "@ryco/shared/regularFile";
 
+import { isPathInside } from "./pathContainment.ts";
+
 import {
   resolveAttachmentPath,
   toSafeThreadAttachmentSegment,
@@ -105,17 +107,6 @@ export function parseAssistantDelivery(
  */
 export const formatAssistantDeliveryText = (text: string, notices: ReadonlyArray<string>): string =>
   [text, ...notices].filter(Boolean).join("\n\n") || " ";
-
-/** `candidate` lies strictly inside `root` (both absolute and canonical). */
-export const isInside = (root: string, candidate: string) => {
-  const relative = path.relative(root, candidate);
-  return (
-    relative !== "" &&
-    relative !== ".." &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
-  );
-};
 
 /** A fresh `.part` file in the attachments root. The caller removes it once published. */
 async function openStagingFile(attachmentsDir: string) {
@@ -231,7 +222,8 @@ export async function stageWorkspaceFile(
   }
   const root = await fs.realpath(input.cwd);
   const source = path.resolve(root, relative);
-  if (!isInside(root, source)) throw new Error("File must be inside this thread's workspace.");
+  if (!isPathInside({ root, candidate: source, allowRoot: false }))
+    throw new Error("File must be inside this thread's workspace.");
   let ancestor = root;
   for (const segment of path.relative(root, source).split(path.sep)) {
     ancestor = path.join(ancestor, segment);

@@ -57,6 +57,7 @@ import { databaseRestoreJournalPath } from "../persistence/databaseRestoreJourna
 import { makePrivateSqliteCopyLive, makeRuntimeSqliteLayer } from "../persistence/Layers/Sqlite.ts";
 import { SUPPORTED_MIGRATION_ID } from "../persistence/Migrations.ts";
 import { type FlavorImportScrubReport, scrubFlavorImportCopy } from "./flavorImportTablePolicy.ts";
+import { isPathInside } from "../pathContainment.ts";
 
 /** Ryco's state folder in its data home (`deriveServerPaths` of a packaged app). */
 const SOURCE_STATE_DIRECTORY = "userdata";
@@ -182,13 +183,8 @@ async function lstatOrNull(path: string) {
 }
 
 /** `child` is `parent` or inside it. */
-const containsPath = (parent: string, child: string) => {
-  const relative = Path.relative(parent, child);
-  return (
-    relative === "" ||
-    (relative !== ".." && !relative.startsWith(`..${Path.sep}`) && !Path.isAbsolute(relative))
-  );
-};
+const containsPath = (parent: string, child: string) =>
+  isPathInside({ root: parent, candidate: child, allowRoot: true });
 
 /** The request file's contents; null when it is not a version 1 request with an absolute source. */
 export function parseFlavorImportRequest(text: string): FlavorImportRequest | null {
