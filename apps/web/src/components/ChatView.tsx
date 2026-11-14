@@ -216,14 +216,7 @@ import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { BranchToolbar, COMPOSER_TOOLBAR_ROW_CLASS_NAME, type ThreadDevice } from "./BranchToolbar";
 import { ExecutionTargetLabel } from "./chat/ExecutionTargetSelect";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
-import {
-  ChevronDownIcon,
-  CircleAlertIcon,
-  LoaderCircleIcon,
-  PowerOffIcon,
-  TriangleAlertIcon,
-  WifiOffIcon,
-} from "lucide-react";
+import { ChevronDownIcon, CircleAlertIcon } from "lucide-react";
 import { ThreadLiveWorkContext, type ThreadLiveWork } from "./delegation/threadLiveWork";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -248,7 +241,6 @@ import {
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
 import {
   buildChatDraftTarget,
-  resolveChatsAvailability,
   CHAT_PROJECT_LABEL,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
@@ -467,10 +459,8 @@ import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedDeliveryNotice, useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
   hostedCapabilityCopy,
-  hostedQueuedCopy,
   hostedRoleRefusesSendCopy,
   hostedSendsWhenReadyCopy,
-  hostedSyncingCopy,
   useHostedSwitchTarget,
 } from "../hostedHub/switchTarget";
 import { markNodeSwitchPhase } from "../perf/nodeSwitchInstrumentation";
@@ -503,10 +493,8 @@ import {
 } from "./chat/ExecutionTarget.logic";
 import { DraftDeviceProjectDialog } from "./chat/DraftDeviceProjectDialog";
 import { RightPanelSheet } from "./RightPanelSheet";
-import { Button } from "./ui/button";
 import {
   buildVersionMismatchDismissalKey,
-  dismissVersionMismatch,
   isVersionMismatchDismissed,
   resolveServerConfigVersionMismatch,
 } from "../versionSkew";
@@ -548,6 +536,11 @@ import {
   publishOverlayClearance,
   shouldIgnoreThreadMessageSearchShortcut,
 } from "./ChatView.dom";
+import { buildComposerBannerItems } from "./ChatView.composerBanners";
+import {
+  deriveChatExecutionCandidates,
+  deriveLogicalProjectEnvironments,
+} from "./ChatView.executionEnvironments";
 import { stabilizeProviderStatusesSnapshot } from "./ChatView.providerStatuses";
 import { runSend as runChatSend } from "./ChatView.runSend";
 
@@ -1720,69 +1713,33 @@ export default function ChatView(props: ChatViewProps) {
       }),
     [desktopWorkspace, primaryEnvironmentId, primaryDeviceName],
   );
-  const logicalProjectEnvironments = useMemo(() => {
-    if (!activeProject) return [];
-    const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
-    const memberProjects = allProjects.filter(
-      (p) => deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey,
-    );
-    const seen = new Set<string>();
-    const envs: Array<{
-      environmentId: EnvironmentId;
-      projectId: ProjectId;
-      label: string;
-      isPrimary: boolean;
-      disabled?: boolean;
-    }> = [];
-    for (const p of memberProjects) {
-      if (seen.has(p.environmentId)) continue;
-      seen.add(p.environmentId);
-      const isPrimary = p.environmentId === primaryEnvironmentId;
-      const savedRecord = savedEnvironmentRegistry[p.environmentId];
-      const runtimeState = savedEnvironmentRuntimeById[p.environmentId];
-      const desktopMachine = desktopExecutionMachines.find(
-        (machine) => machine.environmentId === p.environmentId,
-      );
-      const hostedMachine = hostedWorkspace.machines.find(
-        (machine) => machine.environmentId === p.environmentId,
-      );
-      const workspaceMachine =
-        hostedWorkspace.status === "signed-out" ? desktopMachine : hostedMachine;
-      const fallbackLabel = resolveEnvironmentOptionLabel({
-        isPrimary,
-        environmentId: p.environmentId,
-        runtimeLabel: runtimeState?.descriptor?.label ?? null,
-        savedLabel: savedRecord?.label ?? null,
-      });
-      const label = workspaceMachine?.label ?? (isPrimary ? primaryDeviceName : fallbackLabel);
-      envs.push({
-        environmentId: p.environmentId,
-        projectId: p.id,
-        label,
-        isPrimary,
-        ...(desktopWorkspace.status === "ready" || hostedWorkspace.status === "ready"
-          ? { disabled: workspaceMachine?.canMutate !== true }
-          : {}),
-      });
-    }
-    // Sort: primary first, then alphabetical
-    envs.sort((a, b) => {
-      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-      return a.label.localeCompare(b.label);
-    });
-    return envs;
-  }, [
-    activeProject,
-    allProjects,
-    desktopExecutionMachines,
-    primaryDeviceName,
-    desktopWorkspace.status,
-    hostedWorkspace,
-    projectGroupingSettings,
-    primaryEnvironmentId,
-    savedEnvironmentRegistry,
-    savedEnvironmentRuntimeById,
-  ]);
+  const logicalProjectEnvironments = useMemo(
+    () =>
+      deriveLogicalProjectEnvironments({
+        primaryDeviceName,
+        desktopWorkspace,
+        hostedWorkspace,
+        activeProject,
+        allProjects,
+        primaryEnvironmentId,
+        savedEnvironmentRegistry,
+        savedEnvironmentRuntimeById,
+        projectGroupingSettings,
+        desktopExecutionMachines,
+      }),
+    [
+      activeProject,
+      allProjects,
+      desktopExecutionMachines,
+      primaryDeviceName,
+      desktopWorkspace.status,
+      hostedWorkspace,
+      projectGroupingSettings,
+      primaryEnvironmentId,
+      savedEnvironmentRegistry,
+      savedEnvironmentRuntimeById,
+    ],
+  );
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   // The other nodes this repository is checked out on, for the new-thread
   // hero's "· also on Mac mini" (the device picker's own names for them).
@@ -1796,60 +1753,31 @@ export default function ChatView(props: ChatViewProps) {
   // An unsent "No project" chat needs no project on its device, so it can move
   // to any reachable device whose node supports chats.
   const primaryChatsAvailable = useEnvironmentChatsAvailable(primaryEnvironmentId);
-  const chatExecutionCandidates = useMemo<ReadonlyArray<ChatExecutionCandidate>>(() => {
-    if (!isPendingChat || hostedWorkspace.status !== "signed-out") return [];
-    const chatsAvailable = (candidateEnvironmentId: EnvironmentId) => {
-      if (candidateEnvironmentId === primaryEnvironmentId) return primaryChatsAvailable;
-      const config = savedEnvironmentRuntimeById[candidateEnvironmentId]?.serverConfig;
-      return config ? resolveChatsAvailability(config).available : null;
-    };
-    if (desktopWorkspace.status === "ready") {
-      return desktopExecutionMachines.map((machine) => ({
-        environmentId: machine.environmentId,
-        label: machine.label,
-        reachable: machine.canMutate,
-        chatsAvailable: chatsAvailable(machine.environmentId),
-      }));
-    }
-    return [
-      ...(primaryEnvironmentId
-        ? [
-            {
-              environmentId: primaryEnvironmentId,
-              label: primaryDeviceName,
-              reachable: true,
-              chatsAvailable: primaryChatsAvailable,
-            },
-          ]
-        : []),
-      ...Object.values(savedEnvironmentRegistry).flatMap((record) => {
-        // A machine switched off is not offered: it would only ever be unreachable.
-        if (isSavedEnvironmentSwitchedOff(record)) return [];
-        const runtime = savedEnvironmentRuntimeById[record.environmentId];
-        return {
-          environmentId: record.environmentId,
-          label: resolveEnvironmentOptionLabel({
-            isPrimary: false,
-            environmentId: record.environmentId,
-            runtimeLabel: runtime?.descriptor?.label ?? null,
-            savedLabel: record.label,
-          }),
-          reachable: runtime?.connectionState === "connected",
-          chatsAvailable: chatsAvailable(record.environmentId),
-        };
+  const chatExecutionCandidates = useMemo<ReadonlyArray<ChatExecutionCandidate>>(
+    () =>
+      deriveChatExecutionCandidates({
+        primaryDeviceName,
+        desktopWorkspace,
+        hostedWorkspace,
+        isPendingChat,
+        primaryEnvironmentId,
+        savedEnvironmentRegistry,
+        savedEnvironmentRuntimeById,
+        desktopExecutionMachines,
+        primaryChatsAvailable,
       }),
-    ];
-  }, [
-    desktopExecutionMachines,
-    desktopWorkspace.status,
-    hostedWorkspace.status,
-    isPendingChat,
-    primaryChatsAvailable,
-    primaryDeviceName,
-    primaryEnvironmentId,
-    savedEnvironmentRegistry,
-    savedEnvironmentRuntimeById,
-  ]);
+    [
+      desktopExecutionMachines,
+      desktopWorkspace.status,
+      hostedWorkspace.status,
+      isPendingChat,
+      primaryChatsAvailable,
+      primaryDeviceName,
+      primaryEnvironmentId,
+      savedEnvironmentRegistry,
+      savedEnvironmentRuntimeById,
+    ],
+  );
 
   const openPullRequestDialog = useCallback(
     (reference?: string) => {
@@ -2134,167 +2062,49 @@ export default function ChatView(props: ChatViewProps) {
     onContinue: continueAfterFailure,
     onChangeModel: changeModelAfterFailure,
   });
-  const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
-    const items: ComposerBannerStackItem[] = [];
-    if (hostedDeliveryNotice) {
-      // Shown where the user would retry, not in the connection menu. It also
-      // explains why sending is paused, so it replaces the read-only banner.
-      items.push({
-        id: "hosted-delivery-unconfirmed",
-        variant: "warning",
-        icon: <TriangleAlertIcon />,
-        title: hostedDeliveryNotice.title,
-        description: hostedDeliveryNotice.description,
-        actions: (
-          <Button
-            size="xs"
-            disabled={!hostedDeliveryNotice.canAcknowledge}
-            onClick={hostedDeliveryNotice.acknowledge}
-          >
-            {hostedDeliveryNotice.actionLabel}
-          </Button>
-        ),
-      });
-    } else if (dispatchCapability.hosted && dispatchEstablishing) {
-      // A connection on its way is not a problem: a quiet note instead of a
-      // warning, while sends wait in the queue.
-      items.push({
-        id: "hosted-dispatch-syncing",
-        variant: "info",
-        icon: <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />,
-        title: hostedSwitchTarget.queued
-          ? hostedQueuedCopy(hostedSwitchTarget.label)
-          : hostedSyncingCopy(hostedSwitchTarget.label),
-      });
-    } else if (dispatchCapability.hosted && !dispatchCapability.allowed) {
-      items.push({
-        id: "hosted-dispatch-unavailable",
-        variant: "warning",
-        icon: <TriangleAlertIcon />,
-        title: "Read-only hosted session",
-        description: dispatchCapability.reason ?? "Commands are unavailable on this connection.",
-      });
-    }
-    if (activeEnvironmentUnavailableState?.connectionState === "switched-off") {
-      const switchingOn =
-        reconnectingEnvironmentId === activeEnvironmentUnavailableState.environmentId;
-      items.push({
-        id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
-        variant: "warning",
-        icon: <PowerOffIcon />,
-        title: <>{activeEnvironmentUnavailableState.label} is switched off</>,
-        description: "Switch it on to send messages or run actions.",
-        actions: (
-          <>
-            <Button
-              size="xs"
-              disabled={switchingOn}
-              onClick={() =>
-                void handleSwitchOnActiveEnvironment(
-                  activeEnvironmentUnavailableState.environmentId,
-                )
-              }
-            >
-              {switchingOn ? "Switching on..." : "Switch on"}
-            </Button>
-            <Button size="xs" variant="outline" onClick={() => openSettings("devices")}>
-              Connections
-            </Button>
-          </>
-        ),
-      });
-    } else if (activeEnvironmentUnavailableState) {
-      items.push({
-        id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
-        variant:
-          activeEnvironmentUnavailableState.connectionState === "error" ? "error" : "warning",
-        icon: <WifiOffIcon />,
-        title: (
-          <>
-            {activeEnvironmentUnavailableState.label} is{" "}
-            {activeEnvironmentUnavailableState.connectionState === "connecting"
-              ? "connecting"
-              : "disconnected"}
-          </>
-        ),
-        description: "Reconnect this environment before sending messages or running actions.",
-        actions: (
-          <>
-            <Button
-              size="xs"
-              disabled={
-                activeEnvironmentUnavailableState.connectionState === "connecting" ||
-                reconnectingEnvironmentId === activeEnvironmentUnavailableState.environmentId
-              }
-              onClick={() =>
-                void handleReconnectActiveEnvironment(
-                  activeEnvironmentUnavailableState.environmentId,
-                  activeEnvironmentUnavailableState.label,
-                )
-              }
-            >
-              {activeEnvironmentUnavailableState.connectionState === "connecting" ||
-              reconnectingEnvironmentId === activeEnvironmentUnavailableState.environmentId
-                ? "Reconnecting..."
-                : "Reconnect"}
-            </Button>
-            <Button size="xs" variant="outline" onClick={() => openSettings("devices")}>
-              Connections
-            </Button>
-          </>
-        ),
-      });
-    }
-    if (showVersionMismatchBanner && versionMismatch && versionMismatchDismissKey) {
-      items.push({
-        id: `version-mismatch:${versionMismatchDismissKey}`,
-        variant: "warning",
-        icon: <TriangleAlertIcon />,
-        title: "Client and server versions differ",
-        description: (
-          <>
-            Client {versionMismatch.clientVersion} is connected to {versionMismatchServerLabel}{" "}
-            {versionMismatch.serverVersion}. Sync them if RPC calls or reconnects fail.
-          </>
-        ),
-        dismissLabel: "Dismiss version mismatch warning",
-        onDismiss: () => {
-          dismissVersionMismatch(versionMismatchDismissKey);
-          setDismissedVersionMismatchKey(versionMismatchDismissKey);
-        },
-      });
-    }
-    if (restartInterruptionBannerItem) {
-      items.push(restartInterruptionBannerItem);
-    }
-    if (promptLinkCheckoutBannerItem) {
-      items.push(promptLinkCheckoutBannerItem);
-    }
-    if (failedTurnBanner.item) {
-      items.push(failedTurnBanner.item);
-    }
-    return items;
-  }, [
-    dispatchCapability.allowed,
-    dispatchCapability.hosted,
-    dispatchCapability.reason,
-    dispatchEstablishing,
-    hostedSwitchTarget.label,
-    hostedSwitchTarget.queued,
-    hostedDeliveryNotice,
-    activeEnvironmentUnavailableState,
-    handleReconnectActiveEnvironment,
-    handleSwitchOnActiveEnvironment,
-    openSettings,
-    reconnectingEnvironmentId,
-    restartInterruptionBannerItem,
-    promptLinkCheckoutBannerItem,
-    failedTurnBanner.item,
-    showVersionMismatchBanner,
-    versionMismatch,
-    versionMismatchDismissKey,
-    versionMismatchServerLabel,
-  ]);
+  const composerBannerItems = useMemo<ComposerBannerStackItem[]>(
+    () =>
+      buildComposerBannerItems({
+        dispatchCapability,
+        hostedSwitchTarget,
+        dispatchEstablishing,
+        hostedDeliveryNotice,
+        openSettings,
+        activeEnvironmentUnavailableState,
+        reconnectingEnvironmentId,
+        handleReconnectActiveEnvironment,
+        handleSwitchOnActiveEnvironment,
+        versionMismatch,
+        versionMismatchDismissKey,
+        setDismissedVersionMismatchKey,
+        showVersionMismatchBanner,
+        versionMismatchServerLabel,
+        restartInterruptionBannerItem,
+        promptLinkCheckoutBannerItem,
+        failedTurnBanner,
+      }),
+    [
+      dispatchCapability.allowed,
+      dispatchCapability.hosted,
+      dispatchCapability.reason,
+      dispatchEstablishing,
+      hostedSwitchTarget.label,
+      hostedSwitchTarget.queued,
+      hostedDeliveryNotice,
+      activeEnvironmentUnavailableState,
+      handleReconnectActiveEnvironment,
+      handleSwitchOnActiveEnvironment,
+      openSettings,
+      reconnectingEnvironmentId,
+      restartInterruptionBannerItem,
+      promptLinkCheckoutBannerItem,
+      failedTurnBanner.item,
+      showVersionMismatchBanner,
+      versionMismatch,
+      versionMismatchDismissKey,
+      versionMismatchServerLabel,
+    ],
+  );
   // The history subscription goes out after this view mounts, while the shell
   // already lists the thread: until its window arrives an existing thread must
   // not present as a new one.
