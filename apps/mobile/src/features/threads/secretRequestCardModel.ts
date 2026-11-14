@@ -1,5 +1,6 @@
 import type {
   EnvironmentApi,
+  NodeSessionRole,
   SecretRequestAnswerResult,
   SecretRequestId,
   ThreadId,
@@ -33,7 +34,7 @@ export function mobileSecretRequestCards(input: {
   /** The node advertises `secretRequests`. */
   readonly nodeSupports: boolean;
   /** The environment row's role; unknown is not assumed to be the owner's. */
-  readonly role: "viewer" | "operator" | "owner" | "client" | undefined;
+  readonly role: NodeSessionRole | undefined;
   readonly mutationReady: boolean;
   /** A cached or degraded view renders the card but cannot answer it. */
   readonly promptsDisabled: boolean;

@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ComputerUsePolicy, ComputerUseRequest } from "@ryco/contracts";
+import { ThreadId, TurnId, type ComputerUsePolicy, type ComputerUseRequest } from "@ryco/contracts";
 import { ComputerPolicyController, DEFAULT_COMPUTER_POLICY } from "./policy.ts";
 
 const request = (turnId = "turn-1"): ComputerUseRequest => ({
   sessionId: "session-1",
-  threadId: "thread-1",
-  turnId,
+  threadId: ThreadId.make("thread-1"),
+  turnId: TurnId.make(turnId),
   tool: "computer",
   args: { action: "observe" },
 });

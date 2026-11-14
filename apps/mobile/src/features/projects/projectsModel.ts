@@ -6,7 +6,7 @@ import {
   type SidebarThreadSummary,
   type SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
-import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import type { EnvironmentId, NodeSessionRole, ProjectId } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 
 import {
@@ -28,7 +28,7 @@ export interface ProjectEnvironment {
    * (structurally identical; HomeScreen feeds one roster to both models).
    * Both stay absent rather than defaulted: "no role known" is not "viewer",
    * and "no trust evidence" is not "unverified". */
-  readonly role?: "viewer" | "operator" | "owner" | "client";
+  readonly role?: NodeSessionRole;
   readonly trust?: NodeTrust;
 }
 
@@ -45,7 +45,7 @@ export interface ProjectRowMachine {
   readonly connectionState: ProjectEnvironment["connectionState"];
   readonly stale?: boolean;
   readonly staleDetail?: string;
-  readonly role?: "viewer" | "operator" | "owner" | "client";
+  readonly role?: NodeSessionRole;
 }
 
 export interface ProjectListRow {

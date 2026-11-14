@@ -1,3 +1,4 @@
+import { ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -61,7 +62,7 @@ import { ComputerUseOverlay } from "./overlay.ts";
 import { ComputerActivityIndicator } from "./activityIndicator.ts";
 
 const activity = {
-  threadId: "test",
+  threadId: ThreadId.make("test"),
   target: "Device Hub — iPhone 17",
   app: "Device Hub",
   mode: "background" as const,

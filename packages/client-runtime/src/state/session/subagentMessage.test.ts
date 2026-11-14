@@ -91,7 +91,7 @@ describe("describeSubagentMessageFailure", () => {
       describeSubagentMessageFailure(
         new OrchestrationMessageBackgroundTaskError({
           reason: "task-ended",
-          threadId: "thread-1",
+          threadId: ThreadId.make("thread-1"),
           taskId: "agent-1",
         }),
       ),

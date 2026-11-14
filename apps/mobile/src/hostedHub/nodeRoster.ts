@@ -1,5 +1,5 @@
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, SpaceRole } from "@ryco/contracts";
 import { isObjectLike } from "@ryco/shared/unknownValue";
 
 /**
@@ -20,7 +20,7 @@ export interface CachedHubNodeRecord {
   readonly nodeId: string;
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  readonly effectiveRole: "viewer" | "operator" | "owner";
+  readonly effectiveRole: SpaceRole;
   readonly revokedAt: number | null;
   readonly presenceOnline: boolean;
   readonly lastHeartbeatAt: number | null;

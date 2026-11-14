@@ -29,7 +29,13 @@ import {
 } from "./subagentIdentity.ts";
 import type { ThreadSubagentView } from "./threadWorkspaceViewModel.ts";
 
-export type RuntimeSubagentStatus =
+/**
+ * What a subagent row shows, derived from its thread's activities. Not the
+ * provider event union `RuntimeSubagentStatus` (contracts): that one reports
+ * lifecycle (`starting` … `stopped`) and maps onto these through the task
+ * activities (`stopped` reads as `interrupted`).
+ */
+export type SubagentViewStatus =
   | "pending"
   | "running"
   | "waiting"
@@ -84,7 +90,7 @@ export interface RuntimeSubagent {
   readonly role: string | null;
   readonly model: string | null;
   readonly effort: string | null;
-  readonly status: RuntimeSubagentStatus;
+  readonly status: SubagentViewStatus;
   readonly activationCount: number;
   readonly usage: SubagentUsage | null;
   readonly progress: string | null;
@@ -120,20 +126,20 @@ export interface RuntimeSubagent {
   readonly updatedAt: string;
 }
 
-const TERMINAL_STATUSES: ReadonlySet<RuntimeSubagentStatus> = new Set([
+const TERMINAL_STATUSES: ReadonlySet<SubagentViewStatus> = new Set([
   "completed",
   "failed",
   "cancelled",
   "interrupted",
 ]);
 
-export function isTerminalSubagentStatus(status: RuntimeSubagentStatus): boolean {
+export function isTerminalSubagentStatus(status: SubagentViewStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
 /** Active = the user may still need to care while it runs. Idle is settled-ish
  * but resumable; waiting counts as active because it needs the user. */
-export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
+export function isActiveSubagentStatus(status: SubagentViewStatus): boolean {
   return status === "pending" || status === "running" || status === "waiting";
 }
 
@@ -295,7 +301,7 @@ interface MutableAgent {
   role: string | null;
   model: string | null;
   effort: string | null;
-  status: RuntimeSubagentStatus;
+  status: SubagentViewStatus;
   activationCount: number;
   usage: SubagentUsage | null;
   progress: string | null;
@@ -490,7 +496,7 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): bo
 
 function applyStatus(
   agent: MutableAgent,
-  status: RuntimeSubagentStatus,
+  status: SubagentViewStatus,
   at: string,
   allowTerminalReactivation = false,
 ): void {
@@ -532,7 +538,7 @@ function applyStatus(
 // Map, not object literal: payloads aren't schema-validated on the read
 // path, so a status like "toString" must miss instead of resolving an
 // inherited Function through the prototype chain.
-const TASK_COMPLETED_STATUS: ReadonlyMap<string, RuntimeSubagentStatus> = new Map([
+const TASK_COMPLETED_STATUS: ReadonlyMap<string, SubagentViewStatus> = new Map([
   ["completed", "completed"],
   ["failed", "failed"],
   ["stopped", "interrupted"],
@@ -549,9 +555,9 @@ const KNOWN_STATUSES: ReadonlySet<string> = new Set([
   "interrupted",
 ]);
 
-function asRuntimeStatus(value: unknown): RuntimeSubagentStatus | undefined {
+function asRuntimeStatus(value: unknown): SubagentViewStatus | undefined {
   return typeof value === "string" && KNOWN_STATUSES.has(value)
-    ? (value as RuntimeSubagentStatus)
+    ? (value as SubagentViewStatus)
     : undefined;
 }
 
@@ -843,7 +849,7 @@ export function emptyAgentPanelModel(): AgentPanelModel {
 function runtimeStatusFromTranscript(
   status: ThreadSubagentView["status"],
   sessionLive: boolean,
-): RuntimeSubagentStatus {
+): SubagentViewStatus {
   if (status === "running") {
     return sessionLive ? "running" : "interrupted";
   }
@@ -1139,7 +1145,7 @@ export interface AgentWorkflowSummary {
    * momentarily settled while the run is still mid-flight. */
   readonly live: boolean;
   /** "failed" as soon as any member failed, else the coordinator's status. */
-  readonly displayStatus: RuntimeSubagentStatus;
+  readonly displayStatus: SubagentViewStatus;
   readonly memberCount: number;
   readonly settledCount: number;
   /** Running, queued and waiting members: one steady in-flight presentation. */

@@ -7,7 +7,12 @@ import {
   RELAY_PROTOCOL_MAJOR,
   RELAY_PROTOCOL_MINOR,
 } from "./relay.ts";
-import { IsoDateTime, NonNegativeInt } from "./baseSchemas.ts";
+import {
+  ExecutionEnvironmentPlatformArch,
+  ExecutionEnvironmentPlatformOs,
+  IsoDateTime,
+  NonNegativeInt,
+} from "./baseSchemas.ts";
 
 export const HubConnectorState = Schema.Literals([
   "disabled",
@@ -147,8 +152,8 @@ export const HubEnrollmentCeremonyDetail = Schema.Struct({
   deviceCode: Schema.String.check(Schema.isPattern(/^[A-Z0-9-]{4,32}$/)),
   fingerprint: HubNodePublicKeyFingerprint,
   label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(100)),
-  platformOs: Schema.Literals(["darwin", "linux", "windows", "unknown"]),
-  platformArch: Schema.Literals(["arm64", "x64", "other"]),
+  platformOs: ExecutionEnvironmentPlatformOs,
+  platformArch: ExecutionEnvironmentPlatformArch,
   clientVersion: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),
   algorithm: Schema.Literals(["ed25519"]),
   expiresAt: IsoDateTime,

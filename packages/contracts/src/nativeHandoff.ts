@@ -1,7 +1,11 @@
 import * as Schema from "effect/Schema";
 
 import { rejectExcessProperties } from "./baseSchemas.ts";
-import { ExternalIdentityProvider, ExternalIdentitySummary } from "./hostedIdentity.ts";
+import {
+  ExternalIdentityProvider,
+  ExternalIdentitySummary,
+  HubSpaceRole,
+} from "./hostedIdentity.ts";
 
 export const NATIVE_HANDOFF_CAPABILITY_PATH = "/.well-known/ryco-hub" as const;
 export const NATIVE_HANDOFF_PROTOCOL_VERSION = 1 as const;
@@ -341,7 +345,7 @@ const NativeHandoffAccount = rejectExcessProperties(
   Schema.Struct({
     id: AccountId,
     displayName: Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(200)),
-    role: Schema.Literals(["viewer", "operator", "owner"]),
+    role: HubSpaceRole,
     createdAt: EpochMs,
     disabledAt: Schema.Null,
   }),

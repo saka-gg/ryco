@@ -18,6 +18,7 @@ import {
   OrchestrationReadModel,
   ProjectId,
   RuntimeMode as ThreadRuntimeMode,
+  SpaceRole,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
@@ -2295,7 +2296,7 @@ const e2eeFingerprintArgument = Argument.String("fingerprint").pipe(
   Argument.withDescription("Client key fingerprint in SHA256: display form (§7.1)."),
 );
 
-const e2eeMaxRoleFlag = Flag.Literals("max-role", ["viewer", "operator", "owner"]).pipe(
+const e2eeMaxRoleFlag = Flag.Literals("max-role", SpaceRole.literals).pipe(
   Flag.withDescription("Maximum role this client key may exercise (§8.3 role ordering)."),
 );
 
@@ -2860,7 +2861,7 @@ const e2eeClientNarrowCommand = Command.make("narrow", {
   ...authLocationFlags,
   ...e2eeClientKeyFlags,
   fingerprint: e2eeFingerprintArgument,
-  maxRole: Flag.Literals("max-role", ["viewer", "operator", "owner"]).pipe(
+  maxRole: Flag.Literals("max-role", SpaceRole.literals).pipe(
     Flag.withDescription("Reduced maximum role (§8.3 role ordering). Never widens."),
     Flag.optional,
   ),

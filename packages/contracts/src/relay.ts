@@ -27,6 +27,7 @@ import {
 } from "./relayConstants.ts";
 
 import { RelayNodeId } from "./relayNodeId.ts";
+import { SpaceRole } from "./spaceRole.ts";
 
 export * from "./relayConstants.ts";
 export { RelayNodeId };
@@ -125,8 +126,9 @@ export type RelayCloseReason = typeof RelayCloseReason.Type;
 export const RelayCapability = Schema.Literal("ryco.rpc");
 export type RelayCapability = typeof RelayCapability.Type;
 
-export const RelayEffectiveRole = Schema.Literals(["viewer", "operator", "owner"]);
-export type RelayEffectiveRole = typeof RelayEffectiveRole.Type;
+/** The role the relay reports a session acts with: a space role. */
+export const RelayEffectiveRole = SpaceRole;
+export type RelayEffectiveRole = SpaceRole;
 
 export const RelayProtocolErrorCode = Schema.Literals(RELAY_PROTOCOL_ERROR_CODES);
 export type RelayProtocolErrorCode = typeof RelayProtocolErrorCode.Type;

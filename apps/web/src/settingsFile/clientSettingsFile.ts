@@ -1,4 +1,4 @@
-import { ClientSettingsSchema, type ClientSettings } from "@ryco/contracts/settings";
+import { ClientSettingsSchema, ColorMode, type ClientSettings } from "@ryco/contracts/settings";
 import * as Equal from "effect/Equal";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -92,8 +92,8 @@ export const CLIENT_SETTINGS_FILE_KEYS = Object.keys(CLIENT_SETTINGS_FILE_SCOPE)
   (key) => CLIENT_SETTINGS_FILE_SCOPE[key as keyof ClientSettings],
 ) as ReadonlyArray<FileClientKey>;
 
-export type ColorMode = "system" | "light" | "dark";
-const COLOR_MODES: ReadonlySet<string> = new Set(["system", "light", "dark"]);
+export type { ColorMode };
+const isColorMode = Schema.is(ColorMode);
 
 export interface ClientSettingsFileState {
   readonly client: ClientSettings;
@@ -295,9 +295,9 @@ export function planClientSettingsImport(
   const theme = isRecord(value.theme) ? value.theme : {};
   let colorMode: ColorMode | null = null;
   if (theme.mode !== undefined) {
-    if (typeof theme.mode === "string" && COLOR_MODES.has(theme.mode)) {
+    if (isColorMode(theme.mode)) {
       if (theme.mode !== current.colorMode) {
-        colorMode = theme.mode as ColorMode;
+        colorMode = theme.mode;
         changes.push(`color mode: ${current.colorMode} -> ${colorMode}`);
       }
     } else {

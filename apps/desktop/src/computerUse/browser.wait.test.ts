@@ -1,4 +1,5 @@
 // `wait` cases that need fake timers; browser.test.ts runs in the pure project, which allows none.
+import { TurnId, ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
 import type { ComputerOperationContext } from "./policy.ts";
@@ -27,7 +28,13 @@ function fixture(state: Record<string, unknown>) {
     }),
   };
   const context: ComputerOperationContext = {
-    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
+    request: {
+      sessionId: "s",
+      threadId: ThreadId.make("t"),
+      turnId: TurnId.make("u"),
+      tool: "browser",
+      args: {},
+    },
     signal: controller.signal,
     check: vi.fn(() => {
       if (stopped) throw new Error("Computer use stopped. Start a new turn to resume.");

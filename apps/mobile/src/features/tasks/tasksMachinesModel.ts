@@ -1,4 +1,4 @@
-import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import type { EnvironmentId, NodeSessionRole, ProjectId } from "@ryco/contracts";
 
 // Tasks belong to one machine (each node keeps its own list), so the Tasks tab
 // shows one machine's at a time and offers the others in its picker. Pure, so
@@ -8,7 +8,7 @@ export interface TaskMachineEnvironment {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly connectionState: "connected" | "reconnecting" | "offline" | "read-only";
-  readonly role?: "viewer" | "operator" | "owner" | "client";
+  readonly role?: NodeSessionRole;
 }
 
 export interface TaskMachine {

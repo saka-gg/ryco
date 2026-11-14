@@ -100,7 +100,7 @@ import {
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 
-const FOLLOW_UP_QUEUE_PAYLOADS: Record<FollowUpQueueEventType, Schema.Schema<unknown>> = {
+const FOLLOW_UP_QUEUE_PAYLOADS: Record<FollowUpQueueEventType, Schema.Decoder<unknown>> = {
   "thread.queue-entry-added": ThreadQueueEntryAddedPayload,
   "thread.queue-entry-edited": ThreadQueueEntryEditedPayload,
   "thread.queue-reordered": ThreadQueueReorderedPayload,
@@ -133,14 +133,18 @@ function updateWorktree(
   );
 }
 
+/**
+ * Validates a decider-built payload (trimmed strings, bounds) before it is
+ * folded into the command read model; a failure is a decode error, not a defect.
+ */
 function decodeForEvent<A>(
-  schema: Schema.Schema<A>,
+  schema: Schema.Decoder<A>,
   value: unknown,
   eventType: OrchestrationEvent["type"],
   field: string,
 ): Effect.Effect<A, OrchestrationProjectorDecodeError> {
   return Effect.try({
-    try: () => Schema.decodeUnknownSync(schema as any)(value),
+    try: () => Schema.decodeUnknownSync(schema)(value),
     catch: (error) => toProjectorDecodeError(`${eventType}:${field}`)(error as Schema.SchemaError),
   });
 }
