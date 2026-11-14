@@ -53,6 +53,7 @@ import {
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
+import { isCanonicalPathInside } from "./pathContainment.ts";
 
 const PROJECT_FAVICON_CACHE_CONTROL = "private, max-age=3600";
 const PROJECT_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
@@ -1051,8 +1052,7 @@ export const serveStaticRequest = Effect.gen(function* () {
   }
 
   const isWithinStaticRoot = (candidate: string) =>
-    candidate === staticRoot ||
-    candidate.startsWith(staticRoot.endsWith(path.sep) ? staticRoot : `${staticRoot}${path.sep}`);
+    isCanonicalPathInside({ root: staticRoot, candidate, allowRoot: true, sep: path.sep });
 
   let filePath = path.resolve(staticRoot, staticRelativePath);
   if (!isWithinStaticRoot(filePath)) {
