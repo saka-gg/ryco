@@ -31,6 +31,7 @@ import { Effect } from "effect";
 import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import type { DeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
+import type { CopilotSessionCallbacks } from "./CopilotAdapter.callbacks.ts";
 import type {
   AgentControlProviderBridge,
   AgentControlRuntimeLease,
@@ -82,6 +83,8 @@ export interface ActiveCopilotSession {
    */
   readonly htmlRenderToolCalls: Map<string, HtmlRenderToolPresentation>;
   readonly deviceToolBinding: DeviceToolBinding | null;
+  /** Runs the session's SDK callbacks in order on one fiber in the session scope. */
+  readonly callbacks: CopilotSessionCallbacks;
   /** Copilot turn ids (one per assistant round), never their events. */
   readonly turnIds: Array<TurnId>;
   readonly renewSession: () => Promise<CopilotSession>;

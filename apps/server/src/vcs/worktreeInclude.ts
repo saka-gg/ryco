@@ -16,6 +16,7 @@ import { promises as fsPromises } from "node:fs";
 import nodePath from "node:path";
 
 import { Duration, Effect } from "effect";
+import { isPathInside } from "../pathContainment.ts";
 
 export const WORKTREE_INCLUDE_FILE_NAME = ".worktreeinclude";
 
@@ -57,10 +58,8 @@ export function parseWorktreeIncludePaths(included: string, ignored: string): st
 const errorDetail = (cause: unknown) =>
   cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
 
-const isInside = (root: string, candidate: string) => {
-  const relative = nodePath.relative(root, candidate);
-  return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
-};
+const isInside = (root: string, candidate: string) =>
+  isPathInside({ root, candidate, allowRoot: true });
 
 /**
  * Refuses a target whose existing parent folders in the new worktree include a symlink (a

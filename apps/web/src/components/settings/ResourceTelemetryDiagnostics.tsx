@@ -18,6 +18,7 @@ import {
   formatPercent,
   relativeTimeLabel,
 } from "./DiagnosticsSettings.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 const WINDOWS = [
   { label: "5m", windowMs: 300_000, bucketMs: 15_000 },
@@ -81,10 +82,7 @@ export function ResourceTelemetryDiagnostics({
         setHistory(value);
         setError(null);
       },
-      onError: (cause) =>
-        setError(
-          cause instanceof Error ? cause.message : "Resource history could not be refreshed.",
-        ),
+      onError: (cause) => setError(errorMessage(cause, "Resource history could not be refreshed.")),
       onLoading: setLoading,
     });
     historyRefresh.current = controller.refresh;
@@ -118,7 +116,7 @@ export function ResourceTelemetryDiagnostics({
       await historyRefresh.current?.();
     } catch (cause) {
       if (generation === retryLifetime.current)
-        setError(cause instanceof Error ? cause.message : "Could not retry resource monitor.");
+        setError(errorMessage(cause, "Could not retry resource monitor."));
     } finally {
       if (generation === retryLifetime.current) setRetrying(false);
     }

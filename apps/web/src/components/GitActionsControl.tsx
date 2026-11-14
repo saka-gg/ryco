@@ -109,6 +109,7 @@ import {
   publishProviderOption as sharedPublishProviderOption,
   type PublishProviderKind,
 } from "@ryco/shared/sourceControlPublish";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type { GitActionPostPushEvent } from "./useGitActionRunner";
 
@@ -420,7 +421,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
         );
       })
       .catch((err: unknown) => {
-        setPublishError(err instanceof Error ? err.message : "An error occurred.");
+        setPublishError(errorMessage(err, "An error occurred."));
       });
   }, [
     canSubmitPublishRepository,
@@ -1189,7 +1190,7 @@ export default function GitActionsControl({
           stackedThreadToast({
             type: "error",
             title: "Unable to open file",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
             ...(threadToastData !== undefined ? { data: threadToastData } : {}),
           }),
         );

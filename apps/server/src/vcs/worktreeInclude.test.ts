@@ -62,4 +62,24 @@ describe("copyWorktreeIncludedFiles", () => {
     await expect(readFile(nodePath.join(outside, ".env"), "utf8")).rejects.toThrow();
     expect(await readFile(nodePath.join(worktree, ".env"), "utf8")).toBe("ROOT=1\n");
   });
+
+  it("copies a file whose name starts with two dots", async () => {
+    const source = await scratch();
+    const worktree = await scratch();
+    await writeFile(nodePath.join(source, "..env.local"), "LOCAL=1\n");
+    await mkdir(nodePath.join(source, "..config"), { recursive: true });
+    await writeFile(nodePath.join(source, "..config", "app.json"), "{}\n");
+
+    const result = await Effect.runPromise(
+      copyWorktreeIncludedFiles({
+        sourceRoot: source,
+        worktreePath: worktree,
+        paths: ["..config/app.json", "..env.local"],
+      }),
+    );
+
+    expect(result.failed).toEqual([]);
+    expect(result.copied).toEqual(["..config/app.json", "..env.local"]);
+    expect(await readFile(nodePath.join(worktree, "..env.local"), "utf8")).toBe("LOCAL=1\n");
+  });
 });

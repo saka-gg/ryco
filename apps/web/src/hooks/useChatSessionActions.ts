@@ -31,6 +31,7 @@ import {
   respondToThreadApproval,
   respondToThreadUserInput,
 } from "./chatSessionActions";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type SetThreadError = (targetThreadId: ThreadId | null, error: string | null) => void;
 
@@ -161,10 +162,7 @@ export function useChatSessionActions(input: {
       try {
         await submitApprovalDecision(requestId, decision, approvalIdentity);
       } catch (err: unknown) {
-        setThreadError(
-          activeThreadId,
-          err instanceof Error ? err.message : "Failed to submit approval decision.",
-        );
+        setThreadError(activeThreadId, errorMessage(err, "Failed to submit approval decision."));
       }
     },
     [activeThreadId, environmentId, setThreadError, submitApprovalDecision],
@@ -193,10 +191,7 @@ export function useChatSessionActions(input: {
           userInputIdentity,
         });
       } catch (err: unknown) {
-        setThreadError(
-          activeThreadId,
-          err instanceof Error ? err.message : "Failed to submit user input.",
-        );
+        setThreadError(activeThreadId, errorMessage(err, "Failed to submit user input."));
       } finally {
         setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
       }

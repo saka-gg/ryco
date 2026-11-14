@@ -532,12 +532,11 @@ const makeKeybindings = Effect.gen(function* () {
   });
 
   const start = Effect.gen(function* () {
-    const alreadyStarted = yield* Ref.get(startedRef);
-    if (alreadyStarted) {
+    const shouldStart = yield* Ref.modify(startedRef, (started) => [!started, true]);
+    if (!shouldStart) {
       return yield* Deferred.await(startedDeferred);
     }
 
-    yield* Ref.set(startedRef, true);
     const startup = Effect.gen(function* () {
       yield* startWatcher;
       yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);

@@ -88,6 +88,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { useServerProviders } from "../../rpc/serverState";
+import { errorMessage } from "~/lib/errorMessage";
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 
@@ -226,7 +227,7 @@ export function ProvidersSettingsPanel() {
           stackedThreadToast({
             type: "error",
             title: "Failed to refresh providers",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       })
@@ -356,7 +357,7 @@ export function ProvidersSettingsPanel() {
             stackedThreadToast({
               type: "error",
               title: "Provider update failed",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              description: errorMessage(error, "An error occurred."),
             }),
           );
         })

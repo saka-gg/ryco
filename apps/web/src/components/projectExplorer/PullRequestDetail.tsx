@@ -426,7 +426,7 @@ function PullRequestDetailBody(props: {
             { id: "files", label: "Files changed", count: fileCount },
           ]}
           activeId={activeTab}
-          onSelect={(id) => setActiveTab(id as PullRequestTab)}
+          onSelect={setActiveTab}
         />
 
         <div

@@ -23,6 +23,7 @@ import {
 } from "../../rpc/useAtlassian";
 import { invalidateWorkItems } from "../../rpc/useWorkItems";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 export {
   ATLASSIAN_NONE_VALUE,
@@ -163,7 +164,7 @@ export function useProjectAtlassianLinkForm(input: {
         stackedThreadToast({
           type: "error",
           title: "Could not save Atlassian project settings",
-          description: error instanceof Error ? error.message : "The project link was not saved.",
+          description: errorMessage(error, "The project link was not saved."),
         }),
       );
     },
@@ -194,7 +195,7 @@ export function useProjectAtlassianLinkForm(input: {
         stackedThreadToast({
           type: "error",
           title: "Could not unlink Jira project",
-          description: error instanceof Error ? error.message : "The project link was not saved.",
+          description: errorMessage(error, "The project link was not saved."),
         }),
       );
     },

@@ -9,6 +9,7 @@ import { getPrimaryKnownEnvironment } from "./environments/primary";
 import { getSavedEnvironmentRecord } from "./environments/runtime/catalog";
 import { readLocalApi } from "./localApi";
 import { useSettings } from "./hooks/useSettings";
+import { errorMessage } from "~/lib/errorMessage";
 
 const LAST_EDITOR_KEY = "ryco:last-editor";
 
@@ -162,7 +163,7 @@ export function openPathInEditorWithToast(
     toastManager.add({
       type: "error",
       title: "Unable to open file",
-      description: error instanceof Error ? error.message : "An error occurred.",
+      description: errorMessage(error, "An error occurred."),
     });
   });
 }

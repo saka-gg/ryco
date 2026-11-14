@@ -130,8 +130,6 @@ Browser budget regression coverage lives in `components/perf/ClientPerfBudget.br
 
 Use `useDevPropDiff(props, "ComponentName")` at the top of a memoized component body while refactoring hot paths (`MessagesTimeline`, `ChatComposer`, sidebar rows). It logs which prop identities changed between renders. Remove before merging unless the component is permanently instrumented.
 
-Use `useRenderCounter("ComponentName")` for coarse render-count logging in dev builds.
-
 ### Phase 0.2 audit (2026-06-14)
 
 Static prop-diff audit for hot-path components. Findings and Phase 2.1 follow-ups:

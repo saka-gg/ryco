@@ -37,6 +37,7 @@ import {
 import type { AddDeviceDialogProps } from "./AddDeviceDialog.logic";
 import { resolveAdvertisedEndpointPairingUrl } from "./ConnectionsSettings.logic";
 import { useRelativeTimeTick } from "./settingsLayout";
+import { errorMessage } from "~/lib/errorMessage";
 
 type DeviceTab = "phone" | "computer";
 
@@ -57,10 +58,6 @@ const COPIED_TITLES: Record<CopyKind, string> = {
   code: "Pairing code copied",
   address: "Address copied",
 };
-
-function errorMessage(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message ? cause.message : fallback;
-}
 
 function trimTrailingSlash(url: string): string {
   return url.replace(/\/$/u, "");

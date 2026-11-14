@@ -14,6 +14,7 @@ import { ColorSwatchPicker } from "./ColorSwatchPicker";
 import { PermissionStatusBadge } from "./PermissionStatusBadge";
 import { SettingsBlock, SettingsNotice, SettingsRow, SettingsSection } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** Distinct from the system cursor and from each other on light and dark windows. */
 const CURSOR_SWATCHES = ["#e8794a", "#f43f5e", "#a855f7", "#3b82f6", "#14b8a6", "#22c55e"] as const;
@@ -124,7 +125,7 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
     try {
       setState(await operation());
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Computer setup failed.");
+      setError(errorMessage(cause, "Computer setup failed."));
     } finally {
       setBusy(false);
     }
@@ -223,7 +224,7 @@ function ComputerBetaSettingsPanel({ api }: { api: ComputerBetaApi }) {
                 disabled={busy}
                 onClick={() =>
                   void agentControl.enable().catch((cause: unknown) => {
-                    setError(cause instanceof Error ? cause.message : "Could not turn it on.");
+                    setError(errorMessage(cause, "Could not turn it on."));
                   })
                 }
               >
