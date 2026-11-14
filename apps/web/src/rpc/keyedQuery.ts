@@ -1,1 +1,4 @@
-export { clearKeyedQueriesForEnvironment } from "@ryco/client-runtime/rpc";
+export {
+  clearAccountScopedKeyedQueries,
+  clearKeyedQueriesForEnvironment,
+} from "@ryco/client-runtime/rpc";

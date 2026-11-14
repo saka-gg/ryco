@@ -3,6 +3,8 @@ import { EnvironmentId } from "@ryco/contracts";
 import type { AppLifecycleEvent, AppLifecycleService } from "../platform/index.ts";
 
 import {
+  clearAccountScopedKeyedQueries,
+  clearKeyedQueriesForEnvironment,
   createKeyedQueryRegistry,
   createRetainedKeyTracker,
   defineKeyedQueryByInput,
@@ -1088,4 +1090,60 @@ describe("keyed query read admission", () => {
       registry.dispose();
     },
   );
+});
+
+describe("account-scoped registries", () => {
+  function registry(accountScoped: boolean) {
+    return createKeyedQueryRegistry<State>({
+      labelPrefix: `account-scope-${accountScoped}`,
+      initialState,
+      accountScoped,
+      buildFetchingState: (current) => ({ ...current, fetching: true }),
+      buildSuccessState: (data) => ({ data: data as string, fetching: false, error: null }),
+      buildErrorState: (current, error) => ({ ...current, fetching: false, error }),
+    });
+  }
+
+  it("keep their reads when one environment is cleared and drop all of them at account teardown", async () => {
+    const scoped = registry(true);
+    const other = registry(false);
+    const run = vi.fn(async () => "read");
+    const definition = {
+      label: "read",
+      staleTime: 60_000,
+      isEnabled: () => true,
+      buildKey: () => "key",
+      resolveEnvironmentId: () => environmentId,
+      createControllerFields: () => ({}),
+      run,
+    };
+    const scopedQuery = defineKeyedQueryByKey(scoped, definition, (c) => !c.hasData);
+    const otherQuery = defineKeyedQueryByKey(other, definition, (c) => !c.hasData);
+    const release = scopedQuery.watch(undefined);
+    const releaseOther = otherQuery.watch(undefined);
+    await scoped.controllers.get(scopedQuery.keyOf(undefined)!)?.inFlightPromise;
+    await other.controllers.get(otherQuery.keyOf(undefined)!)?.inFlightPromise;
+    // A state written without any read (a seed) is kept and dropped the same way.
+    scoped.setQueryState(`seed${KEY_SEP}${environmentId}`, { ...initialState, data: "seed" });
+
+    clearKeyedQueriesForEnvironment(environmentId);
+    expect(scopedQuery.getSnapshot(scopedQuery.keyOf(undefined)).data).toBe("read");
+    expect(scoped.getQueryState(`seed${KEY_SEP}${environmentId}`).data).toBe("seed");
+    expect(otherQuery.getSnapshot(otherQuery.keyOf(undefined)).data).toBeNull();
+
+    const rewatchOther = otherQuery.watch(undefined);
+    await other.controllers.get(otherQuery.keyOf(undefined)!)?.inFlightPromise;
+    clearAccountScopedKeyedQueries();
+    expect(scoped.controllers.size).toBe(0);
+    expect(scopedQuery.getSnapshot(scopedQuery.keyOf(undefined)).data).toBeNull();
+    expect(scoped.getQueryState(`seed${KEY_SEP}${environmentId}`).data).toBeNull();
+    // Registries that are not account-scoped are left to their own clearing.
+    expect(otherQuery.getSnapshot(otherQuery.keyOf(undefined)).data).toBe("read");
+
+    rewatchOther();
+    release();
+    releaseOther();
+    scoped.dispose();
+    other.dispose();
+  });
 });

@@ -7,6 +7,15 @@
 // Layer: Web data hooks. Every read follows the node's current connection and fences answers
 //        that arrive after their input changed.
 
+import { useAtomValue } from "@effect/atom-react";
+import {
+  appAtomRegistry,
+  createKeyedQueryRegistry,
+  defineKeyedQueryByKey,
+  KEY_SEP,
+  type KeyedQueryByKey,
+  type KeyedQueryEnabledInput,
+} from "@ryco/client-runtime/rpc";
 import type { EnvironmentApi, EnvironmentId, ProjectId } from "@ryco/contracts";
 import type {
   FilesystemDirectoryMatch,
@@ -23,7 +32,12 @@ import {
   subscribeEnvironmentConnections,
 } from "../../environments/runtime";
 import { normalizeProjectPathForComparison } from "@ryco/shared/projectPaths";
-import { defaultQueryClient, useQuery, type QueryKey } from "../../rpc/queryClient";
+import {
+  isPastStaleTime,
+  type KeyedQueryState,
+  LAST_RESULT_KEYED_QUERY_STATE_BUILDERS,
+} from "../../rpc/keyedQueryState";
+import { currentReadGuard, runWithReadRetry } from "../../rpc/readRetry";
 
 /** The node's environment API on its current connection; undefined while it is not connected. */
 export function useNodeEnvironmentApi(
@@ -43,13 +57,36 @@ export function useNodeEnvironmentApi(
   );
 }
 
+/* ───────── Cached reads ───────── */
+
+// What these reads showed on the former `queryClient` shim: data only while the
+// last settled read succeeded.
+const nodePathRegistry = createKeyedQueryRegistry<KeyedQueryState<unknown>>({
+  labelPrefix: "project-nodes",
+  accountScoped: true,
+  ...LAST_RESULT_KEYED_QUERY_STATE_BUILDERS,
+});
+
+/**
+ * Starts a read of `input` when its cache is stale (`force`: always, joining a
+ * read in flight) without observing it, and settles once that read has.
+ */
+function readNodePath<TInput>(
+  query: KeyedQueryByKey<TInput, unknown, KeyedQueryState<unknown>>,
+  input: TInput,
+  force: boolean,
+): Promise<void> {
+  query.watch(input)();
+  const compositeKey = query.keyOf(input);
+  if (force) return query.refreshAsync(compositeKey).then(() => undefined);
+  const controller =
+    compositeKey === null ? undefined : nodePathRegistry.controllers.get(compositeKey);
+  return controller?.inFlightPromise ?? Promise.resolve();
+}
+
 /* ───────── Path hints ───────── */
 
 const PATH_HINTS_STALE_TIME_MS = 60_000;
-
-export function nodePathHintsQueryKey(environmentId: EnvironmentId): QueryKey {
-  return ["project-nodes", "path-hints", environmentId];
-}
 
 async function readNodePathHints(environmentId: EnvironmentId): Promise<NodePathHints> {
   const read = readEnvironmentApi(environmentId)?.projects.pathHints;
@@ -59,39 +96,95 @@ async function readNodePathHints(environmentId: EnvironmentId): Promise<NodePath
   return read({});
 }
 
+const nodePathHintsQuery: KeyedQueryByKey<
+  EnvironmentId | null,
+  NodePathHints,
+  KeyedQueryState<unknown>
+> = defineKeyedQueryByKey<
+  EnvironmentId | null,
+  NodePathHints,
+  KeyedQueryState<unknown>,
+  Record<string, never>,
+  EnvironmentId
+>(
+  nodePathRegistry,
+  {
+    label: "path-hints",
+    staleTime: PATH_HINTS_STALE_TIME_MS,
+    isEnabled: (environmentId): environmentId is EnvironmentId => environmentId !== null,
+    buildKey: (environmentId) => environmentId,
+    resolveEnvironmentId: (environmentId) => environmentId,
+    createControllerFields: () => ({}),
+    run: (environmentId) =>
+      runWithReadRetry(
+        () => readNodePathHints(environmentId),
+        1,
+        currentReadGuard(nodePathRegistry.controllers, nodePathHintsQuery.keyOf(environmentId)),
+      ),
+  },
+  isPastStaleTime,
+);
+
+export interface NodeCachedReadState<T> extends KeyedQueryState<T> {
+  /** The last settled read succeeded (its data shows). */
+  readonly isSuccess: boolean;
+}
+
+function withSuccess<T>(state: KeyedQueryState<unknown>): NodeCachedReadState<T> {
+  const typed = state as KeyedQueryState<T>;
+  return { ...typed, isSuccess: !typed.isError && typed.data !== null };
+}
+
 /**
  * A node's home, separator, normal code directory and code roots. Cached per
  * node, so the node step, the folder picker and the copy dialog share one read.
+ * While not `supported` (or not connected) nothing is read, but cached hints show.
  */
 export function useNodePathHints(input: {
   readonly environmentId: EnvironmentId | null;
   /** The node advertises `capabilities.projectCopy`. */
   readonly supported: boolean;
-}) {
+}): NodeCachedReadState<NodePathHints> {
   const api = useNodeEnvironmentApi(input.environmentId);
   const environmentId = input.environmentId;
-  const enabled =
-    environmentId !== null && input.supported && api?.projects.pathHints !== undefined;
-  return useQuery({
-    queryKey:
-      environmentId === null
-        ? ["project-nodes", "path-hints", null]
-        : nodePathHintsQueryKey(environmentId),
-    queryFn: () => readNodePathHints(environmentId!),
-    environmentId,
-    enabled,
-    staleTime: PATH_HINTS_STALE_TIME_MS,
-    retry: 1,
-  });
+  const enabled = input.supported && api?.projects.pathHints !== undefined;
+  useEffect(() => {
+    if (!enabled) return;
+    return nodePathHintsQuery.watch(environmentId);
+  }, [enabled, environmentId]);
+  return withSuccess(
+    useAtomValue(nodePathHintsQuery.getAtom(nodePathHintsQuery.keyOf(environmentId))),
+  );
 }
 
 /** Warms a node's path hints, e.g. when "Copy to another node…" is hovered. */
 export function prefetchNodePathHints(environmentId: EnvironmentId): Promise<void> {
-  return defaultQueryClient.prefetchQuery({
-    queryKey: nodePathHintsQueryKey(environmentId),
-    queryFn: () => readNodePathHints(environmentId),
-    staleTime: PATH_HINTS_STALE_TIME_MS,
-  });
+  return readNodePath(nodePathHintsQuery, environmentId, false);
+}
+
+/** The node's path hints when something already read them; this never asks the node. */
+export function readCachedNodePathHints(environmentId: EnvironmentId): NodePathHints | null {
+  const state = nodePathHintsQuery.getSnapshot(nodePathHintsQuery.keyOf(environmentId));
+  return state.data as NodePathHints | null;
+}
+
+/**
+ * Keeps a node's path hints cached and calls `listener` when they change.
+ * Returns the stop.
+ */
+export function followNodePathHints(
+  environmentId: EnvironmentId,
+  listener: () => void,
+): () => void {
+  const release = nodePathHintsQuery.watch(environmentId);
+  const unsubscribe = appAtomRegistry.subscribe(
+    nodePathHintsQuery.getAtom(nodePathHintsQuery.keyOf(environmentId)),
+    listener,
+  );
+  return () => {
+    unsubscribe();
+    release();
+  };
 }
 
 /* ───────── Export inspection ───────── */
@@ -102,13 +195,6 @@ export function prefetchNodePathHints(environmentId: EnvironmentId): Promise<voi
  * that it still shows what the working tree has now.
  */
 export const EXPORT_INSPECT_STALE_TIME_MS = 20_000;
-
-export function exportInspectQueryKey(
-  environmentId: EnvironmentId,
-  projectId: ProjectId,
-): QueryKey {
-  return ["project-nodes", "export-inspect", environmentId, projectId];
-}
 
 async function readExportInspection(
   environmentId: EnvironmentId,
@@ -121,25 +207,73 @@ async function readExportInspection(
   return inspect({ projectId });
 }
 
+interface ExportInspectInput {
+  readonly environmentId: EnvironmentId | null;
+  readonly projectId: ProjectId | null;
+}
+
+type EnabledExportInspectInput = KeyedQueryEnabledInput<
+  ExportInspectInput,
+  "environmentId" | "projectId"
+>;
+
+/** An inspection with when it arrived, so the copy dialog can ask for a recent one. */
+interface ReceivedExportInspection {
+  readonly inspection: ProjectExportInspection;
+  readonly receivedAt: number;
+}
+
+const exportInspectQuery = defineKeyedQueryByKey<
+  ExportInspectInput,
+  ReceivedExportInspection,
+  KeyedQueryState<unknown>,
+  Record<string, never>,
+  EnabledExportInspectInput
+>(
+  nodePathRegistry,
+  {
+    label: "export-inspect",
+    staleTime: EXPORT_INSPECT_STALE_TIME_MS,
+    isEnabled: (input): input is EnabledExportInspectInput =>
+      input.environmentId !== null && input.projectId !== null,
+    buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.projectId}`,
+    resolveEnvironmentId: (input) => input.environmentId,
+    createControllerFields: () => ({}),
+    run: async (input) => ({
+      inspection: await readExportInspection(input.environmentId, input.projectId),
+      receivedAt: Date.now(),
+    }),
+  },
+  isPastStaleTime,
+);
+
+export interface NodeExportInspectionState extends NodeCachedReadState<ProjectExportInspection> {
+  /** When the shown inspection arrived; 0 when none shows. */
+  readonly dataUpdatedAt: number;
+}
+
 /** `projects.exportInspect` of one project on its node, cached for a few seconds. */
 export function useNodeExportInspection(input: {
   readonly environmentId: EnvironmentId | null;
   readonly projectId: ProjectId | null;
   /** The node advertises project copy and its API has the read. */
   readonly enabled: boolean;
-}) {
-  const { environmentId, projectId } = input;
-  return useQuery({
-    queryKey:
-      environmentId === null || projectId === null
-        ? ["project-nodes", "export-inspect", null]
-        : exportInspectQueryKey(environmentId, projectId),
-    queryFn: () => readExportInspection(environmentId!, projectId!),
-    environmentId,
-    enabled: input.enabled && environmentId !== null && projectId !== null,
-    staleTime: EXPORT_INSPECT_STALE_TIME_MS,
-    retry: false,
-  });
+}): NodeExportInspectionState {
+  const { environmentId, projectId, enabled } = input;
+  useEffect(() => {
+    if (!enabled) return;
+    return exportInspectQuery.watch({ environmentId, projectId });
+  }, [enabled, environmentId, projectId]);
+  const state = withSuccess<ReceivedExportInspection>(
+    useAtomValue(
+      exportInspectQuery.getAtom(exportInspectQuery.keyOf({ environmentId, projectId })),
+    ),
+  );
+  return {
+    ...state,
+    data: state.data?.inspection ?? null,
+    dataUpdatedAt: state.data?.receivedAt ?? 0,
+  };
 }
 
 /** Reads a project's inspection again (a retry after it failed). */
@@ -147,12 +281,7 @@ export function refetchExportInspection(
   environmentId: EnvironmentId,
   projectId: ProjectId,
 ): Promise<void> {
-  return defaultQueryClient.prefetchQuery({
-    queryKey: exportInspectQueryKey(environmentId, projectId),
-    queryFn: () => readExportInspection(environmentId, projectId),
-    staleTime: 0,
-    retry: false,
-  });
+  return readNodePath(exportInspectQuery, { environmentId, projectId }, true);
 }
 
 /** Warms a project's inspection on a connected node; a fresh one is kept. */
@@ -160,12 +289,29 @@ export function prefetchExportInspection(
   environmentId: EnvironmentId,
   projectId: ProjectId,
 ): Promise<void> {
-  return defaultQueryClient.prefetchQuery({
-    queryKey: exportInspectQueryKey(environmentId, projectId),
-    queryFn: () => readExportInspection(environmentId, projectId),
-    staleTime: EXPORT_INSPECT_STALE_TIME_MS,
-    retry: false,
-  });
+  return readNodePath(exportInspectQuery, { environmentId, projectId }, false);
+}
+
+/** Caches a node's path hints as if read now. */
+export function seedNodePathHintsForTests(
+  environmentId: EnvironmentId,
+  hints: NodePathHints,
+): void {
+  const compositeKey = nodePathHintsQuery.keyOf(environmentId);
+  if (compositeKey === null) return;
+  const controller = nodePathRegistry.controllers.get(compositeKey);
+  if (controller) {
+    controller.hasData = true;
+    controller.lastFetchedAt = Date.now();
+  }
+  nodePathRegistry.setQueryState(
+    compositeKey,
+    LAST_RESULT_KEYED_QUERY_STATE_BUILDERS.buildSuccessState(hints),
+  );
+}
+
+export function resetNodePathQueriesForTests(): void {
+  nodePathRegistry.resetForTests();
 }
 
 /* ───────── One-shot reads ───────── */

@@ -37,7 +37,6 @@ import {
 import { removeLocalStorageItem, setLocalStorageItem } from "../../hooks/useLocalStorage";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetProjectAtomsForTests } from "../../rpc/projectAtoms";
-import { defaultQueryClient } from "../../rpc/queryClient";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import type { Project } from "../../types";
 import {
@@ -54,7 +53,7 @@ import {
   rememberCopyDestination,
 } from "./copyDestinationMemory";
 import { CopyProjectDialogView } from "./CopyProjectDialog";
-import { prefetchExportInspection } from "./nodePathQueries";
+import { prefetchExportInspection, resetNodePathQueriesForTests } from "./nodePathQueries";
 import { PROJECT_COPY_RECORDS_STORAGE_KEY } from "./projectCopyStorage";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import type { CopyDialogServices } from "./useCopyProjectPlanning";
@@ -506,7 +505,7 @@ afterEach(() => {
   resetProjectAtomsForTests();
   resetProjectCopyManagerForTests();
   setProjectCopyRuntimeForTests(null);
-  defaultQueryClient.clear();
+  resetNodePathQueriesForTests();
   removeLocalStorageItem(COPY_DESTINATIONS_STORAGE_KEY);
   removeLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY);
   document.body.innerHTML = "";
@@ -1088,7 +1087,7 @@ describe("CopyProjectDialog", () => {
       await outdated.screen.unmount();
     }
     resetProjectCopyManagerForTests();
-    defaultQueryClient.clear();
+    resetNodePathQueriesForTests();
 
     const { screen, fake } = await mount({
       sourceInspection: plainFolder,

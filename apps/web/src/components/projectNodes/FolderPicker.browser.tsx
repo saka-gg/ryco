@@ -11,7 +11,7 @@ import {
 } from "../../environmentApi";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetProjectAtomsForTests } from "../../rpc/projectAtoms";
-import { defaultQueryClient } from "../../rpc/queryClient";
+import { resetNodePathQueriesForTests } from "./nodePathQueries";
 import { FolderPicker, type FolderPickerProps } from "./FolderPicker";
 import type { FolderSelectionStatus } from "@ryco/client-runtime/projectCopy/folderPicker";
 import { createFakeNodeApi, FAKE_NODE_ID, FAKE_PROJECTS } from "./projectNodesTestFixtures";
@@ -67,7 +67,7 @@ beforeEach(async () => {
 afterEach(() => {
   __resetEnvironmentApiOverridesForTests();
   resetProjectAtomsForTests();
-  defaultQueryClient.clear();
+  resetNodePathQueriesForTests();
   document.body.innerHTML = "";
 });
 

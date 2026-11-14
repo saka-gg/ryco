@@ -10,13 +10,11 @@ import type {
 } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { DateTime, Option } from "effect";
-import { useQuery } from "~/rpc/queryClient";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useShallow } from "zustand/react/shallow";
 import { ExternalLinkIcon, FlagIcon, GitBranchIcon, RotateCwIcon, SearchIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from "react";
 import { readEnvironmentConnection } from "~/environments/runtime";
-import { readEnvironmentApi } from "~/environmentApi";
 import {
   buildJiraProjectLinkInput,
   buildJiraProjectUnlinkInput,
@@ -32,7 +30,12 @@ import {
   useAtlassianProjectLink,
   useSaveAtlassianProjectLinkMutation,
 } from "~/rpc/useAtlassian";
-import { invalidateWorkItems, useWorkItemList, useWorkItemSearch } from "~/rpc/useWorkItems";
+import {
+  invalidateWorkItems,
+  useWorkItemList,
+  useWorkItemLocalBranches,
+  useWorkItemSearch,
+} from "~/rpc/useWorkItems";
 import { selectSidebarWorktreesForProjectRef, useStore } from "~/store";
 import { cn } from "~/lib/utils";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
@@ -162,18 +165,11 @@ export function WorkItemsTab(props: WorkItemsTabProps) {
         : [],
     ),
   );
-  const branchRefsQuery = useQuery({
-    queryKey: ["workItems", "localBranches", props.environmentId, props.cwd ?? null] as const,
+  const branchRefsQuery = useWorkItemLocalBranches({
     environmentId: props.environmentId,
-    queryFn: async () => {
-      const api = props.environmentId ? readEnvironmentApi(props.environmentId) : null;
-      if (!api || !props.cwd) return [];
-      const result = await api.vcs.listRefs({ cwd: props.cwd, limit: 100 });
-      return result.refs;
-    },
+    cwd: props.cwd ?? null,
     enabled:
       configured && props.environmentId !== null && props.cwd !== null && props.cwd !== undefined,
-    staleTime: 30_000,
   });
   const localLinksByWorkItemKey = useMemo(
     () =>

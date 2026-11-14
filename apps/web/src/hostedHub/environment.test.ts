@@ -21,7 +21,15 @@ import {
 } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import type { NodePathHints } from "@ryco/contracts/project-copy";
+
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import {
+  followNodePathHints,
+  readCachedNodePathHints,
+  seedNodePathHintsForTests,
+} from "../components/projectNodes/nodePathQueries";
+import { cliProxyHubsQuery, seedCliProxyHubs } from "../components/usage/cliProxyHubsQuery";
 import {
   openAddProject,
   useProjectNodesDialogStore,
@@ -39,6 +47,7 @@ import {
   resetGitAtomsForTests,
   watchBranches,
 } from "../rpc/gitAtoms";
+import { workItemLocalBranchesQuery } from "../rpc/workItemsAtoms";
 import {
   EMPTY_PROJECT_SEARCH_ENTRIES_STATE,
   getProjectSearchEntriesSnapshot,
@@ -89,6 +98,15 @@ const iconProjectId = ProjectId.make("iconProject");
 const ICON_SOURCE = "data:image/png;base64,aWNvbg==";
 
 const otherEnvironmentId = EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb");
+
+const PATH_HINTS: NodePathHints = {
+  homeDirectory: "/home/a",
+  pathSeparator: "/",
+  defaultProjectDirectory: "/home/a/code",
+  defaultProjectDirectorySource: "well-known",
+  codeRoots: [],
+  workspaceAccessRoot: null,
+};
 
 function cacheStatistics(target: EnvironmentId): Promise<StatisticsSnapshot> {
   return statisticsSnapshotCache.load(
@@ -156,15 +174,21 @@ const threadId = ThreadId.make("thread-id");
  * One environment's project search, branch and checkpoint-diff caches, each
  * holding a fetched answer, through a fake environment API.
  */
-async function cacheNodeContent(target: EnvironmentId): Promise<() => void> {
-  const api = {
+/** What a connected node answers to the reads these caches make. */
+function nodeApi(
+  target: EnvironmentId,
+  readCliProxyHubs: () => Promise<{ readonly hubs: readonly [] }> = async () => ({ hubs: [] }),
+): EnvironmentApi {
+  return {
     projects: {
+      pathHints: async () => PATH_HINTS,
       searchEntries: async () =>
         ({
           entries: [{ kind: "file", path: `${target}.ts` }],
           truncated: true,
         }) as unknown as ProjectSearchEntriesResult,
     },
+    server: { readCliProxyHubs },
     vcs: {
       listRefs: async (): Promise<VcsListRefsResult> => ({
         refs: [],
@@ -183,6 +207,10 @@ async function cacheNodeContent(target: EnvironmentId): Promise<() => void> {
       }),
     },
   } as unknown as EnvironmentApi;
+}
+
+async function cacheNodeContent(target: EnvironmentId): Promise<() => void> {
+  const api = nodeApi(target);
   vi.spyOn(environmentApi, "ensureEnvironmentApi").mockReturnValue(api);
   vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue(api);
 
@@ -489,5 +517,72 @@ describe("clearWebHostedNodeScopedState", () => {
 
     expect(readEnvironmentServerConfig(environmentId)).toBeNull();
     expect(readEnvironmentServerConfig(otherEnvironmentId)).toBeNull();
+  });
+});
+
+describe("the caches the former queryClient shim held", () => {
+  async function flush(): Promise<void> {
+    for (let index = 0; index < 5; index += 1) await Promise.resolve();
+  }
+
+  afterEach(() => {
+    clearWebHostedAccountScopedState();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("drops CLIProxy hubs the Limits page seeded before any popup read them", async () => {
+    const readHubs = vi.fn(async () => ({ hubs: [] as const }));
+    vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue(
+      nodeApi(environmentId, readHubs),
+    );
+    seedCliProxyHubs(environmentId, []);
+    // Within the reuse window, a popup shows the seed without asking the node.
+    const firstPopup = cliProxyHubsQuery.watch(environmentId);
+    expect(readHubs).not.toHaveBeenCalled();
+    firstPopup();
+    seedCliProxyHubs(otherEnvironmentId, []);
+
+    clearWebHostedAccountScopedState();
+
+    // The next account's popup shows nothing of the seed and asks the node.
+    expect(
+      cliProxyHubsQuery.getSnapshot(cliProxyHubsQuery.keyOf(otherEnvironmentId)).data,
+    ).toBeNull();
+    const nextPopup = cliProxyHubsQuery.watch(otherEnvironmentId);
+    expect(readHubs).toHaveBeenCalledOnce();
+    nextPopup();
+  });
+
+  it("drops path hints and work-item refs of nodes the store no longer lists", async () => {
+    vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue(nodeApi(otherEnvironmentId));
+    seedNodePathHintsForTests(otherEnvironmentId, PATH_HINTS);
+    const branchesInput = { environmentId: otherEnvironmentId, cwd: CWD };
+    const stopBranches = workItemLocalBranchesQuery.watch(branchesInput);
+    await flush();
+    const branchesKey = workItemLocalBranchesQuery.keyOf(branchesInput);
+    expect(workItemLocalBranchesQuery.getSnapshot(branchesKey).data).toEqual([]);
+    expect(useStore.getState().environmentStateById[otherEnvironmentId]).toBeUndefined();
+
+    clearWebHostedAccountScopedState();
+
+    expect(readCachedNodePathHints(otherEnvironmentId)).toBeNull();
+    expect(workItemLocalBranchesQuery.getSnapshot(branchesKey).data).toBeNull();
+    stopBranches();
+  });
+
+  it("keeps a followed node's path hints across a node switch", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue(nodeApi(environmentId));
+    const stopFollowing = followNodePathHints(environmentId, () => undefined);
+    await flush();
+    expect(readCachedNodePathHints(environmentId)).toEqual(PATH_HINTS);
+
+    clearWebHostedNodeScopedState(environmentId);
+    // Past the cache's idle time: the publisher's hold still keeps them.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+    expect(readCachedNodePathHints(environmentId)).toEqual(PATH_HINTS);
+    stopFollowing();
   });
 });

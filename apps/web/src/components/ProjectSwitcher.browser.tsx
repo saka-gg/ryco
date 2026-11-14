@@ -25,10 +25,12 @@ import {
 import { hostedDraftTargetController } from "../hooks/useHostedDraftExecutionTarget";
 import { refreshGitStatus, resetGitStatusStateForTests } from "../lib/gitStatusState";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
-import { defaultQueryClient } from "../rpc/queryClient";
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
 import { ProjectSwitcher } from "./ProjectSwitcher";
-import { nodePathHintsQueryKey } from "./projectNodes/nodePathQueries";
+import {
+  resetNodePathQueriesForTests,
+  seedNodePathHintsForTests,
+} from "./projectNodes/nodePathQueries";
 import {
   requestProjectSelectorOpen,
   resetProjectNodesDialogStoreForTests,
@@ -406,7 +408,7 @@ describe("ProjectSwitcher", () => {
       },
     }));
     // The node's path hints, as a picker already read them: the selector asks for nothing.
-    defaultQueryClient.setQueryData(nodePathHintsQueryKey(STUDIO_ENV), {
+    seedNodePathHintsForTests(STUDIO_ENV, {
       homeDirectory: "/root",
       pathSeparator: "/",
       defaultProjectDirectory: "/root/code",
@@ -442,7 +444,7 @@ describe("ProjectSwitcher", () => {
       expect(Math.abs(text.right - box.right)).toBeLessThan(2);
       expect(text.left).toBeLessThan(box.left);
     } finally {
-      defaultQueryClient.clear();
+      resetNodePathQueriesForTests();
     }
   });
 

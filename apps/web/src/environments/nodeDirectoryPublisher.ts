@@ -8,16 +8,14 @@ import {
 } from "@ryco/client-runtime/state/nodes";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import type { EnvironmentId } from "@ryco/contracts";
-import type { NodePathHints } from "@ryco/contracts/project-copy";
 
 import {
-  nodePathHintsQueryKey,
-  prefetchNodePathHints,
+  followNodePathHints as followCachedNodePathHints,
+  readCachedNodePathHints,
 } from "../components/projectNodes/nodePathQueries";
 import { isHostedHubMode } from "../env";
 import { readEnvironmentApiForConnection } from "../environmentApi";
 import { readHostedRpcCapability, subscribeHostedRpcCapabilities } from "../hostedHub/capabilities";
-import { defaultQueryClient } from "../rpc/queryClient";
 import { useStore } from "../store";
 import { readNodeCatalogSnapshot, subscribeNodeCatalog } from "./nodeCatalog";
 import { readEnvironmentConnection, subscribeEnvironmentConnections } from "./runtime";
@@ -52,9 +50,7 @@ function connectionFor(environmentId: EnvironmentId) {
 
 /** The node's code directory and its repository projects, as far as this client knows them. */
 export function readNodeDirectoryFacts(environmentId: EnvironmentId): NodeDirectoryNodeFacts {
-  const hints = defaultQueryClient.getQueryData<NodePathHints>(
-    nodePathHintsQueryKey(environmentId),
-  );
+  const hints = readCachedNodePathHints(environmentId);
   return readStoreNodeFacts(
     useStore.getState(),
     environmentId,
@@ -80,15 +76,13 @@ function followNodePathHints(listener: () => void): () => void {
       ) {
         continue;
       }
-      if (!followed.has(environmentId)) {
-        followed.set(
-          environmentId,
-          defaultQueryClient.subscribe(nodePathHintsQueryKey(environmentId), listener),
-        );
-      }
-      if (defaultQueryClient.getQueryData(nodePathHintsQueryKey(environmentId)) === undefined) {
-        // A failed read is tried again on the next catalog change.
-        void prefetchNodePathHints(environmentId).catch(() => undefined);
+      const following = followed.get(environmentId);
+      if (following === undefined || readCachedNodePathHints(environmentId) === null) {
+        // Following again reads the hints when there are none (a failed read is
+        // tried again on the next catalog change), and keeps holding them even
+        // after the cache dropped the earlier hold.
+        followed.set(environmentId, followCachedNodePathHints(environmentId, listener));
+        following?.();
       }
     }
   };
