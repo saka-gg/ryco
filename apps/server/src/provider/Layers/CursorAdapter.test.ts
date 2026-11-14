@@ -1836,6 +1836,198 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
+  it.effect("starts a fresh session when the resume cursor cannot be read", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-unreadable-resume");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "cursor-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const argvLogPath = path.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      const adapter = yield* makeCursorAdapter(
+        Schema.decodeSync(CursorSettings)({ binaryPath: wrapperPath }),
+      );
+
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-unreadable-resume"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 2, sessionId: "from-a-newer-build" },
+      });
+      yield* adapter.stopSession(threadId);
+
+      const methods = (yield* Effect.promise(() => readJsonLines(requestLogPath))).map(
+        (entry) => entry.method,
+      );
+      assert.include(methods, "session/new");
+      assert.notInclude(methods, "session/load");
+      assert.deepStrictEqual(session.resumeCursor, {
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+    }),
+  );
+
+  it.effect("answers approvals with Cursor's fixed option ids", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-fixed-approval-option-id");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "cursor-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const argvLogPath = path.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, {
+          RYCO_ACP_EMIT_TOOL_CALLS: "1",
+          RYCO_ACP_ALLOW_ONCE_OPTION_ID: "agent-defined-approval-id",
+        }),
+      );
+      const adapter = yield* makeCursorAdapter(
+        Schema.decodeSync(CursorSettings)({ binaryPath: wrapperPath }),
+      );
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "request.opened"
+          ? adapter.respondToRequest(
+              threadId,
+              ApprovalRequestId.make(String(event.requestId)),
+              "accept",
+            )
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-fixed-option-id"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+      });
+      yield* adapter.sendTurn({ threadId, input: "approve this", attachments: [] });
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+
+      const selected = (yield* Effect.promise(() => readJsonLines(requestLogPath))).flatMap(
+        (entry) => {
+          const outcome = (entry.result as { outcome?: { optionId?: unknown } } | undefined)
+            ?.outcome;
+          return !("method" in entry) && typeof outcome?.optionId === "string"
+            ? [outcome.optionId]
+            : [];
+        },
+      );
+      // The agent offered its own id for "allow once"; Cursor's adapter always answers with its
+      // fixed id, while the generic ACP adapter would pick the offered one.
+      assert.include(selected, "allow-once");
+      assert.notInclude(selected, "agent-defined-approval-id");
+    }),
+  );
+
+  it.effect("tells Cursor no answers when its question is interrupted", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-interrupted-question-reply");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "cursor-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const argvLogPath = path.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath, { RYCO_ACP_EMIT_ASK_QUESTION: "1" }),
+      );
+      const adapter = yield* makeCursorAdapter(
+        Schema.decodeSync(CursorSettings)({ binaryPath: wrapperPath }),
+      );
+      const requested = yield* Deferred.make<void>();
+      const resolved = yield* Deferred.make<ProviderRuntimeEvent>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "user-input.requested"
+          ? Deferred.succeed(requested, undefined).pipe(Effect.ignore)
+          : event.type === "user-input.resolved"
+            ? Deferred.succeed(resolved, event).pipe(Effect.ignore)
+            : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-interrupted-question"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const sendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "ask me a question", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(requested);
+      yield* adapter.interruptTurn(threadId);
+      yield* Fiber.await(sendTurnFiber);
+      const resolvedEvent = yield* Deferred.await(resolved);
+      yield* Fiber.interrupt(eventsFiber);
+      yield* adapter.stopSession(threadId);
+
+      if (resolvedEvent.type === "user-input.resolved") {
+        assert.deepStrictEqual(resolvedEvent.payload.answers, {});
+        assert.isUndefined(resolvedEvent.raw);
+      }
+      const replies = (yield* Effect.promise(() => readJsonLines(requestLogPath))).filter(
+        (entry) =>
+          !("method" in entry) &&
+          typeof entry.result === "object" &&
+          entry.result !== null &&
+          "answers" in entry.result,
+      );
+      assert.deepStrictEqual(
+        replies.map((entry) => entry.result),
+        [{ answers: {} }],
+      );
+    }),
+  );
+
+  it.effect("reports Cursor's steering, readiness and refusal wording", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-wording");
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      const adapter = yield* makeCursorAdapter(
+        Schema.decodeSync(CursorSettings)({ binaryPath: wrapperPath }),
+      );
+      assert.equal(adapter.capabilities.turnSteering, "interrupt-restart");
+      assert.equal(adapter.capabilities.sessionModelSwitch, "in-session");
+
+      const ready = yield* Deferred.make<ProviderRuntimeEvent>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "session.state.changed"
+          ? Deferred.succeed(ready, event).pipe(Effect.ignore)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-cursoradapter-wording"),
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      const readyEvent = yield* Deferred.await(ready);
+      yield* Fiber.interrupt(eventsFiber);
+      if (readyEvent.type === "session.state.changed") {
+        assert.equal(readyEvent.payload.reason, "Cursor ACP session ready");
+      }
+
+      const rollback = yield* Effect.flip(
+        adapter.rollbackThread(threadId, {
+          numTurns: 1,
+          targetTurnId: null,
+          droppedTurnIds: [],
+        }),
+      );
+      assert.include(rollback.message, "Cursor does not support conversation rollback.");
+      const unknownAnswer = yield* Effect.flip(
+        adapter.respondToUserInput(threadId, ApprovalRequestId.make("unknown-question"), {}),
+      );
+      assert.include(unknownAnswer.message, "cursor/ask_question");
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("retention: reports completed turn ids without keeping prompts or results", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
