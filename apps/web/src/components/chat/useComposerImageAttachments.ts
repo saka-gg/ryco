@@ -55,6 +55,7 @@ import type {
   ComposerTextPaste,
   ComposerTextPasteResult,
 } from "../ComposerPromptEditor";
+import { errorMessage } from "~/lib/errorMessage";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 const SHRINKABLE_IMAGE_SIZE_LIMIT_LABEL = `${Math.round(IMAGE_COMPRESSION_MAX_SOURCE_BYTES / (1024 * 1024))}MB`;
@@ -590,7 +591,7 @@ export function useComposerImageAttachments(
         toastManager.add({
           type: "error",
           title: `Couldn't stage '${file.name || "file"}'.`,
-          description: error instanceof Error ? error.message : "File staging failed.",
+          description: errorMessage(error, "File staging failed."),
         });
         return null;
       }

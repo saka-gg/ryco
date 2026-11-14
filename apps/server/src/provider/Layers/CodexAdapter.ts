@@ -671,6 +671,24 @@ function htmlRenderToolItem(
   };
 }
 
+/**
+ * The canonical `receiverThreadIds` of a native `collabAgentToolCall` item: the subagent threads
+ * it addressed, trimmed, omitted when there are none. Takes the raw item too (a child thread's
+ * items reach the adapter untyped).
+ */
+function collabReceiverThreadIds(
+  item: unknown,
+): { readonly receiverThreadIds: ReadonlyArray<string> } | undefined {
+  if (typeof item !== "object" || item === null) return undefined;
+  const { type, receiverThreadIds } = item as { type?: unknown; receiverThreadIds?: unknown };
+  if (type !== "collabAgentToolCall" || !Array.isArray(receiverThreadIds)) return undefined;
+  const ids = receiverThreadIds.flatMap((entry) => {
+    const threadId = typeof entry === "string" ? trimText(entry) : undefined;
+    return threadId ? [threadId] : [];
+  });
+  return ids.length > 0 ? { receiverThreadIds: ids } : undefined;
+}
+
 function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
@@ -706,6 +724,7 @@ function mapItemLifecycle(
       ...(status ? { status } : {}),
       ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
+      ...collabReceiverThreadIds(item),
       ...(htmlRender
         ? { data: htmlRender.payload }
         : event.payload !== undefined
@@ -988,6 +1007,7 @@ function mapCollabAgentEvent(
             status: item.status === "failed" ? "failed" : completed ? "completed" : "inProgress",
             title: summary,
             agentId: agentThreadId,
+            ...collabReceiverThreadIds(item),
             data: { item },
           },
         });

@@ -3,16 +3,16 @@ import { memo } from "react";
 import { cn } from "~/lib/utils";
 import { SlidingTabs } from "../ui/sliding-tabs";
 
-export type ContextPickerTab = {
-  id: string;
+export type ContextPickerTab<T extends string = string> = {
+  id: T;
   label: string;
   count?: number;
 };
 
-export const ContextPickerTabs = memo(function ContextPickerTabs(props: {
-  tabs: ReadonlyArray<ContextPickerTab>;
-  activeId: string;
-  onSelect: (id: string) => void;
+function ContextPickerTabStrip<T extends string>(props: {
+  tabs: ReadonlyArray<ContextPickerTab<T>>;
+  activeId: T;
+  onSelect: (id: T) => void;
   /** Tightens the strip for popovers, where the dialog inset is too generous. */
   density?: "default" | "compact";
 }) {
@@ -28,4 +28,6 @@ export const ContextPickerTabs = memo(function ContextPickerTabs(props: {
       )}
     />
   );
-});
+}
+
+export const ContextPickerTabs = memo(ContextPickerTabStrip) as typeof ContextPickerTabStrip;

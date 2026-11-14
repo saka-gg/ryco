@@ -35,6 +35,7 @@ import { OrchestrationEngineService } from "../src/orchestration/Services/Orches
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import { RestartContinuation } from "../src/orchestration/Services/RestartContinuation.ts";
 import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackgroundLiveness.ts";
+import { ProviderService } from "../src/provider/Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../src/provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
 import {
@@ -161,6 +162,7 @@ it.live(
             Layer.mergeAll(
               Layer.succeed(OrchestrationEngineService, second.engine),
               Layer.succeed(ProjectionSnapshotQuery, second.snapshotQuery),
+              Layer.succeed(ProviderService, second.providerService),
               Layer.succeed(ServerSettingsService, {
                 getSettings: Effect.succeed({
                   ...DEFAULT_SERVER_SETTINGS,

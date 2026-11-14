@@ -40,7 +40,7 @@ import {
   statfs,
 } from "node:fs/promises";
 import { setPriority } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
@@ -60,6 +60,7 @@ import {
   SUPPORTED_MIGRATION_ID,
   type MigrationLedgerInspection,
 } from "./Migrations.ts";
+import { isCanonicalPathInside } from "../pathContainment.ts";
 
 // What startup needs before it knows a backup is due lives in databaseBackupPolicy.ts, so that
 // startup with nothing to migrate never loads this module. Re-exported: this is the backups API.
@@ -1930,10 +1931,12 @@ const identityChain = async (path: string): Promise<ReadonlyArray<string>> =>
 const comparablePath = (path: string) =>
   process.platform === "darwin" || process.platform === "win32" ? path.toLowerCase() : path;
 
-const isWithin = (child: string, parent: string) => {
-  const [a, b] = [comparablePath(child), comparablePath(parent)];
-  return a === b || a.startsWith(b.endsWith(sep) ? b : `${b}${sep}`);
-};
+const isWithin = (child: string, parent: string) =>
+  isCanonicalPathInside({
+    root: comparablePath(parent),
+    candidate: comparablePath(child),
+    allowRoot: true,
+  });
 
 /**
  * Why restoring into `target` would touch the data directory in use, if it would: the target is

@@ -35,6 +35,7 @@ import type {
   SidebarWorktreeSummary,
   ThreadShellOrStub,
 } from "../state/threadsRuntime";
+import { isObjectLike, isRecord } from "@ryco/shared/unknownValue";
 
 /**
  * The typed record layer over snapshotDb, with an explicit schemaVersion
@@ -248,7 +249,7 @@ export function decodeStoredThreadBody(raw: string): StoredThreadBody | null {
   } catch {
     return null;
   }
-  if (!isRecord(value) || Array.isArray(value)) return null;
+  if (!isRecord(value)) return null;
   const decoded = decodeThreadReadContent({ messages: value.messages ?? [] });
   const content = decoded !== null && decoded.messages.length > 0 ? decoded : null;
   const prompts = decodeOpenPromptActivities(value.prompts);
@@ -503,17 +504,13 @@ export function environmentRowsFromLegacyRecord(
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
 function isValidProject(value: unknown, environmentId: string): boolean {
   return (
-    isRecord(value) &&
+    isObjectLike(value) &&
     isNonEmptyString(value.id) &&
     value.environmentId === environmentId &&
     typeof value.name === "string" &&
@@ -523,7 +520,7 @@ function isValidProject(value: unknown, environmentId: string): boolean {
 
 function isValidWorktree(value: unknown, environmentId: string): boolean {
   return (
-    isRecord(value) &&
+    isObjectLike(value) &&
     isNonEmptyString(value.id) &&
     value.environmentId === environmentId &&
     isNonEmptyString(value.projectId)
@@ -531,7 +528,8 @@ function isValidWorktree(value: unknown, environmentId: string): boolean {
 }
 
 function isValidThread(value: unknown, environmentId: string, mayHoldStubs: boolean): boolean {
-  if (!isRecord(value) || !isRecord(value.shell) || !isRecord(value.summary)) return false;
+  if (!isObjectLike(value) || !isObjectLike(value.shell) || !isObjectLike(value.summary))
+    return false;
   const shell = value.shell;
   const summary = value.summary;
   const identityValid =
@@ -571,7 +569,7 @@ export function decodeStoredEnvironmentSnapshot(
   } catch {
     return null;
   }
-  if (!isRecord(value)) return null;
+  if (!isObjectLike(value)) return null;
   if (!LEGACY_SCHEMA_VERSIONS.has(value.schemaVersion)) return null;
   const current = value.schemaVersion === 3;
   if (value.environmentId !== environmentId) return null;
@@ -610,7 +608,7 @@ export function decodeStoredEnvironmentEnvelope(
   } catch {
     return null;
   }
-  if (!isRecord(value)) return null;
+  if (!isObjectLike(value)) return null;
   if (value.schemaVersion !== ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION) return null;
   if (value.environmentId !== environmentId) return null;
   const { projects, worktrees } = value;

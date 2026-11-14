@@ -48,11 +48,12 @@ import { webAppLifecycle } from "~/platform/appLifecycle";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { DevicePicker } from "./DevicePicker";
-import { Control, errorMessage } from "./deviceControls";
+import { Control } from "./deviceControls";
 import { DeviceViewer } from "./DeviceViewer";
 import { DeviceToolsDrawer, type DeviceToolsApi } from "./DeviceToolsDrawer";
 import { NodeDeviceSetup, TurnOnDevicesButton, useNodeDeviceSettings } from "./NodeDeviceSetup";
 import { useDeviceRuntime } from "./useDeviceRuntime";
+import { errorMessage } from "~/lib/errorMessage";
 
 function SetupState(props: { readonly availability: DeviceAvailability | null }) {
   const availability = props.availability;

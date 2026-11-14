@@ -21,6 +21,7 @@ import {
   FileReferenceNoteComposer,
   type ReferenceAddErrors,
 } from "../components/fileReferences/FileReferenceNoteComposer";
+import { errorMessage } from "~/lib/errorMessage";
 
 type BrowserBridge = NonNullable<DesktopBridge["browser"]>;
 
@@ -150,7 +151,7 @@ export function useBrowserElementPicker(input: {
       settle(IDLE);
       if (generationRef.current === generation) {
         ownedTabRef.current = null;
-        onError(error instanceof Error ? error.message : "Couldn’t pick an element.");
+        onError(errorMessage(error, "Couldn’t pick an element."));
       }
     }
   }, [api, onError, scope, tabId]);
