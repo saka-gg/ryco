@@ -20,13 +20,12 @@ import {
   type DevicePromptAttachmentResolution,
 } from "../lib/devicePromptContext";
 import { getPresentationTier } from "../lib/presentationTier";
-import {
-  changeRequestDetailQueryOptions,
-  issueDetailQueryOptions,
-} from "../lib/sourceControlContextRpc";
 import { newCommandId } from "../lib/utils";
 import { getProviderModelCapabilities } from "../providerModels";
-import type { QueryClient } from "../rpc/queryClient";
+import {
+  readSourceControlChangeRequestDetailForSend,
+  readSourceControlIssueDetailForSend,
+} from "../rpc/sourceControlAtoms";
 import { DEFAULT_INTERACTION_MODE } from "../types";
 import { useUiStateStore } from "../uiStateStore";
 import type {
@@ -72,25 +71,28 @@ export function persistThreadSettingsForNextTurn(
   );
 }
 
-/** Refreshes a stale issue / change-request context before it is sent. */
+/**
+ * Refreshes a stale issue / change-request context before it is sent, to the
+ * newest capped detail a view read in the last five minutes (a detail binding
+ * such as the workspace pull request popover or an inbox row, or the composer's
+ * imperative cache), else one read. Full-content pages are not used: they hold
+ * the uncapped detail, not what a send carries.
+ */
 export function createSourceControlContextFetcher(input: {
   readonly environmentId: EnvironmentId;
   readonly cwd: string | null;
-  readonly queryClient: QueryClient;
 }): SendTurnSourceControlFetcher["fetcher"] {
-  const { environmentId, cwd, queryClient } = input;
+  const { environmentId, cwd } = input;
   return async (ctx: ComposerSourceControlContext) => {
     if (!cwd) return ctx;
     const now = DateTime.fromDateUnsafe(new Date());
     const staleAfterDate = DateTime.fromDateUnsafe(new Date(Date.now() + 5 * 60 * 1000));
     if (ctx.kind === "issue") {
-      const detail = await queryClient.fetchQuery(
-        issueDetailQueryOptions({
-          environmentId,
-          cwd,
-          reference: String(ctx.detail.number),
-        }),
-      );
+      const detail = await readSourceControlIssueDetailForSend({
+        environmentId,
+        cwd,
+        reference: String(ctx.detail.number),
+      });
       return {
         ...ctx,
         detail,
@@ -98,13 +100,11 @@ export function createSourceControlContextFetcher(input: {
         staleAfter: staleAfterDate,
       };
     }
-    const detail = await queryClient.fetchQuery(
-      changeRequestDetailQueryOptions({
-        environmentId,
-        cwd,
-        reference: String(ctx.detail.number),
-      }),
-    );
+    const detail = await readSourceControlChangeRequestDetailForSend({
+      environmentId,
+      cwd,
+      reference: String(ctx.detail.number),
+    });
     return { ...ctx, detail, fetchedAt: now, staleAfter: staleAfterDate };
   };
 }

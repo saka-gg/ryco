@@ -1299,6 +1299,17 @@ function createImperativeCache(config: {
     return promise;
   }
 
+  /** The cached value while younger than `staleTime`, with when it was read; never reads. */
+  function peek<T>(
+    cacheKey: string,
+    staleTime: number,
+  ): { readonly value: T; readonly readAt: number } | null {
+    reconcileAuthority();
+    const entry = slots.get(cacheKey)?.entry;
+    if (!entry || Date.now() - entry.fetchedAt >= staleTime) return null;
+    return { value: entry.value as T, readAt: entry.fetchedAt };
+  }
+
   function invalidate(filter: {
     readonly environmentId: EnvironmentId | null;
     readonly cwd: string | null;
@@ -1333,7 +1344,7 @@ function createImperativeCache(config: {
     }
   }
 
-  return { fetch, invalidate, invalidateKey: remove, reset, reconcileAuthority };
+  return { fetch, peek, invalidate, invalidateKey: remove, reset, reconcileAuthority };
 }
 
 const detailCache = createImperativeCache({
@@ -1440,6 +1451,90 @@ export function fetchSourceControlChangeRequestDetail(input: {
         ...(fullContent ? { fullContent: true } : {}),
       }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Detail for a send: the newest capped detail a view already holds
+// ---------------------------------------------------------------------------
+
+interface SendDetailTarget {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly reference: string;
+}
+
+/**
+ * A reactive binding's detail when it was read (or written back) within the
+ * detail stale time, with when; null while reads are not admitted.
+ */
+function shownBindingDetail<TInput, TData>(
+  binding: QueryBinding<TInput, TData>,
+  input: TInput,
+  environmentId: EnvironmentId,
+): { readonly value: TData; readonly readAt: number } | null {
+  if (sourceControlReadAdmission(environmentId).scope === null) return null;
+  const compositeKey = binding.targetKey(input);
+  const controller = compositeKey === null ? undefined : controllers.get(compositeKey);
+  const value = binding.snapshotFor(input).data;
+  if (!controller || value === null) return null;
+  const readAt = Math.max(controller.lastFetchedAt, controller.lastLocalWriteAt ?? 0);
+  return Date.now() - readAt < DETAIL_STALE_TIME_MS ? { value, readAt } : null;
+}
+
+function newestDetail<T>(
+  candidates: ReadonlyArray<{ readonly value: T; readonly readAt: number } | null>,
+): T | null {
+  let newest: { readonly value: T; readonly readAt: number } | null = null;
+  for (const candidate of candidates) {
+    if (candidate !== null && (newest === null || candidate.readAt > newest.readAt)) {
+      newest = candidate;
+    }
+  }
+  return newest?.value ?? null;
+}
+
+/**
+ * The capped (not full-content) issue detail a send refreshes a stale attached
+ * issue to: the newest one a view read in the last five minutes (the issue
+ * detail binding, or the composer's imperative cache), else a read through the
+ * imperative cache. Full-content views (the issue page) hold an uncapped
+ * detail, which is not what a send carries, so they are not used.
+ */
+export function readSourceControlIssueDetailForSend(
+  target: SendDetailTarget,
+): Promise<SourceControlIssueDetail> {
+  const shown = newestDetail([
+    shownBindingDetail(issueDetailBinding, target, target.environmentId),
+    detailCache.peek<SourceControlIssueDetail>(
+      imperativeDetailCacheKey("issueDetail", { ...target, fullContent: false }),
+      DETAIL_STALE_TIME_MS,
+    ),
+  ]);
+  return shown !== null ? Promise.resolve(shown) : fetchSourceControlIssueDetail(target);
+}
+
+/**
+ * The change-request counterpart of `readSourceControlIssueDetailForSend`:
+ * the focused and row reads of the capped detail binding (the workspace pull
+ * request popover, inbox rows) and the composer's imperative cache, newest
+ * first. The full-content pull request page is not used.
+ */
+export function readSourceControlChangeRequestDetailForSend(
+  target: SendDetailTarget,
+): Promise<SourceControlChangeRequestDetail> {
+  const shown = newestDetail([
+    shownBindingDetail(changeRequestDetailBinding, target, target.environmentId),
+    shownBindingDetail(
+      changeRequestDetailBinding,
+      { ...target, view: "row" },
+      target.environmentId,
+    ),
+    detailCache.peek<SourceControlChangeRequestDetail>(
+      imperativeDetailCacheKey("changeRequestDetail", { ...target, fullContent: false }),
+      DETAIL_STALE_TIME_MS,
+    ),
+  ]);
+  return shown !== null ? Promise.resolve(shown) : fetchSourceControlChangeRequestDetail(target);
 }
 
 export interface SourceControlChangeRequestFileContentsInput {

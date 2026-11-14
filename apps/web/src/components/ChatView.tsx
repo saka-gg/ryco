@@ -160,7 +160,6 @@ import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequ
 import { hasSeveralPullRequests } from "./worktrees/workspacePullRequests.logic";
 import { truncate } from "@ryco/shared/String";
 import { Debouncer, useDebouncedValue } from "@tanstack/react-pacer";
-import { useQueryClient } from "~/rpc/queryClient";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import {
   useCallback,
@@ -2951,7 +2950,6 @@ export default function ChatView(props: ChatViewProps) {
   // "No changes" there, since a chat records no checkpoints).
   const sourceControlCwd = isChatContext ? null : gitCwd;
   const gitStatusQuery = useGitStatus({ environmentId, cwd: sourceControlCwd });
-  const queryClient = useQueryClient();
   const {
     postPushWorkflowWatch,
     handlePostPush: handlePostPushGitAction,
@@ -5473,7 +5471,7 @@ export default function ChatView(props: ChatViewProps) {
           sendInFlightRef: threadSendsInFlight.ref(sendThreadKey),
         },
         sourceControl: {
-          fetcher: createSourceControlContextFetcher({ environmentId, cwd: gitCwd, queryClient }),
+          fetcher: createSourceControlContextFetcher({ environmentId, cwd: gitCwd }),
         },
         persistSettings: { persistThreadSettingsForNextTurn },
         composerHandle: { readComposer, showsSendThread },
