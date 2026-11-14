@@ -92,6 +92,7 @@ import {
   ProviderValidationError,
 } from "../Errors.ts";
 import { runDetachedWithDeadline, runDetachedWithDeadlineOption } from "../detachedDeadline.ts";
+import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import {
   providerOperationTimeoutDetail,
@@ -433,25 +434,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     pendingByInstance: new Map(),
     highWaterByInstance: new Map(),
   });
-  const sessionStartLocks = yield* SynchronizedRef.make(new Map<ThreadId, Semaphore.Semaphore>());
-
-  const getSessionStartLock = (threadId: ThreadId) =>
-    SynchronizedRef.modifyEffect(sessionStartLocks, (current) => {
-      const existing = current.get(threadId);
-      if (existing) {
-        return Effect.succeed([existing, current] as const);
-      }
-      return Semaphore.make(1).pipe(
-        Effect.map((semaphore) => {
-          const next = new Map(current);
-          next.set(threadId, semaphore);
-          return [semaphore, next] as const;
-        }),
-      );
-    });
+  const sessionStartLocks = yield* makeKeyedSerialExecutor<ThreadId>();
 
   const withSessionStartLock = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
-    Effect.flatMap(getSessionStartLock(threadId), (semaphore) => semaphore.withPermit(effect));
+    sessionStartLocks.withLock(threadId, effect);
 
   const serviceScope = yield* Effect.scope;
 

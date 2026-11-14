@@ -50,6 +50,7 @@ import type {
   AgentControlMcpTools,
   submitAgentControlMutation,
 } from "./tools.ts";
+import { ToolFailure, decodeToolArgs } from "./toolFailure.ts";
 
 const handoffDescriptor: AgentControlMcpToolDescriptor = {
   name: TOOLS.handoff,
@@ -120,14 +121,6 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
   content: [{ type: "text", text }],
   isError: true,
 });
-
-class ToolFailure {
-  readonly _tag = "ToolFailure";
-  readonly text: string;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
 
 export interface WorktreeHandoffToolDeps {
   readonly policy: Pick<AgentControlPolicyShape, "authorize" | "isEnabled">;
@@ -211,11 +204,6 @@ export function withWorktreeHandoffTools(
       return authority.value;
     });
 
-  const decode = <S extends Schema.Top>(schema: S, args: unknown) =>
-    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
-      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
-    ) as Effect.Effect<S["Type"], ToolFailure>;
-
   /** The caller's chat, its project, and why it cannot move now (null: it can). */
   const ownThread = (session: AgentControlSessionRecord) =>
     Effect.gen(function* () {
@@ -296,7 +284,7 @@ export function withWorktreeHandoffTools(
   const handoff = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       const authority = yield* writeAuthority(session, handoffDescriptor.name);
-      const input = yield* decode(HandoffInput, args);
+      const input = yield* decodeToolArgs(HandoffInput, args);
       // A replay answers with the request's receipt, even once the chat has moved.
       const replay = yield* replayOf(session, input);
       if (Option.isSome(replay)) return textResult(yield* settle(session, replay.value));
@@ -329,7 +317,7 @@ export function withWorktreeHandoffTools(
   const status = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* authorize(session, statusDescriptor.name);
-      yield* decode(StatusInput, args);
+      yield* decodeToolArgs(StatusInput, args);
       const own = yield* ownThread(session);
       const { thread, project } = own;
       let blocker = own.blocker;
@@ -354,7 +342,7 @@ export function withWorktreeHandoffTools(
 
   const run = (effect: Effect.Effect<AgentControlMcpToolResult, ToolFailure>, fallback: string) =>
     effect.pipe(
-      Effect.catch((error) => Effect.succeed(errorResult(error.text))),
+      Effect.catch((error) => Effect.succeed(errorResult(error.reason))),
       Effect.catchCause(() => Effect.succeed(errorResult(fallback))),
     );
 
