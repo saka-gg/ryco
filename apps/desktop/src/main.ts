@@ -1,4 +1,3 @@
-import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import {
   desktopAppIconResourceName,
@@ -7,7 +6,7 @@ import {
 } from "./appIcon.ts";
 import type { DesktopCliCommandEnvironment } from "./desktopCliCommand.ts";
 import type { ExpectedTeamId, NightlyHandoffEnvironment } from "./nightlyHandoff.ts";
-import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
+import { buildEditMenu, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import {
@@ -53,21 +52,16 @@ import {
   webContents,
   WebContentsView,
 } from "electron";
-import type { MenuItemConstructorOptions, OpenDialogOptions } from "electron";
+import type { MenuItemConstructorOptions } from "electron";
 import {
   DESKTOP_PASTE_AS_TEXT_MENU_ACTION,
   EnvironmentId,
-  type DesktopTheme,
   type DesktopAppBranding,
   type DesktopHostedIdentityActionResult,
   type DesktopHostedIdentityState,
-  type DesktopHubLaunchConfigResult,
   type DesktopServerExposureMode,
   type DesktopServerExposureState,
   type DesktopUpdateChannel,
-  type PersistedSavedEnvironmentRecord,
-  type DesktopUpdateActionResult,
-  type DesktopUpdateCheckResult,
   type DesktopRemoteInstallState,
   type DesktopDatabaseCompactionState,
   type DesktopUpdateState,
@@ -75,7 +69,6 @@ import {
 } from "@ryco/contracts";
 import type { AppUpdater, UpdateDownloadedEvent } from "electron-updater";
 
-import type { ContextMenuItem } from "@ryco/contracts";
 import {
   desktopAppAutomaticUpdateMode,
   type DesktopAppUpdateRequestFrame,
@@ -84,7 +77,7 @@ import {
 import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
-import { isAppIconVariant } from "@ryco/shared/appIcon";
+
 import { rycoDesktopFlavorIdentity, updateFilesBelongToFlavor } from "@ryco/shared/desktopFlavor";
 import {
   flavorImportAllowedSourceHome,
@@ -172,19 +165,14 @@ import {
   desktopHubAllowsBackgroundNodeClaim,
   desktopHubLaunchNeedsRestart,
   isDesktopHostedIdentitySupported,
-  isDesktopHubFileSecretStoreSupported,
   pendingDesktopServerExposureMode,
   pendingDesktopTailscaleServe,
-  planDesktopServerExposureChange,
-  planDesktopTailscaleServeChange,
   readDesktopSettings,
   resolveDesktopHubConnectorLaunch,
   resolveDesktopTailscaleServeLaunch,
   setDesktopServerExposurePreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
-  isDesktopKeepAwakeMode,
-  setDesktopKeepAwakeMode,
   writeDesktopSettings,
 } from "./desktopSettings.ts";
 import {
@@ -193,18 +181,7 @@ import {
   DesktopKeepAwakeController,
   isDesktopNodeReachable,
 } from "./desktopKeepAwake.ts";
-import {
-  decodeClientSettingsPayload,
-  readClientSettings,
-  readAppKeybindings,
-  writeAppKeybindings,
-  readSavedEnvironmentRegistry,
-  readSavedEnvironmentSecret,
-  removeSavedEnvironmentSecret,
-  writeClientSettings,
-  writeSavedEnvironmentRegistry,
-  writeSavedEnvironmentSecret,
-} from "./clientPersistence.ts";
+
 import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness.ts";
 import { createBackendRestartBackoff } from "./backendRestartBackoff.ts";
 import { sanitizeLogValue } from "./logValue.ts";
@@ -242,7 +219,7 @@ import {
   type DesktopWindowBounds,
   isWindowPositionUnreported,
 } from "./windowState.ts";
-import { showDesktopConfirmDialog } from "./confirmDialog.ts";
+
 import {
   resolveDesktopCoreAdvertisedEndpoints,
   resolveDesktopServerExposure,
@@ -260,11 +237,7 @@ import {
   settleDesktopUpdateInstallRecord,
   writeDesktopUpdateInstallRecord,
 } from "./updateInstallRecord.ts";
-import {
-  createRemoteAppInstaller,
-  parseRemoteInstallResponse,
-  REMOTE_INSTALL_COUNTDOWN_MS,
-} from "./remoteAppInstall.ts";
+import { createRemoteAppInstaller, REMOTE_INSTALL_COUNTDOWN_MS } from "./remoteAppInstall.ts";
 import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
@@ -281,10 +254,9 @@ import { resolveDesktopAppBranding } from "./appBranding.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
 import {
   createWindowTranslucencyController,
-  parseDesktopWindowMaterial,
   type WindowMaterialAddon,
 } from "./windowTranslucency.ts";
-import { validateHubOrigin } from "./hubOrigin.ts";
+
 import { installThreadNotificationIpc } from "./threadNotifications.ts";
 import {
   createUnsignedMacUpdateInstallScript,
@@ -319,9 +291,32 @@ import type {
   DesktopWorkspaceClient,
   DesktopWorkspaceClientSnapshot,
 } from "./desktopWorkspaceClient.ts";
+
+import { registerAppPreferencesIpc } from "./appPreferencesIpc.ts";
+import { registerAppToolsIpc } from "./appToolsIpc.ts";
+import { registerClientPersistenceIpc } from "./clientPersistenceIpc.ts";
+import { registerServerAccessIpc } from "./serverAccessIpc.ts";
+import { registerUpdateIpc } from "./updateIpc.ts";
+import { registerWindowShellIpc } from "./windowShellIpc.ts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
 import type { DesktopWorkspaceRelayManager } from "./desktopWorkspaceRelay.ts";
 import { createResilientStdIoWriter } from "./resilientStdIo.ts";
+import {
+  GET_APP_BRANDING_CHANNEL,
+  GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL,
+  MENU_ACTION_CHANNEL,
+  SYSTEM_RESUMED_CHANNEL,
+  DATABASE_COMPACTION_STATE_CHANNEL,
+  UPDATE_STATE_CHANNEL,
+  QUIT_SHORTCUT_FEEDBACK_CHANNEL,
+  GET_HOSTED_IDENTITY_STATUS_CHANNEL,
+  CONNECT_HOSTED_IDENTITY_CHANNEL,
+  DISCONNECT_HOSTED_IDENTITY_CHANNEL,
+  CONNECT_HOSTED_GITHUB_CHANNEL,
+  DISCONNECT_HOSTED_GITHUB_CHANNEL,
+  CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL,
+  DESKTOP_COMPUTER_USE_IPC,
+} from "./desktopIpcChannels.ts";
 
 const desktopLaunchRecord = readDesktopLaunchRecord();
 const desktopStartupTiming = createStartupTiming();
@@ -341,45 +336,6 @@ const STARTUP_TIMING_STDOUT = readEnv("RYCO_DESKTOP_STARTUP_TIMING_STDOUT")?.tri
 const DESKTOP_OPEN_DEVTOOLS = readEnv("RYCO_DESKTOP_OPEN_DEVTOOLS")?.trim() === "1";
 const DESKTOP_DISABLE_GPU = readEnv("RYCO_DESKTOP_DISABLE_GPU")?.trim() === "1";
 
-const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
-const CONFIRM_CHANNEL = "desktop:confirm";
-const SET_THEME_CHANNEL = "desktop:set-theme";
-const SET_WINDOW_MATERIAL_CHANNEL = "desktop:set-window-material";
-const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
-const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
-const MENU_ACTION_CHANNEL = "desktop:menu-action";
-const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
-const UPDATE_STATE_CHANNEL = "desktop:update-state";
-const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
-const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
-const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
-const UPDATE_CHECK_CHANNEL = "desktop:update-check";
-const UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL = "desktop:update-remote-install-response";
-const GET_APP_BRANDING_CHANNEL = "desktop:get-app-branding";
-const GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL = "desktop:get-local-environment-bootstrap";
-const GET_CLIENT_SETTINGS_CHANNEL = "desktop:get-client-settings";
-const SET_CLIENT_SETTINGS_CHANNEL = "desktop:set-client-settings";
-const GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL = "desktop:get-saved-environment-registry";
-const SET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL = "desktop:set-saved-environment-registry";
-const GET_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:get-saved-environment-secret";
-const SET_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:set-saved-environment-secret";
-const REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:remove-saved-environment-secret";
-const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
-const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
-const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled";
-const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
-const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
-const RESTART_APP_CHANNEL = "desktop:restart-app";
-const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
-const SET_KEEP_AWAKE_MODE_CHANNEL = "desktop:set-keep-awake-mode";
-const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
-const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
-const GET_HOSTED_IDENTITY_STATUS_CHANNEL = "desktop:get-hosted-identity-status";
-const CONNECT_HOSTED_IDENTITY_CHANNEL = "desktop:connect-hosted-identity";
-const DISCONNECT_HOSTED_IDENTITY_CHANNEL = "desktop:disconnect-hosted-identity";
-const CONNECT_HOSTED_GITHUB_CHANNEL = "desktop:connect-hosted-github";
-const DISCONNECT_HOSTED_GITHUB_CHANNEL = "desktop:disconnect-hosted-github";
-const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-connection";
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isDesktopAuthorizationCallbackRelay =
   isDevelopment && process.env.RYCO_DESKTOP_CALLBACK_RELAY === "1";
@@ -486,66 +442,12 @@ if (!isDevelopment) {
   ]);
 }
 
-function resolvePickFolderDefaultPath(rawOptions: unknown): string | undefined {
-  if (typeof rawOptions !== "object" || rawOptions === null) {
-    return undefined;
-  }
-
-  const { initialPath } = rawOptions as { initialPath?: unknown };
-  if (typeof initialPath !== "string") {
-    return undefined;
-  }
-
-  const trimmedPath = initialPath.trim();
-  if (trimmedPath.length === 0) {
-    return undefined;
-  }
-
-  if (trimmedPath === "~") {
-    return OS.homedir();
-  }
-
-  if (trimmedPath.startsWith("~/") || trimmedPath.startsWith("~\\")) {
-    return Path.join(OS.homedir(), trimmedPath.slice(2));
-  }
-
-  return Path.resolve(trimmedPath);
-}
 const DESKTOP_LOOPBACK_HOST = "127.0.0.1";
 const DESKTOP_REQUIRED_PORT_PROBE_HOSTS = ["0.0.0.0", "::"] as const;
 const TITLEBAR_HEIGHT = 40;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linux
 const TITLEBAR_LIGHT_SYMBOL_COLOR = "#1f2937";
 const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
-
-function normalizeContextMenuItems(source: readonly ContextMenuItem[]): ContextMenuItem[] {
-  const normalizedItems: ContextMenuItem[] = [];
-
-  for (const sourceItem of source) {
-    if (typeof sourceItem.id !== "string" || typeof sourceItem.label !== "string") {
-      continue;
-    }
-
-    const normalizedItem: ContextMenuItem = {
-      id: sourceItem.id,
-      label: sourceItem.label,
-      destructive: sourceItem.destructive === true,
-      disabled: sourceItem.disabled === true,
-    };
-
-    if (sourceItem.children) {
-      const normalizedChildren = normalizeContextMenuItems(sourceItem.children);
-      if (normalizedChildren.length === 0) {
-        continue;
-      }
-      normalizedItem.children = normalizedChildren;
-    }
-
-    normalizedItems.push(normalizedItem);
-  }
-
-  return normalizedItems;
-}
 
 type WindowTitleBarOptions = Pick<
   BrowserWindowConstructorOptions,
@@ -739,7 +641,6 @@ let desktopSettings = ((): DesktopSettings => {
 })();
 let desktopServerExposureMode: DesktopServerExposureMode = desktopSettings.serverExposureMode;
 
-let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const expectedBackendExitChildren = new WeakSet<ChildProcess.ChildProcess>();
 const initialUpdateState = (): DesktopUpdateState =>
   createInitialDesktopUpdateState(app.getVersion(), DESKTOP_UPDATE_CHANNEL);
@@ -1611,15 +1512,6 @@ function assertDesktopServerExposureServable(mode: DesktopServerExposureMode): v
   }
 }
 
-/** `{ deferRelaunch }` from a renderer: save the change, the caller relaunches later. */
-function readDeferRelaunch(raw: unknown, invalid: string): boolean {
-  if (raw === undefined || raw === null) return false;
-  if (typeof raw !== "object") throw new Error(invalid);
-  const value = (raw as { readonly deferRelaunch?: unknown }).deferRelaunch;
-  if (value !== undefined && typeof value !== "boolean") throw new Error(invalid);
-  return value === true;
-}
-
 /** Whether the persisted Hub settings differ from what the running backend serves. */
 function desktopHubRestartRequired(settings: DesktopSettings = desktopSettings): boolean {
   return (
@@ -1822,14 +1714,6 @@ function getSafeExternalUrl(rawUrl: unknown): string | null {
   }
 
   return parsedUrl.toString();
-}
-
-function getSafeTheme(rawTheme: unknown): DesktopTheme | null {
-  if (rawTheme === "light" || rawTheme === "dark" || rawTheme === "system") {
-    return rawTheme;
-  }
-
-  return null;
 }
 
 async function waitForBackendHttpReady(
@@ -2304,28 +2188,6 @@ if (process.platform === "linux") {
   app.commandLine.appendSwitch("class", LINUX_WM_CLASS);
 }
 
-function getDestructiveMenuIcon(): Electron.NativeImage | undefined {
-  if (process.platform !== "darwin") return undefined;
-  if (destructiveMenuIconCache !== undefined) {
-    return destructiveMenuIconCache ?? undefined;
-  }
-  try {
-    const icon = nativeImage.createFromNamedImage("trash").resize({
-      width: 14,
-      height: 14,
-    });
-    if (icon.isEmpty()) {
-      destructiveMenuIconCache = null;
-      return undefined;
-    }
-    icon.setTemplateImage(true);
-    destructiveMenuIconCache = icon;
-    return icon;
-  } catch {
-    destructiveMenuIconCache = null;
-    return undefined;
-  }
-}
 let updatePollTimer: ReturnType<typeof setInterval> | null = null;
 let updateStartupTimer: ReturnType<typeof setTimeout> | null = null;
 let updateCheckInFlight = false;
@@ -3894,7 +3756,6 @@ async function findRestorableBackup(): Promise<RestorableBackup | null> {
 // One-click database compaction (databaseCompaction.ts)
 // ---------------------------------------------------------------------------
 
-const DATABASE_COMPACTION_STATE_CHANNEL = "desktop:database-compaction-state";
 let databaseCompactionState: DesktopDatabaseCompactionState = { phase: "idle" };
 let databaseCompactionAbort: AbortController | null = null;
 
@@ -4462,6 +4323,15 @@ function notifyRenderersToReconnect(): void {
   }
 }
 
+/**
+ * Persist `next`, then publish it as main's current settings. The IPC modules
+ * use this; a failed write throws before anything is published.
+ */
+function commitDesktopSettings(next: DesktopSettings): void {
+  writeDesktopSettings(DESKTOP_SETTINGS_PATH, next);
+  desktopSettings = next;
+}
+
 function registerIpcHandlers(): void {
   ipcMain.removeAllListeners(DESKTOP_STARTUP_MARKS_CHANNEL);
   ipcMain.on(DESKTOP_STARTUP_MARKS_CHANNEL, (event, raw: unknown) => {
@@ -4492,42 +4362,12 @@ function registerIpcHandlers(): void {
     } as const;
   });
 
-  const appSender = (event: Electron.IpcMainInvokeEvent) =>
-    BrowserWindow.fromWebContents(event.sender) !== null &&
-    event.senderFrame === event.sender.mainFrame;
-  ipcMain.removeHandler("desktop:database-compaction-get-state");
-  ipcMain.handle("desktop:database-compaction-get-state", (event) => {
-    if (!appSender(event)) throw new Error("Invalid sender.");
-    return databaseCompactionState;
-  });
-  ipcMain.removeHandler("desktop:database-compaction-start");
-  ipcMain.handle("desktop:database-compaction-start", (event) => {
-    if (!appSender(event)) throw new Error("Invalid sender.");
-    // Answers at once; progress and the result follow on the state channel.
-    void startDatabaseCompaction();
-    return databaseCompactionState;
-  });
-  ipcMain.removeHandler("desktop:database-compaction-cancel");
-  ipcMain.handle("desktop:database-compaction-cancel", (event) => {
-    if (!appSender(event)) throw new Error("Invalid sender.");
-    cancelDatabaseCompaction();
-  });
-  ipcMain.removeHandler("desktop:save-thread-export");
-  ipcMain.handle("desktop:save-thread-export", async (event, raw: unknown) => {
-    const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!owner || event.senderFrame !== event.sender.mainFrame)
-      throw new Error("Invalid export sender.");
-    return saveThreadExport(raw, {
-      choose: async (filename) => {
-        const result = await dialog.showSaveDialog(owner, {
-          title: "Save retained conversation",
-          defaultPath: filename,
-          filters: [{ name: "Markdown", extensions: ["md"] }],
-        });
-        return result.canceled ? null : (result.filePath ?? null);
-      },
-      write: (path, contents) => FS.promises.writeFile(path, contents, "utf8"),
-    });
+  registerAppToolsIpc({
+    databaseCompactionState: () => databaseCompactionState,
+    startDatabaseCompaction,
+    cancelDatabaseCompaction,
+    desktopCliCommandEnvironment,
+    nightlyHandoffEnvironment,
   });
   ipcMain.removeAllListeners(DESKTOP_QUIT_GUARD_IPC.reply);
   ipcMain.on(DESKTOP_QUIT_GUARD_IPC.reply, (event, raw: unknown) => {
@@ -4535,258 +4375,41 @@ function registerIpcHandlers(): void {
     if (event.senderFrame !== event.sender.mainFrame) return;
     quitGuardRequester.receive(event.sender, raw);
   });
-  for (const [channel, action] of [
-    ["desktop:cli-command-state", "state"],
-    ["desktop:cli-command-install", "install"],
-    ["desktop:cli-command-uninstall", "uninstall"],
-  ] as const) {
-    ipcMain.removeHandler(channel);
-    ipcMain.handle(channel, async (event) => {
-      const owner = BrowserWindow.fromWebContents(event.sender);
-      if (!owner || event.senderFrame !== event.sender.mainFrame)
-        throw new Error("Invalid command line sender.");
-      const cli = await import("./desktopCliCommand.ts");
-      const environment = desktopCliCommandEnvironment();
-      if (action === "install") return cli.installDesktopCliCommand(environment);
-      if (action === "uninstall") return cli.uninstallDesktopCliCommand(environment);
-      return cli.readDesktopCliCommandState(environment);
-    });
-  }
-  const nightlyHandoffSender = (event: Electron.IpcMainInvokeEvent) => {
-    const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!owner || event.senderFrame !== event.sender.mainFrame)
-      throw new Error("Invalid Ryco Nightly sender.");
-  };
-  ipcMain.removeHandler("desktop:nightly-state");
-  ipcMain.handle("desktop:nightly-state", async (event) => {
-    nightlyHandoffSender(event);
-    const handoff = await import("./nightlyHandoff.ts");
-    return handoff.readNightlyState(await nightlyHandoffEnvironment());
-  });
-  ipcMain.removeHandler("desktop:nightly-open");
-  ipcMain.handle("desktop:nightly-open", async (event, input: unknown) => {
-    nightlyHandoffSender(event);
-    const copyData =
-      typeof input === "object" && input !== null && (input as { copyData?: unknown }).copyData;
-    if (typeof copyData !== "boolean") throw new Error("Invalid Ryco Nightly request.");
-    if (nightlyOpenInFlight) throw new Error("Ryco Nightly is already opening.");
-    nightlyOpenInFlight = true;
-    try {
-      const handoff = await import("./nightlyHandoff.ts");
-      await handoff.openNightly(await nightlyHandoffEnvironment(), { copyData });
-    } finally {
-      nightlyOpenInFlight = false;
-    }
-  });
-  ipcMain.removeHandler("desktop:nightly-switch-back");
-  ipcMain.handle("desktop:nightly-switch-back", async (event) => {
-    nightlyHandoffSender(event);
-    const handoff = await import("./nightlyHandoff.ts");
-    await handoff.switchBackToRyco(await nightlyHandoffEnvironment());
-  });
-  ipcMain.removeHandler("desktop:app-icon-get");
-  ipcMain.handle("desktop:app-icon-get", () => desktopSettings.appIconVariant);
-  ipcMain.removeHandler("desktop:app-icon-set");
-  ipcMain.handle("desktop:app-icon-set", (event, variant: unknown) => {
-    const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!owner || event.senderFrame !== event.sender.mainFrame)
-      throw new Error("Invalid app icon sender.");
-    if (!isAppIconVariant(variant)) throw new Error("Invalid app icon.");
-    if (variant === desktopSettings.appIconVariant) return;
-    const next: DesktopSettings = { ...desktopSettings, appIconVariant: variant };
-    writeDesktopSettings(DESKTOP_SETTINGS_PATH, next);
-    desktopSettings = next;
-    applyDockIcon();
-    applyWindowIcons();
-  });
-  ipcMain.removeHandler("desktop:quit-shortcut-get");
-  ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
-  ipcMain.removeHandler("desktop:quit-shortcut-set");
-  ipcMain.handle("desktop:quit-shortcut-set", (event, mode: unknown) => {
-    const owner = BrowserWindow.fromWebContents(event.sender);
-    if (!owner || event.senderFrame !== event.sender.mainFrame)
-      throw new Error("Invalid quit shortcut sender.");
-    if (mode !== "press-twice" && mode !== "hold" && mode !== "immediately")
-      throw new Error("Invalid quit shortcut mode.");
-    const next: DesktopSettings = { ...desktopSettings, quitShortcutMode: mode };
-    writeDesktopSettings(DESKTOP_SETTINGS_PATH, next);
-    desktopSettings = next;
-    for (const guard of quitShortcutGuards) guard.reset();
+  registerAppPreferencesIpc({
+    desktopSettings: () => desktopSettings,
+    commitDesktopSettings,
+    applyDockIcon,
+    applyWindowIcons,
+    quitShortcutGuards: () => quitShortcutGuards,
+    clientSettingsPath: CLIENT_SETTINGS_PATH,
   });
 
-  const appKeybindingsPath = Path.join(Path.dirname(CLIENT_SETTINGS_PATH), "app-keybindings.json");
-  ipcMain.removeHandler("desktop:app-keybindings-read");
-  ipcMain.handle("desktop:app-keybindings-read", () => readAppKeybindings(appKeybindingsPath));
-  ipcMain.removeHandler("desktop:app-keybindings-write");
-  ipcMain.handle("desktop:app-keybindings-write", (event, document: unknown) => {
-    const owner = BrowserWindow.fromWebContents(event.sender);
-    if (
-      !owner ||
-      event.senderFrame !== event.sender.mainFrame ||
-      typeof document !== "string" ||
-      document.length > 1024 * 1024
-    ) {
-      throw new Error("Invalid app keybindings write.");
-    }
-    writeAppKeybindings(appKeybindingsPath, document);
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (window !== owner) window.webContents.send("desktop:app-keybindings-changed");
-    }
+  registerClientPersistenceIpc({
+    clientSettingsPath: CLIENT_SETTINGS_PATH,
+    savedEnvironmentRegistryPath: SAVED_ENVIRONMENT_REGISTRY_PATH,
+    getDesktopSecretStorage,
   });
-
-  ipcMain.removeHandler(GET_CLIENT_SETTINGS_CHANNEL);
-  ipcMain.handle(GET_CLIENT_SETTINGS_CHANNEL, async () => readClientSettings(CLIENT_SETTINGS_PATH));
-
-  ipcMain.removeHandler(SET_CLIENT_SETTINGS_CHANNEL);
-  ipcMain.handle(SET_CLIENT_SETTINGS_CHANNEL, async (_event, rawSettings: unknown) => {
-    writeClientSettings(CLIENT_SETTINGS_PATH, decodeClientSettingsPayload(rawSettings));
-  });
-
-  ipcMain.removeHandler(GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL);
-  ipcMain.handle(GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL, async () =>
-    readSavedEnvironmentRegistry(SAVED_ENVIRONMENT_REGISTRY_PATH),
-  );
-
-  ipcMain.removeHandler(SET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL);
-  ipcMain.handle(SET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL, async (_event, rawRecords: unknown) => {
-    if (!Array.isArray(rawRecords)) {
-      throw new Error("Invalid saved environment registry payload.");
-    }
-
-    writeSavedEnvironmentRegistry(
-      SAVED_ENVIRONMENT_REGISTRY_PATH,
-      rawRecords as readonly PersistedSavedEnvironmentRecord[],
-    );
-  });
-
-  ipcMain.removeHandler(GET_SAVED_ENVIRONMENT_SECRET_CHANNEL);
-  ipcMain.handle(
-    GET_SAVED_ENVIRONMENT_SECRET_CHANNEL,
-    async (_event, rawEnvironmentId: unknown) => {
-      if (typeof rawEnvironmentId !== "string" || rawEnvironmentId.trim().length === 0) {
-        return null;
-      }
-
-      return readSavedEnvironmentSecret({
-        registryPath: SAVED_ENVIRONMENT_REGISTRY_PATH,
-        environmentId: rawEnvironmentId,
-        secretStorage: getDesktopSecretStorage(),
-      });
-    },
-  );
-
-  ipcMain.removeHandler(SET_SAVED_ENVIRONMENT_SECRET_CHANNEL);
-  ipcMain.handle(
-    SET_SAVED_ENVIRONMENT_SECRET_CHANNEL,
-    async (_event, rawEnvironmentId: unknown, rawSecret: unknown) => {
-      if (typeof rawEnvironmentId !== "string" || rawEnvironmentId.trim().length === 0) {
-        throw new Error("Invalid saved environment id.");
-      }
-      if (typeof rawSecret !== "string" || rawSecret.trim().length === 0) {
-        throw new Error("Invalid saved environment secret.");
-      }
-
-      return writeSavedEnvironmentSecret({
-        registryPath: SAVED_ENVIRONMENT_REGISTRY_PATH,
-        environmentId: rawEnvironmentId,
-        secret: rawSecret,
-        secretStorage: getDesktopSecretStorage(),
-      });
-    },
-  );
-
-  ipcMain.removeHandler(REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL);
-  ipcMain.handle(
-    REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL,
-    async (_event, rawEnvironmentId: unknown) => {
-      if (typeof rawEnvironmentId !== "string" || rawEnvironmentId.trim().length === 0) {
-        return;
-      }
-
-      removeSavedEnvironmentSecret({
-        registryPath: SAVED_ENVIRONMENT_REGISTRY_PATH,
-        environmentId: rawEnvironmentId,
-      });
-    },
-  );
 
   registerDeferredIpcHandlers(ipcMain, DESKTOP_SSH_INVOKE_CHANNELS, async (registrar) => {
     (await loadDesktopSshEnvironmentBridge()).registerIpcHandlers(registrar);
   });
 
-  ipcMain.removeHandler(GET_SERVER_EXPOSURE_STATE_CHANNEL);
-  ipcMain.handle(GET_SERVER_EXPOSURE_STATE_CHANNEL, async () => getDesktopServerExposureState());
-
-  ipcMain.removeHandler(SET_SERVER_EXPOSURE_MODE_CHANNEL);
-  ipcMain.handle(
-    SET_SERVER_EXPOSURE_MODE_CHANNEL,
-    async (_event, rawMode: unknown, rawOptions: unknown) => {
-      if (rawMode !== "local-only" && rawMode !== "network-accessible") {
-        throw new Error("Invalid desktop server exposure input.");
-      }
-      const deferRelaunch = readDeferRelaunch(rawOptions, "Invalid desktop server exposure input.");
-
-      const nextMode = rawMode as DesktopServerExposureMode;
-      // Measured against the running mode, not only the saved one: a deferred
-      // change leaves the two apart until the relaunch.
-      const plan = planDesktopServerExposureChange({
-        settings: desktopSettings,
-        running: desktopServerExposureMode,
-        requested: nextMode,
-        deferRelaunch,
-      });
-      if (plan.relaunch) {
-        const nextState = await applyDesktopServerExposureMode(nextMode, {
-          persist: true,
-          rejectIfUnavailable: true,
-        });
-        relaunchDesktopApp(`serverExposureMode=${nextMode}`);
-        return nextState;
-      }
-      if (plan.settings !== desktopSettings) {
-        // Saved now so quitting or crashing before the relaunch cannot drop
-        // it; the running backend keeps its listener until then. Asking for
-        // the running mode withdraws a saved change and is always allowed.
-        if (nextMode !== desktopServerExposureMode) assertDesktopServerExposureServable(nextMode);
-        writeDesktopSettings(DESKTOP_SETTINGS_PATH, plan.settings);
-        desktopSettings = plan.settings;
-      }
-      return getDesktopServerExposureState();
-    },
-  );
-
-  ipcMain.removeHandler(GET_KEEP_AWAKE_STATE_CHANNEL);
-  ipcMain.handle(GET_KEEP_AWAKE_STATE_CHANNEL, () => desktopKeepAwakeState());
-
-  ipcMain.removeHandler(SET_KEEP_AWAKE_MODE_CHANNEL);
-  ipcMain.handle(SET_KEEP_AWAKE_MODE_CHANNEL, (_event, rawMode: unknown) => {
-    if (!isDesktopKeepAwakeMode(rawMode)) {
-      throw new Error("Invalid keep-awake input.");
-    }
-    const nextSettings = setDesktopKeepAwakeMode(desktopSettings, rawMode);
-    if (nextSettings !== desktopSettings) {
-      writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-      desktopSettings = nextSettings;
-    }
-    // Live: holding or releasing the assertion needs no backend restart.
-    return desktopKeepAwake?.sync() ?? desktopKeepAwakeState();
-  });
-
-  ipcMain.removeHandler(GET_HUB_LAUNCH_CONFIG_CHANNEL);
-  ipcMain.handle(GET_HUB_LAUNCH_CONFIG_CHANNEL, async () => {
-    // Whether a standby backend runs its connector decides `restartRequired`.
-    if (backendHubLaunch?.standby === true && backendHubConnectorEnabled === null) {
-      await refreshDesktopHubReachability();
-    }
-    return {
-      enabled: desktopSettings.hubConnectorEnabled,
-      origin: desktopSettings.hubOrigin,
-      nodeName: desktopSettings.hubNodeName,
-      allowFileSecretStore: desktopSettings.hubAllowFileSecretStore,
-      fileSecretStoreFallbackSupported: isDesktopHubFileSecretStoreSupported(process.platform),
-      hostedIdentitySupported: isDesktopHostedIdentitySupported(process.platform),
-      restartRequired: desktopHubRestartRequired(),
-    };
+  registerServerAccessIpc({
+    desktopSettings: () => desktopSettings,
+    commitDesktopSettings,
+    desktopServerExposureMode: () => desktopServerExposureMode,
+    getDesktopServerExposureState,
+    applyDesktopServerExposureMode,
+    assertDesktopServerExposureServable,
+    getDesktopAdvertisedEndpoints,
+    runningTailscaleServe,
+    desktopKeepAwakeState,
+    syncDesktopKeepAwake: () => desktopKeepAwake?.sync(),
+    backendHubLaunch: () => backendHubLaunch,
+    backendHubConnectorEnabled: () => backendHubConnectorEnabled,
+    refreshDesktopHubReachability,
+    desktopHubRestartRequired,
+    relaunchDesktopApp,
   });
 
   const hostedIdentityView = (): DesktopHostedIdentityState =>
@@ -5088,225 +4711,10 @@ function registerIpcHandlers(): void {
     );
   });
 
-  ipcMain.removeHandler(VALIDATE_HUB_ORIGIN_CHANNEL);
-  ipcMain.handle(VALIDATE_HUB_ORIGIN_CHANNEL, (_event, raw: unknown) =>
-    validateHubOrigin(typeof raw === "string" ? raw : ""),
-  );
-
-  ipcMain.removeHandler(SET_HUB_LAUNCH_CONFIG_CHANNEL);
-  ipcMain.handle(
-    SET_HUB_LAUNCH_CONFIG_CHANNEL,
-    async (_event, rawInput: unknown): Promise<DesktopHubLaunchConfigResult> => {
-      if (typeof rawInput !== "object" || rawInput === null) {
-        throw new Error("Invalid Hub launch configuration input.");
-      }
-      const input = rawInput as {
-        readonly enabled?: unknown;
-        readonly origin?: unknown;
-        readonly nodeName?: unknown;
-        readonly allowFileSecretStore?: unknown;
-        readonly applyOnNextLaunch?: unknown;
-        readonly deferRelaunch?: unknown;
-      };
-      if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
-        throw new Error("Invalid Hub launch configuration input.");
-      }
-      const deferRelaunch = readDeferRelaunch(input, "Invalid Hub launch configuration input.");
-      if (input.applyOnNextLaunch !== undefined && typeof input.applyOnNextLaunch !== "boolean") {
-        throw new Error("Invalid Hub launch configuration input.");
-      }
-      if (input.applyOnNextLaunch === true) {
-        // Only an explicit enable of a connector the running backend already
-        // runs in standby may skip the relaunch. Anything else changes what the
-        // running backend serves, so it must still restart.
-        if (
-          input.enabled !== true ||
-          input.origin !== undefined ||
-          input.nodeName !== undefined ||
-          input.allowFileSecretStore !== undefined ||
-          deferRelaunch
-        ) {
-          throw new Error("Invalid Hub launch configuration input.");
-        }
-        // Already explicit: nothing is left to record.
-        if (desktopSettings.hubOrigin !== null && desktopSettings.hubConnectorEnabled) {
-          return { relaunching: false };
-        }
-        if (backendHubLaunch?.standby !== true) {
-          throw new Error("Invalid Hub launch configuration input.");
-        }
-        const nextSettings = setDesktopHubPreference(desktopSettings, { enabled: true });
-        if (nextSettings !== desktopSettings) {
-          writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-          desktopSettings = nextSettings;
-          desktopKeepAwake?.sync();
-        }
-        return { relaunching: false };
-      }
-      if (
-        input.allowFileSecretStore !== undefined &&
-        typeof input.allowFileSecretStore !== "boolean"
-      ) {
-        throw new Error("Invalid Hub launch configuration input.");
-      }
-      if (
-        input.allowFileSecretStore === true &&
-        !isDesktopHubFileSecretStoreSupported(process.platform)
-      ) {
-        throw new Error("Permissioned-file Hub key storage is unavailable on this platform.");
-      }
-
-      let origin: string | null | undefined;
-      if (input.origin === null) {
-        origin = null;
-      } else if (typeof input.origin === "string") {
-        // Validate in main, not in the renderer: the renderer cannot import
-        // `@ryco/shared/nodeIdentity` because it pulls in `node:crypto`, and a
-        // value that reaches the connector unvalidated fails closed at startup
-        // with an opaque `configuration_invalid`.
-        const validation = validateHubOrigin(input.origin);
-        if (!validation.ok) throw new Error("Invalid Hub address.");
-        origin = validation.origin;
-      } else if (input.origin !== undefined) {
-        throw new Error("Invalid Hub launch configuration input.");
-      }
-
-      let nodeName: string | null | undefined;
-      if (input.nodeName === null) {
-        nodeName = null;
-      } else if (typeof input.nodeName === "string") {
-        try {
-          nodeName = normalizeHubNodeName(input.nodeName);
-        } catch {
-          throw new Error("Invalid Hub node name.");
-        }
-      } else if (input.nodeName !== undefined) {
-        throw new Error("Invalid Hub launch configuration input.");
-      }
-
-      const nextSettings = setDesktopHubPreference(desktopSettings, {
-        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
-        ...(origin === undefined ? {} : { origin }),
-        ...(nodeName === undefined ? {} : { nodeName }),
-        ...(input.allowFileSecretStore === undefined
-          ? {}
-          : { allowFileSecretStore: input.allowFileSecretStore }),
-      });
-      // An explicit enable of a standby backend still restarts: the renderer
-      // only offers Enable when the connector reports itself off, which for a
-      // standby launch means an existing identity kept it disabled.
-      const restart =
-        desktopHubRestartRequired(nextSettings) ||
-        (input.enabled === true && backendHubLaunch?.standby === true);
-      if (nextSettings === desktopSettings && !restart) return { relaunching: false };
-
-      // Persist before publishing the new in-memory value. If the atomic write
-      // fails, an identical retry must still attempt the write and relaunch.
-      if (nextSettings !== desktopSettings) {
-        writeDesktopSettings(DESKTOP_SETTINGS_PATH, nextSettings);
-        desktopSettings = nextSettings;
-      }
-      // Never log the origin or node name: together they identify this machine.
-      // A deferred change is saved now and applies with the relaunch the
-      // renderer schedules once running turns finish, or on the next launch.
-      const relaunching = restart && !deferRelaunch;
-      if (relaunching) relaunchDesktopApp("hub-launch-config-changed");
-      return { relaunching };
-    },
-  );
-
-  ipcMain.removeHandler(RESTART_APP_CHANNEL);
-  ipcMain.handle(RESTART_APP_CHANNEL, () => {
-    relaunchDesktopApp("renderer-requested-restart");
-  });
-
-  ipcMain.removeHandler(SET_TAILSCALE_SERVE_ENABLED_CHANNEL);
-  ipcMain.handle(SET_TAILSCALE_SERVE_ENABLED_CHANNEL, async (_event, rawInput: unknown) => {
-    if (typeof rawInput !== "object" || rawInput === null) {
-      throw new Error("Invalid Tailscale Serve input.");
-    }
-    const input = rawInput as {
-      readonly enabled?: unknown;
-      readonly port?: unknown;
-      readonly deferRelaunch?: unknown;
-    };
-    if (typeof input.enabled !== "boolean") {
-      throw new Error("Invalid Tailscale Serve input.");
-    }
-    const deferRelaunch = readDeferRelaunch(input, "Invalid Tailscale Serve input.");
-    // Measured against what the running backend serves, not only what is
-    // saved: a deferred change leaves the two apart until the relaunch.
-    const plan = planDesktopTailscaleServeChange({
-      settings: desktopSettings,
-      running: runningTailscaleServe(),
-      requested: {
-        enabled: input.enabled,
-        ...(typeof input.port === "number" ? { port: input.port } : {}),
-      },
-      deferRelaunch,
-    });
-    if (plan.settings !== desktopSettings) {
-      // Saved first; a deferred change keeps the running backend as it is.
-      writeDesktopSettings(DESKTOP_SETTINGS_PATH, plan.settings);
-      desktopSettings = plan.settings;
-    }
-    if (plan.relaunch) {
-      relaunchDesktopApp(
-        desktopSettings.tailscaleServeEnabled
-          ? "tailscale-serve-enabled"
-          : "tailscale-serve-disabled",
-      );
-    }
-    return getDesktopServerExposureState();
-  });
-
-  ipcMain.removeHandler(GET_ADVERTISED_ENDPOINTS_CHANNEL);
-  ipcMain.handle(GET_ADVERTISED_ENDPOINTS_CHANNEL, async () => getDesktopAdvertisedEndpoints());
-
-  ipcMain.removeHandler(PICK_FOLDER_CHANNEL);
-  ipcMain.handle(PICK_FOLDER_CHANNEL, async (_event, rawOptions: unknown) => {
-    const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
-    const defaultPath = resolvePickFolderDefaultPath(rawOptions);
-    const openDialogOptions: OpenDialogOptions = {
-      properties: ["openDirectory", "createDirectory"],
-      ...(defaultPath ? { defaultPath } : {}),
-    };
-    const result = owner
-      ? await dialog.showOpenDialog(owner, openDialogOptions)
-      : await dialog.showOpenDialog(openDialogOptions);
-    if (result.canceled) return null;
-    return result.filePaths[0] ?? null;
-  });
-
-  ipcMain.removeHandler(CONFIRM_CHANNEL);
-  ipcMain.handle(CONFIRM_CHANNEL, async (_event, message: unknown) => {
-    if (typeof message !== "string") {
-      return false;
-    }
-
-    const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
-    return showDesktopConfirmDialog(message, owner);
-  });
-
-  ipcMain.removeHandler(SET_THEME_CHANNEL);
-  ipcMain.handle(SET_THEME_CHANNEL, async (_event, rawTheme: unknown) => {
-    const theme = getSafeTheme(rawTheme);
-    if (!theme) {
-      return;
-    }
-
-    nativeTheme.themeSource = theme;
-  });
-
-  ipcMain.removeHandler(SET_WINDOW_MATERIAL_CHANNEL);
-  ipcMain.handle(SET_WINDOW_MATERIAL_CHANNEL, async (event, rawMaterial: unknown) => {
-    const material = parseDesktopWindowMaterial(rawMaterial);
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!material || !window) {
-      return false;
-    }
-
-    return windowTranslucency.apply(window, material);
+  registerWindowShellIpc({
+    mainWindow: () => mainWindow,
+    windowTranslucency: () => windowTranslucency,
+    getSafeExternalUrl,
   });
 
   installThreadNotificationIpc({
@@ -5332,150 +4740,15 @@ function registerIpcHandlers(): void {
     },
   });
 
-  ipcMain.removeHandler(CONTEXT_MENU_CHANNEL);
-  ipcMain.handle(
-    CONTEXT_MENU_CHANNEL,
-    async (_event, items: ContextMenuItem[], position?: { x: number; y: number }) => {
-      const normalizedItems = normalizeContextMenuItems(items);
-      if (normalizedItems.length === 0) {
-        return null;
-      }
-
-      const popupPosition =
-        position &&
-        Number.isFinite(position.x) &&
-        Number.isFinite(position.y) &&
-        position.x >= 0 &&
-        position.y >= 0
-          ? {
-              x: Math.floor(position.x),
-              y: Math.floor(position.y),
-            }
-          : null;
-
-      const window = BrowserWindow.getFocusedWindow() ?? mainWindow;
-      if (!window) return null;
-
-      return new Promise<string | null>((resolve) => {
-        const buildTemplate = (
-          entries: readonly ContextMenuItem[],
-        ): MenuItemConstructorOptions[] => {
-          const template: MenuItemConstructorOptions[] = [];
-          let hasInsertedDestructiveSeparator = false;
-          for (const item of entries) {
-            if (item.destructive && !hasInsertedDestructiveSeparator && template.length > 0) {
-              template.push({ type: "separator" });
-              hasInsertedDestructiveSeparator = true;
-            }
-            const itemOption: MenuItemConstructorOptions = {
-              label: item.label,
-              enabled: !item.disabled,
-            };
-            if (item.children && item.children.length > 0) {
-              itemOption.submenu = buildTemplate(item.children);
-            } else {
-              itemOption.click = () => resolve(item.id);
-            }
-            if (item.destructive && (!item.children || item.children.length === 0)) {
-              const destructiveIcon = getDestructiveMenuIcon();
-              if (destructiveIcon) {
-                itemOption.icon = destructiveIcon;
-              }
-            }
-            template.push(itemOption);
-          }
-          return template;
-        };
-
-        const menu = Menu.buildFromTemplate(buildTemplate(normalizedItems));
-        menu.popup({
-          window,
-          ...popupPosition,
-          callback: () => resolve(null),
-        });
-      });
-    },
-  );
-
-  ipcMain.removeHandler(PASTE_AS_TEXT_CHANNEL);
-  ipcMain.handle(PASTE_AS_TEXT_CHANNEL, async (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window || window.isDestroyed() || event.sender.isDestroyed()) return;
-    event.sender.pasteAndMatchStyle();
-  });
-
-  ipcMain.removeHandler(OPEN_EXTERNAL_CHANNEL);
-  ipcMain.handle(OPEN_EXTERNAL_CHANNEL, async (event, rawUrl: unknown) => {
-    const externalUrl = getSafeExternalUrl(rawUrl);
-    if (externalUrl) {
-      try {
-        await shell.openExternal(externalUrl);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    const { resolveBundledRelayGuidePath } = await import("./bundledGuide.ts");
-    const guidePath = resolveBundledRelayGuidePath(rawUrl, event.sender.getURL());
-    if (guidePath === null) return false;
-    return (await shell.openPath(guidePath)) === "";
-  });
-
-  ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL);
-  ipcMain.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
-
-  ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL);
-  ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, async () => {
-    const result = await downloadAvailableUpdate();
-    return {
-      accepted: result.accepted,
-      completed: result.completed,
-      state: updateState,
-    } satisfies DesktopUpdateActionResult;
-  });
-
-  ipcMain.removeHandler(UPDATE_INSTALL_CHANNEL);
-  ipcMain.handle(UPDATE_INSTALL_CHANNEL, async () => {
-    if (isQuitting) {
-      return {
-        accepted: false,
-        completed: false,
-        state: updateState,
-      } satisfies DesktopUpdateActionResult;
-    }
-    const result = await installDownloadedUpdate();
-    return {
-      accepted: result.accepted,
-      completed: result.completed,
-      state: updateState,
-    } satisfies DesktopUpdateActionResult;
-  });
-
-  ipcMain.removeHandler(UPDATE_CHECK_CHANNEL);
-  ipcMain.handle(UPDATE_CHECK_CHANNEL, async () => {
-    await ensureAutoUpdaterConfigured().catch(() => undefined);
-    if (!updaterConfigured) {
-      return {
-        checked: false,
-        state: updateState,
-      } satisfies DesktopUpdateCheckResult;
-    }
-    const checked = await checkForUpdates("web-ui");
-    return {
-      checked,
-      state: updateState,
-    } satisfies DesktopUpdateCheckResult;
-  });
-
-  ipcMain.removeHandler(UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL);
-  ipcMain.handle(UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL, async (_event, rawAction: unknown) => {
-    const action = parseRemoteInstallResponse(rawAction);
-    if (action === null) {
-      throw new Error("Invalid remote install response.");
-    }
-    remoteAppInstaller.respond(action);
-    return updateState;
+  registerUpdateIpc({
+    updateState: () => updateState,
+    isQuitting: () => isQuitting,
+    updaterConfigured: () => updaterConfigured,
+    ensureAutoUpdaterConfigured,
+    checkForUpdates,
+    downloadAvailableUpdate,
+    installDownloadedUpdate,
+    remoteAppInstaller: () => remoteAppInstaller,
   });
 }
 
@@ -5628,7 +4901,7 @@ function createWindow(): BrowserWindow {
     quit: () => app.quit(),
     feedback: (state) => {
       if (!window.isDestroyed() && !window.webContents.isDestroyed())
-        window.webContents.send("desktop:quit-shortcut-feedback", state);
+        window.webContents.send(QUIT_SHORTCUT_FEEDBACK_CHANNEL, state);
     },
   });
   quitShortcutGuards.add(quitGuard);
@@ -6034,7 +5307,7 @@ async function startDesktopComputerUse(): Promise<void> {
       getWindow: () => mainWindow,
       changed: (state) => {
         if (mainWindow && !mainWindow.isDestroyed())
-          mainWindow.webContents.send("desktop:computer-use:changed", state);
+          mainWindow.webContents.send(DESKTOP_COMPUTER_USE_IPC.changed, state);
       },
     });
     await computerUseRuntime.start();
@@ -6184,11 +5457,9 @@ function refreshDesktopCliLauncher(): void {
     });
 }
 
-/** What Ryco and Ryco Nightly read to find and open each other (`nightlyHandoff.ts`). */
-/** One "Open Ryco Nightly" at a time: a second would write a request no launch carries. */
-let nightlyOpenInFlight = false;
 let ownTeamIdLookup: Promise<ExpectedTeamId> | null = null;
 
+/** What Ryco and Ryco Nightly read to find and open each other (`nightlyHandoff.ts`). */
 async function nightlyHandoffEnvironment(): Promise<NightlyHandoffEnvironment> {
   const handoff = await import("./nightlyHandoff.ts");
   ownTeamIdLookup ??= handoff.ownAppTeamId({

@@ -34,10 +34,7 @@ describe("Desktop-main local control credential boundary", () => {
     const handlerStart = main.indexOf(
       "ipcMain.on(GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL, (event) =>",
     );
-    const handlerEnd = main.indexOf(
-      "ipcMain.removeHandler(GET_CLIENT_SETTINGS_CHANNEL)",
-      handlerStart,
-    );
+    const handlerEnd = main.indexOf("registerAppToolsIpc({", handlerStart);
     const rendererBootstrapHandler = main.slice(handlerStart, handlerEnd);
 
     expect(preload).not.toContain("desktopControlToken");
