@@ -124,6 +124,7 @@ import {
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeRingBuffer } from "../../ringBuffer.ts";
+import { makeSharedPayloadSecretRedactor } from "../../agentControl/secretRedaction.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
 
 /**
@@ -653,8 +654,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.asVoid,
     );
 
+  // Every adapter's events pass here: Agent Control tokens a tool echoed are redacted once, for
+  // every subscriber (persisted activities, the canonical log). Copy-on-write, and an SDK message
+  // several events share as `raw.payload` is walked once. That cache holds because adapters never
+  // mutate a payload object after emitting it; one that did could republish a token unredacted.
+  const runtimeEventSecretRedactor = makeSharedPayloadSecretRedactor();
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Effect.succeed(event).pipe(
+    Effect.sync(() => runtimeEventSecretRedactor.event(event)).pipe(
       Effect.tap((canonicalEvent) =>
         canonicalEvent.providerInstanceId === undefined
           ? Effect.void
