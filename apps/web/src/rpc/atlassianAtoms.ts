@@ -7,6 +7,12 @@ import type {
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { createKeyedQueryRegistry, defineKeyedQueryByKey, KEY_SEP } from "@ryco/client-runtime/rpc";
 
+import {
+  isPastStaleTime,
+  KEYED_QUERY_STATE_BUILDERS,
+  type KeyedQueryState,
+} from "./keyedQueryState";
+
 // ---------------------------------------------------------------------------
 // Atom-backed Atlassian reads.
 //
@@ -22,47 +28,11 @@ import { createKeyedQueryRegistry, defineKeyedQueryByKey, KEY_SEP } from "@ryco/
 const CONNECTIONS_STALE_TIME_MS = 0;
 const PROJECT_LINK_STALE_TIME_MS = 0;
 
-export interface AtlassianQueryState<T> {
-  readonly data: T | null;
-  readonly isLoading: boolean;
-  readonly isFetching: boolean;
-  readonly isError: boolean;
-  readonly error: Error | null;
-}
-
-const INITIAL_QUERY_STATE: AtlassianQueryState<never> = Object.freeze({
-  data: null,
-  isLoading: false,
-  isFetching: false,
-  isError: false,
-  error: null,
-});
+export type AtlassianQueryState<T> = KeyedQueryState<T>;
 
 const atlassianRegistry = createKeyedQueryRegistry<AtlassianQueryState<unknown>>({
   labelPrefix: "atlassian",
-  initialState: INITIAL_QUERY_STATE,
-  buildFetchingState: (current) => ({
-    data: current.data,
-    isLoading: current.data === null,
-    isFetching: true,
-    isError: false,
-    error: null,
-  }),
-  buildSuccessState: (data) => ({
-    data,
-    isLoading: false,
-    isFetching: false,
-    isError: false,
-    error: null,
-  }),
-  buildErrorState: (current, error) => ({
-    data: current.data,
-    isLoading: false,
-    isFetching: false,
-    isError: true,
-    error,
-  }),
-  isErrorState: (state) => state.isError,
+  ...KEYED_QUERY_STATE_BUILDERS,
 });
 
 const { controllers, runController } = atlassianRegistry;
@@ -92,8 +62,7 @@ function defineQuery<TInput, TData>(
       ...definition,
       createControllerFields: (input) => ({ projectId: definition.resolveProjectId(input) }),
     },
-    (controller) =>
-      !controller.hasData || Date.now() - controller.lastFetchedAt >= controller.staleTime,
+    isPastStaleTime,
   ) as AtlassianQuery<TInput, TData>;
 }
 

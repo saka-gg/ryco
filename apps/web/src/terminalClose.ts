@@ -1,10 +1,10 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
 
 import { readEnvironmentApi } from "./environmentApi";
-import { readLocalApi } from "./localApi";
 import { readTerminalWriteRequireIdleSupported } from "./terminalRequireIdle";
 import { terminalSnippetBroker } from "./terminalSnippetInsertion";
 import { selectThreadTerminalState, useTerminalStateStore } from "./terminalStateStore";
+import { confirmAction } from "./confirmAction";
 
 export const RUNNING_TERMINAL_CLOSE_CONFIRMATION = [
   "Close terminal?",
@@ -13,10 +13,7 @@ export const RUNNING_TERMINAL_CLOSE_CONFIRMATION = [
 
 async function confirmRunningTerminalClose(): Promise<boolean> {
   try {
-    const localApi = readLocalApi();
-    return await (localApi
-      ? localApi.dialogs.confirm(RUNNING_TERMINAL_CLOSE_CONFIRMATION)
-      : window.confirm(RUNNING_TERMINAL_CLOSE_CONFIRMATION));
+    return await confirmAction(RUNNING_TERMINAL_CLOSE_CONFIRMATION);
   } catch {
     return false;
   }

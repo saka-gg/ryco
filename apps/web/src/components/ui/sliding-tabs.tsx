@@ -2,8 +2,8 @@ import { memo, useLayoutEffect, useRef, useState, type KeyboardEvent, type React
 
 import { cn } from "~/lib/utils";
 
-export interface SlidingTab {
-  readonly id: string;
+export interface SlidingTab<T extends string = string> {
+  readonly id: T;
   readonly label: ReactNode;
   /**
    * Optional glyph. Rendered (hidden by default) as `[data-slot="tab-icon"]`
@@ -66,10 +66,10 @@ export function rovingTargetIndex(key: string, index: number, count: number): nu
  * (automatic activation). With `idPrefix`, tabs carry ids and `aria-controls`
  * so panels can be labelled by them.
  */
-export const SlidingTabs = memo(function SlidingTabs(props: {
-  readonly tabs: ReadonlyArray<SlidingTab>;
-  readonly activeId: string;
-  readonly onSelect: (id: string) => void;
+function SlidingTabStrip<T extends string>(props: {
+  readonly tabs: ReadonlyArray<SlidingTab<T>>;
+  readonly activeId: T;
+  readonly onSelect: (id: T) => void;
   readonly variant?: "pill" | "underline";
   readonly density?: "default" | "compact";
   readonly className?: string;
@@ -78,7 +78,7 @@ export const SlidingTabs = memo(function SlidingTabs(props: {
   /** Prefix for tab ids (`slidingTabId`) and their panels' ids (`slidingTabPanelId`). */
   readonly idPrefix?: string | undefined;
   /** Called when a tab is hovered or focused (e.g. to preload its content). */
-  readonly onTabIntent?: (id: string) => void;
+  readonly onTabIntent?: (id: T) => void;
 }) {
   const variant = props.variant ?? "pill";
   const tablistRef = useRef<HTMLDivElement>(null);
@@ -217,4 +217,7 @@ export const SlidingTabs = memo(function SlidingTabs(props: {
       })}
     </div>
   );
-});
+}
+
+/** Generic over the tab ids, so `onSelect` hands back the caller's own id union. */
+export const SlidingTabs = memo(SlidingTabStrip) as typeof SlidingTabStrip;

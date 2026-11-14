@@ -1,4 +1,5 @@
 import { availablePaneSplit, useChatPanesStore } from "../../../chatPanesStore";
+import { confirmAction } from "../../../confirmAction";
 import React, { useCallback, useRef, useState } from "react";
 import {
   scopedProjectKey,
@@ -23,7 +24,6 @@ import {
 import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
 import { newCommandId, newProjectId } from "../../../lib/utils";
 import { readEnvironmentApi } from "../../../environmentApi";
-import { readLocalApi } from "../../../localApi";
 import { useComposerDraftStore, type DraftId } from "../../../composerDraftStore";
 import { resolveThreadRouteTarget } from "../../../threadRoutes";
 import { useUiStateStore } from "../../../uiStateStore";
@@ -153,10 +153,7 @@ export function useThreadMenuActions(params: {
         })
       ) {
         const message = deleteConfirmationMessage([thread.title]);
-        const localApi = readLocalApi();
-        const confirmed = localApi
-          ? await localApi.dialogs.confirm(message)
-          : window.confirm(message);
+        const confirmed = await confirmAction(message);
         if (!confirmed) {
           return;
         }
@@ -324,10 +321,7 @@ export function useThreadMenuActions(params: {
         }),
       });
       if (confirmation !== null) {
-        const localApi = readLocalApi();
-        const confirmed = localApi
-          ? await localApi.dialogs.confirm(confirmation)
-          : window.confirm(confirmation);
+        const confirmed = await confirmAction(confirmation);
         if (!confirmed) return true;
       }
       try {

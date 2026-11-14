@@ -6,19 +6,14 @@ import {
   type StatisticsSearch,
 } from "../components/statistics/statisticsSearch";
 import { getPresentationTier } from "../lib/presentationTier";
+import { requireAppSession } from "../routeAuthGate";
 
 export const Route = createFileRoute("/statistics")({
   beforeLoad: ({ context }) => {
     if (getPresentationTier() === "phone") {
       throw redirect({ to: "/", replace: true });
     }
-    if (
-      context.authGateState.status !== "authenticated" &&
-      context.authGateState.status !== "hosted-static" &&
-      context.authGateState.status !== "hosted-hub"
-    ) {
-      throw redirect({ to: "/pair", replace: true });
-    }
+    requireAppSession(context);
   },
   validateSearch: (search) => parseStatisticsSearch(search),
   // The page's requests start with the navigation (and on link intent), in

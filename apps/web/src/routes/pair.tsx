@@ -1,6 +1,7 @@
 import { createFileRoute, lazyRouteComponent, redirect } from "@tanstack/react-router";
 
 import { PairingPendingSurface } from "../components/auth/PairingSurface";
+import { isAppSessionGate } from "../routeAuthGate";
 
 export const Route = createFileRoute("/pair")({
   beforeLoad: async ({ context }) => {
@@ -11,11 +12,7 @@ export const Route = createFileRoute("/pair")({
       };
     }
 
-    if (
-      authGateState.status === "authenticated" ||
-      authGateState.status === "hosted-static" ||
-      authGateState.status === "hosted-hub"
-    ) {
+    if (isAppSessionGate(authGateState)) {
       throw redirect({ to: "/", replace: true });
     }
     return {

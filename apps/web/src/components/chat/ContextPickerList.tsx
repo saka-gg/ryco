@@ -3,7 +3,8 @@ import { DateTime, Option } from "effect";
 import { memo } from "react";
 import { cn } from "~/lib/utils";
 
-type Item = SourceControlIssueSummary;
+/** An issue or change request row: what the list shows of either. */
+type Item = Pick<SourceControlIssueSummary, "provider" | "number" | "title" | "updatedAt">;
 
 const dateFmt = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
@@ -16,11 +17,11 @@ function formatItemDate(updatedAt: SourceControlIssueSummary["updatedAt"]): stri
   return dateFmt.format(DateTime.toDate(updatedAt.value));
 }
 
-export const ContextPickerList = memo(function ContextPickerList(props: {
-  items: ReadonlyArray<Item>;
+function ContextPickerListImpl<T extends Item>(props: {
+  items: ReadonlyArray<T>;
   isLoading: boolean;
   emptyText: string;
-  onSelect: (item: Item) => void;
+  onSelect: (item: T) => void;
 }) {
   if (props.isLoading && props.items.length === 0) {
     return <div className="px-3 py-4 text-xs text-muted-foreground">Loading…</div>;
@@ -50,4 +51,6 @@ export const ContextPickerList = memo(function ContextPickerList(props: {
       ))}
     </ul>
   );
-});
+}
+
+export const ContextPickerList = memo(ContextPickerListImpl) as typeof ContextPickerListImpl;

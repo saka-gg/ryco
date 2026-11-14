@@ -7,6 +7,7 @@ import {
   type AgentControlExternalProjectScope,
   ProjectId,
 } from "@ryco/contracts";
+import { confirmAction } from "../../confirmAction";
 import {
   applyExternalIntegrationList,
   applyExternalIntegrationPairing,
@@ -513,7 +514,13 @@ export function ExternalIntegrationsSettings() {
   const remove = async (detail: AgentControlExternalIntegrationDetail) => {
     if (!api) return;
     const integrationId = detail.integration.integrationId;
-    if (!window.confirm(`Delete ${detail.integration.displayName}? This cannot be undone.`)) return;
+    if (
+      !(await confirmAction(
+        `Delete ${detail.integration.displayName}? This cannot be undone.`,
+      ).catch(() => false))
+    ) {
+      return;
+    }
     try {
       setBusyId(integrationId);
       const result = await api.deleteIntegration({ integrationId });

@@ -123,17 +123,17 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/hooks/useThreadExportAction.tsx": ["useThreadExportAction"],
   "src/hooks/useThreadRightPanelRouteState.ts": ["useThreadRightPanelRouteState"],
   "src/routes/__root.tsx": ["RootRouteView"],
-  "src/rpc/queryClient.ts": ["useMutation", "useQuery", "useSelectMemo"],
+  "src/rpc/queryClient.ts": ["useQuery", "useSelectMemo"],
   "src/rpc/serverState.ts": ["useLatestAtomSubscription"],
   "src/rpc/useAtlassian.ts": ["useAtlassianQueryBatch"],
   "src/rpc/useGit.ts": ["useGitMutation"],
+  "src/rpc/useMutation.ts": ["useMutation"],
   "src/rpc/useProject.ts": ["useFilesystemBrowse"],
   "src/rpc/useSourceControl.ts": [
     "useSourceControlMutation",
     "useSourceControlWorkflowRunJobsBatch",
     "useWatchedQuery",
   ],
-  "src/rpc/useWorkItems.ts": ["useAsyncMutation"],
 };
 
 /**

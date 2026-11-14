@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { desktopInvokeErrorMessage } from "~/lib/desktopInvokeError";
 import { Button } from "../ui/button";
 import { SettingsRow } from "./settingsLayout";
+import { confirmAction } from "../../confirmAction";
 
 const COPY_CONFIRMATION =
   "Ryco Nightly's chats and settings are replaced by a copy of Ryco's when it starts. Ryco stays as it is. Ryco's node identity and sessions are not copied; schedules and chat goals come over paused.";
@@ -100,8 +101,8 @@ export function NightlyAppSettings({ scope }: { readonly scope: string }) {
           size="sm"
           variant="outline"
           disabled={pending || state.nightlyRunning}
-          onClick={() => {
-            if (!window.confirm(COPY_CONFIRMATION)) return;
+          onClick={async () => {
+            if (!(await confirmAction(COPY_CONFIRMATION).catch(() => false))) return;
             run(() => api.open({ copyData: true }));
           }}
         >

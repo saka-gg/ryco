@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 import * as Record from "effect/Record";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { isHostedHubMode } from "../env";
 
 const isomorphicLocalStorage: Storage = (() => {
@@ -70,7 +70,7 @@ export function useLocalStorage<T, E>(
   // have not been audited for purity yet. Remove after that audit.
   "use no memo";
   // Get the initial value from localStorage or use the provided initialValue
-  const [storedValue, setStoredValue] = useState<T>(() => {
+  const [storedValue, setStoredValueState] = useState<T>(() => {
     try {
       const item = getLocalStorageItem(key, schema);
       return item ?? initialValue;
@@ -79,27 +79,40 @@ export function useLocalStorage<T, E>(
       return initialValue;
     }
   });
+  // The value the next functional update starts from. Every state write goes through
+  // `setStoredValue`, so it never lags, even for several updates before a render.
+  const latestValueRef = useRef(storedValue);
+  const setStoredValue = useCallback((next: T) => {
+    latestValueRef.current = next;
+    setStoredValueState(next);
+  }, []);
+  // Callers often pass a fresh literal (`{}`); reading it through an effect event keeps the
+  // storage listeners from re-subscribing on every render.
+  const readInitialValue = useEffectEvent(() => initialValue);
 
-  // Return a wrapped version of useState's setter function that persists the new value to localStorage
+  // The setter persists outside React's updater, which must stay pure (StrictMode runs it
+  // twice), so an encode or quota error is caught here instead of thrown from a render.
   const setValue = useCallback(
     (value: T | ((val: T) => T)) => {
+      const valueToStore =
+        typeof value === "function" ? (value as (val: T) => T)(latestValueRef.current) : value;
+      let stored = true;
       try {
-        setStoredValue((prev) => {
-          const valueToStore = typeof value === "function" ? (value as (val: T) => T)(prev) : value;
-          if (valueToStore === null) {
-            removeLocalStorageItem(key);
-          } else {
-            setLocalStorageItem(key, valueToStore, schema);
-          }
-          // Dispatch event after state update completes to avoid nested state updates
-          queueMicrotask(() => dispatchLocalStorageChange(key));
-          return valueToStore;
-        });
+        if (valueToStore === null) {
+          removeLocalStorageItem(key);
+        } else {
+          setLocalStorageItem(key, valueToStore, schema);
+        }
       } catch (error) {
+        stored = false;
         console.error("[LOCALSTORAGE] Error:", error);
       }
+      setStoredValue(valueToStore);
+      // After the state update, other hooks for this key re-read storage. A refused write
+      // keeps the value in memory only; announcing it would re-read the old value.
+      if (stored) queueMicrotask(() => dispatchLocalStorageChange(key));
     },
-    [key, schema],
+    [key, schema, setStoredValue],
   );
 
   const prevKeyRef = useRef(key);
@@ -110,19 +123,19 @@ export function useLocalStorage<T, E>(
       prevKeyRef.current = key;
       try {
         const newValue = getLocalStorageItem(key, schema);
-        setStoredValue(newValue ?? initialValue);
+        setStoredValue(newValue ?? readInitialValue());
       } catch (error) {
         console.error("[LOCALSTORAGE] Error:", error);
       }
     }
-  }, [key, initialValue, schema]);
+  }, [key, schema, setStoredValue]);
 
   // Listen for storage events from other tabs AND custom events from the same tab
   useEffect(() => {
     const syncFromStorage = () => {
       try {
         const newValue = getLocalStorageItem(key, schema);
-        setStoredValue(newValue ?? initialValue);
+        setStoredValue(newValue ?? readInitialValue());
       } catch (error) {
         console.error("[LOCALSTORAGE] Error:", error);
       }
@@ -147,7 +160,7 @@ export function useLocalStorage<T, E>(
       window.removeEventListener("storage", handleStorageChange);
       window.removeEventListener(LOCAL_STORAGE_CHANGE_EVENT, handleLocalChange as EventListener);
     };
-  }, [key, initialValue, schema]);
+  }, [key, schema, setStoredValue]);
 
   return [storedValue, setValue];
 }

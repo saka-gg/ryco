@@ -1,13 +1,7 @@
 import { requestNativeCompaction } from "@ryco/client-runtime/state/composer";
-import {
-  submitApprovalResponse,
-  submitUserInputResponse,
-} from "@ryco/client-runtime/state/session";
-import type { ApprovalResponseIdentity } from "@ryco/contracts";
+import { createThreadSessionCommands } from "@ryco/client-runtime/state/session";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
-  type ApprovalRequestId,
-  type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type AgentTokenMode,
   type RuntimeMode,
@@ -23,26 +17,14 @@ import type { SidebarActionCommand } from "@ryco/client-runtime/state/threads";
 import { newCommandId } from "../../lib/ids";
 import { uuidv4 } from "../../lib/uuid";
 
-// §3-15: pure thread session-action dispatch wrappers, ported from
-// apps/web/src/hooks/chatSessionActions.ts. Each dispatches an orchestration
-// command through the EnvironmentApi seam (§3-12); no forked runtime logic. The
-// checkpoint revert is shared with web: `runCheckpointRevert`
-// in `@ryco/client-runtime/state/session` ("Edit from here", `editFromHere.ts`).
+// §3-15: pure thread session-action dispatch wrappers. Each dispatches an orchestration
+// command through the EnvironmentApi seam (§3-12); no forked runtime logic. Stop, approval and
+// user-input answers are shared with web (`createThreadSessionCommands`), as is the checkpoint
+// revert: `runCheckpointRevert` in `@ryco/client-runtime/state/session` ("Edit from here",
+// `editFromHere.ts`).
 
-export async function interruptThreadTurn(
-  api: EnvironmentApi,
-  threadId: ThreadId,
-  options?: { readonly holdQueue?: boolean },
-): Promise<void> {
-  await api.orchestration.dispatchCommand({
-    type: "thread.turn.interrupt",
-    commandId: newCommandId(),
-    threadId,
-    // A person's Stop also holds the node's follow-up queue, in the same batch.
-    ...(options?.holdQueue ? { holdQueue: true as const } : {}),
-    createdAt: new Date().toISOString(),
-  });
-}
+export const { interruptThreadTurn, respondToThreadApproval, respondToThreadUserInput } =
+  createThreadSessionCommands({ newCommandId });
 
 /**
  * Stop one subagent and only it, as web's Stop on an agent row does: the turn keeps running, and
@@ -162,50 +144,6 @@ export async function setThreadSettled(
           reason: "user",
         },
   );
-}
-
-export async function respondToThreadApproval(input: {
-  api: EnvironmentApi;
-  threadId: ThreadId;
-  requestId: ApprovalRequestId;
-  decision: ProviderApprovalDecision;
-  approvalIdentity?: ApprovalResponseIdentity | undefined;
-}): Promise<void> {
-  await submitApprovalResponse({
-    ...input,
-    submit: () =>
-      input.api.orchestration.dispatchCommand({
-        type: "thread.approval.respond",
-        commandId: newCommandId(),
-        threadId: input.threadId,
-        requestId: input.requestId,
-        decision: input.decision,
-        ...(input.approvalIdentity ? { approvalIdentity: input.approvalIdentity } : {}),
-        createdAt: new Date().toISOString(),
-      }),
-  });
-}
-
-export async function respondToThreadUserInput(input: {
-  api: EnvironmentApi;
-  threadId: ThreadId;
-  requestId: ApprovalRequestId;
-  answers: Record<string, unknown>;
-  userInputIdentity?: ApprovalResponseIdentity | undefined;
-}): Promise<void> {
-  await submitUserInputResponse({
-    ...input,
-    submit: () =>
-      input.api.orchestration.dispatchCommand({
-        type: "thread.user-input.respond",
-        commandId: newCommandId(),
-        threadId: input.threadId,
-        requestId: input.requestId,
-        answers: input.answers,
-        ...(input.userInputIdentity ? { userInputIdentity: input.userInputIdentity } : {}),
-        createdAt: new Date().toISOString(),
-      }),
-  });
 }
 
 /**
