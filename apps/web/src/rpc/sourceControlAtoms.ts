@@ -43,6 +43,8 @@ import {
   defineKeyedQueryByInput,
   KEY_SEP,
   type KeyedQueryControllerBase,
+  type KeyedQueryEnabledInput,
+  type KeyedQueryReadDefinition,
 } from "@ryco/client-runtime/rpc";
 import {
   applyCommentUpdateToActivity,
@@ -252,20 +254,17 @@ export type QueryBinding<TInput, TData> = import("@ryco/client-runtime/rpc").Key
   SourceControlQueryState<TData>
 >;
 
-export interface SourceControlQueryDefinition<TInput, TData> {
-  readonly label: string;
-  readonly staleTime: number;
-  readonly gcTime?: number;
-  readonly isEnabled: (input: TInput) => boolean;
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
-  readonly resolveCwd: (input: TInput) => string;
-  readonly run: (input: TInput) => Promise<TData>;
+export interface SourceControlQueryDefinition<
+  TInput,
+  TData,
+  TEnabled extends TInput = TInput,
+> extends KeyedQueryReadDefinition<TInput, TData, TEnabled> {
+  readonly resolveCwd: (input: TEnabled) => string;
 }
 
 /** A read in the shared source-control registry (admission, lifecycle, fencing, invalidation). */
-export function defineQuery<TInput, TData>(
-  definition: SourceControlQueryDefinition<TInput, TData>,
+export function defineQuery<TInput, TData, TEnabled extends TInput = TInput>(
+  definition: SourceControlQueryDefinition<TInput, TData, TEnabled>,
 ): QueryBinding<TInput, TData> {
   return defineKeyedQueryByInput(
     sourceControlRegistry,
@@ -373,18 +372,27 @@ export interface SourceControlIssueListInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlIssueListInput = KeyedQueryEnabledInput<
+  SourceControlIssueListInput,
+  "environmentId" | "cwd"
+>;
+
 export const issueListBinding = sliceToRequestedLimit(
-  defineQuery<SourceControlIssueListInput, ReadonlyArray<SourceControlIssueSummary>>({
+  defineQuery<
+    SourceControlIssueListInput,
+    ReadonlyArray<SourceControlIssueSummary>,
+    EnabledSourceControlIssueListInput
+  >({
     label: ISSUE_LIST_FAMILY,
     staleTime: ISSUE_LIST_STALE_TIME_MS,
-    isEnabled: (input) =>
+    isEnabled: (input): input is EnabledSourceControlIssueListInput =>
       (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
     buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}`,
-    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-    resolveCwd: (input) => input.cwd as string,
+    resolveEnvironmentId: (input) => input.environmentId,
+    resolveCwd: (input) => input.cwd,
     run: (input) =>
-      sourceControlClient(input.environmentId as EnvironmentId).listIssues({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).listIssues({
+        cwd: input.cwd,
         state: input.state,
         limit: SOURCE_CONTROL_LIST_SUPERSET_LIMIT,
       }),
@@ -412,19 +420,28 @@ export interface SourceControlChangeRequestListInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlChangeRequestListInput = KeyedQueryEnabledInput<
+  SourceControlChangeRequestListInput,
+  "environmentId" | "cwd"
+>;
+
 export const changeRequestListBinding = sliceToRequestedLimit(
-  defineQuery<SourceControlChangeRequestListInput, ReadonlyArray<ChangeRequest>>({
+  defineQuery<
+    SourceControlChangeRequestListInput,
+    ReadonlyArray<ChangeRequest>,
+    EnabledSourceControlChangeRequestListInput
+  >({
     label: CHANGE_REQUEST_LIST_FAMILY,
     staleTime: CHANGE_REQUEST_LIST_STALE_TIME_MS,
-    isEnabled: (input) =>
+    isEnabled: (input): input is EnabledSourceControlChangeRequestListInput =>
       (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
     buildKey: (input) =>
       `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}${KEY_SEP}${input.involvement ?? ""}${KEY_SEP}${input.view ?? ""}`,
-    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-    resolveCwd: (input) => input.cwd as string,
+    resolveEnvironmentId: (input) => input.environmentId,
+    resolveCwd: (input) => input.cwd,
     run: (input) =>
-      sourceControlClient(input.environmentId as EnvironmentId).listChangeRequests({
-        cwd: input.cwd as string,
+      sourceControlClient(input.environmentId).listChangeRequests({
+        cwd: input.cwd,
         state: input.state,
         limit: SOURCE_CONTROL_LIST_SUPERSET_LIMIT,
         ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
@@ -445,25 +462,31 @@ export interface SourceControlIssueSearchInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlIssueSearchInput = KeyedQueryEnabledInput<
+  SourceControlIssueSearchInput,
+  "environmentId" | "cwd"
+>;
+
 export const issueSearchBinding = defineQuery<
   SourceControlIssueSearchInput,
-  ReadonlyArray<SourceControlIssueSummary>
+  ReadonlyArray<SourceControlIssueSummary>,
+  EnabledSourceControlIssueSearchInput
 >({
   label: ISSUE_SEARCH_FAMILY,
   staleTime: SEARCH_STALE_TIME_MS,
   gcTime: SEARCH_QUERY_GC_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlIssueSearchInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.query.length > 0,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.query}${KEY_SEP}${input.limit ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).searchIssues({
-      cwd: input.cwd as string,
+    sourceControlClient(input.environmentId).searchIssues({
+      cwd: input.cwd,
       query: input.query,
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
     }),
@@ -481,25 +504,31 @@ export interface SourceControlChangeRequestSearchInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlChangeRequestSearchInput = KeyedQueryEnabledInput<
+  SourceControlChangeRequestSearchInput,
+  "environmentId" | "cwd"
+>;
+
 export const changeRequestSearchBinding = defineQuery<
   SourceControlChangeRequestSearchInput,
-  ReadonlyArray<ChangeRequest>
+  ReadonlyArray<ChangeRequest>,
+  EnabledSourceControlChangeRequestSearchInput
 >({
   label: CHANGE_REQUEST_SEARCH_FAMILY,
   staleTime: SEARCH_STALE_TIME_MS,
   gcTime: SEARCH_QUERY_GC_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlChangeRequestSearchInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.query.length > 0,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.query}${KEY_SEP}${input.limit ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).searchChangeRequests({
-      cwd: input.cwd as string,
+    sourceControlClient(input.environmentId).searchChangeRequests({
+      cwd: input.cwd,
       query: input.query,
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
     }),
@@ -517,21 +546,27 @@ export interface SourceControlRepositorySearchInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlRepositorySearchInput = KeyedQueryEnabledInput<
+  SourceControlRepositorySearchInput,
+  "environmentId" | "provider"
+>;
+
 export const repositorySearchBinding = defineQuery<
   SourceControlRepositorySearchInput,
-  SourceControlRepositorySearchResult
+  SourceControlRepositorySearchResult,
+  EnabledSourceControlRepositorySearchInput
 >({
   label: "repositories:search",
   staleTime: SEARCH_STALE_TIME_MS,
   gcTime: SEARCH_QUERY_GC_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlRepositorySearchInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.provider !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.provider}${KEY_SEP}${input.query}${KEY_SEP}${input.limit ?? 25}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   resolveCwd: () => "",
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).searchRepositories({
+    sourceControlClient(input.environmentId).searchRepositories({
       provider: input.provider as SourceControlProviderKind,
       ...(input.query.length > 0 ? { query: input.query } : {}),
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
@@ -548,37 +583,44 @@ export interface SourceControlIssueMetaInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlIssueMetaInput = KeyedQueryEnabledInput<
+  SourceControlIssueMetaInput,
+  "environmentId" | "cwd"
+>;
+
 export const issueLabelsBinding = defineQuery<
   SourceControlIssueMetaInput,
-  ReadonlyArray<SourceControlLabel>
+  ReadonlyArray<SourceControlLabel>,
+  EnabledSourceControlIssueMetaInput
 >({
   label: "issues:labels",
   staleTime: LABELS_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlIssueMetaInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).listIssueLabels({
-      cwd: input.cwd as string,
+    sourceControlClient(input.environmentId).listIssueLabels({
+      cwd: input.cwd,
     }),
 });
 
 export const issueAssigneesBinding = defineQuery<
   SourceControlIssueMetaInput,
-  ReadonlyArray<SourceControlAssigneeCandidate>
+  ReadonlyArray<SourceControlAssigneeCandidate>,
+  EnabledSourceControlIssueMetaInput
 >({
   label: "issues:assignees",
   staleTime: ASSIGNEES_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlIssueMetaInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).listIssueAssignees({
-      cwd: input.cwd as string,
+    sourceControlClient(input.environmentId).listIssueAssignees({
+      cwd: input.cwd,
     }),
 });
 
@@ -594,25 +636,31 @@ export interface SourceControlIssueDetailInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlIssueDetailInput = KeyedQueryEnabledInput<
+  SourceControlIssueDetailInput,
+  "environmentId" | "cwd" | "reference"
+>;
+
 export const issueDetailBinding = defineQuery<
   SourceControlIssueDetailInput,
-  SourceControlIssueDetail
+  SourceControlIssueDetail,
+  EnabledSourceControlIssueDetailInput
 >({
   label: ISSUE_DETAIL_FAMILY,
   staleTime: ISSUE_DETAIL_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlIssueDetailInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.reference !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}${KEY_SEP}${input.fullContent ?? false}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).getIssue({
-      cwd: input.cwd as string,
-      reference: input.reference as string,
+    sourceControlClient(input.environmentId).getIssue({
+      cwd: input.cwd,
+      reference: input.reference,
       ...(input.fullContent ? { fullContent: true } : {}),
     }),
 });
@@ -637,22 +685,28 @@ export interface SourceControlChangeRequestDetailInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlChangeRequestDetailInput = KeyedQueryEnabledInput<
+  SourceControlChangeRequestDetailInput,
+  "environmentId" | "cwd" | "reference"
+>;
+
 const changeRequestDetailQuery = defineQuery<
   SourceControlChangeRequestDetailInput,
-  SourceControlChangeRequestDetail
+  SourceControlChangeRequestDetail,
+  EnabledSourceControlChangeRequestDetailInput
 >({
   label: CHANGE_REQUEST_DETAIL_FAMILY,
   staleTime: CHANGE_REQUEST_DETAIL_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlChangeRequestDetailInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.reference !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}${KEY_SEP}${input.fullContent ?? false}${input.view === "row" ? `${KEY_SEP}row` : ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
-  run: (input) => readChangeRequestDetail(input),
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
+  run: readChangeRequestDetail,
 });
 
 /**
@@ -791,9 +845,9 @@ function reusableChangeRequestDetail(
 }
 
 function readChangeRequestDetail(
-  input: SourceControlChangeRequestDetailInput,
+  input: EnabledSourceControlChangeRequestDetailInput,
 ): Promise<SourceControlChangeRequestDetail> {
-  const environmentId = input.environmentId as EnvironmentId;
+  const environmentId = input.environmentId;
   const compositeKey = changeRequestDetailBinding.targetKey(input);
   if (compositeKey !== null) {
     const shared = reusableChangeRequestDetail(environmentId, compositeKey);
@@ -814,8 +868,8 @@ function readChangeRequestDetail(
   const startedAt = Date.now();
   return sourceControlClient(environmentId)
     .getChangeRequestDetail({
-      cwd: input.cwd as string,
-      reference: input.reference as string,
+      cwd: input.cwd,
+      reference: input.reference,
       ...(input.fullContent ? { fullContent: true } : {}),
       ...(input.view !== undefined ? { view: input.view } : {}),
       ...(fresh ? { fresh: true } : {}),
@@ -899,23 +953,32 @@ export interface SourceControlChangeRequestDiffInput {
   readonly commitSha?: string | null;
 }
 
-export const changeRequestDiffBinding = defineQuery<SourceControlChangeRequestDiffInput, string>({
+type EnabledSourceControlChangeRequestDiffInput = KeyedQueryEnabledInput<
+  SourceControlChangeRequestDiffInput,
+  "environmentId" | "cwd" | "reference"
+>;
+
+export const changeRequestDiffBinding = defineQuery<
+  SourceControlChangeRequestDiffInput,
+  string,
+  EnabledSourceControlChangeRequestDiffInput
+>({
   label: "changeRequests:diff",
   staleTime: CHANGE_REQUEST_DIFF_STALE_TIME_MS,
   gcTime: LARGE_QUERY_GC_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlChangeRequestDiffInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.reference !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}${KEY_SEP}${input.headSha ?? ""}${KEY_SEP}${input.commitSha ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestDiff({
-      cwd: input.cwd as string,
-      reference: input.reference as string,
+    sourceControlClient(input.environmentId).getChangeRequestDiff({
+      cwd: input.cwd,
+      reference: input.reference,
       ...(input.headSha ? { expectedHeadSha: input.headSha } : {}),
       ...(input.commitSha ? { commitSha: input.commitSha } : {}),
     }),
@@ -933,25 +996,31 @@ export interface SourceControlChangeRequestActivityInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlChangeRequestActivityInput = KeyedQueryEnabledInput<
+  SourceControlChangeRequestActivityInput,
+  "environmentId" | "cwd" | "reference"
+>;
+
 export const changeRequestActivityBinding = defineQuery<
   SourceControlChangeRequestActivityInput,
-  ChangeRequestActivity
+  ChangeRequestActivity,
+  EnabledSourceControlChangeRequestActivityInput
 >({
   label: "changeRequests:activity",
   staleTime: CHANGE_REQUEST_ACTIVITY_STALE_TIME_MS,
   gcTime: LARGE_QUERY_GC_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlChangeRequestActivityInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.reference !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).getChangeRequestActivity({
-      cwd: input.cwd as string,
-      reference: input.reference as string,
+    sourceControlClient(input.environmentId).getChangeRequestActivity({
+      cwd: input.cwd,
+      reference: input.reference,
     }),
 });
 
@@ -969,21 +1038,27 @@ export interface SourceControlWorkflowRunsInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlWorkflowRunsInput = KeyedQueryEnabledInput<
+  SourceControlWorkflowRunsInput,
+  "environmentId" | "cwd"
+>;
+
 export const workflowRunsBinding = defineQuery<
   SourceControlWorkflowRunsInput,
-  SourceControlWorkflowRunListResult
+  SourceControlWorkflowRunListResult,
+  EnabledSourceControlWorkflowRunsInput
 >({
   label: WORKFLOW_RUNS_FAMILY,
   staleTime: WORKFLOW_RUNS_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlWorkflowRunsInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.pullRequestNumber ?? ""}${KEY_SEP}${input.commitSha ?? ""}${KEY_SEP}${input.branch ?? ""}${KEY_SEP}${input.limit ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).listWorkflowRuns({
-      cwd: input.cwd as string,
+    sourceControlClient(input.environmentId).listWorkflowRuns({
+      cwd: input.cwd,
       ...(input.pullRequestNumber !== undefined && input.pullRequestNumber !== null
         ? { pullRequestNumber: input.pullRequestNumber }
         : {}),
@@ -1002,24 +1077,30 @@ export interface SourceControlWorkflowRunJobsInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlWorkflowRunJobsInput = KeyedQueryEnabledInput<
+  SourceControlWorkflowRunJobsInput,
+  "environmentId" | "cwd" | "runId"
+>;
+
 export const workflowRunJobsBinding = defineQuery<
   SourceControlWorkflowRunJobsInput,
-  SourceControlWorkflowRunJobsResult
+  SourceControlWorkflowRunJobsResult,
+  EnabledSourceControlWorkflowRunJobsInput
 >({
   label: WORKFLOW_JOBS_FAMILY,
   staleTime: WORKFLOW_RUN_JOBS_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlWorkflowRunJobsInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.runId !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.runId}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).getWorkflowRunJobs({
-      cwd: input.cwd as string,
-      runId: input.runId as string,
+    sourceControlClient(input.environmentId).getWorkflowRunJobs({
+      cwd: input.cwd,
+      runId: input.runId,
     }),
 });
 
@@ -1031,14 +1112,20 @@ export interface SourceControlWorkflowJobLogInput {
   readonly enabled?: boolean;
 }
 
+type EnabledSourceControlWorkflowJobLogInput = KeyedQueryEnabledInput<
+  SourceControlWorkflowJobLogInput,
+  "environmentId" | "cwd" | "runId" | "jobId"
+>;
+
 export const workflowJobLogBinding = defineQuery<
   SourceControlWorkflowJobLogInput,
-  SourceControlWorkflowJobLogResult
+  SourceControlWorkflowJobLogResult,
+  EnabledSourceControlWorkflowJobLogInput
 >({
   label: "workflows:jobLog",
   staleTime: WORKFLOW_JOB_LOG_STALE_TIME_MS,
   gcTime: LARGE_QUERY_GC_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledSourceControlWorkflowJobLogInput =>
     (input.enabled ?? false) &&
     input.environmentId !== null &&
     input.cwd !== null &&
@@ -1046,13 +1133,13 @@ export const workflowJobLogBinding = defineQuery<
     input.jobId !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.runId}${KEY_SEP}${input.jobId}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-  resolveCwd: (input) => input.cwd as string,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveCwd: (input) => input.cwd,
   run: (input) =>
-    sourceControlClient(input.environmentId as EnvironmentId).getWorkflowJobLog({
-      cwd: input.cwd as string,
-      runId: input.runId as string,
-      jobId: input.jobId as string,
+    sourceControlClient(input.environmentId).getWorkflowJobLog({
+      cwd: input.cwd,
+      runId: input.runId,
+      jobId: input.jobId,
     }),
 });
 

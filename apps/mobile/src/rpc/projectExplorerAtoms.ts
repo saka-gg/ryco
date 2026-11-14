@@ -29,7 +29,7 @@ import type {
   WorkItemStateFilter,
   WorkItemSummary,
 } from "@ryco/contracts";
-import { KEY_SEP } from "@ryco/client-runtime/rpc";
+import { KEY_SEP, type KeyedQueryEnabledInput } from "@ryco/client-runtime/rpc";
 import {
   SourceControlIssueSummary as IssueSummarySchema,
   SourceControlWorkflowRunListResult as WorkflowRunListSchema,
@@ -77,12 +77,14 @@ interface CheckoutInput {
   readonly enabled?: boolean;
 }
 
-function checkoutEnabled(input: CheckoutInput): boolean {
+function checkoutEnabled<T extends CheckoutInput>(
+  input: T,
+): input is KeyedQueryEnabledInput<T, "environmentId" | "cwd"> {
   return (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null;
 }
 
-const resolveEnvironmentId = (input: { readonly environmentId: EnvironmentId | null }) =>
-  input.environmentId as EnvironmentId;
+const resolveEnvironmentId = (input: { readonly environmentId: EnvironmentId }) =>
+  input.environmentId;
 
 // ---------------------------------------------------------------------------
 // Issues
@@ -93,9 +95,12 @@ export interface IssueListInput extends CheckoutInput {
   readonly limit: number;
 }
 
+type EnabledIssueListInput = KeyedQueryEnabledInput<IssueListInput, "environmentId" | "cwd">;
+
 export const issueListQuery = explorerCache.defineQuery<
   IssueListInput,
-  ReadonlyArray<SourceControlIssueSummary>
+  ReadonlyArray<SourceControlIssueSummary>,
+  EnabledIssueListInput
 >({
   label: "issues",
   staleTime: LIST_STALE_TIME_MS,
@@ -106,8 +111,8 @@ export const issueListQuery = explorerCache.defineQuery<
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId).sourceControl.listIssues({
-        cwd: input.cwd as string,
+      client(input.environmentId).sourceControl.listIssues({
+        cwd: input.cwd,
         state: input.state,
         limit: input.limit,
       }),
@@ -119,19 +124,23 @@ export interface IssueSearchInput extends CheckoutInput {
   readonly limit: number;
 }
 
+type EnabledIssueSearchInput = KeyedQueryEnabledInput<IssueSearchInput, "environmentId" | "cwd">;
+
 export const issueSearchQuery = explorerCache.defineQuery<
   IssueSearchInput,
-  ReadonlyArray<SourceControlIssueSummary>
+  ReadonlyArray<SourceControlIssueSummary>,
+  EnabledIssueSearchInput
 >({
   label: "issue-search",
   staleTime: LIST_STALE_TIME_MS,
   retainedKeyLimit: LIST_RETAINED_KEY_LIMIT,
-  isEnabled: (input) => checkoutEnabled(input) && input.query.trim().length > 0,
+  isEnabled: (input): input is EnabledIssueSearchInput =>
+    checkoutEnabled(input) && input.query.trim().length > 0,
   buildKey: (input) => key(input.environmentId, input.cwd, input.query.trim(), input.limit),
   resolveEnvironmentId,
   run: (input) =>
-    client(input.environmentId as EnvironmentId).sourceControl.searchIssues({
-      cwd: input.cwd as string,
+    client(input.environmentId).sourceControl.searchIssues({
+      cwd: input.cwd,
       query: input.query.trim(),
       limit: input.limit,
     }),
@@ -141,26 +150,35 @@ export interface IssueInput extends CheckoutInput {
   readonly number: number | null;
 }
 
-export const issueDetailQuery = explorerCache.defineQuery<IssueInput, SourceControlIssueDetail>({
+type EnabledIssueInput = KeyedQueryEnabledInput<IssueInput, "environmentId" | "cwd" | "number">;
+
+export const issueDetailQuery = explorerCache.defineQuery<
+  IssueInput,
+  SourceControlIssueDetail,
+  EnabledIssueInput
+>({
   label: "issue",
   staleTime: DETAIL_STALE_TIME_MS,
   retainedKeyLimit: DETAIL_RETAINED_KEY_LIMIT,
-  isEnabled: (input) => checkoutEnabled(input) && input.number !== null,
+  isEnabled: (input): input is EnabledIssueInput => checkoutEnabled(input) && input.number !== null,
   buildKey: (input) => key(input.environmentId, input.cwd, input.number),
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId).sourceControl.getIssue({
-        cwd: input.cwd as string,
+      client(input.environmentId).sourceControl.getIssue({
+        cwd: input.cwd,
         reference: String(input.number),
         fullContent: true,
       }),
     ),
 });
 
+type EnabledCheckoutInput = KeyedQueryEnabledInput<CheckoutInput, "environmentId" | "cwd">;
+
 export const issueLabelsQuery = explorerCache.defineQuery<
   CheckoutInput,
-  ReadonlyArray<SourceControlLabel>
+  ReadonlyArray<SourceControlLabel>,
+  EnabledCheckoutInput
 >({
   label: "issue-labels",
   staleTime: META_STALE_TIME_MS,
@@ -169,14 +187,15 @@ export const issueLabelsQuery = explorerCache.defineQuery<
   buildKey: (input) => key(input.environmentId, input.cwd),
   resolveEnvironmentId,
   run: (input) =>
-    client(input.environmentId as EnvironmentId).sourceControl.listIssueLabels({
-      cwd: input.cwd as string,
+    client(input.environmentId).sourceControl.listIssueLabels({
+      cwd: input.cwd,
     }),
 });
 
 export const issueAssigneesQuery = explorerCache.defineQuery<
   CheckoutInput,
-  ReadonlyArray<SourceControlAssigneeCandidate>
+  ReadonlyArray<SourceControlAssigneeCandidate>,
+  EnabledCheckoutInput
 >({
   label: "issue-assignees",
   staleTime: META_STALE_TIME_MS,
@@ -185,8 +204,8 @@ export const issueAssigneesQuery = explorerCache.defineQuery<
   buildKey: (input) => key(input.environmentId, input.cwd),
   resolveEnvironmentId,
   run: (input) =>
-    client(input.environmentId as EnvironmentId).sourceControl.listIssueAssignees({
-      cwd: input.cwd as string,
+    client(input.environmentId).sourceControl.listIssueAssignees({
+      cwd: input.cwd,
     }),
 });
 
@@ -198,9 +217,12 @@ export interface WorkflowRunsInput extends CheckoutInput {
   readonly limit: number;
 }
 
+type EnabledWorkflowRunsInput = KeyedQueryEnabledInput<WorkflowRunsInput, "environmentId" | "cwd">;
+
 export const workflowRunsQuery = explorerCache.defineQuery<
   WorkflowRunsInput,
-  SourceControlWorkflowRunListResult
+  SourceControlWorkflowRunListResult,
+  EnabledWorkflowRunsInput
 >({
   label: "runs",
   persist: schemaSavedQueryCodec(WorkflowRunListSchema, 1),
@@ -211,8 +233,8 @@ export const workflowRunsQuery = explorerCache.defineQuery<
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId).sourceControl.listWorkflowRuns({
-        cwd: input.cwd as string,
+      client(input.environmentId).sourceControl.listWorkflowRuns({
+        cwd: input.cwd,
         limit: input.limit,
       }),
     ),
@@ -222,21 +244,28 @@ export interface WorkflowRunInput extends CheckoutInput {
   readonly runId: string | null;
 }
 
+type EnabledWorkflowRunInput = KeyedQueryEnabledInput<
+  WorkflowRunInput,
+  "environmentId" | "cwd" | "runId"
+>;
+
 export const workflowRunJobsQuery = explorerCache.defineQuery<
   WorkflowRunInput,
-  SourceControlWorkflowRunJobsResult
+  SourceControlWorkflowRunJobsResult,
+  EnabledWorkflowRunInput
 >({
   label: "run-jobs",
   staleTime: RUNS_STALE_TIME_MS,
   retainedKeyLimit: DETAIL_RETAINED_KEY_LIMIT,
-  isEnabled: (input) => checkoutEnabled(input) && input.runId !== null,
+  isEnabled: (input): input is EnabledWorkflowRunInput =>
+    checkoutEnabled(input) && input.runId !== null,
   buildKey: (input) => key(input.environmentId, input.cwd, input.runId),
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId).sourceControl.getWorkflowRunJobs({
-        cwd: input.cwd as string,
-        runId: input.runId as string,
+      client(input.environmentId).sourceControl.getWorkflowRunJobs({
+        cwd: input.cwd,
+        runId: input.runId,
       }),
     ),
 });
@@ -245,21 +274,28 @@ export interface WorkflowJobLogInput extends WorkflowRunInput {
   readonly jobId: string | null;
 }
 
+type EnabledWorkflowJobLogInput = KeyedQueryEnabledInput<
+  WorkflowJobLogInput,
+  "environmentId" | "cwd" | "runId" | "jobId"
+>;
+
 export const workflowJobLogQuery = explorerCache.defineQuery<
   WorkflowJobLogInput,
-  SourceControlWorkflowJobLogResult
+  SourceControlWorkflowJobLogResult,
+  EnabledWorkflowJobLogInput
 >({
   label: "job-log",
   staleTime: LOG_STALE_TIME_MS,
   retainedKeyLimit: LOG_RETAINED_KEY_LIMIT,
-  isEnabled: (input) => checkoutEnabled(input) && input.runId !== null && input.jobId !== null,
+  isEnabled: (input): input is EnabledWorkflowJobLogInput =>
+    checkoutEnabled(input) && input.runId !== null && input.jobId !== null,
   buildKey: (input) => key(input.environmentId, input.cwd, input.runId, input.jobId),
   resolveEnvironmentId,
   run: (input) =>
-    client(input.environmentId as EnvironmentId).sourceControl.getWorkflowJobLog({
-      cwd: input.cwd as string,
-      runId: input.runId as string,
-      jobId: input.jobId as string,
+    client(input.environmentId).sourceControl.getWorkflowJobLog({
+      cwd: input.cwd,
+      runId: input.runId,
+      jobId: input.jobId,
     }),
 });
 
@@ -273,7 +309,9 @@ export interface ProjectInput {
   readonly enabled?: boolean;
 }
 
-function projectEnabled(input: ProjectInput): boolean {
+function projectEnabled<T extends ProjectInput>(
+  input: T,
+): input is KeyedQueryEnabledInput<T, "environmentId" | "projectId"> {
   return (input.enabled ?? true) && input.environmentId !== null && input.projectId !== null;
 }
 
@@ -282,7 +320,13 @@ export interface JiraProjectLinkRead {
   readonly link: AtlassianProjectLink | null;
 }
 
-export const jiraProjectLinkQuery = explorerCache.defineQuery<ProjectInput, JiraProjectLinkRead>({
+type EnabledProjectInput = KeyedQueryEnabledInput<ProjectInput, "environmentId" | "projectId">;
+
+export const jiraProjectLinkQuery = explorerCache.defineQuery<
+  ProjectInput,
+  JiraProjectLinkRead,
+  EnabledProjectInput
+>({
   label: "jira-link",
   staleTime: META_STALE_TIME_MS,
   retainedKeyLimit: META_RETAINED_KEY_LIMIT,
@@ -291,8 +335,8 @@ export const jiraProjectLinkQuery = explorerCache.defineQuery<ProjectInput, Jira
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId)
-        .atlassian.getProjectLink({ projectId: input.projectId as ProjectId })
+      client(input.environmentId)
+        .atlassian.getProjectLink({ projectId: input.projectId })
         .then((link) => ({ link })),
     ),
 });
@@ -302,9 +346,15 @@ export interface WorkItemListInput extends ProjectInput {
   readonly limit: number;
 }
 
+type EnabledWorkItemListInput = KeyedQueryEnabledInput<
+  WorkItemListInput,
+  "environmentId" | "projectId"
+>;
+
 export const workItemListQuery = explorerCache.defineQuery<
   WorkItemListInput,
-  ReadonlyArray<WorkItemSummary>
+  ReadonlyArray<WorkItemSummary>,
+  EnabledWorkItemListInput
 >({
   label: "work-items",
   staleTime: LIST_STALE_TIME_MS,
@@ -315,8 +365,8 @@ export const workItemListQuery = explorerCache.defineQuery<
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId).workItems.list({
-        projectId: input.projectId as ProjectId,
+      client(input.environmentId).workItems.list({
+        projectId: input.projectId,
         state: input.state,
         limit: input.limit,
       }),
@@ -328,19 +378,26 @@ export interface WorkItemSearchInput extends ProjectInput {
   readonly limit: number;
 }
 
+type EnabledWorkItemSearchInput = KeyedQueryEnabledInput<
+  WorkItemSearchInput,
+  "environmentId" | "projectId"
+>;
+
 export const workItemSearchQuery = explorerCache.defineQuery<
   WorkItemSearchInput,
-  ReadonlyArray<WorkItemSummary>
+  ReadonlyArray<WorkItemSummary>,
+  EnabledWorkItemSearchInput
 >({
   label: "work-item-search",
   staleTime: LIST_STALE_TIME_MS,
   retainedKeyLimit: LIST_RETAINED_KEY_LIMIT,
-  isEnabled: (input) => projectEnabled(input) && input.query.trim().length > 0,
+  isEnabled: (input): input is EnabledWorkItemSearchInput =>
+    projectEnabled(input) && input.query.trim().length > 0,
   buildKey: (input) => key(input.environmentId, input.projectId, input.query.trim(), input.limit),
   resolveEnvironmentId,
   run: (input) =>
-    client(input.environmentId as EnvironmentId).workItems.search({
-      projectId: input.projectId as ProjectId,
+    client(input.environmentId).workItems.search({
+      projectId: input.projectId,
       query: input.query.trim(),
       limit: input.limit,
     }),
@@ -350,18 +407,27 @@ export interface WorkItemInput extends ProjectInput {
   readonly key: string | null;
 }
 
-export const workItemDetailQuery = explorerCache.defineQuery<WorkItemInput, WorkItemDetail>({
+type EnabledWorkItemInput = KeyedQueryEnabledInput<
+  WorkItemInput,
+  "environmentId" | "projectId" | "key"
+>;
+
+export const workItemDetailQuery = explorerCache.defineQuery<
+  WorkItemInput,
+  WorkItemDetail,
+  EnabledWorkItemInput
+>({
   label: "work-item",
   staleTime: DETAIL_STALE_TIME_MS,
   retainedKeyLimit: DETAIL_RETAINED_KEY_LIMIT,
-  isEnabled: (input) => projectEnabled(input) && input.key !== null,
+  isEnabled: (input): input is EnabledWorkItemInput => projectEnabled(input) && input.key !== null,
   buildKey: (input) => key(input.environmentId, input.projectId, input.key),
   resolveEnvironmentId,
   run: (input) =>
     runWithRetry(() =>
-      client(input.environmentId as EnvironmentId).workItems.get({
-        projectId: input.projectId as ProjectId,
-        key: input.key as string,
+      client(input.environmentId).workItems.get({
+        projectId: input.projectId,
+        key: input.key,
         fullContent: true,
       }),
     ),

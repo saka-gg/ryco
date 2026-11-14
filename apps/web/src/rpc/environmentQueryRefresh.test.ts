@@ -317,7 +317,7 @@ describe("environment query refresh read epochs", () => {
       {
         label: "read-epoch",
         staleTime: 0,
-        isEnabled: () => true,
+        isEnabled: (_input: { readonly path: string }) => true,
         buildKey: (input: { readonly path: string }) => `${readEpochEnvironmentId}:${input.path}`,
         resolveEnvironmentId: () => readEpochEnvironmentId,
         createControllerFields: () => ({}),

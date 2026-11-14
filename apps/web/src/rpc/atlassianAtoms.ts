@@ -5,7 +5,13 @@ import type {
   ProjectId,
 } from "@ryco/contracts";
 import { requireEnvironmentConnection } from "~/environments/runtime";
-import { createKeyedQueryRegistry, defineKeyedQueryByKey, KEY_SEP } from "@ryco/client-runtime/rpc";
+import {
+  createKeyedQueryRegistry,
+  defineKeyedQueryByKey,
+  KEY_SEP,
+  type KeyedQueryEnabledInput,
+  type KeyedQueryReadDefinition,
+} from "@ryco/client-runtime/rpc";
 
 import {
   isPastStaleTime,
@@ -43,18 +49,15 @@ export type AtlassianQuery<TInput, TData> = import("@ryco/client-runtime/rpc").K
   AtlassianQueryState<TData>
 >;
 
-interface AtlassianQueryDefinition<TInput, TData> {
-  readonly label: string;
-  readonly staleTime: number;
-  readonly isEnabled: (input: TInput) => boolean;
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
-  readonly resolveProjectId: (input: TInput) => ProjectId | null;
-  readonly run: (input: TInput) => Promise<TData>;
+interface AtlassianQueryDefinition<TInput, TData, TEnabled extends TInput = TInput> extends Omit<
+  KeyedQueryReadDefinition<TInput, TData, TEnabled>,
+  "gcTime"
+> {
+  readonly resolveProjectId: (input: TEnabled) => ProjectId | null;
 }
 
-function defineQuery<TInput, TData>(
-  definition: AtlassianQueryDefinition<TInput, TData>,
+function defineQuery<TInput, TData, TEnabled extends TInput = TInput>(
+  definition: AtlassianQueryDefinition<TInput, TData, TEnabled>,
 ): AtlassianQuery<TInput, TData> {
   return defineKeyedQueryByKey(
     atlassianRegistry,
@@ -79,17 +82,24 @@ export interface AtlassianConnectionsInput {
   readonly enabled?: boolean;
 }
 
+type EnabledAtlassianConnectionsInput = KeyedQueryEnabledInput<
+  AtlassianConnectionsInput,
+  "environmentId"
+>;
+
 export const atlassianConnectionsQuery = defineQuery<
   AtlassianConnectionsInput,
-  ReadonlyArray<AtlassianConnectionSummary>
+  ReadonlyArray<AtlassianConnectionSummary>,
+  EnabledAtlassianConnectionsInput
 >({
   label: "connections",
   staleTime: CONNECTIONS_STALE_TIME_MS,
-  isEnabled: (input) => (input.enabled ?? true) && input.environmentId !== null,
+  isEnabled: (input): input is EnabledAtlassianConnectionsInput =>
+    (input.enabled ?? true) && input.environmentId !== null,
   buildKey: (input) => `${input.environmentId}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   resolveProjectId: () => null,
-  run: (input) => atlassianClient(input.environmentId as EnvironmentId).listConnections(),
+  run: (input) => atlassianClient(input.environmentId).listConnections(),
 });
 
 // ---------------------------------------------------------------------------
@@ -102,20 +112,26 @@ export interface AtlassianProjectLinkInput {
   readonly enabled?: boolean;
 }
 
+type EnabledAtlassianProjectLinkInput = KeyedQueryEnabledInput<
+  AtlassianProjectLinkInput,
+  "environmentId" | "projectId"
+>;
+
 export const atlassianProjectLinkQuery = defineQuery<
   AtlassianProjectLinkInput,
-  AtlassianProjectLink | null
+  AtlassianProjectLink | null,
+  EnabledAtlassianProjectLinkInput
 >({
   label: "project-link",
   staleTime: PROJECT_LINK_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledAtlassianProjectLinkInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.projectId !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.projectId}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   resolveProjectId: (input) => input.projectId,
   run: (input) =>
-    atlassianClient(input.environmentId as EnvironmentId).getProjectLink({
-      projectId: input.projectId as ProjectId,
+    atlassianClient(input.environmentId).getProjectLink({
+      projectId: input.projectId,
     }),
 });
 
