@@ -17,6 +17,7 @@ import {
 } from "@ryco/contracts";
 import { truncateUnicodeSafe } from "@ryco/shared/String";
 import { isInheritedItemId } from "@ryco/shared/threadFork";
+import { readUserInputActivityPayload } from "@ryco/shared/threadActivityPayloads";
 import { Option, Schema } from "effect";
 
 import { canonicalJson as canonicalJsonText, sha256Hex } from "../../canonicalJson.ts";
@@ -817,7 +818,7 @@ function collectCheckpoints(
     .toSorted(compareOrdered);
 }
 
-function parseQuestions(payload: Record<string, unknown>): {
+function parseQuestions(payload: { readonly questions?: unknown }): {
   readonly questions: ContextHandoffNoticeEntry["questions"];
   readonly truncated: boolean;
 } {
@@ -900,16 +901,16 @@ function collectNotices(
     if (failure) {
       failures.push(failure);
     }
-    const payload = activityPayload(activity);
+    const payload = readUserInputActivityPayload(activity);
     const requestId = asTrimmedString(payload?.requestId);
-    if (!requestId) {
+    if (!payload || !requestId) {
       continue;
     }
     if (activity.kind === "user-input.resolved") {
       pendingQuestions.delete(requestId);
       continue;
     }
-    if (activity.kind !== "user-input.requested" || !payload) {
+    if (activity.kind !== "user-input.requested") {
       continue;
     }
     const parsed = parseQuestions(payload);

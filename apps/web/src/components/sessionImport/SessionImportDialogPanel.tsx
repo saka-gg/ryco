@@ -41,6 +41,7 @@ import { SettingsSelect } from "../settings/SettingsSelect";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type SessionImportDialogClient = Pick<
   WsRpcClient["sessionImport"],
@@ -97,9 +98,7 @@ async function loadSourceRows(
     const source = SOURCES[index]!;
     if (result.status === "rejected") {
       const reason = result.reason;
-      notices.push(
-        `${SOURCE_LABEL[source]}: ${reason instanceof Error ? reason.message : "History is unavailable."}`,
-      );
+      notices.push(`${SOURCE_LABEL[source]}: ${errorMessage(reason, "History is unavailable.")}`);
       return;
     }
     for (const store of result.value)

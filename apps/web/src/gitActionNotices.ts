@@ -9,6 +9,7 @@ import type {
 import { useEffect, useState } from "react";
 
 import { stackedThreadToast, toastManager, type ThreadToastData } from "./components/ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Where a user-started git action (pull, commit, push, pull request) reports
@@ -162,10 +163,6 @@ type StopState =
   | { readonly kind: "nothing-to-stop" }
   | { readonly kind: "failed"; readonly message: string };
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "An error occurred.";
-}
-
 function stoppedDescription(error: unknown): string {
   const revoked =
     typeof error === "object" &&
@@ -272,7 +269,7 @@ export function createGitActionReporter(input: {
       },
       (error: unknown) => {
         if (stopState.kind !== "stopping") return;
-        stopState = { kind: "failed", message: errorMessage(error) };
+        stopState = { kind: "failed", message: errorMessage(error, "An error occurred.") };
         renderRunning();
       },
     );
@@ -374,7 +371,10 @@ export function createGitActionReporter(input: {
         });
         return true;
       }
-      reporter.failed({ title: failureTitle, description: errorMessage(error) });
+      reporter.failed({
+        title: failureTitle,
+        description: errorMessage(error, "An error occurred."),
+      });
       return false;
     },
   };

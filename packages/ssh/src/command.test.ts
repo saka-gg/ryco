@@ -7,6 +7,7 @@ import { ChildProcessSpawner } from "effect/process";
 import {
   baseSshArgs,
   getLastNonEmptyOutputLine,
+  normalizeSshErrorMessage,
   parseSshResolveOutput,
   resolveRemoteRycoCliPackageSpec,
   runSshCommand,
@@ -75,6 +76,22 @@ const makeNeverFinishingProcess = () => {
 };
 
 describe("ssh command", () => {
+  it("normalizes error messages from stderr, then stdout, then the fallback", () => {
+    assert.strictEqual(
+      normalizeSshErrorMessage({ stderr: "  denied \n", stdout: "out", fallbackMessage: "fb" }),
+      "denied",
+    );
+    assert.strictEqual(
+      normalizeSshErrorMessage({ stderr: " \n", stdout: " out ", fallbackMessage: "fb" }),
+      "out",
+    );
+    assert.strictEqual(normalizeSshErrorMessage({ stderr: "", fallbackMessage: "fb" }), "fb");
+    assert.strictEqual(
+      normalizeSshErrorMessage({ stderr: "", stdout: "  ", fallbackMessage: "fb" }),
+      "fb",
+    );
+  });
+
   it.effect("parses resolved ssh config output into a target", () =>
     Effect.sync(() => {
       assert.deepEqual(

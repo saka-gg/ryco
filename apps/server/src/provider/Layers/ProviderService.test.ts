@@ -839,7 +839,6 @@ it.effect(
               })
             : Effect.fail(unsupported()),
         listInstances: () => Effect.succeed([instanceId]),
-        listProviders: () => Effect.succeed([driverKind] as const),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
           PubSub.subscribe(pubsub),
@@ -910,7 +909,6 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
             })
           : Effect.fail(unsupported()),
       listInstances: () => Effect.succeed([instanceId]),
-      listProviders: () => Effect.succeed([CODEX_DRIVER] as const),
       streamChanges: Stream.empty,
       subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
         PubSub.subscribe(pubsub),
@@ -2289,6 +2287,40 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
         ),
         true,
       );
+    }),
+  );
+
+  it.effect("redacts Agent Control tokens in every adapter's runtime events", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("thread-redact"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-redact"),
+        runtimeMode: "full-access",
+      });
+      const token = `rycoac_${"b".repeat(43)}`;
+      const consumer = yield* Stream.take(provider.streamEvents, 1).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* sleep(50);
+
+      fanout.codex.emit({
+        type: "tool.completed",
+        eventId: asEventId("evt-redact-1"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        threadId: session.threadId,
+        turnId: asTurnId("turn-1"),
+        toolKind: "command",
+        title: `curl -H 'Authorization: Bearer ${token}'`,
+      });
+
+      const [received] = Array.from(yield* Fiber.join(consumer));
+      assert.isDefined(received);
+      assert.notInclude(JSON.stringify(received), token);
+      assert.include(JSON.stringify(received), "Bearer [REDACTED]");
     }),
   );
 

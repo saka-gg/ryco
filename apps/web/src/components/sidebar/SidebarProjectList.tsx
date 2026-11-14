@@ -75,6 +75,7 @@ import {
   SIDEBAR_ROW_ACTION_COARSE_ANCHORED_CLASS_NAME,
   SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME,
 } from "../Sidebar.logic";
+import { confirmAction } from "../../confirmAction";
 
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: "Last user message",
@@ -425,10 +426,10 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
     closeFolderDialog();
   }, [closeFolderDialog, createProjectFolder, folderDialog, folderNameDraft, renameProjectFolder]);
   const handleDeleteFolder = useCallback(
-    (folderId: string, folderName: string) => {
-      const confirmed = window.confirm(
+    async (folderId: string, folderName: string) => {
+      const confirmed = await confirmAction(
         `Delete folder "${folderName}"?\n\nProjects inside it will stay in the sidebar.`,
-      );
+      ).catch(() => false);
       if (!confirmed) {
         return;
       }
@@ -564,7 +565,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
                               setProjectFolderExpanded(row.folder.id, !row.folder.expanded)
                             }
                             onRename={() => openRenameFolderDialog(row.folder.id, row.folder.name)}
-                            onDelete={() => handleDeleteFolder(row.folder.id, row.folder.name)}
+                            onDelete={() => void handleDeleteFolder(row.folder.id, row.folder.name)}
                           />
                           {row.folder.expanded ? (
                             <SidebarMenuSub>

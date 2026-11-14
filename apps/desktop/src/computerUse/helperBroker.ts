@@ -376,7 +376,9 @@ export class ComputerUseHelperBroker {
       this.noteFailure();
       const reason = error instanceof Error ? error.message : String(error);
       this.log(`start failed: ${reason}`);
-      throw new Error(`${this.options.app.displayName} did not start. ${reason}`.trim());
+      throw new Error(`${this.options.app.displayName} did not start. ${reason}`.trim(), {
+        cause: error,
+      });
     }
   }
 

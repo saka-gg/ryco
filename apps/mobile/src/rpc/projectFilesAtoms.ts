@@ -17,7 +17,7 @@ import type {
   ProjectReadFileResult,
   ProjectSearchEntriesResult,
 } from "@ryco/contracts";
-import { KEY_SEP } from "@ryco/client-runtime/rpc";
+import { KEY_SEP, type KeyedQueryEnabledInput } from "@ryco/client-runtime/rpc";
 import {
   listEntriesSince,
   normalizeWorkspaceFileSearchQuery,
@@ -78,23 +78,28 @@ export interface ProjectListEntriesInput {
   readonly enabled?: boolean;
 }
 
+type EnabledProjectListEntriesInput = KeyedQueryEnabledInput<
+  ProjectListEntriesInput,
+  "environmentId" | "cwd"
+>;
+
 export const projectListEntriesQuery: ProjectFilesQuery<
   ProjectListEntriesInput,
   ProjectListEntriesResult
-> = defineQuery<ProjectListEntriesInput, ProjectListEntriesResult>({
+> = defineQuery<ProjectListEntriesInput, ProjectListEntriesResult, EnabledProjectListEntriesInput>({
   label: "listEntries",
   staleTime: LIST_ENTRIES_STALE_TIME_MS,
   retainedKeyLimit: PROJECT_LIST_ENTRIES_RETAINED_KEY_LIMIT,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledProjectListEntriesInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
   buildKey: (input) => `${input.environmentId}${KEY_SEP}${input.cwd}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   // Sends the held listing's revision: an unchanged tree costs about a hundred bytes.
   run: (input) =>
     runWithRetry(() =>
       listEntriesSince(
-        projectsClient(input.environmentId as EnvironmentId).listEntries,
-        input.cwd as string,
+        projectsClient(input.environmentId).listEntries,
+        input.cwd,
         projectListEntriesQuery.getSnapshot(projectListEntriesQuery.keyOf(input)).data,
       ),
     ),
@@ -111,25 +116,30 @@ export interface ProjectReadFileInput {
   readonly enabled?: boolean;
 }
 
+type EnabledProjectReadFileInput = KeyedQueryEnabledInput<
+  ProjectReadFileInput,
+  "environmentId" | "cwd" | "relativePath"
+>;
+
 export const projectReadFileQuery: ProjectFilesQuery<ProjectReadFileInput, ProjectReadFileResult> =
-  defineQuery<ProjectReadFileInput, ProjectReadFileResult>({
+  defineQuery<ProjectReadFileInput, ProjectReadFileResult, EnabledProjectReadFileInput>({
     label: "readFile",
     staleTime: READ_FILE_STALE_TIME_MS,
     retainedKeyLimit: PROJECT_READ_FILE_RETAINED_KEY_LIMIT,
-    isEnabled: (input) =>
+    isEnabled: (input): input is EnabledProjectReadFileInput =>
       (input.enabled ?? true) &&
       input.environmentId !== null &&
       input.cwd !== null &&
       input.relativePath !== null,
     buildKey: (input) =>
       `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.relativePath}`,
-    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+    resolveEnvironmentId: (input) => input.environmentId,
     // Sends the held version: re-reading an unchanged file costs about a hundred bytes.
     run: (input) =>
       runWithRetry(() =>
         readFileSince(
-          projectsClient(input.environmentId as EnvironmentId).readFile,
-          { cwd: input.cwd as string, relativePath: input.relativePath as string },
+          projectsClient(input.environmentId).readFile,
+          { cwd: input.cwd, relativePath: input.relativePath },
           projectReadFileQuery.getSnapshot(projectReadFileQuery.keyOf(input)).data,
         ),
       ),
@@ -152,26 +162,32 @@ export interface ProjectReadFileBinaryInput {
   readonly enabled?: boolean;
 }
 
+type EnabledProjectReadFileBinaryInput = KeyedQueryEnabledInput<
+  ProjectReadFileBinaryInput,
+  "environmentId" | "cwd" | "relativePath"
+>;
+
 export const projectReadFileBinaryQuery = defineQuery<
   ProjectReadFileBinaryInput,
-  ProjectReadFileBinaryResult
+  ProjectReadFileBinaryResult,
+  EnabledProjectReadFileBinaryInput
 >({
   label: "readFileBinary",
   staleTime: READ_FILE_STALE_TIME_MS,
   retainedKeyLimit: PROJECT_READ_FILE_BINARY_RETAINED_KEY_LIMIT,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledProjectReadFileBinaryInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
     input.relativePath !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.relativePath}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   run: (input) =>
     runWithRetry(() =>
-      projectsClient(input.environmentId as EnvironmentId).readFileBinary({
-        cwd: input.cwd as string,
-        relativePath: input.relativePath as string,
+      projectsClient(input.environmentId).readFileBinary({
+        cwd: input.cwd,
+        relativePath: input.relativePath,
       }),
     ),
 });
@@ -202,14 +218,20 @@ function searchEntriesLimit(input: ProjectSearchEntriesInput): number {
   );
 }
 
+type EnabledProjectSearchEntriesInput = KeyedQueryEnabledInput<
+  ProjectSearchEntriesInput,
+  "environmentId" | "cwd"
+>;
+
 export const projectSearchEntriesQuery = defineQuery<
   ProjectSearchEntriesInput,
-  ProjectSearchEntriesResult
+  ProjectSearchEntriesResult,
+  EnabledProjectSearchEntriesInput
 >({
   label: "searchEntries",
   staleTime: SEARCH_ENTRIES_STALE_TIME_MS,
   retainedKeyLimit: PROJECT_SEARCH_ENTRIES_RETAINED_KEY_LIMIT,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledProjectSearchEntriesInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.cwd !== null &&
@@ -221,11 +243,11 @@ export const projectSearchEntriesQuery = defineQuery<
     `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}search${KEY_SEP}${searchEntriesLimit(
       input,
     )}${KEY_SEP}${normalizeWorkspaceFileSearchQuery(input.query)}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   run: (input) =>
     runWithRetry(() =>
-      projectsClient(input.environmentId as EnvironmentId).searchEntries({
-        cwd: input.cwd as string,
+      projectsClient(input.environmentId).searchEntries({
+        cwd: input.cwd,
         query: normalizeWorkspaceFileSearchQuery(input.query),
         limit: searchEntriesLimit(input),
       }),

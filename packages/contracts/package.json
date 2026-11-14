@@ -61,6 +61,11 @@
       "import": "./src/relayConstants.ts",
       "require": "./src/relayConstants.ts"
     },
+    "./space-role": {
+      "types": "./src/spaceRole.ts",
+      "import": "./src/spaceRole.ts",
+      "require": "./src/spaceRole.ts"
+    },
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts",
@@ -135,6 +140,16 @@
       "types": "./src/baseSchemas.ts",
       "import": "./src/baseSchemas.ts",
       "require": "./src/baseSchemas.ts"
+    },
+    "./auth": {
+      "types": "./src/auth.ts",
+      "import": "./src/auth.ts",
+      "require": "./src/auth.ts"
+    },
+    "./saved-environment": {
+      "types": "./src/savedEnvironment.ts",
+      "import": "./src/savedEnvironment.ts",
+      "require": "./src/savedEnvironment.ts"
     },
     "./change-request-review": {
       "types": "./src/changeRequestReview.ts",

@@ -26,6 +26,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Spinner } from "./ui/spinner";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface PullRequestThreadDialogProps {
   open: boolean;
@@ -181,12 +182,10 @@ export function PullRequestThreadDialog({
       : parsedReference === null
         ? `Use a ${terminology.singular} URL, checkout command, 123, or #123.`
         : null;
-  const errorMessage =
+  const visibleError =
     validationMessage ??
     (resolvedPullRequest === null && resolvePullRequestQuery.isError
-      ? resolvePullRequestQuery.error instanceof Error
-        ? resolvePullRequestQuery.error.message
-        : `Failed to resolve ${terminology.singular}.`
+      ? errorMessage(resolvePullRequestQuery.error, `Failed to resolve ${terminology.singular}.`)
       : preparePullRequestThreadMutation.error instanceof Error
         ? preparePullRequestThreadMutation.error.message
         : preparePullRequestThreadMutation.error
@@ -262,7 +261,7 @@ export function PullRequestThreadDialog({
             </div>
           ) : null}
 
-          {errorMessage ? <p className="text-destructive text-xs">{errorMessage}</p> : null}
+          {visibleError ? <p className="text-destructive text-xs">{visibleError}</p> : null}
         </DialogPanel>
         <DialogFooter>
           <Button

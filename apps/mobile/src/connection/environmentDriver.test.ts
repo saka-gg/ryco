@@ -212,7 +212,12 @@ function bearerSession(daysLeft: number, role = "owner"): AuthSessionState {
     role,
     sessionMethod: "bearer-session-token",
     expiresAt: new Date(Date.now() + daysLeft * DAY_MS).toISOString(),
-    auth: {},
+    auth: {
+      policy: "remote-reachable",
+      bootstrapMethods: ["one-time-token"],
+      sessionMethods: ["bearer-session-token"],
+      sessionCookieName: "ryco_session",
+    },
   } as unknown as AuthSessionState;
 }
 

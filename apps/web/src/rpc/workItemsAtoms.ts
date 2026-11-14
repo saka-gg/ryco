@@ -9,7 +9,19 @@ import type {
 } from "@ryco/contracts";
 
 import { requireEnvironmentConnection } from "~/environments/runtime";
-import { createKeyedQueryRegistry, defineKeyedQueryByKey, KEY_SEP } from "@ryco/client-runtime/rpc";
+import {
+  createKeyedQueryRegistry,
+  defineKeyedQueryByKey,
+  KEY_SEP,
+  type KeyedQueryEnabledInput,
+  type KeyedQueryReadDefinition,
+} from "@ryco/client-runtime/rpc";
+
+import {
+  isPastStaleTime,
+  KEYED_QUERY_STATE_BUILDERS,
+  type KeyedQueryState,
+} from "./keyedQueryState";
 
 // ---------------------------------------------------------------------------
 // Atom-backed work-item reads.
@@ -26,47 +38,11 @@ const SEARCH_STALE_TIME_MS = 30_000;
 const DETAIL_STALE_TIME_MS = 60_000;
 const PROJECTS_STALE_TIME_MS = 5 * 60_000;
 
-export interface WorkItemQueryState<T> {
-  readonly data: T | null;
-  readonly isLoading: boolean;
-  readonly isFetching: boolean;
-  readonly isError: boolean;
-  readonly error: Error | null;
-}
-
-const INITIAL_QUERY_STATE: WorkItemQueryState<never> = Object.freeze({
-  data: null,
-  isLoading: false,
-  isFetching: false,
-  isError: false,
-  error: null,
-});
+export type WorkItemQueryState<T> = KeyedQueryState<T>;
 
 const workItemsRegistry = createKeyedQueryRegistry<WorkItemQueryState<unknown>>({
   labelPrefix: "work-items",
-  initialState: INITIAL_QUERY_STATE,
-  buildFetchingState: (current) => ({
-    data: current.data,
-    isLoading: current.data === null,
-    isFetching: true,
-    isError: false,
-    error: null,
-  }),
-  buildSuccessState: (data) => ({
-    data,
-    isLoading: false,
-    isFetching: false,
-    isError: false,
-    error: null,
-  }),
-  buildErrorState: (current, error) => ({
-    data: current.data,
-    isLoading: false,
-    isFetching: false,
-    isError: true,
-    error,
-  }),
-  isErrorState: (state) => state.isError,
+  ...KEYED_QUERY_STATE_BUILDERS,
 });
 
 const { controllers, setQueryState, runController } = workItemsRegistry;
@@ -77,18 +53,15 @@ export type WorkItemQuery<TInput, TData> = import("@ryco/client-runtime/rpc").Ke
   WorkItemQueryState<TData>
 >;
 
-interface WorkItemQueryDefinition<TInput, TData> {
-  readonly label: string;
-  readonly staleTime: number;
-  readonly isEnabled: (input: TInput) => boolean;
-  readonly buildKey: (input: TInput) => string;
-  readonly resolveEnvironmentId: (input: TInput) => EnvironmentId;
-  readonly resolveProjectId: (input: TInput) => ProjectId | null;
-  readonly run: (input: TInput) => Promise<TData>;
+interface WorkItemQueryDefinition<TInput, TData, TEnabled extends TInput = TInput> extends Omit<
+  KeyedQueryReadDefinition<TInput, TData, TEnabled>,
+  "gcTime"
+> {
+  readonly resolveProjectId: (input: TEnabled) => ProjectId | null;
 }
 
-function defineQuery<TInput, TData>(
-  definition: WorkItemQueryDefinition<TInput, TData>,
+function defineQuery<TInput, TData, TEnabled extends TInput = TInput>(
+  definition: WorkItemQueryDefinition<TInput, TData, TEnabled>,
 ): WorkItemQuery<TInput, TData> {
   return defineKeyedQueryByKey(
     workItemsRegistry,
@@ -96,8 +69,7 @@ function defineQuery<TInput, TData>(
       ...definition,
       createControllerFields: (input) => ({ projectId: definition.resolveProjectId(input) }),
     },
-    (controller) =>
-      !controller.hasData || Date.now() - controller.lastFetchedAt >= controller.staleTime,
+    isPastStaleTime,
   ) as WorkItemQuery<TInput, TData>;
 }
 
@@ -116,22 +88,28 @@ export interface WorkItemProjectsInput {
   readonly enabled?: boolean;
 }
 
+type EnabledWorkItemProjectsInput = KeyedQueryEnabledInput<
+  WorkItemProjectsInput,
+  "environmentId" | "connectionId"
+>;
+
 export const workItemProjectsQuery = defineQuery<
   WorkItemProjectsInput,
-  ReadonlyArray<WorkItemProject>
+  ReadonlyArray<WorkItemProject>,
+  EnabledWorkItemProjectsInput
 >({
   label: "projects",
   staleTime: PROJECTS_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledWorkItemProjectsInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.connectionId !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.connectionId}${KEY_SEP}${input.siteUrl?.trim() ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   resolveProjectId: () => null,
   run: (input) => {
     const siteUrl = input.siteUrl?.trim() ?? "";
-    return workItemsClient(input.environmentId as EnvironmentId).listProjects({
-      connectionId: input.connectionId as AtlassianConnectionId,
+    return workItemsClient(input.environmentId).listProjects({
+      connectionId: input.connectionId,
       ...(siteUrl.length > 0 ? { siteUrl } : {}),
     });
   },
@@ -149,18 +127,27 @@ export interface WorkItemListInput {
   readonly enabled?: boolean;
 }
 
-export const workItemListQuery = defineQuery<WorkItemListInput, ReadonlyArray<WorkItemSummary>>({
+type EnabledWorkItemListInput = KeyedQueryEnabledInput<
+  WorkItemListInput,
+  "environmentId" | "projectId"
+>;
+
+export const workItemListQuery = defineQuery<
+  WorkItemListInput,
+  ReadonlyArray<WorkItemSummary>,
+  EnabledWorkItemListInput
+>({
   label: "list",
   staleTime: LIST_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledWorkItemListInput =>
     (input.enabled ?? true) && input.environmentId !== null && input.projectId !== null,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.projectId}${KEY_SEP}${input.state}${KEY_SEP}${input.limit ?? ""}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   resolveProjectId: (input) => input.projectId,
   run: (input) =>
-    workItemsClient(input.environmentId as EnvironmentId).list({
-      projectId: input.projectId as ProjectId,
+    workItemsClient(input.environmentId).list({
+      projectId: input.projectId,
       state: input.state,
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
     }),
@@ -178,27 +165,34 @@ export interface WorkItemSearchInput {
   readonly enabled?: boolean;
 }
 
-export const workItemSearchQuery = defineQuery<WorkItemSearchInput, ReadonlyArray<WorkItemSummary>>(
-  {
-    label: "search",
-    staleTime: SEARCH_STALE_TIME_MS,
-    isEnabled: (input) =>
-      (input.enabled ?? true) &&
-      input.environmentId !== null &&
-      input.projectId !== null &&
-      input.query.trim().length > 0,
-    buildKey: (input) =>
-      `${input.environmentId}${KEY_SEP}${input.projectId}${KEY_SEP}${input.query.trim()}${KEY_SEP}${input.limit ?? ""}`,
-    resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
-    resolveProjectId: (input) => input.projectId,
-    run: (input) =>
-      workItemsClient(input.environmentId as EnvironmentId).search({
-        projectId: input.projectId as ProjectId,
-        query: input.query.trim(),
-        ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      }),
-  },
-);
+type EnabledWorkItemSearchInput = KeyedQueryEnabledInput<
+  WorkItemSearchInput,
+  "environmentId" | "projectId"
+>;
+
+export const workItemSearchQuery = defineQuery<
+  WorkItemSearchInput,
+  ReadonlyArray<WorkItemSummary>,
+  EnabledWorkItemSearchInput
+>({
+  label: "search",
+  staleTime: SEARCH_STALE_TIME_MS,
+  isEnabled: (input): input is EnabledWorkItemSearchInput =>
+    (input.enabled ?? true) &&
+    input.environmentId !== null &&
+    input.projectId !== null &&
+    input.query.trim().length > 0,
+  buildKey: (input) =>
+    `${input.environmentId}${KEY_SEP}${input.projectId}${KEY_SEP}${input.query.trim()}${KEY_SEP}${input.limit ?? ""}`,
+  resolveEnvironmentId: (input) => input.environmentId,
+  resolveProjectId: (input) => input.projectId,
+  run: (input) =>
+    workItemsClient(input.environmentId).search({
+      projectId: input.projectId,
+      query: input.query.trim(),
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    }),
+});
 
 // ---------------------------------------------------------------------------
 // Detail
@@ -212,21 +206,30 @@ export interface WorkItemDetailInput {
   readonly enabled?: boolean;
 }
 
-export const workItemDetailQuery = defineQuery<WorkItemDetailInput, WorkItemDetailModel>({
+type EnabledWorkItemDetailInput = KeyedQueryEnabledInput<
+  WorkItemDetailInput,
+  "environmentId" | "projectId"
+>;
+
+export const workItemDetailQuery = defineQuery<
+  WorkItemDetailInput,
+  WorkItemDetailModel,
+  EnabledWorkItemDetailInput
+>({
   label: "detail",
   staleTime: DETAIL_STALE_TIME_MS,
-  isEnabled: (input) =>
+  isEnabled: (input): input is EnabledWorkItemDetailInput =>
     (input.enabled ?? true) &&
     input.environmentId !== null &&
     input.projectId !== null &&
     input.key.trim().length > 0,
   buildKey: (input) =>
     `${input.environmentId}${KEY_SEP}${input.projectId}${KEY_SEP}${input.key}${KEY_SEP}${input.fullContent ?? false}`,
-  resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
+  resolveEnvironmentId: (input) => input.environmentId,
   resolveProjectId: (input) => input.projectId,
   run: (input) =>
-    workItemsClient(input.environmentId as EnvironmentId).get({
-      projectId: input.projectId as ProjectId,
+    workItemsClient(input.environmentId).get({
+      projectId: input.projectId,
       key: input.key,
       fullContent: input.fullContent ?? false,
     }),

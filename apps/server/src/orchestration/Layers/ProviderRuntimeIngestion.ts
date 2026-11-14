@@ -35,6 +35,8 @@ import {
   type OrchestrationTurnOutcome,
   type ProviderRuntimeEvent,
   type ResponseStreamingMode,
+  type RuntimeTaskUsage,
+  type TaskAgentLinkage,
 } from "@ryco/contracts";
 import { Cache, Cause, Deferred, Duration, Effect, Layer, Option, Semaphore, Stream } from "effect";
 import type { ProviderRuntimeBinding } from "../../provider/Services/ProviderSessionDirectory.ts";
@@ -71,6 +73,16 @@ import {
 import { modelSelectionSpeed } from "@ryco/shared/model";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
+import type {
+  ContextWindowActivityPayload,
+  ApprovalActivityPayload,
+  RuntimeErrorActivityPayload,
+  SubagentActivityPayload,
+  TaskActivityPayload,
+  ToolActivityPayload,
+  TurnPlanActivityPayload,
+  UserInputActivityPayload,
+} from "@ryco/shared/threadActivityPayloads";
 import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -464,7 +476,9 @@ function rawPayloadThreadId(event: ProviderRuntimeEvent): string | undefined {
   return asTrimmedString(asRecord(event.raw?.payload)?.threadId);
 }
 
-function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): string[] {
+function collabReceiverThreadIdsFromRuntimeEvent(
+  event: ProviderRuntimeEvent,
+): ReadonlyArray<string> {
   if (
     event.type === "subagent.started" ||
     event.type === "subagent.updated" ||
@@ -483,16 +497,7 @@ function collabReceiverThreadIdsFromRuntimeEvent(event: ProviderRuntimeEvent): s
   if (event.payload.itemType !== "collab_agent_tool_call") {
     return [];
   }
-
-  const data = asRecord(event.payload.data);
-  const item = asRecord(data?.item);
-  const receiverThreadIds = item?.type === "collabAgentToolCall" ? item.receiverThreadIds : [];
-  return Array.isArray(receiverThreadIds)
-    ? receiverThreadIds.flatMap((entry) => {
-        const threadId = asTrimmedString(entry);
-        return threadId ? [threadId] : [];
-      })
-    : [];
+  return event.payload.receiverThreadIds ?? [];
 }
 
 /**
@@ -635,65 +640,78 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
+/** The task runtime payload fields every task activity repeats. */
+type TaskLinkageSource = TaskAgentLinkage & {
+  readonly typedUsage?: RuntimeTaskUsage | undefined;
+  readonly status?: string | undefined;
+  readonly error?: string | undefined;
+};
+
+type CopiedTaskLinkageField = Exclude<keyof TaskLinkageSource, "agentKind">;
+
+/**
+ * The fields `taskLinkageActivityFields` copies. Typed by the contract, so a field renamed there
+ * fails to compile here, and one added there fails `everyTaskLinkageFieldCopied` until it is
+ * listed. `agentKind` is the server's own stamp, never copied.
+ */
+const COPIED_TASK_LINKAGE_FIELDS = [
+  "isBackgrounded",
+  "canStop",
+  "canMessage",
+  "taskType",
+  "agentId",
+  "title",
+  "role",
+  "model",
+  "effort",
+  "toolUseId",
+  "parentAgentId",
+  "workflowName",
+  "agentIndex",
+  "phaseIndex",
+  "phaseTitle",
+  "phases",
+  "attempt",
+  "runHandles",
+  "outputFile",
+  "agentPath",
+  "timelineBypass",
+  "typedUsage",
+  "status",
+  "error",
+] as const satisfies ReadonlyArray<CopiedTaskLinkageField>;
+const everyTaskLinkageFieldCopied: [
+  Exclude<CopiedTaskLinkageField, (typeof COPIED_TASK_LINKAGE_FIELDS)[number]>,
+] extends [never]
+  ? true
+  : never = true;
+void everyTaskLinkageFieldCopied;
+
 /**
  * Copies the optional TaskAgentLinkage bundle from a task.* runtime payload
  * into the persisted activity payload. Identity fields ride on every row so
  * client folds survive activity retention; absent fields stay absent.
  */
-function taskLinkageActivityFields(payload: Record<string, unknown>): Record<string, unknown> {
+function taskLinkageActivityFields(payload: TaskLinkageSource): TaskActivityPayload {
   const fields: Record<string, unknown> = {
     // Server-stamped classification: persisted rows are self-describing, so
     // clients trust the stamp instead of re-deriving agent-vs-background
     // from taskType denylists and marker heuristics (legacy rows without a
     // stamp keep the client fallback).
-    agentKind: classifyTaskAgentKind({
-      taskType: typeof payload.taskType === "string" ? payload.taskType : undefined,
-      agentId: typeof payload.agentId === "string" ? payload.agentId : undefined,
-    }),
+    agentKind: classifyTaskAgentKind({ taskType: payload.taskType, agentId: payload.agentId }),
   };
-  for (const key of [
-    "isBackgrounded",
-    "canStop",
-    "canMessage",
-    "taskType",
-    "agentId",
-    "title",
-    "role",
-    "model",
-    "effort",
-    "toolUseId",
-    "parentAgentId",
-    "workflowName",
-    "agentIndex",
-    "phaseIndex",
-    "phaseTitle",
-    "phases",
-    "attempt",
-    "runHandles",
-    "outputFile",
-    "agentPath",
-    "timelineBypass",
-    "typedUsage",
-    "status",
-    "error",
-  ] as const) {
+  for (const key of COPIED_TASK_LINKAGE_FIELDS) {
     if (payload[key] !== undefined) {
       fields[key] = payload[key];
     }
   }
-  return fields;
+  return fields as TaskActivityPayload;
 }
 
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskTitle?: string,
 ): ReadonlyArray<OrchestrationThreadActivity> {
-  const maybeSequence = (() => {
-    const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
-    return eventWithSequence.sessionSequence !== undefined
-      ? { sequence: eventWithSequence.sessionSequence }
-      : {};
-  })();
   switch (event.type) {
     case "session.started":
     case "session.exited":
@@ -716,7 +734,6 @@ export function runtimeEventToActivities(
             state: event.type === "session.started" ? "started" : "stopped",
           },
           turnId: null,
-          ...maybeSequence,
         },
       ];
     }
@@ -751,9 +768,8 @@ export function runtimeEventToActivities(
             ...(event.payload.acceptForSessionOffered === false
               ? { acceptForSessionOffered: false }
               : {}),
-          },
+          } satisfies ApprovalActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -776,9 +792,8 @@ export function runtimeEventToActivities(
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
             ...(event.payload.decision ? { decision: event.payload.decision } : {}),
-          },
+          } satisfies ApprovalActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -792,7 +807,7 @@ export function runtimeEventToActivities(
           tone: "error",
           kind: "runtime.error",
           summary: usageLimit ? "Usage limit reached" : "Runtime error",
-          payload: usageLimit
+          payload: (usageLimit
             ? {
                 message: truncateDetail(event.payload.message),
                 class: "usage_limit",
@@ -800,9 +815,8 @@ export function runtimeEventToActivities(
               }
             : {
                 message: truncateDetail(event.payload.message),
-              },
+              }) satisfies RuntimeErrorActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -820,9 +834,8 @@ export function runtimeEventToActivities(
             ...(event.payload.toolUseId ? { toolUseId: event.payload.toolUseId } : {}),
             ...(event.payload.reason ? { detail: truncateDetail(event.payload.reason) } : {}),
             ...(event.payload.agentId ? { agentId: event.payload.agentId } : {}),
-          },
+          } satisfies ToolActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -841,7 +854,6 @@ export function runtimeEventToActivities(
               ? { detail: truncateActivityText(event.payload.detail, RUNTIME_NOTICE_DETAIL_LIMIT) }
               : {},
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -859,7 +871,6 @@ export function runtimeEventToActivities(
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -877,9 +888,8 @@ export function runtimeEventToActivities(
             ...(event.payload.explanation !== undefined
               ? { explanation: event.payload.explanation }
               : {}),
-          },
+          } satisfies TurnPlanActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -901,9 +911,8 @@ export function runtimeEventToActivities(
             ...(event.payload.nonBlocking
               ? { nonBlocking: true, itemId: event.itemId, providerRefs: event.providerRefs }
               : {}),
-          },
+          } satisfies UserInputActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -926,9 +935,8 @@ export function runtimeEventToActivities(
             ...(event.payload.userInputIdentity
               ? { userInputIdentity: event.payload.userInputIdentity }
               : {}),
-          },
+          } satisfies UserInputActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -951,11 +959,10 @@ export function runtimeEventToActivities(
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(event.payload),
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
-          },
+          } satisfies TaskActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -963,13 +970,17 @@ export function runtimeEventToActivities(
     case "task.progress": {
       const description = event.payload.description.trim();
       const linkage = {
-        ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+        ...taskLinkageActivityFields(event.payload),
         ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
       };
       // Usage and activity are independent latest-state streams. Separate
       // stable ids keep a command/reasoning update from replacing token usage
       // and keep a pure usage tick from blanking meaningful activity.
-      const identityLinkage: Record<string, unknown> = { ...linkage };
+      const identityLinkage: {
+        -readonly [Key in keyof TaskActivityPayload]: TaskActivityPayload[Key];
+      } = {
+        ...linkage,
+      };
       delete identityLinkage.typedUsage;
       delete identityLinkage.status;
       delete identityLinkage.error;
@@ -1006,9 +1017,8 @@ export function runtimeEventToActivities(
                   ...(event.payload.status ? { status: event.payload.status } : {}),
                   ...(event.payload.error ? { error: event.payload.error } : {}),
                   ...identityLinkage,
-                },
+                } satisfies TaskActivityPayload,
                 turnId: toTurnId(event.turnId) ?? null,
-                ...maybeSequence,
               },
             ]
           : []),
@@ -1026,9 +1036,8 @@ export function runtimeEventToActivities(
                   ...identityLinkage,
                   usageSnapshot: true,
                   typedUsage: event.payload.typedUsage,
-                },
+                } satisfies TaskActivityPayload,
                 turnId: toTurnId(event.turnId) ?? null,
-                ...maybeSequence,
               },
             ]
           : []),
@@ -1057,11 +1066,10 @@ export function runtimeEventToActivities(
             ...(event.payload.isBackgrounded !== undefined
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(event.payload),
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
-          },
+          } satisfies TaskActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1093,9 +1101,8 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
-          },
+          } satisfies ToolActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1126,11 +1133,10 @@ export function runtimeEventToActivities(
                 }
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(event.payload),
             ...(event.runtimeSessionId ? { runtimeSessionId: event.runtimeSessionId } : {}),
-          },
+          } satisfies TaskActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1147,9 +1153,8 @@ export function runtimeEventToActivities(
             itemType: "collab_agent_tool_call",
             status: "running",
             subagent: event.payload.subagent,
-          },
+          } satisfies SubagentActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1169,9 +1174,8 @@ export function runtimeEventToActivities(
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
-          },
+          } satisfies SubagentActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1195,9 +1199,8 @@ export function runtimeEventToActivities(
             subagent: event.payload.subagent,
             ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
-          },
+          } satisfies SubagentActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1219,7 +1222,6 @@ export function runtimeEventToActivities(
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1242,7 +1244,6 @@ export function runtimeEventToActivities(
               : {}),
           },
           turnId: null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1263,7 +1264,6 @@ export function runtimeEventToActivities(
           summary: "Suggested next prompt",
           payload: { suggestion: event.payload.suggestion },
           turnId,
-          ...maybeSequence,
         },
       ];
     }
@@ -1287,9 +1287,8 @@ export function runtimeEventToActivities(
           payload: {
             ...payload,
             statisticsProvider: event.provider,
-          },
+          } satisfies ContextWindowActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1318,9 +1317,8 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
-          },
+          } satisfies ToolActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         }),
       ];
     }
@@ -1349,9 +1347,8 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
-          },
+          } satisfies ToolActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -1380,9 +1377,8 @@ export function runtimeEventToActivities(
             ...(event.payload.parentToolUseId
               ? { parentToolUseId: event.payload.parentToolUseId }
               : {}),
-          },
+          } satisfies ToolActivityPayload,
           turnId: toTurnId(event.turnId) ?? null,
-          ...maybeSequence,
         },
       ];
     }
@@ -2002,8 +1998,6 @@ const make = Effect.gen(function* () {
     streaming: boolean;
     createdAt: string;
   }): ActivityAppendCommand => {
-    const sessionSequence = (input.event as ProviderRuntimeEvent & { sessionSequence?: number })
-      .sessionSequence;
     const commandKey = `${input.providerThreadId}:${input.providerItemId}`;
     return {
       type: "thread.activity.append",
@@ -2029,7 +2023,6 @@ const make = Effect.gen(function* () {
           ...(input.event.providerRefs ? { providerRefs: input.event.providerRefs } : {}),
         },
         turnId: toTurnId(input.event.turnId) ?? null,
-        ...(sessionSequence !== undefined ? { sequence: sessionSequence } : {}),
       },
       createdAt: input.createdAt,
     };
@@ -3745,19 +3738,12 @@ const make = Effect.gen(function* () {
         case "task.progress":
         case "task.updated":
         case "task.completed": {
-          const payload = event.payload as {
-            taskId: string;
-            taskType?: string;
-            status?: string;
-            agentId?: string;
-            attempt?: number;
-            parentAgentId?: string;
-          };
+          const payload = event.payload;
           threadBackgroundLiveness.recordTaskLiveness({
             threadId: thread.id,
             taskId: payload.taskId,
             taskType: payload.taskType,
-            status: payload.status,
+            status: "status" in payload ? payload.status : undefined,
             agentId: payload.agentId,
             attempt: payload.attempt,
             parentAgentId: payload.parentAgentId,
@@ -3825,10 +3811,11 @@ const make = Effect.gen(function* () {
               ? {
                   ...activity,
                   payload: {
-                    ...(activity.payload as Record<string, unknown>),
+                    // Written by `runtimeEventToActivities` just above.
+                    ...(activity.payload as ContextWindowActivityPayload),
                     statisticsModel: thread.modelSelection.model,
                     ...statisticsSpeedField(thread.modelSelection),
-                  },
+                  } satisfies ContextWindowActivityPayload,
                 }
               : activity,
           createdAt: activity.createdAt,
