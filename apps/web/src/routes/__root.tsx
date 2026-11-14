@@ -5,6 +5,7 @@ import {
   useLocation,
   useRouter,
 } from "@tanstack/react-router";
+import { isAppSessionGate } from "../routeAuthGate";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { AuthSessionState, ServerLifecycleWelcomePayload } from "@ryco/contracts";
 
@@ -184,11 +185,7 @@ function resolveRootBeforeLoadContext(
   const pendingContext: Promise<RootBeforeLoadContext> = resolveRootBeforeLoadContextAsync(
     pathname,
   ).then((context) => {
-    if (
-      context.authGateState.status === "authenticated" ||
-      context.authGateState.status === "hosted-static" ||
-      context.authGateState.status === "hosted-hub"
-    ) {
+    if (isAppSessionGate(context.authGateState)) {
       cachedReadyRootContext = context;
     }
     return withRootSurfaceLoaded(pathname, context);
@@ -434,11 +431,7 @@ function RootRoutePendingView() {
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
-  const canShowInterstitial =
-    rendersRootSurface(pathname) &&
-    (authGateState.status === "authenticated" ||
-      authGateState.status === "hosted-static" ||
-      authGateState.status === "hosted-hub");
+  const canShowInterstitial = rendersRootSurface(pathname) && isAppSessionGate(authGateState);
   const [showInterstitial, setShowInterstitial] = useState(() => {
     if (!canShowInterstitial || !isPhoneAppInterstitialEnabled()) return false;
     return shouldShowPhoneAppInterstitial({

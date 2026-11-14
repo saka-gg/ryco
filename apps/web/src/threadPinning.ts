@@ -1,4 +1,5 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
+import { confirmAction } from "./confirmAction";
 import {
   applyThreadPin,
   requestThreadPinChange as requestSharedThreadPinChange,
@@ -10,7 +11,6 @@ import {
 import { sidebarUndo } from "./sidebarUndo";
 import { stackedThreadToast } from "./components/ui/toastHelpers";
 import { toastManager } from "./components/ui/toastManager";
-import { readLocalApi } from "./localApi";
 import { useUiStateStore } from "./uiStateStore";
 import { errorMessage } from "~/lib/errorMessage";
 
@@ -50,10 +50,7 @@ const defaultDependencies: ThreadPinChangeDependencies = {
     if (!target) return;
     applyThreadPin({ target, threadKey, pinned }, uiStatePinStore, sidebarUndo);
   },
-  confirm: async (message) => {
-    const localApi = readLocalApi();
-    return localApi ? localApi.dialogs.confirm(message) : window.confirm(message);
-  },
+  confirm: confirmAction,
   failed: (error) =>
     toastManager.add(
       stackedThreadToast({

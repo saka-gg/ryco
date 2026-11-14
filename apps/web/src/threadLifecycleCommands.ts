@@ -2,6 +2,7 @@ import type {
   SidebarBatchCommand,
   SidebarUndoBatchResult,
 } from "@ryco/client-runtime/state/threads/sidebarUndoBatch";
+import { confirmAction } from "./confirmAction";
 import type { ScopedThreadRef, ThreadId } from "@ryco/contracts";
 
 import {
@@ -11,7 +12,6 @@ import {
 import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { readEnvironmentApi } from "./environmentApi";
 import { newCommandId } from "./lib/utils";
-import { readLocalApi } from "./localApi";
 import { sidebarUndo } from "./sidebarUndo";
 import type { ThreadBatchAction } from "./threadLifecycleBatch";
 import type { SidebarThreadSummary } from "./types";
@@ -213,11 +213,6 @@ export async function attemptThreadArchive(input: {
   }
 }
 
-async function confirmWithDialog(message: string): Promise<boolean> {
-  const localApi = readLocalApi();
-  return localApi ? localApi.dialogs.confirm(message) : window.confirm(message);
-}
-
 /** Archives a thread, asking first when "Archive confirmation" is on. */
 export async function requestThreadArchive(
   input: {
@@ -227,7 +222,7 @@ export async function requestThreadArchive(
     readonly confirmThreadArchive: boolean;
     readonly archiveThread: ArchiveThread;
   },
-  confirm: (message: string) => Promise<boolean> = confirmWithDialog,
+  confirm: (message: string) => Promise<boolean> = confirmAction,
 ): Promise<void> {
   if (
     shouldConfirmSidebarThreadArchive({

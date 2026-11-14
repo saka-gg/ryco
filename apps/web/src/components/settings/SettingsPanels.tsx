@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { confirmAction } from "../../confirmAction";
 import { useServerConfig } from "../../rpc/serverState";
 import { ProjectDefaultsSection } from "./ProjectDefaultsSection";
 import { StorageSettings } from "./StorageSettings";
@@ -166,7 +167,7 @@ function AboutVersionSection({
 }) {
   const updateState = useDesktopUpdateState();
 
-  const handleButtonClick = useCallback(() => {
+  const handleButtonClick = useCallback(async () => {
     const bridge = window.desktopBridge;
     if (!bridge) return;
 
@@ -191,11 +192,11 @@ function AboutVersionSection({
     }
 
     if (action === "install") {
-      const confirmed = window.confirm(
+      const confirmed = await confirmAction(
         getDesktopUpdateInstallConfirmationMessage(
           updateState ?? { availableVersion: null, downloadedVersion: null },
         ),
-      );
+      ).catch(() => false);
       if (!confirmed) return;
       void bridge
         .installUpdate()
