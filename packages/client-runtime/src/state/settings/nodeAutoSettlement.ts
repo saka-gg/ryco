@@ -1,4 +1,4 @@
-import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
+import type { EnvironmentId, NodeSessionRole, ServerConfig } from "@ryco/contracts";
 import {
   DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   type ServerSettingsPatch,
@@ -41,7 +41,7 @@ export interface AutoSettleRuleHandOverInput {
   readonly config: NodeConfig | null | undefined;
   /** This client's own rule, from before nodes kept one. */
   readonly clientValue: SidebarAutoSettleAfterDays;
-  readonly role: "viewer" | "operator" | "owner" | "client" | null | undefined;
+  readonly role: NodeSessionRole | null | undefined;
   readonly mutationReady: boolean;
 }
 

@@ -5,6 +5,9 @@ test-results/
 .DS_Store
 *.log
 *.tsbuildinfo
+# Merge and patch leftovers
+*.orig
+*.rej
 apps/*/dist
 .perf-results/
 apps/desktop/resources/ryco-desktop-security-helper

@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { errorMessage } from "~/lib/errorMessage";
 
 function describeSshTarget(request: DesktopSshPasswordPromptRequest): string {
   return request.username ? `${request.username}@${request.destination}` : request.destination;
@@ -22,7 +23,7 @@ function formatRemainingSeconds(seconds: number): string {
 }
 
 function getPromptErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : "SSH password prompt failed.";
+  const message = errorMessage(error, "SSH password prompt failed.");
   return message.includes("expired") || message.includes("no longer pending")
     ? "This SSH password prompt expired. Try connecting again."
     : message;

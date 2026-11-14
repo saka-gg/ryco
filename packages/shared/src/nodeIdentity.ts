@@ -77,6 +77,9 @@ const SESSION_ID = new RegExp(`^sess_${PUBLIC_ID_SUFFIX}$`);
 const NATIVE_NODE_CLAIM_ID = new RegExp(`^nclaim_${PUBLIC_ID_SUFFIX}$`);
 const DESKTOP_INSTALLATION_ID = new RegExp(`^install_${PUBLIC_ID_SUFFIX}$`);
 const ENVIRONMENT_ID = /^env_[A-Za-z0-9_-]{22}$/;
+// A local copy of the loopback rule (`loopbackHost.ts` with `ipv4: "127.0.0.1"`), on purpose:
+// this module is also built outside this package together with a fixed set of sibling files,
+// and `loopbackHost.ts` is not one of them. Keep its imports to that set.
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 function invalid(): never {

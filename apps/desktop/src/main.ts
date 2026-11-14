@@ -57,7 +57,6 @@ import type { MenuItemConstructorOptions, OpenDialogOptions } from "electron";
 import {
   DESKTOP_PASTE_AS_TEXT_MENU_ACTION,
   EnvironmentId,
-  type ClientSettings,
   type DesktopTheme,
   type DesktopAppBranding,
   type DesktopHostedIdentityActionResult,
@@ -195,6 +194,7 @@ import {
   isDesktopNodeReachable,
 } from "./desktopKeepAwake.ts";
 import {
+  decodeClientSettingsPayload,
   readClientSettings,
   readAppKeybindings,
   writeAppKeybindings,
@@ -4639,11 +4639,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.removeHandler(SET_CLIENT_SETTINGS_CHANNEL);
   ipcMain.handle(SET_CLIENT_SETTINGS_CHANNEL, async (_event, rawSettings: unknown) => {
-    if (typeof rawSettings !== "object" || rawSettings === null) {
-      throw new Error("Invalid client settings payload.");
-    }
-
-    writeClientSettings(CLIENT_SETTINGS_PATH, rawSettings as ClientSettings);
+    writeClientSettings(CLIENT_SETTINGS_PATH, decodeClientSettingsPayload(rawSettings));
   });
 
   ipcMain.removeHandler(GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL);

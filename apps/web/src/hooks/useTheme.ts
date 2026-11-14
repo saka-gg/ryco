@@ -1,3 +1,5 @@
+import { ColorMode } from "@ryco/contracts/settings";
+import * as Schema from "effect/Schema";
 import { useSyncExternalStore } from "react";
 
 import {
@@ -24,7 +26,9 @@ import {
 } from "../themes/appearancePreferences";
 import { getDocumentWindowTranslucencyScope } from "../themes/windowTranslucency";
 
-type Theme = "light" | "dark" | "system";
+type Theme = ColorMode;
+
+const isColorMode = Schema.is(ColorMode);
 
 /** The color modes Settings and the command palette offer, in their order. */
 export const COLOR_MODE_OPTIONS = [
@@ -71,7 +75,7 @@ function getSystemDark() {
 function getStored(): Theme {
   if (!hasThemeStorage()) return DEFAULT_THEME_SNAPSHOT.theme;
   const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw === "light" || raw === "dark" || raw === "system") return raw;
+  if (isColorMode(raw)) return raw;
   return DEFAULT_THEME_SNAPSHOT.theme;
 }
 

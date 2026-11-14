@@ -22,14 +22,16 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import {
+  buildDisabledServerProvider,
+  buildPendingServerProvider,
   buildServerProvider,
   DEFAULT_TIMEOUT_MS,
   detailFromResult,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
-  spawnAndCollect,
   type ServerProviderDraft,
+  spawnAndCollect,
   withProviderRateLimits,
 } from "../providerSnapshot.ts";
 import {
@@ -485,18 +487,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   );
 
   if (!claudeSettings.enabled) {
-    return buildServerProvider({
+    return buildDisabledServerProvider({
       presentation: CLAUDE_PRESENTATION,
-      enabled: false,
       checkedAt,
       models: allModels,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Claude is disabled in Ryco settings.",
-      },
     });
   }
 
@@ -723,32 +717,13 @@ export const makePendingClaudeProvider = (claudeSettings: ClaudeSettings): Serve
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
 
-  if (!claudeSettings.enabled) {
-    return buildServerProvider({
-      presentation: CLAUDE_PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models,
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Claude is disabled in Ryco settings.",
-      },
-    });
-  }
-
-  return buildServerProvider({
+  return buildPendingServerProvider({
     presentation: CLAUDE_PRESENTATION,
-    enabled: true,
+    enabled: claudeSettings.enabled,
     checkedAt,
     models,
-    probe: {
+    pending: {
       installed: false,
-      version: null,
-      status: "warning",
-      auth: { status: "unknown" },
       message: "Claude provider status has not been checked in this session yet.",
     },
   });

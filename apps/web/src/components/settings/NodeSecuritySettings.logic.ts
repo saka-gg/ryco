@@ -55,6 +55,7 @@ import type {
 } from "@ryco/client-runtime/connection";
 import type { HostedConnectionStatusIndicator } from "../../hostedHub/connectionStatus";
 import { hostedE2eeVerificationView } from "../hostedHub/HostedE2eeVerification.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Which of the two connection modes this build is running in.
@@ -246,7 +247,7 @@ export function nodeSecurityReadFailure(results: NodeSecurityReadResults): strin
   for (const field of NODE_SECURITY_READ_FIELDS) {
     const result = results[field];
     if (result.status === "rejected") {
-      return result.reason instanceof Error ? result.reason.message : NODE_SECURITY_READ_FAILED;
+      return errorMessage(result.reason, NODE_SECURITY_READ_FAILED);
     }
   }
   return null;

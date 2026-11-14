@@ -17,7 +17,7 @@ import {
 } from "../primitives";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { usePullRequestReaderStore } from "../pullRequestsLayoutStore";
-import { errorText } from "./MarkdownEditor";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** Edit requests already answered, per reader, so a remount does not reopen the editor. */
 const handledTitleEditRequests = new Map<string, number>();
@@ -178,7 +178,7 @@ function TitleEditor(props: {
       await props.onSubmit(next);
       settledRef.current = true;
     } catch (submitError) {
-      setError(errorText(submitError, "Could not rename the pull request."));
+      setError(errorMessage(submitError, "Could not rename the pull request."));
       setPending(false);
     }
   };

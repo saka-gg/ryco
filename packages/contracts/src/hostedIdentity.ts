@@ -1,8 +1,13 @@
 import * as Schema from "effect/Schema";
 
-import { rejectExcessProperties } from "./baseSchemas.ts";
+import {
+  ExecutionEnvironmentPlatformArch,
+  ExecutionEnvironmentPlatformOs,
+  rejectExcessProperties,
+} from "./baseSchemas.ts";
 import { HubNodePublicKeyFingerprint } from "./hubConnector.ts";
 import { RelayNodeId } from "./relay.ts";
+import { SpaceRole } from "./spaceRole.ts";
 
 export const PUBLIC_SIGNUP_START_PATH = "/api/public-signup/start" as const;
 export const PUBLIC_SIGNUP_CONFIG_PATH = "/api/public-signup/config" as const;
@@ -149,8 +154,8 @@ export type HubSpaceId = typeof HubSpaceId.Type;
 export const HubSpaceKind = Schema.Literals(["personal", "legacy"]);
 export type HubSpaceKind = typeof HubSpaceKind.Type;
 
-export const HubSpaceRole = Schema.Literals(["viewer", "operator", "owner"]);
-export type HubSpaceRole = typeof HubSpaceRole.Type;
+export const HubSpaceRole = SpaceRole;
+export type HubSpaceRole = SpaceRole;
 
 /** A canonical, globally unique public username. Non-canonical input is rejected. */
 export const HubUsername = Schema.String.check(
@@ -1047,8 +1052,8 @@ const NativeNodeClaimMetadata = rejectExcessProperties(
   Schema.Struct({
     environmentId: NativeNodeClaimEnvironmentId,
     label: Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(100)),
-    platformOs: Schema.Literals(["darwin", "linux", "windows", "unknown"]),
-    platformArch: Schema.Literals(["arm64", "x64", "other"]),
+    platformOs: ExecutionEnvironmentPlatformOs,
+    platformArch: ExecutionEnvironmentPlatformArch,
     clientVersion: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(64)),
     algorithm: Schema.Literal("ed25519"),
     publicKey: NativeNodeClaimPublicKey,

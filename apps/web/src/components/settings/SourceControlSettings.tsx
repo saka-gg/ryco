@@ -51,6 +51,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { readEnvironmentConnection } from "~/environments/runtime";
 import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
+import { errorMessage } from "~/lib/errorMessage";
 
 const EMPTY_DISCOVERY_RESULT: SourceControlDiscoveryResult = {
   versionControlSystems: [],
@@ -386,7 +387,7 @@ function AtlassianConfiguration({
         stackedThreadToast({
           type: "error",
           title: "Could not save Bitbucket token",
-          description: error instanceof Error ? error.message : "The token could not be saved.",
+          description: errorMessage(error, "The token could not be saved."),
         }),
       );
     },
@@ -426,7 +427,7 @@ function AtlassianConfiguration({
         stackedThreadToast({
           type: "error",
           title: "Could not save Jira token",
-          description: error instanceof Error ? error.message : "The token could not be saved.",
+          description: errorMessage(error, "The token could not be saved."),
         }),
       );
     },
@@ -449,7 +450,7 @@ function AtlassianConfiguration({
         stackedThreadToast({
           type: "error",
           title: "Could not delete Atlassian connection",
-          description: error instanceof Error ? error.message : "The connection was not changed.",
+          description: errorMessage(error, "The connection was not changed."),
         }),
       );
     },

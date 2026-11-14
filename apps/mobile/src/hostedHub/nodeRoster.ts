@@ -1,5 +1,6 @@
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, SpaceRole } from "@ryco/contracts";
+import { isObjectLike } from "@ryco/shared/unknownValue";
 
 /**
  * The locally persisted Hub node roster (wave 2 amendment A). The directory
@@ -19,7 +20,7 @@ export interface CachedHubNodeRecord {
   readonly nodeId: string;
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  readonly effectiveRole: "viewer" | "operator" | "owner";
+  readonly effectiveRole: SpaceRole;
   readonly revokedAt: number | null;
   readonly presenceOnline: boolean;
   readonly lastHeartbeatAt: number | null;
@@ -34,17 +35,13 @@ export interface StoredHubNodeRoster {
 
 const ROLES = new Set(["viewer", "operator", "owner"]);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isNullableNumber(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isFinite(value));
 }
 
 function isValidRosterRecord(value: unknown): value is CachedHubNodeRecord {
   return (
-    isRecord(value) &&
+    isObjectLike(value) &&
     typeof value.nodeId === "string" &&
     value.nodeId.length > 0 &&
     typeof value.environmentId === "string" &&
@@ -73,7 +70,7 @@ export function decodeStoredHubNodeRoster(raw: string): ReadonlyArray<CachedHubN
   } catch {
     return null;
   }
-  if (!isRecord(value)) return null;
+  if (!isObjectLike(value)) return null;
   if (value.schemaVersion !== HUB_NODE_ROSTER_SCHEMA_VERSION) return null;
   if (!Array.isArray(value.nodes)) return null;
   if (!value.nodes.every(isValidRosterRecord)) return null;

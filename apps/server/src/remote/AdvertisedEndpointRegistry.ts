@@ -19,7 +19,7 @@ import { ServerConfig } from "../config.ts";
 import {
   bindsAllInterfaces,
   formatHostForUrl,
-  isLoopbackHost,
+  isLocalListenerHost,
   resolveExternalInterfaceHost,
   resolveListeningPort,
 } from "../startupAccess.ts";
@@ -46,7 +46,7 @@ function createServerEndpoint(
 }
 
 function classifyConfiguredHostReachability(host: string): AdvertisedEndpoint["reachability"] {
-  if (isLoopbackHost(host)) {
+  if (isLocalListenerHost(host)) {
     return "loopback";
   }
   if (isTailscaleIpv4Address(host)) {
@@ -83,7 +83,7 @@ export function resolveServerAdvertisedEndpoints(input: {
   ];
 
   const allInterfaces = bindsAllInterfaces(input.host);
-  if (!allInterfaces && input.host && isLoopbackHost(input.host)) {
+  if (!allInterfaces && input.host && isLocalListenerHost(input.host)) {
     return endpoints;
   }
 
@@ -93,7 +93,7 @@ export function resolveServerAdvertisedEndpoints(input: {
 
   if (
     configuredHost === undefined ||
-    isLoopbackHost(configuredHost) ||
+    isLocalListenerHost(configuredHost) ||
     configuredHost === "localhost"
   ) {
     return endpoints;

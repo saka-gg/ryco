@@ -1,4 +1,4 @@
-import type { RuntimeSubagent, RuntimeSubagentStatus } from "../../threadWorkspaceViewModel";
+import type { RuntimeSubagent, SubagentViewStatus } from "../../threadWorkspaceViewModel";
 
 /**
  * A running direct subagent seen at a fixed instant; override any field. The
@@ -7,7 +7,7 @@ import type { RuntimeSubagent, RuntimeSubagentStatus } from "../../threadWorkspa
 export function makeRuntimeAgent(
   id: string,
   overrides: Partial<RuntimeSubagent> & {
-    readonly status?: RuntimeSubagentStatus;
+    readonly status?: SubagentViewStatus;
   } = {},
 ): RuntimeSubagent {
   const firstSeenAt = overrides.firstSeenAt ?? "2026-08-10T10:00:00.000Z";

@@ -27,6 +27,7 @@ import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
 import { WorkspacePaths } from "../Services/WorkspacePaths.ts";
 import { IGNORED_DIRECTORY_NAMES, isPathInIgnoredDirectory } from "./WorkspaceEntries.ts";
 import { isLikelyBinaryPreview, WORKSPACE_PREVIEW_MAX_BYTES } from "./WorkspaceFileSystem.ts";
+import { isPathInside } from "../../pathContainment.ts";
 
 /**
  * One page's budget from request to answer, waits for a search slot and a cold
@@ -165,13 +166,8 @@ export const makeWorkspaceContentSearch = Effect.gen(function* () {
   const makeFolderContainment = (root: string) => {
     let realRoot: Promise<string> | undefined;
     const folders = new Map<string, Promise<boolean>>();
-    const staysInside = (realRootPath: string, realFolder: string) => {
-      const relative = path.relative(realRootPath, realFolder);
-      return (
-        relative.length === 0 ||
-        (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-      );
-    };
+    const staysInside = (realRootPath: string, realFolder: string) =>
+      isPathInside({ root: realRootPath, candidate: realFolder, allowRoot: true, path });
     return (relativePath: string): Promise<boolean> => {
       const folder = path.dirname(relativePath);
       if (folder === ".") return Promise.resolve(true);

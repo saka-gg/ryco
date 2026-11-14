@@ -7,7 +7,7 @@ import {
   WorkspaceDiskUsageResult,
   WorkspaceLifecycleSummary,
 } from "@ryco/contracts/workspace-lifecycle";
-import { KEY_SEP } from "@ryco/client-runtime/rpc";
+import { KEY_SEP, type KeyedQueryEnabledInput } from "@ryco/client-runtime/rpc";
 import * as Schema from "effect/Schema";
 
 import { createMobileQueryCache } from "./mobileQueryCache";
@@ -20,16 +20,20 @@ export interface ProjectInput {
   readonly projectId: ProjectId | null;
 }
 
+type EnabledProjectInput = KeyedQueryEnabledInput<ProjectInput, "environmentId" | "projectId">;
+
 const project = {
   retainedKeyLimit: 4,
-  isEnabled: (input: ProjectInput) => input.environmentId !== null && input.projectId !== null,
-  buildKey: (input: ProjectInput) => `${input.environmentId}${KEY_SEP}${input.projectId}`,
-  resolveEnvironmentId: (input: ProjectInput) => input.environmentId as EnvironmentId,
+  isEnabled: (input: ProjectInput): input is EnabledProjectInput =>
+    input.environmentId !== null && input.projectId !== null,
+  buildKey: (input: EnabledProjectInput) => `${input.environmentId}${KEY_SEP}${input.projectId}`,
+  resolveEnvironmentId: (input: EnabledProjectInput) => input.environmentId,
 } as const;
 
 export const projectWorkspacesMirror = projectSettingsCache.defineSavedMirror<
   ProjectInput,
-  ReadonlyArray<WorkspaceLifecycleSummary>
+  ReadonlyArray<WorkspaceLifecycleSummary>,
+  EnabledProjectInput
 >({
   ...project,
   label: "workspaces",
@@ -38,7 +42,8 @@ export const projectWorkspacesMirror = projectSettingsCache.defineSavedMirror<
 
 export const projectDiskUsageMirror = projectSettingsCache.defineSavedMirror<
   ProjectInput,
-  WorkspaceDiskUsageResult["workspaces"]
+  WorkspaceDiskUsageResult["workspaces"],
+  EnabledProjectInput
 >({
   ...project,
   label: "disk-usage",

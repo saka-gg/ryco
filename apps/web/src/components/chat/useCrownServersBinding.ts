@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { normalizeBrowserUrl, projectBrowserKey, useBrowserUi } from "~/browser/browserState";
 import { readEnvironmentApi } from "~/environmentApi";
-import { isLoopbackHostname } from "~/environments/primary";
+import { isPrimaryLoopbackHostname } from "~/environments/primary";
 import { getEnvironmentHttpBaseUrl } from "~/environments/runtime";
 import { readHostedRpcCapability, useHostedRpcCapability } from "~/hostedHub/capabilities";
 import { useDocumentVisible } from "~/hooks/useDocumentVisible";
@@ -24,6 +24,7 @@ import { openExternalLink } from "~/lib/openExternalLink";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { CrownServersBinding } from "../overview/crown/crownTypes";
 import { serverDisplayName } from "../overview/crown/details/ServersDetail";
+import { errorMessage } from "~/lib/errorMessage";
 
 const NO_SERVERS: ReadonlyArray<ThreadLocalServer> = [];
 const NOT_STOPPING: ReadonlySet<number> = new Set();
@@ -38,7 +39,7 @@ const selectNodeLabel = (config: ServerConfig | null) => config?.environment.lab
 function nodeIsThisComputer(environmentId: EnvironmentId): boolean {
   try {
     const url = getEnvironmentHttpBaseUrl(environmentId);
-    return url !== null && isLoopbackHostname(new URL(url).hostname);
+    return url !== null && isPrimaryLoopbackHostname(new URL(url).hostname);
   } catch {
     return false;
   }
@@ -114,7 +115,7 @@ export function useCrownServersBinding(input: {
           toastManager.add({
             type: "error",
             title: "Could not open the server",
-            description: error instanceof Error ? error.message : "The Browser panel refused it.",
+            description: errorMessage(error, "The Browser panel refused it."),
           }),
         );
     },

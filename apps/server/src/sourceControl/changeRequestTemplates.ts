@@ -28,6 +28,7 @@ import { truncateUnicodeSafe } from "@ryco/shared/String";
 import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
 import { withChangeRequestTemplate } from "../textGeneration/TextGenerationPresets.ts";
 import type { ExecuteGitInput, GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import { truncateUtf8Bytes } from "@ryco/shared/utf8Truncate";
 
 /** Larger template files are skipped without being read (Synara `BLOB_READ_MAX_BYTES`). */
 export const CHANGE_REQUEST_TEMPLATE_BLOB_MAX_BYTES = 100_000;
@@ -209,18 +210,6 @@ export function parseCatFileBatch(bytes: Uint8Array): ReadonlyMap<string, Uint8A
   return objects;
 }
 
-/** At most `maxBytes` of UTF-8, cut before a character that would not fit (Synara `truncateUtf8`). */
-export function truncateUtf8(
-  bytes: Uint8Array,
-  maxBytes: number,
-): { readonly text: string; readonly truncated: boolean } {
-  if (bytes.length <= maxBytes) return { text: textDecoder.decode(bytes), truncated: false };
-  let end = Math.max(0, maxBytes);
-  // Back up over continuation bytes to the start of the character that crosses the limit.
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return { text: textDecoder.decode(bytes.subarray(0, end)), truncated: true };
-}
-
 /**
  * A template's body: bounded, with `\n` line ends (a text box would turn `\r\n` into `\n` and
  * make an untouched template look edited), and trimmed; null for binary (NUL) or blank content.
@@ -229,7 +218,7 @@ export function templateBody(
   bytes: Uint8Array,
 ): { readonly body: string; readonly truncated: boolean } | null {
   if (bytes.includes(0)) return null;
-  const { text, truncated } = truncateUtf8(bytes, CHANGE_REQUEST_TEMPLATE_MAX_BYTES);
+  const { text, truncated } = truncateUtf8Bytes(bytes, CHANGE_REQUEST_TEMPLATE_MAX_BYTES);
   const body = text.replace(/\r\n?/gu, "\n").trim();
   return body.length === 0 ? null : { body, truncated };
 }
