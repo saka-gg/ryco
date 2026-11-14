@@ -400,6 +400,10 @@ import type {
   ChangeRequestTemplateListInput,
   ChangeRequestTemplateListResult,
 } from "./changeRequestReview.ts";
+import type {
+  DesktopSshEnvironmentTarget,
+  PersistedSavedEnvironmentRecord,
+} from "./savedEnvironment.ts";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -482,13 +486,6 @@ export interface DesktopEnvironmentBootstrap {
   bootstrapToken?: string;
 }
 
-export interface DesktopSshEnvironmentTarget {
-  alias: string;
-  hostname: string;
-  username: string | null;
-  port: number | null;
-}
-
 export type DesktopSshHostSource = "ssh-config" | "known-hosts";
 
 export interface DesktopDiscoveredSshHost extends DesktopSshEnvironmentTarget {
@@ -522,40 +519,6 @@ export interface DesktopSshPasswordPromptRequest {
   username: string | null;
   prompt: string;
   expiresAt: string;
-}
-
-/**
- * A saved environment whose direct access was issued over a trusted Hub relay
- * channel (Hub-linked direct access), rather than by a pasted pairing link.
- */
-export interface SavedEnvironmentHubLink {
-  /** The node's Hub environment id: a different id from the direct one. */
-  hubEnvironmentId: string;
-  /** When the direct credential was last issued; it is renewed through the Hub. */
-  linkedAt: string;
-  /**
-   * The node identity key (Ed25519, base64url) the grant named: each direct
-   * address must prove it before the bearer goes there. A link saved before
-   * the proof existed has none, so it is never used and is renewed instead.
-   */
-  nodeIdentityPublicKey?: string;
-}
-
-export interface PersistedSavedEnvironmentRecord {
-  environmentId: EnvironmentId;
-  label: string;
-  wsBaseUrl: string;
-  httpBaseUrl: string;
-  createdAt: string;
-  lastConnectedAt: string | null;
-  desktopSsh?: DesktopSshEnvironmentTarget;
-  hubLink?: SavedEnvironmentHubLink;
-  /**
-   * When the user switched the machine off (ISO time). A switched-off machine
-   * stays saved with its credential but never connects until switched on.
-   * Absent means on, so an app that predates the field keeps it on.
-   */
-  disabledAt?: string;
 }
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";

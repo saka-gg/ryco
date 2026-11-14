@@ -1,14 +1,11 @@
 import * as FS from "node:fs";
 
-import {
-  ClientSettingsSchema,
-  MAX_KEYBINDINGS_COUNT,
-  type ClientSettings,
-  type PersistedSavedEnvironmentRecord,
-} from "@ryco/contracts";
+import { ClientSettingsSchema, MAX_KEYBINDINGS_COUNT, type ClientSettings } from "@ryco/contracts";
+import { PersistedSavedEnvironmentRecord } from "@ryco/contracts/saved-environment";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import {
+  decodeSavedEnvironmentRecords,
   isSavedEnvironmentHubLink,
   persistedSavedEnvironmentRecordFields,
 } from "@ryco/shared/savedEnvironmentRecord";
@@ -19,9 +16,12 @@ interface ClientSettingsDocument {
   readonly settings: ClientSettings;
 }
 
-interface PersistedSavedEnvironmentStorageRecord extends PersistedSavedEnvironmentRecord {
-  readonly encryptedBearerToken?: string;
-}
+/** A record in the registry file: the shared fields and the `safeStorage`-encrypted bearer. */
+const PersistedSavedEnvironmentStorageRecord = Schema.Struct({
+  ...PersistedSavedEnvironmentRecord.fields,
+  encryptedBearerToken: Schema.optionalKey(Schema.String),
+});
+type PersistedSavedEnvironmentStorageRecord = typeof PersistedSavedEnvironmentStorageRecord.Type;
 
 interface SavedEnvironmentRegistryDocument {
   readonly records: readonly PersistedSavedEnvironmentStorageRecord[];
@@ -49,29 +49,6 @@ function writeJsonFile(filePath: string, value: unknown): void {
   writeFileAtomicallySync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function isPersistedSavedEnvironmentStorageRecord(
-  value: unknown,
-): value is PersistedSavedEnvironmentStorageRecord {
-  return (
-    Predicate.isObject(value) &&
-    typeof value.environmentId === "string" &&
-    typeof value.label === "string" &&
-    typeof value.httpBaseUrl === "string" &&
-    typeof value.wsBaseUrl === "string" &&
-    typeof value.createdAt === "string" &&
-    (value.lastConnectedAt === null || typeof value.lastConnectedAt === "string") &&
-    (value.desktopSsh === undefined ||
-      (Predicate.isObject(value.desktopSsh) &&
-        typeof value.desktopSsh.alias === "string" &&
-        typeof value.desktopSsh.hostname === "string" &&
-        (value.desktopSsh.username === null || typeof value.desktopSsh.username === "string") &&
-        (value.desktopSsh.port === null || typeof value.desktopSsh.port === "number"))) &&
-    (value.hubLink === undefined || isSavedEnvironmentHubLink(value.hubLink)) &&
-    (value.disabledAt === undefined || typeof value.disabledAt === "string") &&
-    (value.encryptedBearerToken === undefined || typeof value.encryptedBearerToken === "string")
-  );
-}
-
 function readSavedEnvironmentRegistryDocument(filePath: string): SavedEnvironmentRegistryDocument {
   const parsed = readJsonFile<SavedEnvironmentRegistryDocument>(filePath);
   if (!Predicate.isObject(parsed)) {
@@ -79,9 +56,11 @@ function readSavedEnvironmentRegistryDocument(filePath: string): SavedEnvironmen
   }
 
   return {
-    records: Array.isArray(parsed.records)
-      ? parsed.records.filter(isPersistedSavedEnvironmentStorageRecord)
-      : [],
+    // A hub link this build cannot verify (no id, no parseable time) leaves its record out.
+    records: decodeSavedEnvironmentRecords(
+      parsed.records,
+      PersistedSavedEnvironmentStorageRecord,
+    ).filter((record) => record.hubLink === undefined || isSavedEnvironmentHubLink(record.hubLink)),
   };
 }
 

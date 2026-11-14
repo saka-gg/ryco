@@ -1,5 +1,6 @@
 import type { KVService } from "@ryco/client-runtime/platform";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import * as Schema from "effect/Schema";
 
 import {
   markNewTaskLaunchStarted,
@@ -22,17 +23,52 @@ const VERSION = 1;
 /** More than a phone queues by hand; older entries go first. */
 const MAX_PERSISTED_LAUNCHES = 32;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+const NonEmptyString = Schema.String.check(Schema.isNonEmpty());
+const WorktreeKind = Schema.Struct({ kind: Schema.Literals(["local", "existing", "new"]) });
 
-function nonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
+/**
+ * The fields a stored entry must have for this build to start it: who it goes
+ * to, under which ids, and what it says. Checked, not decoded: the entry is
+ * used as stored, so nothing it carries beyond these is lost.
+ */
+const ReadableStoredLaunch = Schema.Struct({
+  key: Schema.String,
+  queuedAt: NonEmptyString,
+  failure: Schema.NullOr(
+    Schema.Struct({
+      step: Schema.Literals(["project", "worktree", "thread", "turn"]),
+      message: Schema.String,
+      deliveryUncertain: Schema.Boolean,
+    }),
+  ),
+  attempt: Schema.Struct({
+    environmentId: NonEmptyString,
+    threadId: NonEmptyString,
+    prompt: Schema.String,
+    createdAt: NonEmptyString,
+    project: Schema.Struct({ kind: Schema.Literals(["existing", "new", "chat"]) }),
+    worktree: WorktreeKind,
+    attachments: Schema.Array(Schema.Unknown),
+    // A task's chat goes out as the task's: a malformed task id must not turn it into a plain chat.
+    localTaskId: Schema.optionalKey(NonEmptyString),
+    ids: Schema.Struct({
+      projectId: NonEmptyString,
+      projectCommandId: NonEmptyString,
+      threadId: NonEmptyString,
+      threadCommandId: NonEmptyString,
+      attachCommandId: NonEmptyString,
+      turnCommandId: NonEmptyString,
+      messageId: NonEmptyString,
+    }),
+  }),
+  draft: Schema.Struct({ prompt: Schema.String, worktree: WorktreeKind }),
+});
+const isReadableStoredLaunch = Schema.is(ReadableStoredLaunch);
 
-const FAILURE_STEPS = new Set(["project", "worktree", "thread", "turn"]);
-const PROJECT_KINDS = new Set(["existing", "new", "chat"]);
-const WORKTREE_KINDS = new Set(["local", "existing", "new"]);
+/** The stored outbox of this version; its entries are read one by one. */
+const isStoredOutbox = Schema.is(
+  Schema.Struct({ version: Schema.Literal(VERSION), launches: Schema.Array(Schema.Unknown) }),
+);
 
 /** What is stored: the draft's images are the attempt's, so they are stored once. */
 type StoredLaunch = Omit<NewTaskLaunch, "draft" | "editing"> & {
@@ -45,53 +81,19 @@ function toStoredLaunch(launch: NewTaskLaunch): StoredLaunch {
   return { ...rest, draft: storedDraft };
 }
 
-function readFailure(value: unknown): NewTaskLaunch["failure"] | undefined {
-  if (value === null) return null;
-  if (!isRecord(value)) return undefined;
-  if (typeof value.step !== "string" || !FAILURE_STEPS.has(value.step)) return undefined;
-  if (typeof value.message !== "string" || typeof value.deliveryUncertain !== "boolean") {
-    return undefined;
-  }
-  return value as unknown as NewTaskLaunch["failure"];
-}
-
 /**
  * Whether a stored entry still has the shape this build reads. A malformed or
  * foreign entry is dropped rather than half-trusted: the worst case is a task
  * the user writes again, never one sent with fields this build cannot check.
  */
 function readPersistedLaunch(value: unknown): NewTaskLaunch | null {
-  if (!isRecord(value)) return null;
-  const { attempt, draft } = value;
-  if (!isRecord(attempt) || !isRecord(draft) || !isRecord(attempt.ids)) return null;
-  if (!nonEmptyString(attempt.environmentId) || !nonEmptyString(attempt.threadId)) return null;
-  if (typeof attempt.prompt !== "string" || typeof draft.prompt !== "string") return null;
-  if (!nonEmptyString(value.queuedAt) || !nonEmptyString(attempt.createdAt)) return null;
-  if (!isRecord(attempt.project) || !PROJECT_KINDS.has(String(attempt.project.kind))) return null;
-  if (!isRecord(attempt.worktree) || !WORKTREE_KINDS.has(String(attempt.worktree.kind))) {
-    return null;
-  }
-  if (!isRecord(draft.worktree) || !WORKTREE_KINDS.has(String(draft.worktree.kind))) return null;
-  if (!Array.isArray(attempt.attachments)) return null;
-  // A task's chat goes out as the task's: a malformed task id must not turn it into a plain chat.
-  if (attempt.localTaskId !== undefined && !nonEmptyString(attempt.localTaskId)) return null;
-  for (const id of [
-    "projectId",
-    "projectCommandId",
-    "threadId",
-    "threadCommandId",
-    "attachCommandId",
-    "turnCommandId",
-    "messageId",
-  ]) {
-    if (!nonEmptyString(attempt.ids[id])) return null;
-  }
-  const failure = readFailure(value.failure);
-  if (failure === undefined) return null;
+  if (!isReadableStoredLaunch(value)) return null;
+  // The rest of the entry is as this build's outbox wrote it.
   const stored = value as unknown as StoredLaunch;
   if (stored.key !== newTaskLaunchKey(stored.attempt.environmentId, stored.attempt.threadId)) {
     return null;
   }
+  const failure = value.failure;
   const launch: NewTaskLaunch = {
     ...stored,
     failure,
@@ -190,7 +192,7 @@ export function createNewTaskOutboxPersistence(
     try {
       const raw = await kv.getItem(STORAGE_KEY);
       const parsed: unknown = raw === null ? null : JSON.parse(raw);
-      if (isRecord(parsed) && parsed.version === VERSION && Array.isArray(parsed.launches)) {
+      if (isStoredOutbox(parsed)) {
         return parsed.launches.flatMap((entry) => readPersistedLaunch(entry) ?? []);
       }
       return [];
