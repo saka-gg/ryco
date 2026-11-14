@@ -70,10 +70,3 @@ export function subscribeCrossRepositoryOverlays(listener: () => void): () => vo
 export function getCrossRepositoryOverlays(): CrossRepositoryOverlaySnapshot {
   return snapshot;
 }
-
-export function resetCrossRepositoryOverlaysForTests(): void {
-  overlays.clear();
-  if (pruneTimer !== null) clearTimeout(pruneTimer);
-  pruneTimer = null;
-  snapshot = { overlays: [], nowMs: 0 };
-}

@@ -78,12 +78,3 @@ export function subscribeLiveActivityPushToken(listener: () => void): () => void
     listeners.delete(listener);
   };
 }
-
-/** Test seam. */
-export function resetLiveActivityPushTokensForTests(): void {
-  tokens.clear();
-  current = null;
-  startToken = null;
-  startOffered = false;
-  listeners.clear();
-}

@@ -37,7 +37,6 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import ChatMarkdown from "../ChatMarkdown";
 import { ChangeRequestStateGlyph, RelativeTime } from "../pullRequests/primitives";
 import { SubagentAvatar } from "../sidebar/SubagentAvatar";
-import { changeRequestStateKind, StateBadge } from "../projectExplorer/StateBadge";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -116,24 +115,6 @@ export function DiffStat({
  */
 export const COMPACT_DIFF_STAT_CLASS =
   "gap-[5px] text-[10.5px] font-medium [&>:first-child]:text-success-foreground [&>:last-child]:text-destructive-foreground";
-
-/** The `.spark` stacked add/del bar. */
-export function SparkBar({
-  additions,
-  deletions,
-  className,
-}: {
-  additions: number;
-  deletions: number;
-  className?: string;
-}) {
-  return (
-    <span className={cn("flex h-1.5 overflow-hidden rounded-[3px] bg-muted", className)}>
-      <span className="h-full bg-success" style={{ flexGrow: additions || 0 }} />
-      <span className="h-full bg-destructive" style={{ flexGrow: deletions || 0 }} />
-    </span>
-  );
-}
 
 export function AheadBehind({ ahead, behind }: { ahead: number; behind: number }) {
   if (ahead === 0 && behind === 0) return null;
@@ -221,14 +202,6 @@ export function AvatarStack({ subagents }: { subagents: ReadonlyArray<ThreadSuba
 /** A running status dot (`.dot.running`). */
 function StatusDot({ className, title }: { className?: string; title?: string }) {
   return <span className={cn("size-2 shrink-0 rounded-full", className)} title={title} />;
-}
-
-export function SectionMiniLabel({ children }: { children: ReactNode }) {
-  return (
-    <p className="px-3 pt-1.5 pb-1 text-[10.5px] font-semibold tracking-wider text-muted-foreground uppercase">
-      {children}
-    </p>
-  );
 }
 
 export function KeyValueRow({
@@ -1045,22 +1018,6 @@ export function OtherPullRequestRows({
         </div>
       ))}
     </div>
-  );
-}
-
-/** Inline `#3204 open` heading used by single-section layouts that need it. */
-export function PullRequestHeading({
-  pullRequest,
-}: {
-  pullRequest: NonNullable<OverviewLayoutProps["pullRequest"]>;
-}) {
-  return (
-    <span className="flex items-center gap-2 text-[13px] font-semibold">
-      <GitPullRequestIcon className="size-3.5 text-muted-foreground" />#{pullRequest.number}
-      {pullRequest.state ? (
-        <StateBadge kind={changeRequestStateKind(pullRequest.state, pullRequest.isDraft)} />
-      ) : null}
-    </span>
   );
 }
 

@@ -130,5 +130,3 @@ export function createHtmlRenderLookup(readPage: ReadThreadHistoryPage) {
     },
   };
 }
-
-export type HtmlRenderLookup = ReturnType<typeof createHtmlRenderLookup>;

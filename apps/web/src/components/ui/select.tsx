@@ -243,7 +243,6 @@ export {
   selectTriggerVariants,
   SelectValue,
   SelectPopup,
-  SelectPopup as SelectContent,
   SelectItem,
   SelectSeparator,
   SelectGroup,

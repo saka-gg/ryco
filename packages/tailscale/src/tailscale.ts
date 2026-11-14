@@ -19,10 +19,6 @@ export class TailscaleStatusParseError extends Data.TaggedError("TailscaleStatus
   readonly cause: unknown;
 }> {}
 
-export class TailscaleUnavailableError extends Data.TaggedError("TailscaleUnavailableError")<{
-  readonly reason: string;
-}> {}
-
 const TailscaleStatusSelf = Schema.Struct({
   DNSName: Schema.optional(Schema.Unknown),
   TailscaleIPs: Schema.optional(Schema.Unknown),

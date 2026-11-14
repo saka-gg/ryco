@@ -2,7 +2,6 @@ import type { SessionPhase } from "../../types";
 import { deriveComposerSendState } from "../ChatView.logic";
 
 export { deriveComposerSendState };
-export type ComposerSendState = ReturnType<typeof deriveComposerSendState>;
 
 /**
  * Whether the collapsed (mobile) composer's primary send action should be

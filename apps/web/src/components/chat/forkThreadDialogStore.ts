@@ -62,11 +62,6 @@ export const useForkThreadDialogStore = create<ForkThreadDialogState>()(() => ({
   origin: null,
 }));
 
-/** Starts loading the dialog's code ahead of a likely open. */
-export function preloadForkThreadDialog(): void {
-  void import("./ForkThreadDialog");
-}
-
 export function openForkThreadDialog(
   request: ForkThreadDialogRequest & { readonly origin?: HTMLElement | null },
 ): void {

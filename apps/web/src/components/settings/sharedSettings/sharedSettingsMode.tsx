@@ -68,15 +68,6 @@ export function takeSharedRowOpen(key: ShareableServerSettingKey, nowMs = Date.n
   return true;
 }
 
-/**
- * The device bar's choice on the settings page: "All devices", or the device chosen with its
- * pill. The settings store keeps it (`deviceView`), so `openSettings` with a device and the
- * page's address set it too.
- */
-export function useSettingsDeviceView(): "all" | "device" {
-  return useSettingsDialogStore((state) => state.deviceView);
-}
-
 export function setSettingsDeviceView(view: "all" | "device"): void {
   useSettingsDialogStore.getState().setDeviceView(view);
 }

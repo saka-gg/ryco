@@ -262,15 +262,6 @@ export function markSidebarExpandFirstPaint(key: string): void {
   }
 }
 
-export function useRenderCounter(label: string): void {
-  const count = useRef(0);
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    count.current += 1;
-    console.debug(`[render] ${label} #${count.current}`);
-  });
-}
-
 /**
  * Dev-only: log which prop changed between renders. Use to figure out
  * why a memoized component is re-rendering. Logs `[memo:<label>] <key>

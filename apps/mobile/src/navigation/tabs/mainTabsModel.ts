@@ -81,10 +81,6 @@ export function tabBarItemTitle(input: {
   return input.platform === "android" && !input.hasPlatformIcon ? input.label : "";
 }
 
-export function isMainTabName(value: string): value is MainTabName {
-  return (MAIN_TAB_NAMES as readonly string[]).includes(value);
-}
-
 /**
  * Old links that named a screen which is a tab now. Widgets and notifications
  * written by earlier builds still carry them, so they keep opening the same
