@@ -11,6 +11,7 @@ import {
 } from "@ryco/shared/browserElementPickScript";
 import { normalizeBrowserElementPick } from "@ryco/shared/browserElementReference";
 import type { CdpLease } from "./cdpLease.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 /** Chromium's inspect overlay while the user chooses (DevTools' default colours). */
 export const PICKER_HIGHLIGHT = {
@@ -93,9 +94,6 @@ interface PickerWorld {
   readonly contextId: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 function field(value: unknown, name: string): unknown {
   return isRecord(value) ? value[name] : undefined;
 }

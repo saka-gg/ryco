@@ -17,6 +17,7 @@ import {
   type DeviceCapabilityStatus,
   type DeviceToolchain,
 } from "@ryco/contracts";
+import { asRecord } from "@ryco/shared/unknownValue";
 
 /** Every capability, in the order the pane should list them. */
 export const DEVICE_CAPABILITY_IDS = [
@@ -52,11 +53,6 @@ export interface HelperProbeResult {
    */
   readonly coreSimulatorVersion?: string | undefined;
 }
-
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 
 const asNonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;

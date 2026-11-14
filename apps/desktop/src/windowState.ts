@@ -2,6 +2,7 @@ import * as FS from "node:fs";
 
 import { writeFileAtomicallySync } from "./atomicFileWrite.ts";
 import { describeErrorForLog } from "./logValue.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 /**
  * Where the main window was, so it reopens there.
@@ -45,10 +46,6 @@ function isWindowExtent(value: unknown): value is number {
     value > 0 &&
     value <= MAX_WINDOW_COORDINATE
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseWindowBounds(value: unknown): DesktopWindowBounds | null {

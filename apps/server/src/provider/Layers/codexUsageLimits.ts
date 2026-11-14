@@ -14,16 +14,11 @@ import {
 } from "@ryco/contracts";
 
 import { usageLimitStateFromWindows, type UsageWindowObservation } from "../usageLimitReset.ts";
+import { asRecord } from "@ryco/shared/unknownValue";
 
 export const CODEX_USAGE_LIMIT_FALLBACK_MESSAGE = "Codex usage limit reached.";
 
 export type CodexRateLimitSnapshot = Readonly<Record<string, unknown>>;
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 /**
  * Codex's rolling update is sparse: a present value overrides the previous one, while

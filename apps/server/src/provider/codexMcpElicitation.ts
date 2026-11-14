@@ -2,6 +2,7 @@ import type { ProviderUserInputAnswers, RuntimeMode, UserInputQuestion } from "@
 import * as Schema from "effect/Schema";
 import { isHttpLink } from "@ryco/shared/userInputExchange";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
+import { asRecord } from "@ryco/shared/unknownValue";
 
 /**
  * Codex `mcpServer/elicitation/request` → one Ryco pending question, and the user's answer → the
@@ -90,12 +91,6 @@ export type CodexElicitationAnswer =
   | { readonly ok: true; readonly response: CodexElicitationResponse }
   | { readonly ok: false; readonly questionId: string; readonly reason: string };
 
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
 function readText(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.replace(/\s+/g, " ").trim();
@@ -112,7 +107,7 @@ function truncate(text: string, max: number): string {
 
 /** The name the question card shows above the prompt. */
 export function elicitationTitle(params: CodexElicitationParams): string {
-  const meta = readRecord(params._meta);
+  const meta = asRecord(params._meta);
   if (meta?.connector_id === COMPUTER_USE_CONNECTOR_ID) return COMPUTER_USE_TITLE;
   return readText(meta?.connector_name) ?? readText(params.serverName) ?? "MCP server";
 }
@@ -129,7 +124,7 @@ function displayParamLines(meta: Record<string, unknown> | undefined, message: s
   const lines: string[] = [];
   for (const raw of display) {
     if (lines.length >= MAX_DISPLAY_PARAMS) break;
-    const entry = readRecord(raw);
+    const entry = asRecord(raw);
     const name = readText(entry?.display_name) ?? readText(entry?.name);
     if (!name || entry?.value === undefined) continue;
     const value =
@@ -150,8 +145,8 @@ function option(label: string, description: string) {
 
 function isMessageOnlySchema(schema: unknown): boolean {
   if (schema === null || schema === undefined) return true;
-  const record = readRecord(schema);
-  const properties = readRecord(record?.properties);
+  const record = asRecord(schema);
+  const properties = asRecord(record?.properties);
   return (
     record?.type === "object" && properties !== undefined && Object.keys(properties).length === 0
   );
@@ -167,7 +162,7 @@ function readEnumOptions(
   const fromConst = (entries: unknown) =>
     Array.isArray(entries)
       ? entries.flatMap((entry) => {
-          const record = readRecord(entry);
+          const record = asRecord(entry);
           return typeof record?.const === "string"
             ? [{ value: record.const, label: readText(record.title) ?? record.const }]
             : [];
@@ -187,7 +182,7 @@ function readEnumOptions(
         )
       : [];
   if (property.type === "array") {
-    const items = readRecord(property.items);
+    const items = asRecord(property.items);
     if (!items) return undefined;
     return items.anyOf !== undefined ? fromConst(items.anyOf) : fromEnum(items.enum);
   }
@@ -308,7 +303,7 @@ function planForm(
   header: string,
   message: string,
 ): CodexElicitationPlan {
-  const properties = readRecord(schema.properties) ?? {};
+  const properties = asRecord(schema.properties) ?? {};
   const required = new Set(
     Array.isArray(schema.required)
       ? schema.required.filter((key): key is string => typeof key === "string")
@@ -321,7 +316,7 @@ function planForm(
   const fields: ElicitationField[] = [];
   const questions: UserInputQuestion[] = [];
   for (const [key, raw] of entries) {
-    const property = readRecord(raw);
+    const property = asRecord(raw);
     const field =
       property && key.trim() !== "" ? readField(key, property, required.has(key)) : undefined;
     if (!field || !property) {
@@ -336,7 +331,7 @@ function planForm(
 /** Builds the question for a Codex elicitation, or says why Ryco cannot show it. */
 export function planCodexElicitation(params: CodexElicitationParams): CodexElicitationPlan {
   const header = elicitationTitle(params);
-  const meta = readRecord(params._meta);
+  const meta = asRecord(params._meta);
   const message = readText(params.message) ?? "The MCP server asks for your input.";
 
   if (params.mode === "url") {
@@ -410,13 +405,13 @@ export function planCodexElicitation(params: CodexElicitationParams): CodexElici
   if (params.mode === "openai/form" && !isTypedElicitationSchema(schema)) {
     return { kind: "unsupported", reason: "openai/form schema is not a typed object schema" };
   }
-  const record = readRecord(schema);
+  const record = asRecord(schema);
   if (!record) return { kind: "unsupported", reason: "form without a schema" };
   return planForm(record, header, message);
 }
 
 function isComputerUseAppApproval(meta: Record<string, unknown> | undefined): boolean {
-  return readText(readRecord(meta?.tool_params)?.app) !== undefined;
+  return readText(asRecord(meta?.tool_params)?.app) !== undefined;
 }
 
 /**

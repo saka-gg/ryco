@@ -30,6 +30,7 @@ import {
   type DeviceLogQuery,
   type DeviceLogResult,
 } from "./DeviceBackend.ts";
+import { asRecord } from "@ryco/shared/unknownValue";
 
 /**
  * Log reads stay under Agent Control's 60 s request abort: the executable
@@ -256,12 +257,6 @@ function safeJson(text: string): unknown {
   } catch {
     return null;
   }
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 /** What a simulator log read needs from the backend that owns the simulator. */

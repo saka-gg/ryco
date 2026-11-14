@@ -21,6 +21,7 @@ import { Schema } from "effect";
 
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../../assistantAttachments.ts";
 import type { ReplayEntry, ReplayRuntimeExit } from "./replayTranscript.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export type ReplayJsonPath = ReadonlyArray<string | number>;
 
@@ -28,9 +29,6 @@ export type ReplayJsonPath = ReadonlyArray<string | number>;
 export type ReplayFrameNormalizer = (frame: unknown) => unknown;
 
 export const identityNormalizer: ReplayFrameNormalizer = (frame) => frame;
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** JSON with sorted object keys at every depth. */
 export function stableStringify(value: unknown): string {

@@ -51,6 +51,7 @@ import {
 } from "./replayMatch.ts";
 import { splitReplaySegments } from "./replaySpawner.ts";
 import type { ReplayRuntimeExit, ReplayTranscript } from "./replayTranscript.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export type ClaudeCreateQuery = NonNullable<ClaudeAdapterLiveOptions["createQuery"]>;
 /** The adapter's query interface (not exported by `ClaudeAdapter.ts`). */
@@ -89,9 +90,6 @@ export interface ClaudeReplayQueryFactory {
   readonly assertConsumed: Effect.Effect<void, ReplayError>;
   readonly describePosition: () => string;
 }
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const messageOf = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 

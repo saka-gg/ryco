@@ -30,6 +30,7 @@ import {
   type ParsedTokenActivity,
   statisticsSpeedOf,
 } from "./processedTokenUsage.ts";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export const StatisticsThreadRow = Schema.Struct({
   threadId: Schema.String,
@@ -519,9 +520,6 @@ export function mergeStatisticsThreadPartials(
     earliest,
   };
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
  * A stored partial read back (`statistics_usage_rollups`): buckets without a date, project or

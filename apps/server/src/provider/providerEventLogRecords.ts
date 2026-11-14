@@ -26,6 +26,7 @@ import {
   AGENT_CONTROL_SECRET_MARKER,
   redactAgentControlSecretText,
 } from "../agentControl/secretRedaction.ts";
+import { asRecord, isRecord } from "@ryco/shared/unknownValue";
 
 export type EventNdjsonStream = "native" | "canonical" | "orchestration";
 
@@ -589,14 +590,6 @@ function isSmallFlatRecord(value: Record<string, unknown> | undefined): boolean 
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return isRecord(value) ? value : undefined;
-}
 
 function firstString(...values: ReadonlyArray<unknown>): string | undefined {
   for (const value of values) {

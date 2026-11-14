@@ -1,4 +1,5 @@
 import type { SecretKVService } from "@ryco/client-runtime/platform";
+import { isRecord } from "@ryco/shared/unknownValue";
 
 export const NATIVE_IDENTITY_TRANSACTION_KEY = "ryco.nativeIdentity.transaction.v1";
 
@@ -47,10 +48,6 @@ export type NativeIdentityTransactionRecord =
       readonly presentation: string;
       readonly requiresTotp?: boolean;
     };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlyArray<string>): boolean {
   const keys = new Set(allowed);

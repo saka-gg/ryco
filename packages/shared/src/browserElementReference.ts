@@ -26,6 +26,7 @@ import type {
   ProjectBrowserElementBox,
   ProjectBrowserPickedElement,
 } from "@ryco/contracts/project-browser";
+import { isRecord } from "./unknownValue.ts";
 
 /** What a private-looking URL path segment becomes. */
 export const BROWSER_ELEMENT_REDACTED_SEGMENT = "REDACTED";
@@ -174,10 +175,6 @@ export function normalizeBrowserElementPick(
     text: VALUE_TAGS.has(tagName) ? null : publicLine(raw.text, BROWSER_ELEMENT_MAX_TEXT_LENGTH),
     box: elementBox(raw.box),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

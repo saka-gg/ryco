@@ -42,6 +42,7 @@ import {
   type WindowsEnvironmentProbeOptions,
   type WindowsShellEnvironmentReader,
 } from "./shell.ts";
+import { isRecord } from "./unknownValue.ts";
 
 /** Every variable the shell environment can contribute, in cache order. */
 export const SHELL_ENVIRONMENT_NAMES = [
@@ -426,10 +427,6 @@ export type ShellEnvironmentCacheReadResult =
   | { readonly kind: "miss"; readonly reason: string };
 
 export const SHELL_ENVIRONMENT_PROBE_FAILED = "probe-failed";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function normalizeShell(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
