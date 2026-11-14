@@ -1,12 +1,12 @@
 import { DateTime, Effect, Layer, Option } from "effect";
 import {
   SourceControlProviderError,
-  truncateSourceControlDetailContent,
   type ChangeRequest,
   type SourceControlChangeRequestDetail,
   type SourceControlIssueDetail,
   type SourceControlIssueSummary,
 } from "@ryco/contracts";
+import { truncateSourceControlDetailContent } from "@ryco/shared/sourceControlDetailContent";
 
 import * as GitLabCli from "./GitLabCli.ts";
 import * as GitLabIssues from "./gitLabIssues.ts";

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { hubKeyAddress, isLoopbackHost, normalizeHubBaseUrl } from "./cliProxyHubUrl.ts";
+import { HUB_LOOPBACK_HOST, hubKeyAddress, normalizeHubBaseUrl } from "./cliProxyHubUrl.ts";
+import { isLoopbackHostname } from "./loopbackHost.ts";
 
 describe("normalizeHubBaseUrl", () => {
   it("accepts http(s) bases and strips pasted management paths", () => {
@@ -35,7 +36,11 @@ describe("hubKeyAddress", () => {
   });
 
   it("knows the loopback names", () => {
-    expect(isLoopbackHost("[::1]")).toBe(true);
-    expect(isLoopbackHost("hub.example")).toBe(false);
+    for (const host of ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]) {
+      expect(isLoopbackHostname(host, HUB_LOOPBACK_HOST), host).toBe(true);
+    }
+    expect(isLoopbackHostname("127.0.0.2", HUB_LOOPBACK_HOST)).toBe(false);
+    expect(isLoopbackHostname("hub.example", HUB_LOOPBACK_HOST)).toBe(false);
+    expect(hubKeyAddress("http://0.0.0.0:8317")).toBe(hubKeyAddress("http://127.0.0.1:8317"));
   });
 });

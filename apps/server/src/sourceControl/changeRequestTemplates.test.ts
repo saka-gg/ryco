@@ -20,7 +20,6 @@ import {
   selectTemplateForGeneration,
   templateBody,
   templateDisplayName,
-  truncateUtf8,
   type ChangeRequestTemplateLayout,
 } from "./changeRequestTemplates.ts";
 
@@ -226,13 +225,6 @@ describe("change request template helpers", () => {
     expect([...objects.keys()]).toEqual([SHA1, "c".repeat(40)]);
     expect(new TextDecoder().decode(objects.get(SHA1))).toBe("abc");
     expect(new TextDecoder().decode(objects.get("c".repeat(40)))).toBe("x\n");
-  });
-
-  it("cuts UTF-8 before a character that would cross the byte limit", () => {
-    // "é" is two bytes; a limit inside it keeps the text before it.
-    expect(truncateUtf8(encoder.encode("abé"), 3)).toEqual({ text: "ab", truncated: true });
-    expect(truncateUtf8(encoder.encode("ab😀"), 5)).toEqual({ text: "ab", truncated: true });
-    expect(truncateUtf8(encoder.encode("abé"), 4)).toEqual({ text: "abé", truncated: false });
   });
 
   it("gives template bodies \\n line ends, so a text box shows them unchanged", () => {

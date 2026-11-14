@@ -51,6 +51,7 @@ import {
   SshPasswordPromptError,
   SshReadinessError,
 } from "./errors.ts";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 export const DEFAULT_REMOTE_PORT = 3773;
 const REMOTE_PORT_SCAN_WINDOW = 200;
@@ -921,14 +922,6 @@ export const waitForHttpReady = Effect.fn("ssh/tunnel.waitForHttpReady")(functio
   });
 });
 
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname
-    .trim()
-    .toLowerCase()
-    .replace(/^\[(.*)\]$/, "$1");
-  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "localhost";
-}
-
 function resolveLoopbackSshHttpUrl(
   rawHttpBaseUrl: unknown,
   pathname: string,
@@ -939,7 +932,7 @@ function resolveLoopbackSshHttpUrl(
         throw new Error("Invalid SSH forwarded http base URL.");
       }
       const baseUrl = new URL(rawHttpBaseUrl);
-      if (!isLoopbackHostname(baseUrl.hostname)) {
+      if (!isLoopbackHostname(baseUrl.hostname, { ipv4: "127.0.0.1" })) {
         throw new Error("SSH desktop bridge only supports loopback forwarded URLs.");
       }
       const url = new URL(baseUrl.toString());

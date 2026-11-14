@@ -1,4 +1,5 @@
 import { canonicalizeHubOrigin } from "@ryco/shared/nodeIdentity";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 /**
  * Why a typed Hub address was rejected.
@@ -50,8 +51,7 @@ export function validateHubOrigin(raw: string): HubOriginValidation {
     return { ok: false, reason: "has_credentials" };
   }
 
-  const isLoopback =
-    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  const isLoopback = isLoopbackHostname(url.hostname, { ipv4: "127.0.0.1" });
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback)) {
     return { ok: false, reason: "insecure_scheme" };
   }

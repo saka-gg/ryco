@@ -2,7 +2,7 @@ import { networkInterfaces } from "node:os";
 
 import type { AdvertisedEndpoint } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
-import { isLoopbackHost, isWildcardHost, pairingQrUrl } from "@ryco/shared/pairingQr";
+import { isLocalListenerHost, isWildcardHost, pairingQrUrl } from "@ryco/shared/pairingQr";
 import { buildDirectPairingUrl, buildHostedPairingUrl } from "@ryco/shared/pairingUrl";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import { DateTime, Effect } from "effect";
@@ -39,7 +39,7 @@ export interface HeadlessServeAccessInfo {
 type NetworkInterfacesMap = ReturnType<typeof networkInterfaces>;
 
 // The loopback rule lives with the pairing links, so the web's QR codes follow it too.
-export { isLoopbackHost, isWildcardHost, pairingQrUrl };
+export { isLocalListenerHost, isWildcardHost, pairingQrUrl };
 
 /**
  * Printed instead of a QR code when the only pairing link is a loopback address: a

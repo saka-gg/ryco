@@ -123,7 +123,7 @@ import {
   revokeOtherServerClientSessions,
   revokeServerClientSession,
   revokeServerPairingLink,
-  isLoopbackHostname,
+  isPrimaryLoopbackHostname,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,
 } from "~/environments/primary";
@@ -493,7 +493,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
     endpointPairingUrl ??
     (endpointUrl != null && endpointUrl !== ""
       ? (hostedPairingUrl ?? resolveDesktopPairingUrl(endpointUrl, pairingLink.credential))
-      : isLoopbackHostname(window.location.hostname)
+      : isPrimaryLoopbackHostname(window.location.hostname)
         ? null
         : currentOriginPairingUrl);
   // A QR code never encodes loopback. A saved loopback default still copies as
