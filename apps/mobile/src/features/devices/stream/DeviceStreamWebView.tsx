@@ -76,6 +76,7 @@ export function DeviceStreamWebView(props: {
     onSender((message) => {
       const webView = webViewRef.current;
       if (webView === null) return false;
+      // oxlint-disable-next-line unicorn/require-post-message-target-origin -- React Native WebView, not window
       webView.postMessage(JSON.stringify(message));
       return true;
     });
