@@ -19,7 +19,7 @@ import type { ChatHeaderBreadcrumbProjectIcon } from "./ChatHeaderBreadcrumb";
 import type { ChatProjectTarget } from "./ChatProjectActions";
 import { HEADER_CHROME_ICON_BUTTON_CLASS_NAME } from "./headerChrome";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
-import { usePerfMark, useDevPropDiff } from "../../perf/tabSwitchInstrumentation";
+import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "../LiveAgentCountBadge";
 import { preloadWorkspacePanelForIntent } from "../../workspacePanelPreload";
 
@@ -97,7 +97,6 @@ export const ChatHeader = memo(function ChatHeader({
   ...props
 }: ChatHeaderProps) {
   usePerfMark("ChatHeader");
-  useDevPropDiff(props as unknown as Record<string, unknown>, "ChatHeader");
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const showOpenInPicker = shouldShowOpenInPicker({
     openInCwd: props.openInCwd,
