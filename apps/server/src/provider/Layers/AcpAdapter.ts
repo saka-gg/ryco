@@ -3,13 +3,18 @@ import {
   ApprovalRequestId,
   DEFAULT_AGENT_TOKEN_MODE,
   EventId,
+  type ModelSelection,
   type ProviderApprovalDecision,
+  type ProviderInteractionMode,
   type ProviderRuntimeEvent,
+  type ProviderSendTurnInput,
   type ProviderSession,
   type ProviderUserInputAnswers,
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  type RuntimeEventRaw,
+  type RuntimeMode,
   type RuntimeSessionId,
   type ThreadId,
   TurnId,
@@ -20,6 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
@@ -46,7 +52,11 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { failStartedTurnOnError, mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
-import { type AcpSessionRuntimeShape } from "../acp/AcpSessionRuntime.ts";
+import {
+  type AcpSessionRuntimeOptions,
+  type AcpSessionRuntimeShape,
+  type AcpSessionRuntimeStartResult,
+} from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
@@ -65,6 +75,7 @@ import {
   makeRecentProjectCommands,
   parseSlashCommandInput,
 } from "../providerSlashCommands.ts";
+import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import {
   applyAcpModelSelection,
@@ -76,11 +87,20 @@ import {
   makeXAiAskUserQuestionResponse,
   XAiAskUserQuestionRequest,
 } from "../acp/XAiAcpExtension.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderTurnSteeringMode,
+} from "../Services/ProviderAdapter.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 type AcpAdapterShape = ProviderAdapterShape<ProviderAdapterError>;
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
+import {
+  agentControlHostContext,
+  installAgentControlAcp,
+  type AgentControlAcpInjection,
+  type AgentControlProviderBridge,
+} from "../../agentControl/ProviderInjection.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
@@ -91,13 +111,98 @@ function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   return Exit.isSuccess(result) ? result.value : undefined;
 }
 
+/** A session's or turn's model as Ryco reports it, and the agent's model id to start from next. */
+export interface AcpModelState {
+  /** Reported on the session and on `turn.started`; nothing is reported when undefined. */
+  readonly model: string | undefined;
+  /** The agent's current model id, passed to the next turn's configuration. */
+  readonly currentModelId: string | undefined;
+}
+
+/**
+ * How a session's model (and anything else, like its mode) is configured, at start and before
+ * every turn. The default selects the model through the ACP model API
+ * (`applyAcpModelSelection`) and reports it through `normalizeModel`.
+ */
+export interface AcpSessionConfiguration {
+  readonly start: (input: {
+    readonly runtime: AcpSessionRuntimeShape;
+    readonly threadId: ThreadId;
+    readonly runtimeMode: RuntimeMode;
+    /** The requested selection when it names this instance. */
+    readonly modelSelection: ModelSelection | undefined;
+    readonly started: AcpSessionRuntimeStartResult;
+  }) => Effect.Effect<AcpModelState, ProviderAdapterError>;
+  readonly turn: (input: {
+    readonly runtime: AcpSessionRuntimeShape;
+    readonly threadId: ThreadId;
+    readonly session: ProviderSession;
+    readonly interactionMode: ProviderInteractionMode | undefined;
+    /** The turn's selection when it names this instance. */
+    readonly modelSelection: ModelSelection | undefined;
+    readonly currentModelId: string | undefined;
+  }) => Effect.Effect<AcpModelState, ProviderAdapterError>;
+}
+
+type UserInputQuestions = Extract<
+  ProviderRuntimeEvent,
+  { readonly type: "user-input.requested" }
+>["payload"]["questions"];
+
+/** How a question the agent asked was settled. */
+export type AcpUserInputResolution =
+  | { readonly _tag: "answered"; readonly answers: ProviderUserInputAnswers }
+  /** The turn was interrupted or the session stopped before anyone answered. */
+  | { readonly _tag: "cancelled" };
+
+/** What an agent's extension handlers get from the adapter for one session. */
+export interface AcpAdapterExtensionContext {
+  readonly runtime: AcpSessionRuntimeShape;
+  readonly threadId: ThreadId;
+  readonly runtimeSessionId: RuntimeSessionId;
+  /** Writes the native request to the native event log; never fails. */
+  readonly logNative: (method: string, payload: unknown) => Effect.Effect<void>;
+  readonly emit: (event: ProviderRuntimeEvent) => Effect.Effect<void>;
+  readonly makeEventStamp: () => Effect.Effect<{
+    readonly eventId: EventId;
+    readonly createdAt: string;
+  }>;
+  readonly activeTurnId: () => TurnId | undefined;
+  /** Emits a plan update, once per distinct plan per turn; dropped before the session is ready. */
+  readonly emitPlanUpdate: (input: {
+    readonly payload: AcpPlanPayload;
+    readonly rawPayload: unknown;
+    readonly source: AcpRawSource;
+    readonly method: string;
+  }) => Effect.Effect<void>;
+  /**
+   * Asks the person and waits for the answer. Emits `user-input.requested` with `raw`, then
+   * `user-input.resolved` (with `raw` too when `rawOnResolved`), whose answers are empty when the
+   * question was cancelled.
+   */
+  readonly requestUserInput: (input: {
+    readonly questions: UserInputQuestions;
+    readonly raw: RuntimeEventRaw;
+    readonly rawOnResolved: boolean;
+  }) => Effect.Effect<AcpUserInputResolution>;
+}
+
+type AcpRawSource = Extract<RuntimeEventRaw["source"], "acp.jsonrpc" | `acp.${string}.extension`>;
+
+interface AcpPlanPayload {
+  readonly explanation?: string | null;
+  readonly plan: ReadonlyArray<{
+    readonly step: string;
+    readonly status: "pending" | "inProgress" | "completed";
+  }>;
+}
+
 export interface AcpAdapterLiveOptions {
   readonly provider: ProviderDriverKind;
   readonly makeRuntime: (
-    input: Omit<
-      import("../acp/AcpSessionRuntime.ts").AcpSessionRuntimeOptions,
-      "spawn" | "authMethodId"
-    > & { readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"] },
+    input: Omit<AcpSessionRuntimeOptions, "spawn" | "authMethodId"> & {
+      readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+    },
   ) => Effect.Effect<AcpSessionRuntimeShape, EffectAcpErrors.AcpError, Scope.Scope>;
   readonly normalizeModel: (model: string) => string;
   readonly xaiExtensions?: boolean;
@@ -120,18 +225,59 @@ export interface AcpAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   /** Lowers each session's agent process; undefined spawns it unchanged. */
   readonly processPriority?: AgentProcessPriorityShape | undefined;
+  /** Model (and mode) configuration; defaults to the ACP model API. */
+  readonly sessionConfiguration?: AcpSessionConfiguration;
+  /** Registers the agent's own extension requests and notifications before the session starts. */
+  readonly registerExtensions?: (
+    context: AcpAdapterExtensionContext,
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  /**
+   * The permission option a person's decision selects. Defaults to the option the agent offers
+   * with the matching kind (`allow_always`, `allow_once`, `reject_once`); none cancels the request.
+   */
+  readonly selectPermissionOptionId?: (
+    request: EffectAcpSchema.RequestPermissionRequest,
+    decision: Exclude<ProviderApprovalDecision, "cancel">,
+  ) => string | undefined;
+  /**
+   * A resume cursor this adapter cannot read: `"reject"` (default) fails `startSession`,
+   * `"start-fresh"` starts a new agent session instead.
+   */
+  readonly invalidResumeCursor?: "reject" | "start-fresh";
+  /**
+   * When a turn's prompt is built from its text and attachments. `"before-turn-start"` (default):
+   * an empty turn or an unreadable attachment fails `sendTurn` before any turn event.
+   * `"after-turn-start"`: `turn.started` goes out first, and such a failure closes the turn as
+   * failed.
+   */
+  readonly promptAssembly?: "before-turn-start" | "after-turn-start";
+  /**
+   * Agent Control for each session: its MCP server is offered to the agent, each turn binds the
+   * turn's authority, and the first prompt (unless it is a slash command) carries the host
+   * context. Without a bridge the session runs without Agent Control and no host context.
+   */
+  readonly agentControl?: {
+    readonly bridge: AgentControlProviderBridge | undefined;
+    readonly stdioProxy?: { readonly command: string; readonly entryPoint: string };
+  };
+  /** `capabilities.turnSteering`; unset leaves steering unsupported. */
+  readonly turnSteering?: ProviderTurnSteeringMode;
+  /** Wording that names the agent in events and errors. */
+  readonly labels?: {
+    /** `session.state.changed` reason once the session is ready. */
+    readonly readyReason?: string;
+    readonly rollbackUnsupportedDetail?: string;
+    /** The method named when a person answers a question nobody asked. */
+    readonly userInputMethod?: string;
+  };
 }
 
 interface PendingApproval {
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
 }
 
-type PendingUserInputResolution =
-  | { readonly _tag: "answered"; readonly answers: ProviderUserInputAnswers }
-  | { readonly _tag: "cancelled" };
-
 interface PendingUserInput {
-  readonly resolution: Deferred.Deferred<PendingUserInputResolution>;
+  readonly resolution: Deferred.Deferred<AcpUserInputResolution>;
 }
 
 interface AcpSessionContext {
@@ -141,6 +287,10 @@ interface AcpSessionContext {
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: AcpSessionRuntimeShape;
+  readonly agentControl: AgentControlAcpInjection | undefined;
+  /** Sent once, ahead of the first prompt that is not a slash command; empty sends nothing. */
+  readonly agentControlHostContext: string;
+  agentControlHostContextDelivered: boolean;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -207,6 +357,70 @@ function selectAutoApprovedPermissionOption(
   );
 }
 
+const XAI_ASK_USER_QUESTION_METHODS = [
+  "x.ai/ask_user_question",
+  "_x.ai/ask_user_question",
+] as const;
+
+/** xAI's `ask_user_question` extension (Grok): a cancelled question gets an explicit cancellation. */
+function registerXAiExtensions(context: AcpAdapterExtensionContext) {
+  return Effect.forEach(
+    XAI_ASK_USER_QUESTION_METHODS,
+    (method) =>
+      context.runtime.handleExtRequest(method, XAiAskUserQuestionRequest, (params) =>
+        Effect.gen(function* () {
+          yield* context.logNative(method, params);
+          const resolved = yield* context.requestUserInput({
+            questions: extractXAiAskUserQuestions(params),
+            raw: { source: "acp.grok.extension", method, payload: params },
+            rawOnResolved: true,
+          });
+          switch (resolved._tag) {
+            case "answered":
+              return makeXAiAskUserQuestionResponse(params, resolved.answers);
+            case "cancelled":
+              return makeXAiAskUserQuestionCancelledResponse();
+          }
+        }),
+      ),
+    { discard: true },
+  );
+}
+
+function makeDefaultSessionConfiguration(
+  provider: ProviderDriverKind,
+  normalizeModel: (model: string) => string,
+): AcpSessionConfiguration {
+  const select = (input: {
+    readonly runtime: AcpSessionRuntimeShape;
+    readonly threadId: ThreadId;
+    readonly currentModelId: string | undefined;
+    readonly modelSelection: ModelSelection | undefined;
+  }) =>
+    applyAcpModelSelection({
+      runtime: input.runtime,
+      currentModelId: input.currentModelId,
+      requestedModelId:
+        (input.modelSelection?.model ? normalizeModel(input.modelSelection.model) : undefined) ||
+        undefined,
+      mapError: (cause) =>
+        mapAcpToAdapterError(provider, input.threadId, "session/set_model", cause),
+    }).pipe(
+      Effect.map((currentModelId): AcpModelState => ({
+        model: currentModelId ? normalizeModel(currentModelId) : undefined,
+        currentModelId,
+      })),
+    );
+  return {
+    start: (input) =>
+      select({
+        ...input,
+        currentModelId: currentAcpModelIdFromSessionSetup(input.started.sessionSetupResult),
+      }),
+    turn: select,
+  };
+}
+
 export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
   const PROVIDER = options.provider;
   const normalizeModel = options.normalizeModel;
@@ -230,6 +444,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     // inside a session, so a stopped session's list keeps serving its directory.
     const recentCommands = makeRecentProjectCommands();
     const commandOptions = { hidden: options.hiddenCommands };
+    const sessionConfiguration =
+      options.sessionConfiguration ?? makeDefaultSessionConfiguration(PROVIDER, normalizeModel);
+    const selectDecisionOptionId = options.selectPermissionOptionId ?? selectPermissionOptionId;
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const randomUUIDv4 = Effect.sync(() => crypto.randomUUID());
@@ -290,14 +507,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
 
     const emitPlanUpdate = (
       ctx: AcpSessionContext,
-      payload: {
-        readonly explanation?: string | null;
-        readonly plan: ReadonlyArray<{
-          readonly step: string;
-          readonly status: "pending" | "inProgress" | "completed";
-        }>;
-      },
+      payload: AcpPlanPayload,
       rawPayload: unknown,
+      source: AcpRawSource,
       method: string,
     ) =>
       Effect.gen(function* () {
@@ -314,7 +526,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             threadId: ctx.threadId,
             turnId: ctx.activeTurnId,
             payload,
-            source: "acp.jsonrpc",
+            source,
             method,
             rawPayload,
           }),
@@ -337,6 +549,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
+        if (ctx.agentControl) yield* ctx.agentControl.revoke("runtime-teardown");
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
         if (ctx.notificationFiber) {
@@ -386,7 +599,11 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             input.resumePolicy === "fresh" ? undefined : input.resumeCursor;
           const acpResume =
             effectiveResumeCursor === undefined ? undefined : parseAcpResume(effectiveResumeCursor);
-          if (effectiveResumeCursor !== undefined && acpResume === undefined) {
+          if (
+            effectiveResumeCursor !== undefined &&
+            acpResume === undefined &&
+            options.invalidResumeCursor !== "start-fresh"
+          ) {
             return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
               operation: "startSession",
@@ -427,6 +644,49 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
               Effect.sync(() => deviceToolBinding.dispose()),
             );
           }
+          // `ctx` exists once the session is ready; callbacks before that see no turn.
+          const currentTurnId = (): TurnId | undefined =>
+            (ctx as AcpSessionContext | undefined)?.activeTurnId;
+          let agentControl: AgentControlAcpInjection | undefined;
+          const agentControlOptions = options.agentControl;
+          const agentControlRuntimeHooks = agentControlOptions
+            ? {
+                resolveMcpServers: (initializeResult: EffectAcpSchema.InitializeResponse) =>
+                  installAgentControlAcp(agentControlOptions.bridge, {
+                    threadId: input.threadId,
+                    providerInstanceId: boundInstanceId,
+                    runtimeSessionId,
+                    initializeResult,
+                    proxyCommand: agentControlOptions.stdioProxy?.command ?? process.execPath,
+                    proxyEntryPoint:
+                      agentControlOptions.stdioProxy?.entryPoint ?? process.argv[1] ?? "",
+                  }).pipe(
+                    Effect.tap(
+                      Option.match({
+                        onNone: () => Effect.void,
+                        onSome: (installed) =>
+                          installed
+                            .addScopeFinalizer(sessionScope)
+                            .pipe(Effect.tap(() => Effect.sync(() => (agentControl = installed)))),
+                      }),
+                    ),
+                    Effect.map(
+                      Option.match({
+                        onNone: () => [],
+                        onSome: (installed) => [installed.mcpServer],
+                      }),
+                    ),
+                  ),
+                onProcessExit: () =>
+                  agentControl ? agentControl.revoke("runtime-teardown") : Effect.void,
+                onMcpSetupFailure: () =>
+                  agentControl
+                    ? agentControl
+                        .revoke("runtime-teardown")
+                        .pipe(Effect.tap(() => Effect.sync(() => (agentControl = undefined))))
+                    : Effect.void,
+              }
+            : {};
 
           const resumeSessionId = acpResume?.sessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
@@ -459,6 +719,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                     ],
                   }
                 : {}),
+              ...agentControlRuntimeHooks,
               ...acpNativeLoggers,
             })
             .pipe(
@@ -473,62 +734,56 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                   }),
               ),
             );
+          const extensionContext: AcpAdapterExtensionContext = {
+            runtime: acp,
+            threadId: input.threadId,
+            runtimeSessionId,
+            logNative: (method, payload) => logNative(input.threadId, method, payload),
+            emit: (event) => offerRuntimeEventForRuntime(runtimeSessionId, event),
+            makeEventStamp,
+            activeTurnId: currentTurnId,
+            emitPlanUpdate: ({ payload, rawPayload, source, method }) =>
+              ctx === undefined
+                ? Effect.void
+                : emitPlanUpdate(ctx, payload, rawPayload, source, method),
+            requestUserInput: ({ questions, raw, rawOnResolved }) =>
+              Effect.gen(function* () {
+                const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+                const runtimeRequestId = RuntimeRequestId.make(requestId);
+                const resolution = yield* Deferred.make<AcpUserInputResolution>();
+                pendingUserInputs.set(requestId, { resolution });
+                yield* offerRuntimeEventForRuntime(runtimeSessionId, {
+                  type: "user-input.requested",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId: currentTurnId(),
+                  requestId: runtimeRequestId,
+                  payload: { questions },
+                  raw,
+                });
+                const resolved = yield* Deferred.await(resolution);
+                pendingUserInputs.delete(requestId);
+                yield* offerRuntimeEventForRuntime(runtimeSessionId, {
+                  type: "user-input.resolved",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  turnId: currentTurnId(),
+                  requestId: runtimeRequestId,
+                  payload: { answers: resolved._tag === "answered" ? resolved.answers : {} },
+                  ...(rawOnResolved ? { raw } : {}),
+                });
+                return resolved;
+              }),
+          };
           const started = yield* Effect.gen(function* () {
-            yield* Effect.forEach(
-              options.xaiExtensions
-                ? (["x.ai/ask_user_question", "_x.ai/ask_user_question"] as const)
-                : [],
-              (method) =>
-                acp.handleExtRequest(method, XAiAskUserQuestionRequest, (params) =>
-                  mapAcpCallbackFailure(
-                    Effect.gen(function* () {
-                      yield* logNative(input.threadId, method, params);
-                      const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
-                      const runtimeRequestId = RuntimeRequestId.make(requestId);
-                      const resolution = yield* Deferred.make<PendingUserInputResolution>();
-                      pendingUserInputs.set(requestId, { resolution });
-                      yield* offerRuntimeEventForRuntime(runtimeSessionId, {
-                        type: "user-input.requested",
-                        ...(yield* makeEventStamp()),
-                        provider: PROVIDER,
-                        threadId: input.threadId,
-                        turnId: sessions.get(input.threadId)?.activeTurnId,
-                        requestId: runtimeRequestId,
-                        payload: { questions: extractXAiAskUserQuestions(params) },
-                        raw: {
-                          source: "acp.grok.extension",
-                          method,
-                          payload: params,
-                        },
-                      });
-                      const resolved = yield* Deferred.await(resolution);
-                      pendingUserInputs.delete(requestId);
-                      const resolvedAnswers = resolved._tag === "answered" ? resolved.answers : {};
-                      yield* offerRuntimeEventForRuntime(runtimeSessionId, {
-                        type: "user-input.resolved",
-                        ...(yield* makeEventStamp()),
-                        provider: PROVIDER,
-                        threadId: input.threadId,
-                        turnId: sessions.get(input.threadId)?.activeTurnId,
-                        requestId: runtimeRequestId,
-                        payload: { answers: resolvedAnswers },
-                        raw: {
-                          source: "acp.grok.extension",
-                          method,
-                          payload: params,
-                        },
-                      });
-                      switch (resolved._tag) {
-                        case "answered":
-                          return makeXAiAskUserQuestionResponse(params, resolved.answers);
-                        case "cancelled":
-                          return makeXAiAskUserQuestionCancelledResponse();
-                      }
-                    }),
-                  ),
-                ),
-              { discard: true },
-            );
+            if (options.xaiExtensions) {
+              yield* registerXAiExtensions(extensionContext);
+            }
+            if (options.registerExtensions) {
+              yield* options.registerExtensions(extensionContext);
+            }
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
@@ -555,7 +810,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                       stamp: yield* makeEventStamp(),
                       provider: PROVIDER,
                       threadId: input.threadId,
-                      turnId: sessions.get(input.threadId)?.activeTurnId,
+                      turnId: currentTurnId(),
                       requestId: runtimeRequestId,
                       permissionRequest,
                       detail:
@@ -576,14 +831,14 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                       stamp: yield* makeEventStamp(),
                       provider: PROVIDER,
                       threadId: input.threadId,
-                      turnId: sessions.get(input.threadId)?.activeTurnId,
+                      turnId: currentTurnId(),
                       requestId: runtimeRequestId,
                       permissionRequest,
                       decision: resolved,
                     }),
                   );
                   const selectedOptionId =
-                    resolved === "cancel" ? undefined : selectPermissionOptionId(params, resolved);
+                    resolved === "cancel" ? undefined : selectDecisionOptionId(params, resolved);
                   return {
                     outcome: selectedOptionId
                       ? {
@@ -604,15 +859,12 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
 
           if (options.onStarted) yield* options.onStarted(started);
 
-          const requestedStartModelId = acpModelSelection?.model
-            ? normalizeModel(acpModelSelection.model)
-            : undefined;
-          const boundModelId = yield* applyAcpModelSelection({
+          const startModel = yield* sessionConfiguration.start({
             runtime: acp,
-            currentModelId: currentAcpModelIdFromSessionSetup(started.sessionSetupResult),
-            requestedModelId: requestedStartModelId || undefined,
-            mapError: (cause) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
+            threadId: input.threadId,
+            runtimeMode: input.runtimeMode,
+            modelSelection: acpModelSelection,
+            started,
           });
 
           const now = yield* nowIso;
@@ -624,7 +876,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             runtimeMode: input.runtimeMode,
             tokenMode: input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
             cwd,
-            ...(boundModelId ? { model: normalizeModel(boundModelId) } : {}),
+            ...(startModel.model ? { model: startModel.model } : {}),
             threadId: input.threadId,
             resumeCursor: {
               schemaVersion: ACP_RESUME_VERSION,
@@ -641,13 +893,18 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             session,
             scope: sessionScope,
             acp,
+            agentControl,
+            agentControlHostContext:
+              agentControl?.hostContext ??
+              (agentControlOptions?.bridge ? agentControlHostContext(false) : ""),
+            agentControlHostContextDelivered: false,
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
             turnIds: [],
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
-            currentModelId: boundModelId,
+            currentModelId: startModel.currentModelId,
             promptImages:
               started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
             stopped: false,
@@ -699,7 +956,13 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                     return;
                   case "PlanUpdated":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
-                    yield* emitPlanUpdate(ctx, event.payload, event.rawPayload, "session/update");
+                    yield* emitPlanUpdate(
+                      ctx,
+                      event.payload,
+                      event.rawPayload,
+                      "acp.jsonrpc",
+                      "session/update",
+                    );
                     return;
                   case "ToolCallUpdated":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
@@ -790,7 +1053,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             ...(yield* makeEventStamp()),
             provider: PROVIDER,
             threadId: input.threadId,
-            payload: { state: "ready", reason: "ACP session ready" },
+            payload: { state: "ready", reason: options.labels?.readyReason ?? "ACP session ready" },
           });
           yield* offerRuntimeEventForRuntime(runtimeSessionId, {
             type: "thread.started",
@@ -803,6 +1066,87 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           return session;
         }).pipe(Effect.scoped),
       );
+
+    /** The prompt of a turn: the host context once, then its text, then its images. */
+    const buildPromptParts = (ctx: AcpSessionContext, input: ProviderSendTurnInput) =>
+      Effect.gen(function* () {
+        const imagePromptParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
+          Effect.gen(function* () {
+            if (
+              !isPersistableChatAttachment(attachment) ||
+              attachment.type !== "image" ||
+              (options.respectPromptCapabilities && !ctx.promptImages)
+            ) {
+              return null;
+            }
+            const attachmentPath = resolveAttachmentPath({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachment,
+            });
+            if (!attachmentPath) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: `Invalid attachment id '${attachment.id}'.`,
+              });
+            }
+            const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/prompt",
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            );
+            return {
+              type: "image",
+              data: Buffer.from(bytes).toString("base64"),
+              mimeType: attachment.mimeType,
+            } satisfies EffectAcpSchema.ContentBlock;
+          }),
+        );
+        const promptText = appendAttachmentPathLines(
+          input.input?.trim(),
+          attachmentPathLines({
+            attachmentsDir: serverConfig.attachmentsDir,
+            attachments: input.attachments,
+          }),
+        );
+        const userParts: Array<EffectAcpSchema.ContentBlock> = [
+          ...(promptText && promptText.trim().length > 0
+            ? [{ type: "text" as const, text: promptText }]
+            : []),
+          ...imagePromptParts.filter((part) => part !== null),
+        ];
+
+        if (userParts.length === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Turn requires non-empty text or attachments.",
+          });
+        }
+
+        // A slash command must lead the prompt; the host context waits for the next turn.
+        if (
+          ctx.agentControlHostContextDelivered ||
+          ctx.agentControlHostContext.length === 0 ||
+          isSlashCommandInput(input.input)
+        ) {
+          return userParts;
+        }
+        ctx.agentControlHostContextDelivered = true;
+        return [
+          {
+            type: "text" as const,
+            text: `<ryco_host_context>${ctx.agentControlHostContext}</ryco_host_context>`,
+          },
+          ...userParts,
+        ];
+      });
 
     const sendTurn: AcpAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
@@ -823,83 +1167,24 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
               });
             }
             const turnId = TurnId.make(yield* randomUUIDv4);
-            const turnModelSelection =
-              input.modelSelection?.instanceId === boundInstanceId
-                ? input.modelSelection
-                : undefined;
-            const requestedTurnModelId = turnModelSelection?.model
-              ? normalizeModel(turnModelSelection.model)
-              : undefined;
-            const currentModelId = yield* applyAcpModelSelection({
+            const turnModel = yield* sessionConfiguration.turn({
               runtime: ctx.acp,
+              threadId: input.threadId,
+              session: ctx.session,
+              interactionMode: input.interactionMode,
+              modelSelection:
+                input.modelSelection?.instanceId === boundInstanceId
+                  ? input.modelSelection
+                  : undefined,
               currentModelId: ctx.currentModelId,
-              requestedModelId: requestedTurnModelId || undefined,
-              mapError: (cause) =>
-                mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
             });
+            const promptParts =
+              options.promptAssembly === "after-turn-start"
+                ? undefined
+                : yield* buildPromptParts(ctx, input);
 
-            const imagePromptParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
-              Effect.gen(function* () {
-                if (
-                  !isPersistableChatAttachment(attachment) ||
-                  attachment.type !== "image" ||
-                  (options.respectPromptCapabilities && !ctx.promptImages)
-                ) {
-                  return null;
-                }
-                const attachmentPath = resolveAttachmentPath({
-                  attachmentsDir: serverConfig.attachmentsDir,
-                  attachment,
-                });
-                if (!attachmentPath) {
-                  return yield* new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "session/prompt",
-                    detail: `Invalid attachment id '${attachment.id}'.`,
-                  });
-                }
-                const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderAdapterRequestError({
-                        provider: PROVIDER,
-                        method: "session/prompt",
-                        detail: cause.message,
-                        cause,
-                      }),
-                  ),
-                );
-                return {
-                  type: "image",
-                  data: Buffer.from(bytes).toString("base64"),
-                  mimeType: attachment.mimeType,
-                } satisfies EffectAcpSchema.ContentBlock;
-              }),
-            );
-            const promptText = appendAttachmentPathLines(
-              input.input?.trim(),
-              attachmentPathLines({
-                attachmentsDir: serverConfig.attachmentsDir,
-                attachments: input.attachments,
-              }),
-            );
-            const promptParts: Array<EffectAcpSchema.ContentBlock> = [
-              ...(promptText && promptText.trim().length > 0
-                ? [{ type: "text" as const, text: promptText }]
-                : []),
-              ...imagePromptParts.filter((part) => part !== null),
-            ];
-
-            if (promptParts.length === 0) {
-              return yield* new ProviderAdapterValidationError({
-                provider: PROVIDER,
-                operation: "sendTurn",
-                issue: "Turn requires non-empty text or attachments.",
-              });
-            }
-
-            ctx.currentModelId = currentModelId;
-            const displayModel = currentModelId ? normalizeModel(currentModelId) : undefined;
+            ctx.currentModelId = turnModel.currentModelId;
+            const displayModel = turnModel.model;
             ctx.activeTurnId = turnId;
             ctx.lastPlanFingerprint = undefined;
             ctx.session = {
@@ -920,7 +1205,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             });
 
             return {
-              acp: ctx.acp,
+              ctx,
               acpSessionId: ctx.acpSessionId,
               runtimeSessionId,
               displayModel,
@@ -934,13 +1219,19 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         // runtime stream; otherwise ingestion keeps it running forever.
         let terminalEmitted = false;
         return yield* Effect.gen(function* () {
-          const result = yield* prepared.acp
+          const ctx = prepared.ctx;
+          const promptParts = prepared.promptParts ?? (yield* buildPromptParts(ctx, input));
+          if (ctx.agentControl) yield* ctx.agentControl.bindTurn(prepared.turnId);
+          const result = yield* ctx.acp
             .prompt({
-              prompt: prepared.promptParts,
+              prompt: promptParts,
             })
             .pipe(
               Effect.mapError((error) =>
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
+              ),
+              Effect.ensuring(
+                ctx.agentControl ? ctx.agentControl.retireTurn(prepared.turnId) : Effect.void,
               ),
             );
 
@@ -1008,6 +1299,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
     const interruptTurn: AcpAdapterShape["interruptTurn"] = (threadId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
+        if (ctx.agentControl) yield* ctx.agentControl.retireTurn(ctx.activeTurnId);
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
         yield* Effect.ignore(
@@ -1044,7 +1336,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         if (!pending) {
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
-            method: "_x.ai/ask_user_question",
+            method: options.labels?.userInputMethod ?? "_x.ai/ask_user_question",
             detail: `Unknown pending user-input request: ${requestId}`,
           });
         }
@@ -1064,7 +1356,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "thread/rollback",
-          detail: "This ACP agent does not support conversation rollback.",
+          detail:
+            options.labels?.rollbackUnsupportedDetail ??
+            "This ACP agent does not support conversation rollback.",
         });
       });
 
@@ -1109,6 +1403,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           // override this only when the agent advertises no model API.
           return options.getSessionModelSwitch?.() ?? "in-session";
         },
+        ...(options.turnSteering ? { turnSteering: options.turnSteering } : {}),
         // sendTurn awaits the whole ACP prompt after emitting turn.started.
         turnSubmission: "completion",
         // Agent-specific: ACP does not say whether session/load accepts a new cwd.
