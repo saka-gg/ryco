@@ -1,11 +1,9 @@
 import { claudeApprovalPresentation } from "../claudeApprovalPresentation.ts";
 import { claudeInitAdvertisesNativeCompaction } from "../claudeNativeCompaction.ts";
 import { readClaudeResumeState } from "../claudeResumeCursor.ts";
-import { getActiveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
-import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
-import { appendClaudeStderrTail, prepareClaudeCodeSpawn } from "../claudeCodeSpawn.ts";
-import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
-import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
+import { prepareClaudeCodeSpawn } from "../claudeCodeSpawn.ts";
+import { observeClaudeCache } from "../claudeCacheObservation.ts";
+import { claudePostCompactionUsage } from "../claudeContextUsage.ts";
 import {
   decideClaudeFastModePublish,
   readClaudeFastModeFrame,
@@ -20,16 +18,12 @@ import {
   decideClaudeStop,
   decideClaudeTurnClose,
   decideClaudeTurnResult,
-  isClaudeAbortTerminalReason,
   isClaudeApiErrorReply,
   isClaudeRootTurnFrame,
-  isInterruptedResult,
   parseClaudeCliCapabilities,
   readClaudeInterruptReceipt,
   rememberDiscardedSteer,
-  resultErrorsText,
   type ClaudeTurnClose,
-  type ClaudeTurnCloseCause,
 } from "../claudeSteering.ts";
 import {
   CLAUDE_PROVIDER_TURN_STOP_GRACE_MS,
@@ -38,7 +32,6 @@ import {
   isClaudeRootTurnOutput,
   shouldOpenClaudeWakeTurn,
 } from "../claudeWakeTurn.ts";
-import type { ClaudeCacheObservation, ModelSelection } from "@ryco/contracts";
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
  *
@@ -56,14 +49,9 @@ import {
   type Options as ClaudeQueryOptions,
   type PermissionMode,
   type PermissionResult,
-  type PermissionUpdate,
-  type SDKAPIRetryMessage,
-  type SDKInformationalMessage,
   type SDKMessage,
   type SDKResultMessage,
-  type SettingSource,
   type SDKUserMessage,
-  type ModelUsage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@ryco/shared/cliArgs";
 import { normalizePromptSuggestion } from "@ryco/shared/promptSuggestion";
@@ -71,18 +59,11 @@ import {
   parseClaudeAutoCompactWindow,
   resolveClaudeAutoCompactMode,
 } from "@ryco/shared/claudeAutoCompact";
-import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import {
   ApprovalRequestId,
-  type AgentTokenMode,
-  type CanonicalItemType,
-  type CanonicalRequestType,
-  type ChatFileAttachment,
-  type ChatImageAttachment,
   type ClaudeSettings,
   EventId,
   type ProviderApprovalDecision,
-  ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
   type ProviderRuntimeEvent,
@@ -92,45 +73,26 @@ import {
   type ProviderSendTurnInput,
   type ProviderSession,
   type ProviderSessionStartInput,
-  type ServerProviderSlashCommand,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
-  type RuntimeContentStreamKind,
   type RuntimePlanStep,
   DEFAULT_AGENT_TOKEN_MODE,
-  RuntimeItemId,
-  RuntimeRequestId,
-  RuntimeSubagentId,
   RuntimeTaskId,
   type RuntimeSubagentStatus,
-  type RuntimeTaskStatus,
-  type RuntimeTaskUsage,
   type SubagentRef,
-  type TaskAgentLinkage,
   type TaskRunHandles,
   ThreadId,
   TurnId,
   type UserInputQuestion,
-  type VcsStateChangedPayload,
 } from "@ryco/contracts";
 import {
-  applyClaudePromptEffortPrefix,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
-  resolvePromptInjectedEffort,
 } from "@ryco/shared/model";
-import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
-import { findServerProviderModel } from "@ryco/shared/serverProviderModels";
 import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
-import { redactToolParameterCredentials } from "@ryco/shared/toolParameterRedaction";
-import { isNativeCompactionCommand, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
-import {
-  resolveHtmlRenderToolKind,
-  resolveHtmlRenderToolPresentation,
-  withoutHtmlRenderMarkup,
-} from "@ryco/shared/htmlRenderToolPresentation";
+import { NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 import {
   Cause,
   Clock,
@@ -149,11 +111,6 @@ import {
   Stream,
 } from "effect";
 
-import {
-  attachmentPathLines,
-  isPersistableChatAttachment,
-  resolveAttachmentPath,
-} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { logOnceEvery } from "../../logOnceEvery.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
@@ -166,22 +123,15 @@ import {
   observeContextCompaction,
   recordContextCompactionRequest,
   settleContextCompaction,
-  type ContextCompactionPolicyState,
 } from "../contextCompactionPolicy.ts";
-import {
-  createProcessDeviceToolBinding,
-  type DeviceToolBinding,
-} from "../../providerTools/deviceToolGateway.ts";
-import { buildTokenReductionInstructions, checkRtkAvailability } from "../../tokenReduction.ts";
+import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import { makeClaudeEnvironment, resolveClaudeSourceRoot } from "../Drivers/ClaudeHome.ts";
 import {
   type ClaudeChainPositionBeforePrompt,
   claudeEntryBeforePrompt,
 } from "../claudeTranscriptCutoff.ts";
 import {
-  CLAUDE_PLAN_TOOL_NAMES,
   ClaudePlanTaskTracker,
-  claudePlanToolDetail,
   planTasksCursorField,
   readClaudePlanTasksFromCursor,
 } from "../claudePlanTasks.ts";
@@ -197,7 +147,6 @@ import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts
 import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
-  normalizeClaudeCliEffort,
   parseClaudeSlashCommands,
   probeClaudeCapabilities,
   resolveClaudeApiModelId,
@@ -224,7 +173,7 @@ import {
   isMessageableClaudeTask,
   takeSubagentMessages,
 } from "../claudeSubagentMessages.ts";
-import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
@@ -233,8 +182,6 @@ import {
   agentControlHostContext,
   installAgentControlNativeHttp,
   redactAgentControlSecrets,
-  type AgentControlProviderBridge,
-  type AgentControlRuntimeLease,
 } from "../../agentControl/ProviderInjection.ts";
 import { makeSharedPayloadSecretRedactor } from "../../agentControl/secretRedaction.ts";
 import {
@@ -243,1970 +190,122 @@ import {
   CLAUDE_USAGE_LIMIT_FALLBACK_MESSAGE,
   claudeUsageLimitState,
 } from "./claudeUsageLimits.ts";
-
-const PROVIDER = ProviderDriverKind.make("claudeAgent");
-const WAKE_NO_OUTPUT_REASON = "Claude started a background turn but produced no output.";
-const PROVIDER_TURN_STOP_REASON = "Claude did not end the background turn after Stop.";
-const DISCARDED_STEER_TURN_REASON = "Claude started a turn for a message Stop cancelled.";
-const FOLDED_INTO_DISCARDED_STEER_REASON =
-  "Claude Code merged this message into a cancelled steer's request, so no reply is shown. Send it again.";
-const STEER_TURN_ENDED_DETAIL =
-  "The turn finished before this message could be steered. It stays queued and is sent next.";
-const STEER_TURN_COMPACTING_DETAIL =
-  "Claude is compacting the conversation. The message stays queued.";
-/** A compaction segment correlates by its own prompt uuid alone. */
-const NO_STEER_PROMPT_UUIDS: ReadonlySet<string> = new Set();
-type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
-type ClaudeToolResultStreamKind = Extract<
-  RuntimeContentStreamKind,
-  "command_output" | "file_change_output"
->;
-type ClaudeSdkEffort = NonNullable<ClaudeQueryOptions["effort"]>;
-
-type PromptQueueItem =
-  | {
-      readonly type: "message";
-      readonly message: SDKUserMessage;
-    }
-  | {
-      readonly type: "terminate";
-    };
-
-/** Transcript chain entry, as read by `getSessionMessages`. */
-export interface ClaudeTranscriptEntry {
-  readonly type: string;
-  readonly uuid: string;
-  readonly parent_tool_use_id: string | null;
-}
-
-const CLAUDE_TURN_HEADS_CAP = 64;
-const CLAUDE_REWIND_PROBE_TIMEOUT = "30 seconds";
-const CLAUDE_REWIND_TRANSCRIPT_TIMEOUT = "10 seconds";
-/** A transcript check that takes longer (a hung network mount) reads as `unknown`. */
-const CLAUDE_TRANSCRIPT_CHECK_TIMEOUT = "2 seconds";
-const CLAUDE_REWIND_QUERY_EXIT_MS = 5_000;
-/**
- * How long the CLI may take to answer its initialize control request on a runtime's first turn.
- * It loads its settings, plugins and MCP servers first; a hang there would otherwise surface only
- * through the 90 s turn-acceptance deadline, with no hint at the cause.
- */
-const CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS = 30_000;
-
-/**
- * Who opened a turn. Anything but "prompt" is a provider turn: Claude started it without a
- * prompt (a background "wake"), so it has no prompt UUID. It still holds exact-turn Agent
- * Control authority (bound as a provider turn), so the agent can keep acting on the user's task.
- */
-type ClaudeTurnOpener = "prompt" | "wake-signal" | "assistant-output";
-
-interface ClaudeTurnState {
-  readonly turnId: TurnId;
-  /** Only user-initiated turns have a prompt UUID; provider turns preserve legacy completion. */
-  readonly promptUuid?: string;
-  readonly openedBy: ClaudeTurnOpener;
-  readonly startedAt: string;
-  readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
-  readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
-  readonly capturedProposedPlanKeys: Set<string>;
-  nextSyntheticAssistantBlockIndex: number;
-  /** Open thinking blocks by stream index; each one is a reasoning item. */
-  readonly reasoningBlocks: Map<number, { readonly itemId: string }>;
-  reasoningBlockCount: number;
-  /** A root frame proved Claude is producing this turn (first-output watchdog liveness). */
-  rootOutputObserved: boolean;
-  /** Newest main-chain transcript entry of this turn (subagent sidechains excluded). */
-  lastChainUuid: string | undefined;
-  /**
-   * A root content frame (stream event, assistant or user) was routed into this turn. Unlike
-   * `rootOutputObserved`, system frames (`api_retry`, compaction) never set it: they carry no
-   * echo, so a wake turn they opened can still turn out to be a discarded steer's CLI turn.
-   */
-  rootContentObserved: boolean;
-  /**
-   * Set while one fiber finishes this turn. Concurrent closes wait on it instead of emitting a
-   * second lifecycle event.
-   */
-  completion: Deferred.Deferred<void> | undefined;
-  /** Rejected rate-limit windows already warned about in this turn; created lazily. */
-  announcedUsageLimitKeys?: Set<string>;
-  /** Uuids of steers offered into this turn. The turn owns every CLI segment they start. */
-  readonly steerPromptUuids: Set<string>;
-  /**
-   * Steers that need nothing more: a result consumed them, or Stop's interrupt cancelled them
-   * (the CLI never runs those, so no result may discard them again).
-   */
-  readonly settledSteerPromptUuids: Set<string>;
-  /** Steers whose CLI segment's echo was routed into this turn: they run, whatever a receipt says. */
-  readonly startedSteerPromptUuids: Set<string>;
-  /** Echo sets already re-interrupted after Stop (once per CLI segment). */
-  readonly reinterruptedEchoKeys: Set<string>;
-  /** Stop was requested for this turn; it never waits for a steer again. */
-  interruptRequested: boolean;
-  /** CLI segments sealed while the turn waited for a steer's segment. */
-  sealedSegmentCount: number;
-  /**
-   * Set between a sealed segment and the next root frame: the CLI promised another result, and
-   * no segment of this turn is running.
-   */
-  awaitingSteerContinuation:
-    | { readonly since: string; readonly segmentStatus: ProviderRuntimeTurnStatus }
-    | undefined;
-  /**
-   * The uuid of the `/compact` the compaction policy sent after this turn's own work completed.
-   * The turn stays open for that last segment and closes at its result.
-   */
-  compactionPromptUuid: string | undefined;
-}
-
-/** The only turn-state constructor: prompt and provider turns must share one shape. */
-function makeClaudeTurnState(input: {
-  readonly turnId: TurnId;
-  readonly startedAt: string;
-  readonly openedBy: ClaudeTurnOpener;
-  readonly promptUuid?: string;
-}): ClaudeTurnState {
-  return {
-    turnId: input.turnId,
-    ...(input.promptUuid !== undefined ? { promptUuid: input.promptUuid } : {}),
-    openedBy: input.openedBy,
-    startedAt: input.startedAt,
-    assistantTextBlocks: new Map(),
-    assistantTextBlockOrder: [],
-    capturedProposedPlanKeys: new Set(),
-    nextSyntheticAssistantBlockIndex: -1,
-    reasoningBlocks: new Map(),
-    reasoningBlockCount: 0,
-    rootOutputObserved: input.openedBy !== "wake-signal",
-    lastChainUuid: undefined,
-    rootContentObserved: input.openedBy !== "wake-signal",
-    completion: undefined,
-    steerPromptUuids: new Set(),
-    settledSteerPromptUuids: new Set(),
-    startedSteerPromptUuids: new Set(),
-    reinterruptedEchoKeys: new Set(),
-    interruptRequested: false,
-    sealedSegmentCount: 0,
-    awaitingSteerContinuation: undefined,
-    compactionPromptUuid: undefined,
-  };
-}
-
-interface AssistantTextBlockState {
-  readonly itemId: string;
-  readonly blockIndex: number;
-  emittedTextDelta: boolean;
-  fallbackText: string;
-  streamClosed: boolean;
-  completionEmitted: boolean;
-}
-
-interface PendingApproval {
-  readonly requestType: CanonicalRequestType;
-  readonly detail?: string;
-  readonly suggestions?: ReadonlyArray<PermissionUpdate>;
-  /** The CLI refused a session-wide grant for this request. */
-  readonly acceptForSessionOffered?: false;
-  readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
-}
-
-interface PendingUserInput {
-  readonly questions: ReadonlyArray<UserInputQuestion>;
-  readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
-  /** Unparks the waiting handler as cancelled. Session teardown must run it. */
-  readonly cancel: Effect.Effect<void>;
-}
-
-interface ToolInFlight {
-  readonly itemId: string;
-  readonly itemType: CanonicalItemType;
-  readonly toolName: string;
-  readonly title: string;
-  readonly detail?: string;
-  readonly input: Record<string, unknown>;
-  readonly partialInputJson: string;
-  readonly partialInputScan: StreamedJsonScan;
-  readonly lastEmittedInputFingerprint?: string;
-  /** Owning agent when this tool ran inside a subagent (see attribution note). */
-  readonly agentId?: string;
-  readonly parentToolUseId?: string;
-}
-
-/**
- * Agent identity captured from task_started and repeated on every subsequent
- * task.* payload, so client folds can reconstruct an agent even when its
- * start row aged out of activity retention.
- */
-interface ClaudeTaskAgentState {
-  backgroundAttempt?: number | undefined;
-  readonly taskId: string;
-  toolUseId: string | undefined;
-  description: string | undefined;
-  subagentType: string | undefined;
-  taskType: string | undefined;
-  workflowName: string | undefined;
-  skipTranscript: boolean;
-  runHandles: TaskRunHandles | undefined;
-  /** Set when this task was launched from inside a subagent. */
-  owningAgentId: string | undefined;
-  /** Seeded from the launching tool's input; refined by the subagent's own
-   * assistant snapshots (authoritative API model). */
-  model: string | undefined;
-  effort: string | undefined;
-}
-
-interface ClaudeSessionContext {
-  readonly generation: number;
-  session: ProviderSession;
-  /** The start input without its cursor, so a checkpoint revert can reopen the session. */
-  readonly startInput: Omit<ProviderSessionStartInput, "resumeCursor" | "resumePolicy">;
-  /** Last main-chain entry of recent completed turns (in memory, FIFO-capped). */
-  readonly turnHeads: Array<{ readonly turnId: TurnId; readonly head: string }>;
-  /** A rewind that later resumes must keep honoring until a turn completes. */
-  pendingRewind: { readonly at: string } | undefined;
-  /**
-   * The Claude Code stderr tail when Ryco spawned the CLI itself (agent priority); the SDK
-   * appends it to its exit errors only for its own spawn.
-   */
-  readonly processStderrTail?: () => string;
-  /** Reopen probe in progress: stream exits and error results feed `probeFailure`. */
-  probing: boolean;
-  probeFailure: Deferred.Deferred<string> | undefined;
-  readonly promptQueue: Queue.Queue<PromptQueueItem>;
-  readonly query: ClaudeQueryRuntime;
-  /** The configured CLI command, for startup error messages. */
-  readonly cliCommand: string;
-  /** The CLI answered its initialize control request; startup is no longer bounded. */
-  cliInitialized: boolean;
-  readonly deviceToolBinding: DeviceToolBinding | null;
-  readonly agentControl?: AgentControlRuntimeLease;
-  readonly agentControlHostContext: string;
-  agentControlHostContextDelivered: boolean;
-  streamFiber: Fiber.Fiber<void, Error> | undefined;
-  readonly startedAt: string;
-  /**
-   * The session's own permission mode, which a "default" interaction turn restores. Cleared when
-   * the CLI turns out to refuse Auto, so the turns never ask for it again.
-   */
-  basePermissionMode: PermissionMode | undefined;
-  /** The Auto-mode refusal warning was emitted; it is shown once per session. */
-  autoModeRefusedWarningEmitted: boolean;
-  /**
-   * The permission mode this process is known to be in: the start option, then each mode a
-   * turn set. Undefined when unknown (no start option, or the CLI may have changed it), so the
-   * next turn with an interaction mode sets it explicitly.
-   */
-  currentPermissionMode: PermissionMode | undefined;
-  currentApiModelId: string | undefined;
-  /** Effective effort for the session's turns; subagents without an explicit
-   * effort override inherit this. */
-  currentEffort: string | undefined;
-  resumeSessionId: string | undefined;
-  /** The session whose transcript the config root was seen to hold (the cursor's `transcriptSeen`). */
-  transcriptSeenFor: string | undefined;
-  /** The session a completed turn already ran the transcript check for. */
-  transcriptCheckedFor: string | undefined;
-  readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
-  readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
-  /** Completed turn ids only (resume `turnCount`, `readThread`); never message bodies. */
-  readonly completedTurnIds: Array<TurnId>;
-  readonly inFlightTools: Map<number, ToolInFlight>;
-  /**
-   * The session's Task tool list (TaskCreate/TaskUpdate/TaskGet/TaskList), shown as the plan and
-   * carried in the resume cursor. Unlike `inFlightTools`, its pending calls outlive the turn: a
-   * background subagent's result can land after the turn settled.
-   */
-  readonly planTasks: ClaudePlanTaskTracker;
-  /**
-   * Block indexes of dropped subagent narration, keyed by parent_tool_use_id.
-   * Block indexes are per-message, so a suppressed block's
-   * content_block_stop must be dropped too — index N could otherwise match
-   * the parent's open assistant text block at N and close it mid-stream.
-   */
-  readonly suppressedSubagentBlocks: Map<string, Set<number>>;
-  readonly taskAgents: Map<string, ClaudeTaskAgentState>;
-  /** Agent-tool input retained beyond parent-turn completion for delayed task_started. */
-  readonly subagentLaunchInputByToolUseId: Map<string, Record<string, unknown>>;
-  /**
-   * Turn that issued each Agent tool call. Background task_started often
-   * arrives after that turn settled (or inside a later wake turn); stamping
-   * the launching turn keeps one turn's spawns in one batch.
-   */
-  readonly subagentLaunchTurnByToolUseId: Map<string, TurnId>;
-  /**
-   * Authoritative API model observed in a subagent-owned assistant snapshot,
-   * keyed by the launching tool use id. The SDK can deliver the snapshot and
-   * task_started on independent paths, so retain the observation until both
-   * sides of the linkage have arrived.
-   */
-  readonly subagentModelByToolUseId: Map<string, string>;
-  /** Snapshot-only tool calls need the same parent attribution as streamed calls. */
-  readonly subagentParentByToolUseId: Map<string, string>;
-  /**
-   * Last emitted workflow-member fingerprint per member slot. A coordinator
-   * task_progress repeats the FULL member array every tick; without a
-   * material-transition filter one provider tick fans out into up to 100
-   * runtime events (event-log writes, queue pressure, client reducer work)
-   * even when nothing changed for most members.
-   */
-  readonly workflowMemberFingerprints: Map<string, string>;
-  /**
-   * Rejected rate-limit windows by limit type (reset ISO time, or null when unknown).
-   * Account-scoped, so they outlive turns: a wake turn opened after the rejection still
-   * classifies its limit stop with the reset. Allowed events clear them.
-   */
-  readonly rejectedRateLimitWindows: Map<string, string | null>;
-  /**
-   * Last complete workflow phase roster per coordinator task. Claude only
-   * includes workflow_progress on some task_progress heartbeats, while the
-   * persisted activity is a latest-state upsert. Repeating this cached shape
-   * prevents a thin heartbeat from temporarily erasing future phases in the
-   * Agents workspace.
-   */
-  readonly workflowPhasesByTaskId: Map<string, ReadonlyArray<ClaudeWorkflowPhase>>;
-  /** Task ids that have started and not yet reached a terminal state. */
-  readonly liveTaskIds: Set<string>;
-  /**
-   * A person's messages for running subagents, by task id, oldest first. The PreToolUse hook
-   * hands them to the agent at its next tool call (`claudeSubagentMessages.ts`).
-   */
-  readonly pendingSubagentMessages: Map<string, Array<string>>;
-  /**
-   * Task ids positively observed as backgrounded (membership in a
-   * background_tasks_changed set, or a task_updated is_backgrounded patch).
-   * Only these are ever settled by set reconciliation: the set carries
-   * BACKGROUND work only, so a foreground task's absence proves nothing.
-   */
-  readonly backgroundedTaskIds: Set<string>;
-  turnState: ClaudeTurnState | undefined;
-  lastKnownContextWindow: number | undefined;
-  lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
-  cacheObservation: ClaudeCacheObservation | undefined;
-  /**
-   * Sticky: a root assistant frame reported main-loop usage on this runtime. Legacy task
-   * telemetry must never feed the gauge after that, even when a compaction boundary cleared
-   * `cacheObservation`.
-   */
-  mainLoopUsageObserved: boolean;
-  /**
-   * A compaction boundary was crossed since the last result. That result's cumulative usage
-   * includes the pre-compaction input, so it must not become the gauge.
-   */
-  cumulativeUsageSpansCompaction: boolean;
-  cacheModelSelection: ModelSelection | undefined;
-  compactionPolicy: ContextCompactionPolicyState;
-  /** The CLI's latest init frame lists `/compact`, which the compaction policy sends. */
-  supportsAutomaticCompaction: boolean;
-  /** Ryco asked this runtime for Fast mode, at start or by a later turn's selection. */
-  fastModeRequested: boolean;
-  /** `state:reason` of the Fast mode report last seen on this runtime; undefined before one. */
-  lastFastModeSignature: string | undefined;
-  compactionUnavailableWarningEmitted: boolean;
-  lastAssistantUuid: string | undefined;
-  lastThreadStartedId: string | undefined;
-  readonly subagentByTaskId: Map<string, SubagentRef>;
-  readonly startedSubagentIds: Set<string>;
-  readonly completedSubagentIds: Set<string>;
-  stopped: boolean;
-  /** A prompt turn was installed on this runtime; earlier signals are startup/resume handshakes. */
-  promptSent: boolean;
-  /** sendTurn calls between entry and install. A provider turn must not open under them. */
-  turnInstallsInFlight: number;
-  /** The CLI emitted `status: requesting`; from then on `init` alone never opens a turn. */
-  requestingStatusObserved: boolean;
-  /** Protocol capabilities from the latest `system/init`; undefined before the first one. */
-  cliCapabilities: ReadonlySet<string> | undefined;
-  /**
-   * The full slash-command list the CLI last pushed (`commands_changed`), with the adapter-wide
-   * order of that push; undefined before the first one.
-   */
-  slashCommands:
-    | { readonly commands: ReadonlyArray<ServerProviderSlashCommand>; readonly order: number }
-    | undefined;
-  /**
-   * Steer uuids that must never reply (Stop, or a failed segment) but that the CLI may still
-   * run; their CLI turn is dropped. A uuid leaves the set once a CLI turn consumed it.
-   */
-  readonly discardedSteerPromptUuids: Set<string>;
-  /** A CLI turn of discarded steers is running; its frames are dropped until its result. */
-  discardingCliTurn: { readonly uuids: ReadonlySet<string> } | undefined;
-  /**
-   * A wake signal arrived while discarded steers were pending. The provider turn opens at the
-   * next root content frame instead, whose echo was checked first. System frames carry no echo,
-   * so they never open it; a result ends the signalling CLI turn and clears the deferral.
-   */
-  wakeSignalDeferred: boolean;
-  /** Serializes SDK frame handling against Stop bookkeeping and steer registration. */
-  readonly turnLock: Semaphore.Semaphore;
-  /**
-   * The turn this runtime finished last and how it ended. Claude sends a turn's
-   * `prompt_suggestion` after its result, when the turn is already detached.
-   */
-  lastFinishedTurn?: { readonly turnId: TurnId; readonly status: ProviderRuntimeTurnStatus };
-}
-
-interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
-  /**
-   * Resolves to the interrupt receipt on CLIs with `interrupt_receipt_v1`, else undefined. The
-   * 0.3.263 SDK runtime forwards `cancelQueued` as `cancel_queued` even though its public `.d.ts`
-   * declares no argument, so the receipt is always parsed defensively.
-   */
-  readonly interrupt: (options?: { readonly cancelQueued?: boolean }) => Promise<unknown>;
-  /** SDK Query.stopTask — present on real queries; optional for test doubles. */
-  readonly stopTask?: (taskId: string) => Promise<void>;
-  readonly setModel: (model?: string) => Promise<void>;
-  readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
-  readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
-  /** SDK Query.applyFlagSettings; `null` clears the key from the flag layer. */
-  readonly applyFlagSettings: (settings: { readonly fastMode: true | null }) => Promise<void>;
-  readonly close: () => void;
-  readonly mcpServerStatus?: () => Promise<
-    ReadonlyArray<{ readonly name: string; readonly status: string }>
-  >;
-  /** Resolves once the CLI accepted the initialize control request. */
-  readonly initializationResult?: () => Promise<unknown>;
-}
-
-export interface ClaudeAdapterLiveOptions {
-  readonly instanceId?: ProviderInstanceId;
-  readonly environment?: NodeJS.ProcessEnv;
-  readonly agentControl?: AgentControlProviderBridge;
-  readonly createQuery?: (input: {
-    readonly prompt: AsyncIterable<SDKUserMessage>;
-    readonly options: ClaudeQueryOptions;
-  }) => ClaudeQueryRuntime;
-  readonly nativeEventLogPath?: string;
-  readonly nativeEventLogger?: EventNdjsonLogger;
-  /** Test seam: a small capacity makes runtime-event backpressure deterministic. */
-  readonly runtimeEventQueueCapacity?: number;
-  /** Runs each session's Claude Code through `nice`; undefined keeps the SDK's own spawn. */
-  readonly processPriority?: AgentProcessPriorityShape | undefined;
-  /**
-   * The node's `promptSuggestions` setting, read when a session opens: Claude Code then predicts
-   * the next prompt after each turn. Undefined keeps it off.
-   */
-  readonly promptSuggestionsEnabled?: Effect.Effect<boolean> | undefined;
-  /** Reads a session's main transcript chain. Defaults to the SDK's `getSessionMessages`. */
-  readonly readSessionMessages?: (
-    sessionId: string,
-    options: { readonly dir?: string; readonly includeSystemMessages: boolean },
-  ) => Promise<ReadonlyArray<ClaudeTranscriptEntry>>;
-  /**
-   * Whether Claude still keeps a session's transcript, read before a resume. Defaults to
-   * `readClaudeTranscriptPresence` in the instance's config root.
-   */
-  readonly readTranscriptPresence?: (sessionId: string) => Promise<ClaudeTranscriptPresence>;
-  /**
-   * Whether this instance's Claude Code says a model (slug or alias) can run Auto mode, from the
-   * instance's snapshot. Undefined is unknown: the session keeps Auto.
-   */
-  readonly resolveAutoModeSupport?: (model: string) => Effect.Effect<boolean | undefined>;
-}
-
-const CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP = 256;
-
-function claudeAutoModeRefusedMessage(model: string | undefined): string {
-  const catalogModels = getActiveClaudeModelCatalog().models.map((entry) => entry.model);
-  const name = findServerProviderModel(catalogModels, model)?.name ?? model ?? "the selected model";
-  return `Claude Code reports that ${name} can't run in Auto mode, so this session asks before commands and file changes.`;
-}
-
-function rememberClaudeSubagentAttribution<A>(
-  cache: Map<string, A>,
-  toolUseId: string,
-  value: A,
-): void {
-  if (!cache.has(toolUseId) && cache.size >= CLAUDE_SUBAGENT_ATTRIBUTION_CACHE_CAP) {
-    const oldestToolUseId = cache.keys().next().value;
-    if (oldestToolUseId !== undefined) cache.delete(oldestToolUseId);
-  }
-  cache.set(toolUseId, value);
-}
-
-function rememberClaudeSubagentLaunch(
-  context: Pick<
-    ClaudeSessionContext,
-    "subagentLaunchInputByToolUseId" | "subagentLaunchTurnByToolUseId" | "turnState"
-  >,
-  toolUseId: string,
-  input: Record<string, unknown>,
-): void {
-  rememberClaudeSubagentAttribution(context.subagentLaunchInputByToolUseId, toolUseId, input);
-  if (context.turnState && !context.subagentLaunchTurnByToolUseId.has(toolUseId)) {
-    rememberClaudeSubagentAttribution(
-      context.subagentLaunchTurnByToolUseId,
-      toolUseId,
-      context.turnState.turnId,
-    );
-  }
-}
-
-function claudeSubagentLaunchModel(input: Record<string, unknown> | undefined): string | undefined {
-  const model = trimmedClaudeString(input?.model);
-  return model?.toLowerCase() === "inherit" ? undefined : model;
-}
-
-function hasDurableClaudeSessionId(message: SDKMessage): boolean {
-  if (message.type !== "system") {
-    return true;
-  }
-
-  return (
-    message.subtype !== "hook_started" &&
-    message.subtype !== "hook_progress" &&
-    message.subtype !== "hook_response"
-  );
-}
-
-/** An SDK exit error with the stderr tail the SDK adds only for its own spawn (see claudeCodeSpawn). */
-function withClaudeProcessStderr<A>(
-  context: Pick<ClaudeSessionContext, "processStderrTail">,
-  cause: A,
-): A {
-  return context.processStderrTail
-    ? appendClaudeStderrTail(cause, context.processStderrTail())
-    : cause;
-}
-
-function toMessage(cause: unknown, fallback: string): string {
-  if (cause instanceof Error && cause.message.length > 0) {
-    return cause.message;
-  }
-  return fallback;
-}
-
-/** A typed adapter error's user-level text: its `detail` or `issue`, not its prefixed message. */
-function adapterFailureDetail(error: { readonly message: string }): string {
-  const fields = error as { readonly detail?: unknown; readonly issue?: unknown };
-  for (const value of [fields.detail, fields.issue]) {
-    if (typeof value === "string" && value.trim().length > 0) return value.trim();
-  }
-  return error.message;
-}
-
-function toError(cause: unknown, fallback: string): Error {
-  return cause instanceof Error ? cause : new Error(toMessage(cause, fallback));
-}
-
-function normalizeClaudeStreamMessages(cause: Cause.Cause<Error>): ReadonlyArray<string> {
-  const errors = Cause.prettyErrors(cause)
-    .map((error) => error.message.trim())
-    .filter((message) => message.length > 0);
-  if (errors.length > 0) {
-    return errors;
-  }
-
-  const squashed = toMessage(Cause.squash(cause), "").trim();
-  return squashed.length > 0 ? [squashed] : [];
-}
-
-function getEffectiveClaudeAgentEffort(
-  effort: string | null | undefined,
-  model: string | null | undefined,
-): ClaudeSdkEffort | null {
-  const normalized = normalizeClaudeCliEffort(effort, model);
-  return normalized ? (normalized as ClaudeSdkEffort) : null;
-}
-
-/** The device tool gateway's MCP server name in Claude sessions (tools are `mcp__ryco_device__*`). */
-const CLAUDE_DEVICE_TOOL_SERVER = "ryco_device";
-
-/** Insertion-ordered map that forgets its oldest entries past `max`. */
-function rememberBounded<V>(map: Map<string, V>, key: string, value: V, max: number): void {
-  map.delete(key);
-  map.set(key, value);
-  while (map.size > max) {
-    const oldest = map.keys().next().value;
-    if (oldest === undefined) break;
-    map.delete(oldest);
-  }
-}
-
-function readTokenReductionInstructions(tokenMode: AgentTokenMode) {
-  return Effect.promise(() => checkRtkAvailability()).pipe(
-    Effect.map((availability) =>
-      buildTokenReductionInstructions({
-        tokenMode,
-        rtkInstalled: availability.installed,
-      }),
-    ),
-  );
-}
-
-function isClaudeInterruptedMessage(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("all fibers interrupted without error") ||
-    normalized.includes("request was aborted") ||
-    normalized.includes("interrupted by user")
-  );
-}
-
-function isClaudeInterruptedCause(cause: Cause.Cause<Error>): boolean {
-  return (
-    Cause.hasInterruptsOnly(cause) ||
-    normalizeClaudeStreamMessages(cause).some(isClaudeInterruptedMessage)
-  );
-}
-
-function messageFromClaudeStreamCause(cause: Cause.Cause<Error>, fallback: string): string {
-  return normalizeClaudeStreamMessages(cause)[0] ?? fallback;
-}
-
-function interruptionMessageFromClaudeCause(cause: Cause.Cause<Error>): string {
-  const message = messageFromClaudeStreamCause(cause, "Claude runtime interrupted.");
-  return isClaudeInterruptedMessage(message) ? "Claude runtime interrupted." : message;
-}
-
-function asRuntimeItemId(value: string): RuntimeItemId {
-  return RuntimeItemId.make(value);
-}
-
-function mainClaudeContextWindowFromModelUsage(
-  modelUsage: Record<string, ModelUsage> | undefined,
-  mainModel?: string,
-): number | undefined {
-  if (!modelUsage) return undefined;
-  // modelUsage includes subagents. A child's larger budget is not the parent's.
-  const usage = mainModel
-    ? modelUsage[mainModel]
-    : Object.keys(modelUsage).length === 1
-      ? Object.values(modelUsage)[0]
-      : undefined;
-  const window = usage?.contextWindow;
-  return typeof window === "number" && Number.isSafeInteger(window) && window > 0
-    ? window
-    : undefined;
-}
-
-function normalizeClaudeTokenUsage(
-  value: unknown,
-  contextWindow?: number,
-): ThreadTokenUsageSnapshot | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-
-  const usage = value as Record<string, unknown>;
-  const directInputTokens =
-    typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens)
-      ? usage.input_tokens
-      : 0;
-  const cacheCreationInputTokens =
-    typeof usage.cache_creation_input_tokens === "number" &&
-    Number.isFinite(usage.cache_creation_input_tokens)
-      ? usage.cache_creation_input_tokens
-      : 0;
-  const cachedInputTokens =
-    typeof usage.cache_read_input_tokens === "number" &&
-    Number.isFinite(usage.cache_read_input_tokens)
-      ? usage.cache_read_input_tokens
-      : 0;
-  const inputTokens = directInputTokens + cacheCreationInputTokens + cachedInputTokens;
-  const outputTokens =
-    typeof usage.output_tokens === "number" && Number.isFinite(usage.output_tokens)
-      ? usage.output_tokens
-      : 0;
-  const derivedTotalProcessedTokens = inputTokens + outputTokens;
-  const totalProcessedTokens =
-    (typeof usage.total_tokens === "number" && Number.isFinite(usage.total_tokens)
-      ? usage.total_tokens
-      : undefined) ?? (derivedTotalProcessedTokens > 0 ? derivedTotalProcessedTokens : undefined);
-  if (totalProcessedTokens === undefined || totalProcessedTokens <= 0) {
-    return undefined;
-  }
-
-  const maxTokens =
-    typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0
-      ? contextWindow
-      : undefined;
-  const usedTokens =
-    maxTokens !== undefined ? Math.min(totalProcessedTokens, maxTokens) : totalProcessedTokens;
-
-  return {
-    usedTokens,
-    lastUsedTokens: usedTokens,
-    ...(totalProcessedTokens > usedTokens ? { totalProcessedTokens } : {}),
-    ...(inputTokens > 0 ? { inputTokens } : {}),
-    ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
-    ...(outputTokens > 0 ? { outputTokens } : {}),
-    ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(typeof usage.tool_uses === "number" && Number.isFinite(usage.tool_uses)
-      ? { toolUses: usage.tool_uses }
-      : {}),
-    ...(typeof usage.duration_ms === "number" && Number.isFinite(usage.duration_ms)
-      ? { durationMs: usage.duration_ms }
-      : {}),
-  };
-}
-
-function withAutomaticCompactionCapability(
-  usage: ThreadTokenUsageSnapshot,
-  supported: boolean,
-): ThreadTokenUsageSnapshot {
-  return supported ? { ...usage, compactsAutomatically: true } : usage;
-}
-
-function asCanonicalTurnId(value: TurnId): TurnId {
-  return value;
-}
-
-function asRuntimeRequestId(value: ApprovalRequestId): RuntimeRequestId {
-  return RuntimeRequestId.make(value);
-}
-
-/**
- * The uuid of a main-chain transcript entry (user, assistant, compaction
- * boundary), or undefined for subagent sidechains and non-chain frames.
- */
-function claudeMainChainUuid(message: SDKMessage): string | undefined {
-  const isChainEntry =
-    message.type === "user" ||
-    message.type === "assistant" ||
-    (message.type === "system" &&
-      (message as { readonly subtype?: unknown }).subtype === "compact_boundary");
-  if (!isChainEntry) return undefined;
-  const uuid = (message as { readonly uuid?: unknown }).uuid;
-  const parentToolUseId = (message as { readonly parent_tool_use_id?: unknown }).parent_tool_use_id;
-  return typeof uuid === "string" &&
-    uuid.length > 0 &&
-    (parentToolUseId === null || parentToolUseId === undefined)
-    ? uuid
-    : undefined;
-}
-
-function trimmedClaudeString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function claudeTaskField(message: SDKMessage, field: string): string | undefined {
-  return trimmedClaudeString((message as Record<string, unknown>)[field]);
-}
-
-/** Only http/https survive; anything else (javascript:, file:, …) is dropped. */
-function sanitizeSessionUrl(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  if (!/^https?:\/\//i.test(trimmed)) {
-    return undefined;
-  }
-  return trimmed;
-}
-
-function nonNegativeInt(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? Math.floor(value)
-    : undefined;
-}
-
-/**
- * SDK task usage ({total_tokens, tool_uses, duration_ms}, sometimes with
- * input/output/cache breakdowns) → the typed contract shape. Unknown or
- * malformed input yields undefined rather than a partial guess.
- */
-function normalizeTaskUsage(usage: unknown): RuntimeTaskUsage | undefined {
-  if (typeof usage !== "object" || usage === null) {
-    return undefined;
-  }
-  const record = usage as Record<string, unknown>;
-  const totalTokens = nonNegativeInt(record.total_tokens);
-  if (totalTokens === undefined) {
-    return undefined;
-  }
-  const inputTokens = nonNegativeInt(record.input_tokens);
-  const cachedInputTokens = nonNegativeInt(record.cache_read_input_tokens);
-  const cacheWriteInputTokens = nonNegativeInt(record.cache_creation_input_tokens);
-  const outputTokens = nonNegativeInt(record.output_tokens);
-  const toolUses = nonNegativeInt(record.tool_uses);
-  const durationMs = nonNegativeInt(record.duration_ms);
-  return {
-    totalTokens,
-    ...(inputTokens !== undefined ? { inputTokens, directInputTokens: inputTokens } : {}),
-    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
-    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(toolUses !== undefined ? { toolUses } : {}),
-    ...(durationMs !== undefined ? { durationMs } : {}),
-  };
-}
-
-/** The cache writes a Claude usage record reports (already counted in its input). */
-function claudeCacheWriteInputTokens(usage: unknown): number {
-  if (typeof usage !== "object" || usage === null) return 0;
-  const value = (usage as Record<string, unknown>).cache_creation_input_tokens;
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
-}
-
-/** SDK task_updated patch status → the shared wire vocabulary. */
-const CLAUDE_TASK_PATCH_STATUS: Record<string, RuntimeTaskStatus> = {
-  pending: "pending",
-  running: "running",
-  completed: "completed",
-  failed: "failed",
-  killed: "cancelled",
-  paused: "idle",
-};
-
-/**
- * Resolves a stream message's parent_tool_use_id to the owning agent's
- * taskId. The Task tool's tool_use_id is remembered on task_started; any
- * subagent-forwarded block carries that id as its parent. Returns undefined
- * for parent-conversation traffic.
- */
-function agentIdForParentToolUse(
-  agents: Map<string, ClaudeTaskAgentState>,
-  parentToolUseId: string | null | undefined,
-): string | undefined {
-  if (parentToolUseId === null || parentToolUseId === undefined) {
-    return undefined;
-  }
-  for (const agent of agents.values()) {
-    if (agent.toolUseId === parentToolUseId) {
-      return agent.taskId;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Linkage bundle repeated on every task.* payload for `taskId`. Reads the
- * remembered identity (from task_started) so progress/terminal rows are
- * self-describing even when the start row ages out of activity retention.
- */
-function taskLinkageFor(
-  agents: Map<string, ClaudeTaskAgentState>,
-  taskId: string,
-): TaskAgentLinkage {
-  const agent = agents.get(taskId);
-  if (!agent) {
-    return {};
-  }
-  return {
-    ...(agent.backgroundAttempt !== undefined ? { attempt: agent.backgroundAttempt } : {}),
-    ...(agent.taskType ? { taskType: agent.taskType } : {}),
-    ...(agent.owningAgentId ? { agentId: agent.owningAgentId } : {}),
-    ...(agent.description ? { title: agent.description } : {}),
-    ...(agent.subagentType ? { role: agent.subagentType } : {}),
-    ...(agent.model ? { model: agent.model } : {}),
-    ...(agent.effort ? { effort: agent.effort } : {}),
-    ...(agent.toolUseId ? { toolUseId: agent.toolUseId } : {}),
-    ...(agent.workflowName ? { workflowName: agent.workflowName } : {}),
-    ...(agent.runHandles ? { runHandles: agent.runHandles } : {}),
-  };
-}
-
-function readClaudeToolUseResult(message: SDKMessage): Record<string, unknown> | undefined {
-  if (message.type !== "user") {
-    return undefined;
-  }
-  const result = (message as { readonly tool_use_result?: unknown }).tool_use_result;
-  return result !== null && typeof result === "object" && !Array.isArray(result)
-    ? (result as Record<string, unknown>)
-    : undefined;
-}
-
-/**
- * Claude Code's own report that a shell command changed git or forge state; the pinned SDK
- * typings carry neither subtype, so both are matched structurally. `vcs_state_changed` follows a
- * commit, push, merge or rebase the CLI saw in a Bash command's output (scripts and aliases
- * included); `code_change_published` follows a command that opened or touched a pull request.
- * The CLI calls both a cue to re-read the repository: the thread git sync re-reads the checkout
- * and trusts no field. A kind a newer CLI adds is kept; fields that are not strings are dropped.
- * Null for a frame that reports no change: `started` names the pull request the session's branch
- * already had when the session started or resumed. Undefined for any other frame.
- */
-function readClaudeVcsSignal(message: SDKMessage): VcsStateChangedPayload | null | undefined {
-  if (message.type !== "system") return undefined;
-  const wire = message as unknown as Record<string, unknown>;
-  if (wire.subtype === "code_change_published") {
-    const action = trimmedClaudeString(wire.action);
-    if (action === "started") return null;
-    return { kind: "change-request", ...(action !== undefined ? { action } : {}) };
-  }
-  if (wire.subtype !== "vcs_state_changed") return undefined;
-  const kind = trimmedClaudeString(wire.kind);
-  if (kind === undefined) return undefined;
-  const cwd = trimmedClaudeString(wire.cwd);
-  return { kind, ...(cwd !== undefined ? { cwd } : {}) };
-}
-
-const WORKFLOW_PHASE_CAP = 64;
-/**
- * Members re-examined per progress tick. Bounds work on a hostile payload, not
- * a real run's size: settled members were emitted on earlier ticks, so live
- * ones are kept first and a run past the cap still reports what is moving.
- */
-const WORKFLOW_AGENT_CAP = 2000;
-
-/** One workflow phase with its member tally (counts absent until a roster arrives). */
-interface ClaudeWorkflowPhase {
-  readonly index: number;
-  readonly title: string;
-  readonly memberCount?: number;
-  readonly activeCount?: number;
-  readonly settledCount?: number;
-  readonly failedCount?: number;
-}
-
-interface ClaudeWorkflowAgentEntry {
-  readonly index: number;
-  readonly state: string;
-  readonly label: string | undefined;
-  readonly phaseIndex: number | undefined;
-  readonly phaseTitle: string | undefined;
-  readonly model: string | undefined;
-  readonly attempt: number | undefined;
-  readonly lastToolName: string | undefined;
-  readonly startedAt: string | undefined;
-  readonly error: string | undefined;
-  readonly tokens: number | undefined;
-  readonly toolCalls: number | undefined;
-}
-
-interface ClaudeWorkflowProgress {
-  readonly phases: ReadonlyArray<ClaudeWorkflowPhase>;
-  readonly agents: ReadonlyArray<ClaudeWorkflowAgentEntry>;
-}
-
-/**
- * Defensive parse of the SDK's undeclared-but-real workflow_progress array on
- * task_progress messages (wire-confirmed; absent from sdk.d.ts). Unknown
- * shapes are skipped per-entry; phases and agents dedupe by index before
- * caps; a vanished field never throws. If the array disappears upstream the
- * caller keeps the coordinator row and plain task lifecycle.
- */
-function parseWorkflowProgress(value: unknown): ClaudeWorkflowProgress | undefined {
-  if (!Array.isArray(value) || value.length === 0) {
-    return undefined;
-  }
-  const phasesByIndex = new Map<number, string>();
-  const agentsByIndex = new Map<number, ClaudeWorkflowAgentEntry>();
-  for (const entry of value) {
-    if (typeof entry !== "object" || entry === null) {
-      continue;
-    }
-    const record = entry as Record<string, unknown>;
-    const entryType = trimmedClaudeString(record.type);
-    if (entryType === "workflow_phase") {
-      const index = nonNegativeInt(record.index);
-      const title = trimmedClaudeString(record.title);
-      if (index !== undefined && title && !phasesByIndex.has(index)) {
-        phasesByIndex.set(index, title);
-      }
-      continue;
-    }
-    if (entryType !== "workflow_agent") {
-      continue;
-    }
-    const index = nonNegativeInt(record.index);
-    const state = trimmedClaudeString(record.state);
-    if (index === undefined || !state || agentsByIndex.has(index)) {
-      continue;
-    }
-    agentsByIndex.set(index, {
-      index,
-      state,
-      label: trimmedClaudeString(record.label),
-      phaseIndex: nonNegativeInt(record.phaseIndex),
-      phaseTitle: trimmedClaudeString(record.phaseTitle),
-      model: trimmedClaudeString(record.model),
-      attempt: nonNegativeInt(record.attempt),
-      lastToolName: trimmedClaudeString(record.lastToolName),
-      startedAt: trimmedClaudeString(record.startedAt),
-      error: trimmedClaudeString(record.error),
-      tokens: nonNegativeInt(record.tokens),
-      toolCalls: nonNegativeInt(record.toolCalls),
-    });
-  }
-  if (phasesByIndex.size === 0 && agentsByIndex.size === 0) {
-    return undefined;
-  }
-  // Tallied from the whole roster before the per-tick cap, so totals stay
-  // true however large the run.
-  const tallies = new Map<
-    number,
-    { members: number; active: number; settled: number; failed: number }
-  >();
-  for (const agent of agentsByIndex.values()) {
-    if (agent.phaseIndex === undefined) continue;
-    const tally = tallies.get(agent.phaseIndex) ?? { members: 0, active: 0, settled: 0, failed: 0 };
-    const status = workflowAgentStatus(agent);
-    tally.members += 1;
-    if (status === "completed" || status === "failed") tally.settled += 1;
-    else tally.active += 1;
-    if (status === "failed") tally.failed += 1;
-    tallies.set(agent.phaseIndex, tally);
-  }
-  const phases = Array.from(phasesByIndex.entries())
-    .map(([index, title]): ClaudeWorkflowPhase => {
-      const tally = agentsByIndex.size > 0 ? (tallies.get(index) ?? null) : undefined;
-      return tally === undefined
-        ? { index, title }
-        : {
-            index,
-            title,
-            memberCount: tally?.members ?? 0,
-            activeCount: tally?.active ?? 0,
-            settledCount: tally?.settled ?? 0,
-            failedCount: tally?.failed ?? 0,
-          };
-    })
-    .toSorted((a, b) => a.index - b.index)
-    .slice(0, WORKFLOW_PHASE_CAP);
-  const isLive = (agent: ClaudeWorkflowAgentEntry) => {
-    const status = workflowAgentStatus(agent);
-    return status !== "completed" && status !== "failed";
-  };
-  const agents = Array.from(agentsByIndex.values())
-    .toSorted((a, b) => Number(isLive(b)) - Number(isLive(a)) || a.index - b.index)
-    .slice(0, WORKFLOW_AGENT_CAP)
-    .toSorted((a, b) => a.index - b.index);
-  return { phases, agents };
-}
-
-/**
- * Workflow progress is a sparse snapshot stream: some ticks omit phases and
- * later ticks may reveal additional ones. Keep a monotonic, index-keyed
- * roster so the coordinator's latest-state activity always carries the full
- * workflow shape observed so far.
- */
-function mergeWorkflowPhases(
-  current: ReadonlyArray<ClaudeWorkflowPhase> | undefined,
-  incoming: ReadonlyArray<ClaudeWorkflowPhase> | undefined,
-): ReadonlyArray<ClaudeWorkflowPhase> {
-  if (!incoming || incoming.length === 0) {
-    return current ?? [];
-  }
-  const byIndex = new Map<number, ClaudeWorkflowPhase>();
-  for (const phase of current ?? []) {
-    byIndex.set(phase.index, phase);
-  }
-  for (const phase of incoming) {
-    // A tick without a roster renames a phase but must not erase its tally.
-    const previous = byIndex.get(phase.index);
-    byIndex.set(
-      phase.index,
-      phase.memberCount === undefined && previous?.memberCount !== undefined
-        ? { ...previous, title: phase.title }
-        : phase,
-    );
-  }
-  return Array.from(byIndex.values())
-    .toSorted((left, right) => left.index - right.index)
-    .slice(0, WORKFLOW_PHASE_CAP);
-}
-
-/**
- * Workflow member states from workflow_progress → shared task status.
- * Unknown states read running after startedAt, pending before it.
- */
-function workflowAgentStatus(entry: ClaudeWorkflowAgentEntry): RuntimeTaskStatus {
-  switch (entry.state) {
-    case "queued":
-    case "pending":
-      return "pending";
-    case "start":
-    case "running":
-      return entry.startedAt === undefined ? "pending" : "running";
-    case "done":
-      return "completed";
-    case "error":
-      return "failed";
-    default:
-      return entry.startedAt === undefined ? "pending" : "running";
-  }
-}
-
-function hasClaudeSubagentNameSignal(value: string | undefined): boolean {
-  return value !== undefined && /\b(?:sub[-\s]?agent|agent|subtask|task)\b/i.test(value);
-}
-
-function hasClaudeSubagentDescriptionSignal(value: string | undefined): boolean {
-  return (
-    value !== undefined &&
-    /\b(?:sub[-\s]?agent|agent|teammate|worker|delegate[sd]?|reviewer)\b/i.test(value)
-  );
-}
-
-function isClaudeSubagentTaskMessage(message: SDKMessage): boolean {
-  return (
-    hasClaudeSubagentNameSignal(claudeTaskField(message, "task_type")) ||
-    hasClaudeSubagentNameSignal(claudeTaskField(message, "last_tool_name")) ||
-    hasClaudeSubagentDescriptionSignal(claudeTaskField(message, "description")) ||
-    hasClaudeSubagentDescriptionSignal(claudeTaskField(message, "summary"))
-  );
-}
-
-function claudeTaskSubagentStatus(
-  status: "starting" | "running" | "completed" | "failed" | "stopped",
-): RuntimeSubagentStatus {
-  return status;
-}
-
-function claudeTaskCompletionStatus(
-  status: "completed" | "failed" | "stopped",
-): Extract<RuntimeSubagentStatus, "completed" | "failed" | "stopped"> {
-  return status;
-}
-
-function claudeTaskMetadata(message: SDKMessage): Record<string, unknown> | undefined {
-  const metadata = Object.fromEntries(
-    [
-      ["source", "claude.task"],
-      ["taskType", claudeTaskField(message, "task_type")],
-      ["lastToolName", claudeTaskField(message, "last_tool_name")],
-    ].filter(([, value]) => value !== undefined),
-  );
-  return Object.keys(metadata).length > 0 ? metadata : undefined;
-}
-
-function makeClaudeTaskSubagentRef(
-  existing: SubagentRef | undefined,
-  message: SDKMessage & { readonly task_id: string },
-  linkage?: {
-    readonly model?: string | undefined;
-    readonly effort?: string | undefined;
-  },
-): SubagentRef {
-  const taskType = claudeTaskField(message, "task_type");
-  const lastToolName = claudeTaskField(message, "last_tool_name");
-  const description = claudeTaskField(message, "description") ?? existing?.description;
-  const label = taskType ?? lastToolName ?? existing?.label ?? "Claude task";
-  const taskMetadata = claudeTaskMetadata(message);
-  const metadata: Record<string, unknown> = {};
-  if (existing?.metadata) {
-    Object.assign(metadata, existing.metadata);
-  }
-  if (taskMetadata) {
-    Object.assign(metadata, taskMetadata);
-  }
-  return {
-    subagentId: existing?.subagentId ?? RuntimeSubagentId.make(`claude-task:${message.task_id}`),
-    origin: "native",
-    capability: "summary",
-    label,
-    ...(description && { description }),
-    ...((linkage?.model ?? existing?.model) ? { model: linkage?.model ?? existing?.model } : {}),
-    ...((linkage?.effort ?? existing?.effort)
-      ? { effort: linkage?.effort ?? existing?.effort }
-      : {}),
-    providerTaskId: RuntimeTaskId.make(message.task_id),
-    ...(Object.keys(metadata).length > 0 && { metadata }),
-  };
-}
-
-function classifyToolItemType(toolName: string): CanonicalItemType {
-  // Planning tools before the substring rules: TaskCreate ("create") and TodoWrite ("write")
-  // would otherwise read as file changes and count as edits. Their rows stay in the work log,
-  // only relabelled; hiding them would be a client change.
-  if (CLAUDE_PLAN_TOOL_NAMES.has(toolName)) {
-    return "dynamic_tool_call";
-  }
-  const normalized = toolName.toLowerCase();
-  if (normalized.includes("agent")) {
-    return "collab_agent_tool_call";
-  }
-  if (
-    normalized === "task" ||
-    normalized === "agent" ||
-    normalized.includes("subagent") ||
-    normalized.includes("sub-agent")
-  ) {
-    return "collab_agent_tool_call";
-  }
-  if (
-    normalized.includes("bash") ||
-    normalized.includes("command") ||
-    normalized.includes("shell") ||
-    normalized.includes("terminal")
-  ) {
-    return "command_execution";
-  }
-  if (
-    normalized.includes("edit") ||
-    normalized.includes("write") ||
-    normalized.includes("file") ||
-    normalized.includes("patch") ||
-    normalized.includes("replace") ||
-    normalized.includes("create") ||
-    normalized.includes("delete")
-  ) {
-    return "file_change";
-  }
-  if (normalized.includes("mcp")) {
-    return "mcp_tool_call";
-  }
-  if (normalized.includes("websearch") || normalized.includes("web search")) {
-    return "web_search";
-  }
-  if (normalized.includes("image")) {
-    return "image_view";
-  }
-  return "dynamic_tool_call";
-}
-
-function isReadOnlyToolName(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return (
-    normalized === "read" ||
-    normalized.includes("read file") ||
-    normalized.includes("view") ||
-    normalized.includes("grep") ||
-    normalized.includes("glob") ||
-    normalized.includes("search")
-  );
-}
-
-function classifyRequestType(toolName: string): CanonicalRequestType {
-  if (isReadOnlyToolName(toolName)) {
-    return "file_read_approval";
-  }
-  const itemType = classifyToolItemType(toolName);
-  return itemType === "command_execution"
-    ? "command_execution_approval"
-    : itemType === "file_change"
-      ? "file_change_approval"
-      : "dynamic_tool_call";
-}
-
-function isTodoTool(toolName: string): boolean {
-  return toolName.toLowerCase().includes("todowrite");
-}
-
-function extractPlanStepsFromTodoInput(input: Record<string, unknown>): RuntimePlanStep[] | null {
-  // TodoWrite format: { todos: [{ content, status, activeForm? }] }
-  const todos = input.todos;
-  if (!Array.isArray(todos) || todos.length === 0) {
-    return null;
-  }
-  return todos
-    .filter((t): t is Record<string, unknown> => t !== null && typeof t === "object")
-    .map((todo) => ({
-      step:
-        typeof todo.content === "string" && todo.content.trim().length > 0
-          ? todo.content.trim()
-          : "Task",
-      status:
-        todo.status === "completed"
-          ? "completed"
-          : todo.status === "in_progress"
-            ? "inProgress"
-            : "pending",
-    }));
-}
-
-function summarizeToolRequest(toolName: string, input: Record<string, unknown>): string {
-  // Ryco's HTML tools carry a whole page; name the page instead of dumping it.
-  const htmlRender = resolveHtmlRenderToolPresentation({ toolName, input });
-  if (htmlRender) return htmlRender.detail ? `${toolName}: ${htmlRender.detail}` : toolName;
-
-  const planDetail = claudePlanToolDetail(toolName, input);
-  if (planDetail) return planDetail;
-
-  const commandValue = input.command ?? input.cmd;
-  const command = typeof commandValue === "string" ? commandValue : undefined;
-  if (command && command.trim().length > 0) {
-    return `${toolName}: ${command.trim().slice(0, 400)}`;
-  }
-
-  // For agent/subagent tools, prefer the human-readable description or prompt
-  // over raw JSON, but keep the tool identity in front: the summary lands in
-  // pendingApproval.detail, where free text alone reads as an unlabeled quote.
-  // The structured subagent_type is carried separately on the task.* payloads
-  // (role) — the label is display-only.
-  const itemType = classifyToolItemType(toolName);
-  if (itemType === "collab_agent_tool_call") {
-    const description =
-      typeof input.description === "string" ? input.description.trim() : undefined;
-    const prompt = typeof input.prompt === "string" ? input.prompt.trim() : undefined;
-    const label = description || (prompt ? prompt.slice(0, 200) : undefined);
-    if (label) {
-      return `${toolName}: ${label}`;
-    }
-  }
-
-  // The summary is persisted with the approval and the tool activity: redact before truncating.
-  const serialized = JSON.stringify(redactToolParameterCredentials(input));
-  if (serialized.length <= 400) {
-    return `${toolName}: ${serialized}`;
-  }
-  return `${toolName}: ${serialized.slice(0, 397)}...`;
-}
-
-/** Work-log detail of a tool item: an HTML tool shows its page title or viewport alone. */
-function toolItemDetail(toolName: string, input: Record<string, unknown>): string | undefined {
-  const htmlRender = resolveHtmlRenderToolPresentation({ toolName, input });
-  return htmlRender ? htmlRender.detail : summarizeToolRequest(toolName, input);
-}
-
-function toolItemTitle(toolName: string, itemType: CanonicalItemType): string {
-  return (
-    resolveHtmlRenderToolPresentation({ toolName, input: undefined })?.title ??
-    titleForTool(itemType)
-  );
-}
-
-/** Tool input as carried on runtime events: an HTML tool's page is reduced to its length. */
-function toolEventInput(toolName: string, input: Record<string, unknown>): unknown {
-  return resolveHtmlRenderToolKind(toolName) === undefined ? input : withoutHtmlRenderMarkup(input);
-}
-
-function titleForTool(itemType: CanonicalItemType): string {
-  switch (itemType) {
-    case "command_execution":
-      return "Command run";
-    case "file_change":
-      return "File change";
-    case "mcp_tool_call":
-      return "MCP tool call";
-    case "collab_agent_tool_call":
-      return "Subagent task";
-    case "web_search":
-      return "Web search";
-    case "image_view":
-      return "Image view";
-    case "dynamic_tool_call":
-      return "Tool call";
-    default:
-      return "Item";
-  }
-}
-
-const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
-  "image/gif",
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-]);
-const CLAUDE_PDF_MIME_TYPE = "application/pdf";
-export const CLAUDE_NATIVE_PDF_MAX_BYTES = 25_000_000;
-const CLAUDE_SETTING_SOURCES = [
-  "user",
-  "project",
-  "local",
-] as const satisfies ReadonlyArray<SettingSource>;
-
-function buildPromptText(
-  input: ProviderSendTurnInput,
-  boundInstanceId: ProviderInstanceId,
-): string {
-  if (isNativeCompactionCommand(input)) return NATIVE_COMPACTION_COMMAND;
-  const rawEffort =
-    input.modelSelection?.instanceId === boundInstanceId
-      ? getModelSelectionStringOptionValue(input.modelSelection, "effort")
-      : null;
-  const claudeModel =
-    input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection.model : undefined;
-  const caps = getClaudeModelCapabilities(claudeModel);
-
-  const promptEffort = resolvePromptInjectedEffort(caps, rawEffort);
-  const formatted = formatSourceControlContextsForAgent(input.sourceControlContexts ?? []);
-  const text = applyClaudePromptEffortPrefix(
-    formatted ? formatted + "\n\n" + (input.input?.trim() ?? "") : (input.input?.trim() ?? ""),
-    promptEffort,
-  );
-  return text;
-}
-
-function buildUserMessage(input: {
-  readonly sdkContent: Array<Record<string, unknown>>;
-}): SDKUserMessage {
-  return {
-    type: "user",
-    session_id: "",
-    parent_tool_use_id: null,
-    message: {
-      role: "user",
-      content: input.sdkContent as unknown as SDKUserMessage["message"]["content"],
-    },
-  } as SDKUserMessage;
-}
-
-function buildClaudeImageContentBlock(input: {
-  readonly mimeType: string;
-  readonly bytes: Uint8Array;
-}): Record<string, unknown> {
-  return {
-    type: "image",
-    source: {
-      type: "base64",
-      media_type: input.mimeType,
-      data: Buffer.from(input.bytes).toString("base64"),
-    },
-  };
-}
-
-function buildClaudeDocumentContentBlock(input: {
-  readonly bytes: Uint8Array;
-  readonly title: string;
-}): Record<string, unknown> {
-  return {
-    type: "document",
-    source: {
-      type: "base64",
-      media_type: CLAUDE_PDF_MIME_TYPE,
-      data: Buffer.from(input.bytes).toString("base64"),
-    },
-    title: input.title,
-  };
-}
-
-function isClaudeNativeAttachment(attachment: ChatImageAttachment | ChatFileAttachment): boolean {
-  if (attachment.type === "image") {
-    return SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType);
-  }
-  return (
-    attachment.mimeType === CLAUDE_PDF_MIME_TYPE &&
-    attachment.sizeBytes <= CLAUDE_NATIVE_PDF_MAX_BYTES
-  );
-}
-
-const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
-  input: ProviderSendTurnInput,
-  dependencies: {
-    readonly fileSystem: FileSystem.FileSystem;
-    readonly attachmentsDir: string;
-    readonly boundInstanceId: ProviderInstanceId;
-  },
-) {
-  const promptText = buildPromptText(input, dependencies.boundInstanceId);
-  const nativeBlocks: Array<Record<string, unknown>> = [];
-
-  for (const attachment of input.attachments ?? []) {
-    if (!isPersistableChatAttachment(attachment) || !isClaudeNativeAttachment(attachment)) {
-      continue;
-    }
-
-    const attachmentPath = resolveAttachmentPath({
-      attachmentsDir: dependencies.attachmentsDir,
-      attachment,
-    });
-    if (!attachmentPath) {
-      return yield* new ProviderAdapterRequestError({
-        provider: PROVIDER,
-        method: "turn/start",
-        detail: `Invalid attachment id '${attachment.id}'.`,
-      });
-    }
-
-    const bytes = yield* dependencies.fileSystem.readFile(attachmentPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "turn/start",
-            detail: toMessage(cause, "Failed to read attachment file."),
-            cause,
-          }),
-      ),
-    );
-
-    nativeBlocks.push(
-      attachment.type === "image"
-        ? buildClaudeImageContentBlock({
-            mimeType: attachment.mimeType,
-            bytes,
-          })
-        : buildClaudeDocumentContentBlock({
-            bytes,
-            title: attachment.name,
-          }),
-    );
-  }
-
-  const text = appendAttachmentPathLines(
-    promptText,
-    attachmentPathLines({
-      attachmentsDir: dependencies.attachmentsDir,
-      attachments: input.attachments,
-    }),
-  );
-  const sdkContent: Array<Record<string, unknown>> = [];
-  if (text !== undefined && text.length > 0) {
-    sdkContent.push({ type: "text", text });
-  }
-  for (const block of nativeBlocks) {
-    sdkContent.push(block);
-  }
-
-  return buildUserMessage({ sdkContent });
-});
-
-function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
-  if (result.subtype === "success") {
-    return "completed";
-  }
-  // An abort is never a failure, even when the error text lacks "abort".
-  if (isClaudeAbortTerminalReason(result)) {
-    return "interrupted";
-  }
-
-  const errors = resultErrorsText(result);
-  if (isInterruptedResult(result)) {
-    return "interrupted";
-  }
-  if (errors.includes("cancel")) {
-    return "cancelled";
-  }
-  return "failed";
-}
-
-/** The error a completing turn reports, by why it reports its status (`decideClaudeTurnClose`). */
-function claudeTurnCloseErrorMessage(
-  cause: ClaudeTurnCloseCause,
-  result: SDKResultMessage,
-): string | undefined {
-  switch (cause) {
-    case "result":
-      return result.subtype === "success" ? undefined : result.errors[0];
-    case "aborted-by-steer":
-      return undefined;
-    case "stopped":
-      return "Interrupted by user.";
-    case "failed-segment-dropped-steers": {
-      // A success flagged as an error carries the error text as its result.
-      const text = result.subtype === "success" ? result.result.trim() : result.errors[0];
-      return text !== undefined && text.length > 0 ? text : "Claude turn failed.";
-    }
-    case "folded-into-discarded-cli-turn":
-      return FOLDED_INTO_DISCARDED_STEER_REASON;
-  }
-}
-
-const CLAUDE_API_RETRY_ERROR_LABELS: Partial<Record<SDKAPIRetryMessage["error"], string>> = {
-  overloaded: "API overloaded",
-  rate_limit: "Rate limited",
-  server_error: "API server error",
-};
-
-/** `api_retry` as a notice: "Retrying request (2/10) in 4s", detailed by why the attempt failed. */
-function claudeApiRetryNotice(message: SDKAPIRetryMessage): {
-  readonly message: string;
-  readonly detail: string;
-} {
-  const attempt = Math.trunc(message.attempt);
-  const maxRetries = Math.trunc(message.max_retries);
-  const delaySeconds = Math.ceil(message.retry_delay_ms / 1000);
-  const waitedSeconds = Math.round((message.no_response?.waited_ms ?? Number.NaN) / 1000);
-  const label = CLAUDE_API_RETRY_ERROR_LABELS[message.error];
-  const status =
-    typeof message.error_status === "number" ? `HTTP ${message.error_status}` : undefined;
-  return {
-    message: [
-      "Retrying request",
-      ...(attempt > 0 && maxRetries > 0 ? [`(${attempt}/${maxRetries})`] : []),
-      ...(delaySeconds > 0 ? [`in ${delaySeconds}s`] : []),
-    ].join(" "),
-    detail: Number.isFinite(waitedSeconds)
-      ? `No response after ${waitedSeconds}s`
-      : status === undefined
-        ? "Connection error"
-        : label === undefined
-          ? status
-          : `${label} (${status})`,
-  };
-}
-
-/** The row label of an `informational` banner; the CLI's own text is the row's body. */
-function claudeInformationalLabel(message: SDKInformationalMessage): string {
-  if (message.prevent_continuation === true) {
-    return "Claude stopped";
-  }
-  switch (message.level) {
-    case "warning":
-      return "Claude warning";
-    case "suggestion":
-      return "Claude suggestion";
-    default:
-      return "Claude notice";
-  }
-}
-
-const DEBUG_PREVIEW_MAX_CHARS = 400;
-
-/** A frame for a log line: JSON, cut to a few hundred characters. */
-function boundedJsonPreview(value: unknown): string {
-  let json: string;
-  try {
-    json = JSON.stringify(value) ?? String(value);
-  } catch {
-    json = String(value);
-  }
-  return json.length > DEBUG_PREVIEW_MAX_CHARS
-    ? `${json.slice(0, DEBUG_PREVIEW_MAX_CHARS)}…`
-    : json;
-}
-
-function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
-  return deltaType.includes("thinking") ? "reasoning_text" : "assistant_text";
-}
-
-function nativeProviderRefs(
-  _context: ClaudeSessionContext,
-  options?: {
-    readonly providerItemId?: string | undefined;
-  },
-): NonNullable<ProviderRuntimeEvent["providerRefs"]> {
-  if (options?.providerItemId) {
-    return {
-      providerItemId: ProviderItemId.make(options.providerItemId),
-    };
-  }
-  return {};
-}
-
-function extractAssistantTextBlocks(message: SDKMessage): Array<string> {
-  if (message.type !== "assistant") {
-    return [];
-  }
-
-  const content = (message.message as { content?: unknown } | undefined)?.content;
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  const fragments: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object") {
-      continue;
-    }
-    const candidate = block as { type?: unknown; text?: unknown };
-    if (
-      candidate.type === "text" &&
-      typeof candidate.text === "string" &&
-      candidate.text.length > 0
-    ) {
-      fragments.push(candidate.text);
-    }
-  }
-
-  return fragments;
-}
-
-function extractContentBlockText(block: unknown): string {
-  if (!block || typeof block !== "object") {
-    return "";
-  }
-
-  const candidate = block as { type?: unknown; text?: unknown };
-  return candidate.type === "text" && typeof candidate.text === "string" ? candidate.text : "";
-}
-
-function extractTextContent(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((entry) => extractTextContent(entry)).join("");
-  }
-
-  if (!value || typeof value !== "object") {
-    return "";
-  }
-
-  const record = value as {
-    text?: unknown;
-    content?: unknown;
-  };
-
-  if (typeof record.text === "string") {
-    return record.text;
-  }
-
-  return extractTextContent(record.content);
-}
-
-/**
- * The SDK permission mode a turn's interaction mode asks for, or undefined to leave the
- * current mode alone. "plan" and "ask" both map to the SDK's read-only "plan" mode;
- * "default" restores the session's own mode.
- */
-export function claudePermissionModeForInteraction(
-  interactionMode: ProviderSendTurnInput["interactionMode"],
-  basePermissionMode: PermissionMode | undefined,
-): PermissionMode | undefined {
-  if (interactionMode === "plan" || interactionMode === "ask") return "plan";
-  if (interactionMode === "default") return basePermissionMode ?? "default";
-  return undefined;
-}
-
-function extractExitPlanModePlan(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-
-  const record = value as {
-    plan?: unknown;
-  };
-  return typeof record.plan === "string" && record.plan.trim().length > 0
-    ? record.plan.trim()
-    : undefined;
-}
-
-function exitPlanCaptureKey(input: {
-  readonly toolUseId?: string | undefined;
-  readonly planMarkdown: string;
-}): string {
-  return input.toolUseId && input.toolUseId.length > 0
-    ? `tool:${input.toolUseId}`
-    : `plan:${input.planMarkdown}`;
-}
-
-/**
- * How far a streamed tool input's JSON has got, advanced one delta at a time.
- * The accumulated text can only parse once its top-level value closes, so it
- * is parsed then rather than after every delta: re-parsing the whole prefix
- * each time is quadratic, and an HTML tool call streams a page of up to 512k
- * characters.
- */
-interface StreamedJsonScan {
-  /** Open objects and arrays; negative once the text can no longer be JSON. */
-  readonly depth: number;
-  readonly inString: boolean;
-  readonly escaped: boolean;
-  readonly opened: boolean;
-}
-
-const EMPTY_STREAMED_JSON_SCAN: StreamedJsonScan = {
-  depth: 0,
-  inString: false,
-  escaped: false,
-  opened: false,
-};
-
-function scanStreamedJson(scan: StreamedJsonScan, chunk: string): StreamedJsonScan {
-  let { depth, inString, escaped, opened } = scan;
-  for (let index = 0; index < chunk.length; index += 1) {
-    const code = chunk.charCodeAt(index);
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (code === 0x5c) escaped = true; // backslash
-      else if (code === 0x22) inString = false; // quote
-    } else if (code === 0x22) {
-      inString = true;
-    } else if (code === 0x7b || code === 0x5b) {
-      depth += 1;
-      opened = true;
-    } else if (code === 0x7d || code === 0x5d) {
-      depth -= 1;
-    }
-  }
-  return { depth, inString, escaped, opened };
-}
-
-/** Every complete JSON object passes this, so skipping the parse otherwise changes nothing. */
-const mayBeCompleteJson = (scan: StreamedJsonScan): boolean =>
-  scan.opened && scan.depth === 0 && !scan.inString;
-
-function tryParseJsonRecord(value: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function toolInputFingerprint(input: Record<string, unknown>): string | undefined {
-  try {
-    return JSON.stringify(input);
-  } catch {
-    return undefined;
-  }
-}
-
-function toolResultStreamKind(itemType: CanonicalItemType): ClaudeToolResultStreamKind | undefined {
-  switch (itemType) {
-    case "command_execution":
-      return "command_output";
-    case "file_change":
-      return "file_change_output";
-    default:
-      return undefined;
-  }
-}
-
-function toolResultBlocksFromUserMessage(message: SDKMessage): Array<{
-  readonly toolUseId: string;
-  readonly block: Record<string, unknown>;
-  readonly text: string;
-  readonly isError: boolean;
-}> {
-  if (message.type !== "user") {
-    return [];
-  }
-
-  const content = (message.message as { content?: unknown } | undefined)?.content;
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  const blocks: Array<{
-    readonly toolUseId: string;
-    readonly block: Record<string, unknown>;
-    readonly text: string;
-    readonly isError: boolean;
-  }> = [];
-
-  for (const entry of content) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-
-    const block = entry as Record<string, unknown>;
-    if (block.type !== "tool_result") {
-      continue;
-    }
-
-    const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
-    if (!toolUseId) {
-      continue;
-    }
-
-    blocks.push({
-      toolUseId,
-      block,
-      text: extractTextContent(block.content),
-      isError: block.is_error === true,
-    });
-  }
-
-  return blocks;
-}
-
-/**
- * The SDK's own "this session is gone" messages: `Session <id> not found`, "unknown session",
- * "Query closed before …" and "Transport is closed". Everything else (a missing model, file or
- * executable, a peer closing a connection) is an ordinary request failure.
- */
-const CLAUDE_SESSION_NOT_FOUND = /\bunknown session\b|\bsession\b[^.:]*\bnot found\b/;
-const CLAUDE_SESSION_CLOSED = /\bquery closed\b|\btransport is closed\b|\bsession (?:is )?closed\b/;
-
-/**
- * Classifies a Claude SDK failure as a gone session. Callers pass the SDK's error before any stderr
- * tail is appended (see {@link toSessionRequestError}): CLI stderr is free text and must not turn
- * a request failure into a session-gone one.
- */
-function toSessionError(
-  threadId: ThreadId,
-  cause: unknown,
-): ProviderAdapterSessionNotFoundError | ProviderAdapterSessionClosedError | undefined {
-  const normalized = toMessage(cause, "").toLowerCase();
-  if (CLAUDE_SESSION_NOT_FOUND.test(normalized)) {
-    return new ProviderAdapterSessionNotFoundError({
-      provider: PROVIDER,
-      threadId,
-      cause,
-    });
-  }
-  if (CLAUDE_SESSION_CLOSED.test(normalized)) {
-    return new ProviderAdapterSessionClosedError({
-      provider: PROVIDER,
-      threadId,
-      cause,
-    });
-  }
-  return undefined;
-}
-
-function toRequestError(threadId: ThreadId, method: string, cause: unknown): ProviderAdapterError {
-  return toSessionError(threadId, cause) ?? toPlainRequestError(method, cause);
-}
-
-function toPlainRequestError(method: string, cause: unknown): ProviderAdapterRequestError {
-  return new ProviderAdapterRequestError({
-    provider: PROVIDER,
-    method,
-    detail: toMessage(cause, `${method} failed`),
-    cause,
-  });
-}
-
-/**
- * {@link toRequestError} for an SDK call on a live session. When the CLI exits, the SDK rejects
- * every pending call with its exit error; this restores the stderr tail on it (see
- * {@link withClaudeProcessStderr}), so the text matches the SDK's own spawn. The session-gone
- * classification reads the SDK's message from before the tail is added.
- */
-function toSessionRequestError(
-  context: Pick<ClaudeSessionContext, "processStderrTail">,
-  threadId: ThreadId,
-  method: string,
-  cause: unknown,
-): ProviderAdapterError {
-  const sessionError = toSessionError(threadId, cause);
-  const withStderr = withClaudeProcessStderr(context, cause);
-  return sessionError ?? toPlainRequestError(method, withStderr);
-}
-
-function sdkMessageType(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const record = value as { type?: unknown };
-  return typeof record.type === "string" ? record.type : undefined;
-}
-
-function sdkMessageSubtype(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const record = value as { subtype?: unknown };
-  return typeof record.subtype === "string" ? record.subtype : undefined;
-}
-
-function sdkNativeMethod(message: SDKMessage): string {
-  const subtype = sdkMessageSubtype(message);
-  if (subtype) {
-    return `claude/${message.type}/${subtype}`;
-  }
-
-  if (message.type === "stream_event") {
-    const streamType = sdkMessageType(message.event);
-    if (streamType) {
-      const deltaType =
-        streamType === "content_block_delta"
-          ? sdkMessageType((message.event as { delta?: unknown }).delta)
-          : undefined;
-      if (deltaType) {
-        return `claude/${message.type}/${streamType}/${deltaType}`;
-      }
-      return `claude/${message.type}/${streamType}`;
-    }
-  }
-
-  return `claude/${message.type}`;
-}
-
-function sdkNativeItemId(message: SDKMessage): string | undefined {
-  if (message.type === "assistant") {
-    const maybeId = (message.message as { id?: unknown }).id;
-    if (typeof maybeId === "string") {
-      return maybeId;
-    }
-    return undefined;
-  }
-
-  if (message.type === "user") {
-    return toolResultBlocksFromUserMessage(message)[0]?.toolUseId;
-  }
-
-  if (message.type === "stream_event") {
-    const event = message.event as {
-      type?: unknown;
-      content_block?: { id?: unknown };
-    };
-    if (event.type === "content_block_start" && typeof event.content_block?.id === "string") {
-      return event.content_block.id;
-    }
-  }
-
-  return undefined;
-}
+import {
+  adapterFailureDetail,
+  claudeAutoModeRefusedMessage,
+  claudeTurnCloseErrorMessage,
+  interruptionMessageFromClaudeCause,
+  isClaudeInterruptedCause,
+  messageFromClaudeStreamCause,
+  toError,
+  toMessage,
+  toRequestError,
+  toSessionRequestError,
+  withClaudeProcessStderr,
+} from "./ClaudeAdapter.errors.ts";
+import {
+  CLAUDE_SETTING_SOURCES,
+  buildUserMessage,
+  buildUserMessageEffect,
+  claudePermissionModeForInteraction,
+  getEffectiveClaudeAgentEffort,
+  readTokenReductionInstructions,
+} from "./ClaudeAdapter.prompt.ts";
+import {
+  boundedJsonPreview,
+  claudeApiRetryNotice,
+  claudeInformationalLabel,
+  claudeMainChainUuid,
+  extractAssistantTextBlocks,
+  hasDurableClaudeSessionId,
+  nativeProviderRefs,
+  sanitizeSessionUrl,
+  sdkMessageSubtype,
+  sdkNativeItemId,
+  sdkNativeMethod,
+  streamKindFromDeltaType,
+  turnStatusFromResult,
+} from "./ClaudeAdapter.sdkMessage.ts";
+import {
+  CLAUDE_TASK_PATCH_STATUS,
+  type ClaudeWorkflowProgress,
+  agentIdForParentToolUse,
+  claudeSubagentLaunchModel,
+  claudeTaskCompletionStatus,
+  claudeTaskSubagentStatus,
+  isClaudeSubagentTaskMessage,
+  makeClaudeTaskSubagentRef,
+  mergeWorkflowPhases,
+  parseWorkflowProgress,
+  rememberClaudeSubagentAttribution,
+  rememberClaudeSubagentLaunch,
+  taskLinkageFor,
+  workflowAgentStatus,
+} from "./ClaudeAdapter.tasks.ts";
+import {
+  EMPTY_STREAMED_JSON_SCAN,
+  classifyRequestType,
+  classifyToolItemType,
+  exitPlanCaptureKey,
+  extractContentBlockText,
+  extractExitPlanModePlan,
+  extractPlanStepsFromTodoInput,
+  isTodoTool,
+  mayBeCompleteJson,
+  readClaudeToolUseResult,
+  readClaudeVcsSignal,
+  scanStreamedJson,
+  summarizeToolRequest,
+  toolEventInput,
+  toolInputFingerprint,
+  toolItemDetail,
+  toolItemTitle,
+  toolResultBlocksFromUserMessage,
+  toolResultStreamKind,
+  tryParseJsonRecord,
+} from "./ClaudeAdapter.tools.ts";
+import {
+  type AssistantTextBlockState,
+  CLAUDE_DEVICE_TOOL_SERVER,
+  CLAUDE_REWIND_PROBE_TIMEOUT,
+  CLAUDE_REWIND_QUERY_EXIT_MS,
+  CLAUDE_REWIND_TRANSCRIPT_TIMEOUT,
+  CLAUDE_STARTUP_INITIALIZE_TIMEOUT_MS,
+  CLAUDE_TRANSCRIPT_CHECK_TIMEOUT,
+  CLAUDE_TURN_HEADS_CAP,
+  type ClaudeAdapterLiveOptions,
+  type ClaudeQueryRuntime,
+  type ClaudeSessionContext,
+  type ClaudeTranscriptEntry,
+  type ClaudeTurnOpener,
+  type ClaudeTurnState,
+  DISCARDED_STEER_TURN_REASON,
+  NO_STEER_PROMPT_UUIDS,
+  PROVIDER,
+  PROVIDER_TURN_STOP_REASON,
+  type PendingApproval,
+  type PendingUserInput,
+  type PromptQueueItem,
+  STEER_TURN_COMPACTING_DETAIL,
+  STEER_TURN_ENDED_DETAIL,
+  type ToolInFlight,
+  WAKE_NO_OUTPUT_REASON,
+  asCanonicalTurnId,
+  asRuntimeItemId,
+  asRuntimeRequestId,
+  makeClaudeTurnState,
+  rememberBounded,
+  trimmedClaudeString,
+} from "./ClaudeAdapter.types.ts";
+import {
+  normalizeClaudeTokenUsage,
+  normalizeTaskUsage,
+  resolveResultUsageSnapshot,
+  withAutomaticCompactionCapability,
+} from "./ClaudeAdapter.usage.ts";
+import { nowIso, transcriptSeenMarker, updateResumeCursor } from "./ClaudeAdapter.session.ts";
+
+export type { ClaudeAdapterLiveOptions, ClaudeTranscriptEntry } from "./ClaudeAdapter.types.ts";
 
 export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   claudeSettings: ClaudeSettings,
@@ -2312,7 +411,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     providerInstanceId: boundInstanceId,
   });
 
-  const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const nextEventId = Effect.map(
     Effect.sync(() => crypto.randomUUID()),
     (id) => EventId.make(id),
@@ -2541,31 +639,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
     return providerThreadSnapshotFromTurnIds(threadId, context.completedTurnIds);
-  });
-
-  /** The cursor's `transcriptSeen`, for the session it resumes. */
-  const transcriptSeenMarker = (context: ClaudeSessionContext) =>
-    context.resumeSessionId !== undefined && context.transcriptSeenFor === context.resumeSessionId
-      ? { transcriptSeen: true as const }
-      : {};
-
-  const updateResumeCursor = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
-    if (!context.session.threadId) return;
-    // Yield before reading the session: a spread taken across a yield would write back a
-    // stale status/activeTurnId over a concurrent turn install.
-    const updatedAt = yield* nowIso;
-    const threadId = context.session.threadId;
-    const resumeCursor = {
-      threadId,
-      ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
-      ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
-      ...(context.pendingRewind ? { rewind: { at: context.pendingRewind.at } } : {}),
-      turnCount: context.completedTurnIds.length,
-      ...transcriptSeenMarker(context),
-      // A resumed session must still know the tasks an update names only by id.
-      ...planTasksCursorField(context.planTasks, context.resumeSessionId),
-    };
-    context.session = { ...context.session, resumeCursor, updatedAt };
   });
 
   /**
@@ -3098,74 +1171,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       result,
       { expectedTurnState: turnState },
     );
-  });
-
-  /** The context gauge a result (or a local close without one) publishes. */
-  const resolveResultUsageSnapshot = Effect.fn("resolveResultUsageSnapshot")(function* (
-    context: ClaudeSessionContext,
-    result: SDKResultMessage | undefined,
-  ) {
-    const resultCounts = readClaudeCacheCounts(result?.usage);
-    if (context.cacheObservation && resultCounts?.outputTokens !== undefined) {
-      context.cacheObservation = {
-        ...context.cacheObservation,
-        mainLoopTotals: {
-          source: "result-usage",
-          observedAt: yield* nowIso,
-          ...resultCounts,
-          outputTokens: resultCounts.outputTokens,
-        },
-      };
-    }
-    const resultContextWindow = mainClaudeContextWindowFromModelUsage(
-      result?.modelUsage,
-      context.cacheObservation?.model ?? context.currentApiModelId,
-    );
-    if (resultContextWindow !== undefined) {
-      context.lastKnownContextWindow = resultContextWindow;
-    }
-
-    // The SDK result.usage contains *accumulated* totals across all API calls
-    // (input_tokens, cache_read_input_tokens, etc. summed over every request).
-    // This does NOT represent the current context window size.
-    // Prefer the last main-loop request gauge (legacy main-task telemetry is
-    // a fallback) and keep cumulative totals separate as totalProcessedTokens.
-    const accumulatedSnapshot = normalizeClaudeTokenUsage(
-      result?.usage,
-      resultContextWindow ?? context.lastKnownContextWindow,
-    );
-    const rawUsageSnapshot = selectClaudeResultUsageGauge({
-      lastGauge: context.lastKnownTokenUsage,
-      cumulative: accumulatedSnapshot,
-      maxTokens: resultContextWindow ?? context.lastKnownContextWindow,
-      cumulativeIsGauge: !context.cumulativeUsageSpansCompaction,
-    });
-    // Only a real result consumes the boundary: a local close must not re-enable the
-    // cumulative fallback for the CLI's late result of the same turn.
-    if (result !== undefined) context.cumulativeUsageSpansCompaction = false;
-    return rawUsageSnapshot
-      ? withAutomaticCompactionCapability(
-          {
-            ...rawUsageSnapshot,
-            ...(accumulatedSnapshot
-              ? {
-                  processedUsage: {
-                    scope: "turn" as const,
-                    inputTokens: accumulatedSnapshot.inputTokens ?? 0,
-                    cachedInputTokens: accumulatedSnapshot.cachedInputTokens ?? 0,
-                    cacheWriteInputTokens: claudeCacheWriteInputTokens(result?.usage),
-                    outputTokens: accumulatedSnapshot.outputTokens ?? 0,
-                    reasoningOutputTokens: accumulatedSnapshot.reasoningOutputTokens ?? 0,
-                    totalTokens:
-                      accumulatedSnapshot.totalProcessedTokens ?? accumulatedSnapshot.usedTokens,
-                  },
-                }
-              : {}),
-            ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
-          },
-          context.supportsAutomaticCompaction,
-        )
-      : undefined;
   });
 
   /** Publishes a context-gauge snapshot, attributed to a turn when one is given. */
