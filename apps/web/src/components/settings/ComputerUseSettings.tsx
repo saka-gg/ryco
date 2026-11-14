@@ -18,6 +18,7 @@ import {
 } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { errorMessage } from "~/lib/errorMessage";
 
 const BROWSERS: ReadonlyArray<{ id: ComputerBrowser; label: string }> = [
   { id: "ryco", label: "Ryco Browser" },
@@ -82,7 +83,7 @@ export function ComputerUseSettings() {
     try {
       await operation();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Computer-use request failed.");
+      setError(errorMessage(error, "Computer-use request failed."));
     } finally {
       setBusy(false);
     }

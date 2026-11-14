@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { errorMessage } from "~/lib/errorMessage";
 
 const MAX_NODE_NAME_LENGTH = 100;
 
@@ -54,7 +55,7 @@ export function HostedNodeRenameDialog({
       await onRename(normalized);
       onOpenChange(false);
     } catch (cause) {
-      setMutationError(cause instanceof Error ? cause.message : "Unable to rename this device.");
+      setMutationError(errorMessage(cause, "Unable to rename this device."));
       setPending(false);
     }
   };

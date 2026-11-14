@@ -9,6 +9,7 @@ import {
 import { selectSidebarThreadsForProjectRefs, useStore } from "../../../store";
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function useSidebarProjectActions(params: {
   memberThreadCountByPhysicalKey: ReadonlyMap<string, number>;
@@ -49,7 +50,7 @@ export function useSidebarProjectActions(params: {
           stackedThreadToast({
             type: "error",
             title: "Unable to open Jira project",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       });
@@ -105,8 +106,7 @@ export function useSidebarProjectActions(params: {
 
                   await removeProject(member, { force: true });
                 })().catch((error) => {
-                  const message =
-                    error instanceof Error ? error.message : "Unknown error removing project.";
+                  const message = errorMessage(error, "Unknown error removing project.");
                   console.error("Failed to remove project", {
                     projectId: member.id,
                     environmentId: member.environmentId,
@@ -136,7 +136,7 @@ export function useSidebarProjectActions(params: {
       try {
         await removeProject(member);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error removing project.";
+        const message = errorMessage(error, "Unknown error removing project.");
         console.error("Failed to remove project", {
           projectId: member.id,
           environmentId: member.environmentId,

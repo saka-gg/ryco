@@ -34,6 +34,7 @@ import {
 } from "@ryco/client-runtime/state/settings/providerInstanceSettings";
 import { deriveProviderSettingsFields } from "@ryco/client-runtime/state/settings/providerSettingsFields";
 import { AnimatedHeight } from "../AnimatedHeight";
+import { errorMessage } from "~/lib/errorMessage";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -199,7 +200,7 @@ export function AddProviderInstanceDialog({
       toastManager.add({
         type: "error",
         title: "Could not add provider instance",
-        description: error instanceof Error ? error.message : "Update failed.",
+        description: errorMessage(error, "Update failed."),
       });
     }
   }, [

@@ -26,6 +26,7 @@ import {
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Agent turns on this desktop's own backend; remote environments keep running.
@@ -47,10 +48,7 @@ function reportRelaunchFailure(error: unknown): void {
     stackedThreadToast({
       type: "error",
       title: "Ryco could not restart",
-      description:
-        error instanceof Error
-          ? error.message
-          : "Your saved change applies the next time Ryco starts.",
+      description: errorMessage(error, "Your saved change applies the next time Ryco starts."),
     }),
   );
 }

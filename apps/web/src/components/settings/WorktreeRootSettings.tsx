@@ -9,6 +9,7 @@ import { ensureLocalApi } from "../../localApi";
 import { DraftInput } from "../ui/draft-input";
 import { SETTINGS_CONTROL_WIDTH, SettingResetButton, SettingsRow } from "./settingsLayout";
 import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** A node-scoped preference. Paths are interpreted and validated by the selected server. */
 export function WorktreeRootSettings({
@@ -73,7 +74,7 @@ export function WorktreeRootEditor({
       if (target) await updateEnvironmentServerSettings(target.environmentId, patch);
       else applySettingsUpdated(await ensureLocalApi().server.updateSettings(patch));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save worktree root. Try again.");
+      setError(errorMessage(cause, "Could not save worktree root. Try again."));
     } finally {
       setSaving(false);
     }

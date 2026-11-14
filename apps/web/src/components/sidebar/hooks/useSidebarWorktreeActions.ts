@@ -27,6 +27,7 @@ import {
   type SidebarTreeThread,
   type SidebarTreeWorktree,
 } from "./useSidebarTree";
+import { errorMessage } from "~/lib/errorMessage";
 
 const newestFirst = (left: SidebarTreeThread, right: SidebarTreeThread) =>
   Date.parse(right.updatedAt ?? right.createdAt) - Date.parse(left.updatedAt ?? left.createdAt);
@@ -171,7 +172,7 @@ export function useSidebarWorktreeActions(params: {
             stackedThreadToast({
               type: "error",
               title: "Unable to open worktree",
-              description: error instanceof Error ? error.message : "An error occurred.",
+              description: errorMessage(error, "An error occurred."),
             }),
           );
         },
@@ -254,7 +255,7 @@ export function useSidebarWorktreeActions(params: {
           stackedThreadToast({
             type: "error",
             title: "Failed to rename worktree",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       }

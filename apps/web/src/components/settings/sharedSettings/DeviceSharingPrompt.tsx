@@ -17,6 +17,7 @@ import {
   useSharedSettingsSource,
   type SharedSettingsSnapshot,
 } from "./sharedSettingsSource";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** The device's keys holding a value from before sharing, unlike the shared one. */
 function useValuesFromBeforeSharing(
@@ -92,7 +93,7 @@ export function DeviceSharingPrompt({ environmentId }: { readonly environmentId:
       const result = await source.run(command, extra);
       setOutcome(describeSettingsSharingResult(command, result));
     } catch (error) {
-      setOutcome(error instanceof Error ? error.message : "The change was not saved.");
+      setOutcome(errorMessage(error, "The change was not saved."));
     }
     setBusy(false);
   };

@@ -20,6 +20,7 @@ import {
   type ChangeRequestStateFilter,
 } from "./StateFilterButtons";
 import { usePrCheckPassNotifications } from "./usePrCheckPassNotifications";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface PullRequestsTabProps {
   environmentId: EnvironmentId | null;
@@ -153,7 +154,7 @@ export function PullRequestsTab(props: PullRequestsTabProps) {
               props.density === "compact" ? "px-2.5 py-4" : "px-4 py-6",
             )}
           >
-            {error instanceof Error ? error.message : "Failed to load pull requests."}
+            {errorMessage(error, "Failed to load pull requests.")}
           </p>
         ) : (
           <PullRequestList

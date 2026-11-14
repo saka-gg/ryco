@@ -14,6 +14,7 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { toastManager } from "../ui/toast";
 import { deviceHidUsageForCode, deviceHidUsageForKey } from "./deviceFrameGate";
 import type { DeviceLiveInputChannel } from "./useDeviceVideoStream";
+import { errorMessage } from "~/lib/errorMessage";
 
 type DeviceApi = NonNullable<EnvironmentApi["device"]>;
 
@@ -27,10 +28,6 @@ function modifiers(event: KeyboardEvent): DeviceKeyModifier[] {
   if (event.altKey) result.push("option");
   if (event.ctrlKey) result.push("control");
   return result;
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message.trim() ? error.message : fallback;
 }
 
 let pasteGroups = 0;

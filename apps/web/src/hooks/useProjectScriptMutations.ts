@@ -14,6 +14,7 @@ import { decodeProjectScriptKeybindingRule } from "../lib/projectScriptKeybindin
 import { updateProjectMeta } from "../projectMutations";
 import { commandForProjectScript } from "../projectScripts";
 import type { Project } from "../types";
+import { errorMessage } from "~/lib/errorMessage";
 
 export interface ProjectScriptMutations {
   readonly saveProjectScript: (input: NewProjectScriptInput) => Promise<void>;
@@ -103,7 +104,7 @@ export function useProjectScriptMutations(
           stackedThreadToast({
             type: "error",
             title: "Could not delete action",
-            description: error instanceof Error ? error.message : "An unexpected error occurred.",
+            description: errorMessage(error, "An unexpected error occurred."),
           }),
         );
       }

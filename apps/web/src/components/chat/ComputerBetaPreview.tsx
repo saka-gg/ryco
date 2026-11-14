@@ -10,6 +10,7 @@ import {
   PanelBottomIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface PreviewPresentation {
   hidden: boolean;
@@ -325,9 +326,7 @@ export function ComputerBetaPreview({
           onClick={() =>
             void api
               .stopTask(threadId)
-              .catch((cause: unknown) =>
-                setError(cause instanceof Error ? cause.message : "Could not stop Computer."),
-              )
+              .catch((cause: unknown) => setError(errorMessage(cause, "Could not stop Computer.")))
           }
         >
           <SquareIcon className="size-3" />

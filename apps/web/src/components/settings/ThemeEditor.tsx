@@ -42,6 +42,7 @@ import { ColorPicker } from "../ui/color-picker";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { errorMessage } from "~/lib/errorMessage";
 
 type Mode = "form" | "json";
 
@@ -227,7 +228,7 @@ export function ThemeEditor({
     try {
       parsed = JSON.parse(value);
     } catch (error) {
-      setJsonError(error instanceof Error ? error.message : "Invalid JSON");
+      setJsonError(errorMessage(error, "Invalid JSON"));
       return;
     }
     if (!isValidTheme(parsed)) {

@@ -110,6 +110,7 @@ import {
   subscribeCarriedForkTargetsAccess,
 } from "./carriedForkTargetAccess";
 import { closeForkThreadDialog, type ForkThreadDialogRequest } from "./forkThreadDialogStore";
+import { errorMessage } from "~/lib/errorMessage";
 
 const CARRIED_FORM_ID = "carried-fork-form";
 
@@ -435,7 +436,7 @@ export function CarriedForkBody(props: {
       });
     } catch (error) {
       return fail({
-        message: error instanceof Error ? error.message : CARRIED_FORK_COPY.sourceChanged,
+        message: errorMessage(error, CARRIED_FORK_COPY.sourceChanged),
       });
     }
     const model = carriedForkModel(
@@ -495,7 +496,7 @@ export function CarriedForkBody(props: {
     }
     const failure = await pushMutation.mutateAsync().then(
       () => null,
-      (error: unknown) => (error instanceof Error ? error.message : "Git reported an error."),
+      (error: unknown) => errorMessage(error, "Git reported an error."),
     );
     if (failure !== null) {
       setNotice({ tone: "error", title: "Couldn't push", message: failure, detail: null });

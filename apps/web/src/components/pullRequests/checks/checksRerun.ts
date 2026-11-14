@@ -1,3 +1,4 @@
+import { errorMessage } from "~/lib/errorMessage";
 /**
  * Re-run requests in words: what a toast says when GitHub accepts a re-run,
  * and what it says when it refuses (permissions, a run that is still going,
@@ -14,7 +15,7 @@ export interface ChecksRerunFailure {
 }
 
 function rawMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : "The re-run request failed.";
+  const raw = errorMessage(error, "The re-run request failed.");
   // Provider errors arrive as "Source control provider github failed in rerunWorkflow: …".
   return /^Source control provider [^ ]+ failed in [^:]+:\s*(.*)$/u.exec(raw)?.[1] ?? raw;
 }

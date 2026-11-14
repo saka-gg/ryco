@@ -16,6 +16,7 @@ import { DEFAULT_THREAD_TERMINAL_ID, type Project, type Thread } from "../../typ
 import { LastInvokedScriptByProjectSchema } from "../ChatView.logic";
 import { type NewProjectScriptInput } from "../ProjectScriptDialog";
 import { useProjectScriptMutations } from "../../hooks/useProjectScriptMutations";
+import { errorMessage } from "~/lib/errorMessage";
 
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
@@ -180,7 +181,7 @@ export function useChatProjectScripts(
       } catch (error) {
         setThreadError(
           activeThreadId,
-          error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
+          errorMessage(error, `Failed to run script "${script.name}".`),
         );
       }
     },

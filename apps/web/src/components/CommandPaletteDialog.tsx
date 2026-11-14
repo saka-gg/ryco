@@ -231,6 +231,7 @@ import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { carryWorkspaceSearchToThread } from "../workspaceRouteSearch";
 import { resolveThreadPinCommandPresentation, toggleThreadPin } from "../threadPinning";
+import { errorMessage } from "~/lib/errorMessage";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
 const BROWSE_STALE_TIME_MS = 30_000;
@@ -280,13 +281,6 @@ function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string
   if (!flow) return null;
   if (flow.step === "confirm") return null;
   return remoteRepositoryInputPlaceholder(flow.source);
-}
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message;
-  }
-  return "An error occurred.";
 }
 
 /** The description of a palette item whose action the connection cannot run right now. */
@@ -1952,8 +1946,7 @@ function OpenCommandPaletteDialog() {
           stackedThreadToast({
             type: "error",
             title: "Failed to add project",
-            description:
-              outcome.error instanceof Error ? outcome.error.message : "An error occurred.",
+            description: errorMessage(outcome.error, "An error occurred."),
           }),
         );
         return;
@@ -2070,7 +2063,7 @@ function OpenCommandPaletteDialog() {
           stackedThreadToast({
             type: "error",
             title: "Repository lookup failed",
-            description: errorMessage(error),
+            description: errorMessage(error, "An error occurred."),
           }),
         );
       } finally {
@@ -2120,7 +2113,7 @@ function OpenCommandPaletteDialog() {
         stackedThreadToast({
           type: "error",
           title: "Clone failed",
-          description: errorMessage(error),
+          description: errorMessage(error, "An error occurred."),
         }),
       );
     } finally {
@@ -2176,7 +2169,7 @@ function OpenCommandPaletteDialog() {
                 value: "browse-status:error",
                 searchTerms: ["filesystem", "unavailable", "error"],
                 title: "Unable to browse folders",
-                description: errorMessage(browseQuery.error),
+                description: errorMessage(browseQuery.error, "An error occurred."),
                 icon: <CircleAlertIcon className={ITEM_ICON_CLASS} />,
                 disabled: true,
                 run: async () => {},
@@ -2287,7 +2280,7 @@ function OpenCommandPaletteDialog() {
               value: "remote-repositories:error",
               searchTerms: ["error", "repository", "repo"],
               title: "Unable to load repositories",
-              description: errorMessage(remoteRepositorySearchQuery.error),
+              description: errorMessage(remoteRepositorySearchQuery.error, "An error occurred."),
               icon: remoteProjectSourceIcon(addProjectCloneFlow.source, ITEM_ICON_CLASS),
               disabled: true,
               run: async () => {},
@@ -2475,7 +2468,7 @@ function OpenCommandPaletteDialog() {
         stackedThreadToast({
           type: "error",
           title: "Unable to run command",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          description: errorMessage(error, "An unexpected error occurred."),
         }),
       );
     });

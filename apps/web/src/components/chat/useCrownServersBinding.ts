@@ -24,6 +24,7 @@ import { openExternalLink } from "~/lib/openExternalLink";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { CrownServersBinding } from "../overview/crown/crownTypes";
 import { serverDisplayName } from "../overview/crown/details/ServersDetail";
+import { errorMessage } from "~/lib/errorMessage";
 
 const NO_SERVERS: ReadonlyArray<ThreadLocalServer> = [];
 const NOT_STOPPING: ReadonlySet<number> = new Set();
@@ -114,7 +115,7 @@ export function useCrownServersBinding(input: {
           toastManager.add({
             type: "error",
             title: "Could not open the server",
-            description: error instanceof Error ? error.message : "The Browser panel refused it.",
+            description: errorMessage(error, "The Browser panel refused it."),
           }),
         );
     },

@@ -22,10 +22,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "An unexpected error occurred.";
-}
+import { errorMessage } from "~/lib/errorMessage";
 
 function autoSettleLabel(value: SidebarAutoSettleAfterDays): string {
   return value === null ? "Off" : `After ${value} ${value === 1 ? "day" : "days"}`;
@@ -163,7 +160,7 @@ function NodeAutoSettleSettings() {
                 stackedThreadToast({
                   type: "error",
                   title: "Could not update the rule",
-                  description: errorMessage(error),
+                  description: errorMessage(error, "An unexpected error occurred."),
                 }),
               ),
           );

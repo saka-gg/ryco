@@ -65,6 +65,7 @@ import { displayProjectPath } from "@ryco/shared/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { NodePathText } from "./NodePathText";
 import { closeAddProject } from "./projectNodesDialogStore";
+import { errorMessage } from "~/lib/errorMessage";
 
 const REPOSITORY_SEARCH_DEBOUNCE_MS = 200;
 
@@ -215,12 +216,6 @@ function MarkStack(props: { readonly children: ReactNode; readonly label?: strin
 }
 
 const CLONE_CARD_PROVIDERS = ["github", "gitlab", "forgejo", "bitbucket", "azure-devops"] as const;
-
-function errorText(error: unknown): string {
-  return error instanceof Error && error.message.trim().length > 0
-    ? error.message
-    : "An error occurred.";
-}
 
 export function AddProjectSourceStep(props: AddProjectSourceStepProps) {
   const { node, kind, onKindChange } = props;
@@ -416,7 +411,7 @@ function ClonePanel(props: AddProjectSourceStepProps) {
       });
       onClone({ source: effectiveSource, ...resolved });
     } catch (error) {
-      setLookupError(`Repository lookup failed: ${errorText(error)}`);
+      setLookupError(`Repository lookup failed: ${errorMessage(error, "An error occurred.")}`);
     }
     // After the try, not in a `finally`: React Compiler does not lower one.
     setLookingUp(false);

@@ -14,7 +14,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
-import { errorMessage } from "./deviceControls";
+import { errorMessage } from "~/lib/errorMessage";
 
 export interface DeviceSetupValues {
   readonly devicesEnabled: boolean;

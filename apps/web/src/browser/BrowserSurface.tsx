@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProjectBrowserTab } from "@ryco/contracts";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** DOM owns layout; the main process owns guest content and attachment identity. */
 export function BrowserSurface({ tab, width }: { tab: ProjectBrowserTab; width: number | null }) {
@@ -46,8 +47,7 @@ export function BrowserSurface({ tab, width }: { tab: ProjectBrowserTab; width: 
       if (key !== previous) {
         previous = key;
         void api.surface(input).catch((reason) => {
-          if (!stopped)
-            setError(reason instanceof Error ? reason.message : "Browser surface unavailable.");
+          if (!stopped) setError(errorMessage(reason, "Browser surface unavailable."));
         });
       }
       if (performance.now() < settlingUntil) frame = requestAnimationFrame(sync);

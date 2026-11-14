@@ -4,6 +4,7 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { openInPreferredEditor } from "../editorPreferences";
 import { readEnvironmentApi } from "../environmentApi";
 import { readLocalApi } from "../localApi";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Shows a folder on this machine in the file manager (`"file-manager"`) or the
@@ -33,7 +34,7 @@ export async function openFolderWithFeedback(
       stackedThreadToast({
         type: "error",
         title: "Unable to open folder",
-        description: error instanceof Error ? error.message : "An error occurred.",
+        description: errorMessage(error, "An error occurred."),
       }),
     );
   }
@@ -76,7 +77,7 @@ export async function deleteChatFolderWithFeedback(input: {
       stackedThreadToast({
         type: "error",
         title: "Could not delete the chat folder",
-        description: `${error instanceof Error ? error.message : "The request failed."} The files are still in ${input.folderPath}.`,
+        description: `${errorMessage(error, "The request failed.")} The files are still in ${input.folderPath}.`,
       }),
     );
   }

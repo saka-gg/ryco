@@ -34,6 +34,7 @@ import {
   resourceMemorySeries,
   topSpanSeries,
 } from "./DiagnosticsSettings.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 const POLL_INTERVAL_MS = 5_000;
 
@@ -641,9 +642,7 @@ function DiagnosticsSettingsContent({
         setError(null);
       },
       onError: (refreshError) =>
-        setError(
-          refreshError instanceof Error ? refreshError.message : "Unable to refresh diagnostics.",
-        ),
+        setError(errorMessage(refreshError, "Unable to refresh diagnostics.")),
       onLoading: setLoading,
     });
     refreshRef.current = controller.refresh;

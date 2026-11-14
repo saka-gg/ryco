@@ -72,6 +72,7 @@ import {
   presentHubSetup,
   recordHubEnrollmentIntent,
 } from "./hubSetup.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Matches the diagnostics panel's cadence.
@@ -210,7 +211,7 @@ export function HubSection({
       // Keep the last good snapshot, but stop calling it current. See the
       // staleness note below. Never let a dead control plane keep rendering
       // "Connected".
-      setError(cause instanceof Error ? cause.message : "Unable to read Hub status.");
+      setError(errorMessage(cause, "Unable to read Hub status."));
     }
   }, []);
 
@@ -254,9 +255,7 @@ export function HubSection({
       })
       .catch((cause: unknown) => {
         if (!mountedRef.current) return;
-        setConfigError(
-          cause instanceof Error ? cause.message : "Unable to read Hub launch configuration.",
-        );
+        setConfigError(errorMessage(cause, "Unable to read Hub launch configuration."));
       });
   }, [desktopBridge]);
 
@@ -535,7 +534,7 @@ export function HubSection({
         await refreshCurrent();
       } catch (cause) {
         if (!mountedRef.current) return;
-        setError(cause instanceof Error ? cause.message : "That didn't work.");
+        setError(errorMessage(cause, "That didn't work."));
       } finally {
         if (mountedRef.current) setPendingAction(null);
       }
@@ -595,7 +594,7 @@ export function HubSection({
         if (outcome !== "relaunched" && mountedRef.current) setPendingAction(null);
       } catch (cause) {
         if (!mountedRef.current) return;
-        setError(cause instanceof Error ? cause.message : "Unable to save the Hub address.");
+        setError(errorMessage(cause, "Unable to save the Hub address."));
         setPendingAction(null);
       }
     },
@@ -625,9 +624,7 @@ export function HubSection({
       if (outcome !== "relaunched" && mountedRef.current) setSavingNodeName(false);
     } catch (cause) {
       if (!mountedRef.current) return;
-      setNodeNameError(
-        cause instanceof Error ? cause.message : "Unable to save the Hub node name.",
-      );
+      setNodeNameError(errorMessage(cause, "Unable to save the Hub node name."));
       setSavingNodeName(false);
     }
   }, [desktopBridge, guardRelaunch, nodeNameDraft, reloadConfig]);
@@ -651,9 +648,7 @@ export function HubSection({
         if (outcome !== "relaunched" && mountedRef.current) setSavingFileFallback(false);
       } catch (cause) {
         if (!mountedRef.current) return;
-        setConfigError(
-          cause instanceof Error ? cause.message : "Unable to save the key storage setting.",
-        );
+        setConfigError(errorMessage(cause, "Unable to save the key storage setting."));
         setSavingFileFallback(false);
       }
     },
@@ -669,7 +664,7 @@ export function HubSection({
       setConfigError(null);
     } catch (cause) {
       if (!mountedRef.current) return;
-      setConfigError(cause instanceof Error ? cause.message : "Unable to open the relay guide.");
+      setConfigError(errorMessage(cause, "Unable to open the relay guide."));
     }
   }, [desktopBridge]);
 

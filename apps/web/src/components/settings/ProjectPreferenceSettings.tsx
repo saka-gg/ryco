@@ -46,6 +46,7 @@ import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSet
 import { SettingResetButton, SettingsBlock, SettingsNotice, SettingsRow } from "./settingsLayout";
 import { SETTINGS_CONTROL_WIDTH } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
+import { errorMessage } from "~/lib/errorMessage";
 
 export function ProjectPreferenceSettings({
   projectId,
@@ -116,7 +117,7 @@ function ProjectPreferenceEditor(props: {
       })
       .catch((cause) => {
         if (generation.current === request)
-          setError(cause instanceof Error ? cause.message : "Could not load project defaults.");
+          setError(errorMessage(cause, "Could not load project defaults."));
       });
     return () => {
       generation.current++;
@@ -136,7 +137,7 @@ function ProjectPreferenceEditor(props: {
       if (generation.current === request) setReload((value) => value + 1);
     } catch (cause) {
       if (generation.current === request)
-        setError(cause instanceof Error ? cause.message : "Could not save project defaults.");
+        setError(errorMessage(cause, "Could not save project defaults."));
     } finally {
       setSaving(false);
     }

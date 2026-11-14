@@ -8,6 +8,7 @@ import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { AddDeviceDialogProps } from "./AddDeviceDialog.logic";
 import { useLocalSessionAccess } from "./localSessionAccess";
+import { errorMessage } from "~/lib/errorMessage";
 
 // The dialog and its view logic load on the first click, not with Connections.
 const LazyAddDeviceDialog = preloadableLazy(() =>
@@ -23,7 +24,7 @@ function reportLoadError(error: unknown) {
     stackedThreadToast({
       type: "error",
       title: "Could not open Add a device",
-      description: error instanceof Error ? error.message : "Try again.",
+      description: errorMessage(error, "Try again."),
     }),
   );
 }

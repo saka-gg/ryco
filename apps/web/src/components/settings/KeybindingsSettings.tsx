@@ -68,6 +68,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { errorMessage } from "~/lib/errorMessage";
 
 type DraftRule = KeybindingRule & { __id: string };
 
@@ -237,7 +238,7 @@ export function KeybindingsSettingsPanel() {
           stackedThreadToast({
             type: "error",
             title: "Could not save keybindings",
-            description: error instanceof Error ? error.message : "An unknown error occurred.",
+            description: errorMessage(error, "An unknown error occurred."),
           }),
         );
         // Revert the editor when local persistence fails.
@@ -384,7 +385,7 @@ export function KeybindingsSettingsPanel() {
         stackedThreadToast({
           type: "error",
           title: "Could not restore default keybindings",
-          description: error instanceof Error ? error.message : "An unknown error occurred.",
+          description: errorMessage(error, "An unknown error occurred."),
         }),
       );
       setDraft(snapshotToDraft(resolvedKeybindings));
@@ -512,7 +513,7 @@ export function KeybindingsSettingsPanel() {
       const rules = Schema.decodeUnknownSync(KeybindingsConfig)(JSON.parse(await file.text()));
       setImportRules(rules);
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : "Invalid keybindings file.");
+      setImportError(errorMessage(error, "Invalid keybindings file."));
     }
   };
   const importReviewed = async () => {
@@ -542,7 +543,7 @@ export function KeybindingsSettingsPanel() {
       await importLegacyKeybindings(mapped);
       setImportRules(null);
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : "Could not import keybindings.");
+      setImportError(errorMessage(error, "Could not import keybindings."));
     } finally {
       setImportBusy(false);
     }

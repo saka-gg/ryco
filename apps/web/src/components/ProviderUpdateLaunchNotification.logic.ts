@@ -7,6 +7,7 @@ import {
   type ServerProvider,
 } from "@ryco/contracts";
 import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type ProviderUpdateCandidate = ServerProvider & {
   readonly versionAdvisory: NonNullable<ServerProvider["versionAdvisory"]> & {
@@ -427,7 +428,7 @@ export function firstRejectedProviderUpdateMessage(
   if (!rejected) {
     return null;
   }
-  return rejected.reason instanceof Error ? rejected.reason.message : "Provider update failed.";
+  return errorMessage(rejected.reason, "Provider update failed.");
 }
 
 function getProviderUpdateInitialToastTitle(

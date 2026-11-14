@@ -51,6 +51,7 @@ import {
   useSharedSettingsMode,
 } from "./sharedSettingsMode";
 import { useSharedSettingsSnapshot, useSharedSettingsSource } from "./sharedSettingsSource";
+import { errorMessage } from "~/lib/errorMessage";
 
 /** What a shared row's `render` draws one control with. */
 export interface SharedSettingControl<K extends ShareableServerSettingKey> {
@@ -332,7 +333,7 @@ function useSharedSettingState<K extends ShareableServerSettingKey>(props: {
       result = await source.run(command, extra);
       setNotes(describeSharedRowOutcome({ action, command, result, view }));
     } catch (error) {
-      setNotes([error instanceof Error ? error.message : "The change was not saved."]);
+      setNotes([errorMessage(error, "The change was not saved.")]);
     }
     setBusy(false);
     return result;

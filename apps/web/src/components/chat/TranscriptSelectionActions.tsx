@@ -9,6 +9,7 @@ import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../Compos
 import { Button } from "../ui/button";
 import { resolveComposerEnter } from "./composerFollowUp";
 import { useSendShortcut } from "./useSendShortcut";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface CapturedSelection {
   citation: QuoteCitation;
@@ -221,7 +222,7 @@ export function TranscriptSelectionActions(props: Props) {
       setExpanded(false);
       setSelection(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not open the chat. Try again.");
+      setError(errorMessage(cause, "Could not open the chat. Try again."));
     } finally {
       submitting.current = false;
       setBusy(false);

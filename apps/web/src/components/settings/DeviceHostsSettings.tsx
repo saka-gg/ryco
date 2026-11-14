@@ -21,6 +21,7 @@ import {
   toDraft,
   type Draft,
 } from "@ryco/client-runtime/state/settings/deviceHosts";
+import { errorMessage } from "~/lib/errorMessage";
 
 const fieldClass =
   "h-8 w-full rounded-md border border-border bg-background px-2 text-xs disabled:opacity-60";
@@ -77,7 +78,7 @@ export function DeviceHostsSettings() {
         setProbes((current) => ({
           ...current,
           [key]: {
-            error: error instanceof Error ? error.message : "Test connection failed.",
+            error: errorMessage(error, "Test connection failed."),
           },
         })),
     );

@@ -59,6 +59,7 @@ import {
   resolveQuickAction,
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
+import { errorMessage } from "~/lib/errorMessage";
 
 /**
  * Runs the checkout's git actions: commit / push / pull request (one stacked
@@ -479,7 +480,7 @@ export function useGitActionRunner({
         stackedThreadToast({
           type: "error",
           title: "Unable to open pull request link",
-          description: err instanceof Error ? err.message : "An error occurred.",
+          description: errorMessage(err, "An error occurred."),
           ...(threadToastData !== undefined ? { data: threadToastData } : {}),
         }),
       );
@@ -774,7 +775,7 @@ export function useGitActionRunner({
       (err: unknown) => {
         reporter.failed({
           title: "Pull failed",
-          description: err instanceof Error ? err.message : "An error occurred.",
+          description: errorMessage(err, "An error occurred."),
         });
         return false;
       },

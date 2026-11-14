@@ -7,6 +7,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { readLifecycleApi, useWorkspaceLifecycleChanges } from "../../../workspaceLifecycle";
+import { errorMessage } from "~/lib/errorMessage";
 
 export type WorkspaceInspection =
   | { readonly status: "unavailable" }
@@ -24,9 +25,6 @@ export type WorkspaceInspection =
 type Settled =
   | Exclude<WorkspaceInspection, { readonly status: "unavailable" | "loading" | "ready" }>
   | Omit<Extract<WorkspaceInspection, { readonly status: "ready" }>, "suggestions">;
-
-const errorMessage = (reason: unknown, fallback: string) =>
-  reason instanceof Error && reason.message ? reason.message : fallback;
 
 /**
  * The server's inspection of a checkout's workspaces (Git state, conversations,

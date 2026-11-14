@@ -2,6 +2,7 @@ import type { AtlassianConnectionId, EnvironmentId, WorkItemProject } from "@ryc
 import { useEffect } from "react";
 import { useWorkItemProjects } from "~/rpc/useWorkItems";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { errorMessage } from "~/lib/errorMessage";
 
 const JIRA_PROJECT_PICKER_EMPTY = "__ryco_empty_jira_project__";
 const EMPTY_PROJECTS: ReadonlyArray<WorkItemProject> = [];
@@ -89,9 +90,7 @@ export function JiraProjectPicker(props: {
       </Select>
       {projectsQuery.error ? (
         <p className="text-destructive text-[11px]">
-          {projectsQuery.error instanceof Error
-            ? projectsQuery.error.message
-            : "Failed to load Jira projects."}
+          {errorMessage(projectsQuery.error, "Failed to load Jira projects.")}
         </p>
       ) : projects.length > 0 ? (
         <p className="text-[11px] text-muted-foreground">

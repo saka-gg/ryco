@@ -48,6 +48,7 @@ import { LabelChip } from "./LabelChip";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { errorMessage } from "~/lib/errorMessage";
 
 const workItemStateOptions: ReadonlyArray<{ id: WorkItemStateFilter; label: string }> = [
   { id: "open", label: "Open" },
@@ -265,7 +266,7 @@ export function WorkItemsTab(props: WorkItemsTabProps) {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {error ? (
               <p className="px-4 py-6 text-destructive text-sm">
-                {error instanceof Error ? error.message : "Failed to load Jira work items."}
+                {errorMessage(error, "Failed to load Jira work items.")}
               </p>
             ) : (
               <WorkItemList

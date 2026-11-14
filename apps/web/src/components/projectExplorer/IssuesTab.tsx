@@ -14,6 +14,7 @@ import { Input } from "../ui/input";
 import { cn } from "~/lib/utils";
 import { IssueList } from "./IssueList";
 import { StateFilterButtons, type IssueStateFilter } from "./StateFilterButtons";
+import { errorMessage } from "~/lib/errorMessage";
 
 interface IssuesTabProps {
   environmentId: EnvironmentId | null;
@@ -118,7 +119,7 @@ export function IssuesTab(props: IssuesTabProps) {
               props.density === "compact" ? "px-2.5 py-4" : "px-4 py-6",
             )}
           >
-            {error instanceof Error ? error.message : "Failed to load issues."}
+            {errorMessage(error, "Failed to load issues.")}
           </p>
         ) : (
           <IssueList
