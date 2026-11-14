@@ -1,13 +1,12 @@
 import type { DesktopEnvironmentBootstrap } from "@ryco/contracts";
 import type { KnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
 import { isHostedHubMode } from "../../env";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 export interface PrimaryEnvironmentTarget {
   readonly source: KnownEnvironment["source"];
   readonly target: KnownEnvironment["target"];
 }
-
-const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 
 type DesktopBridgeInstance = NonNullable<Window["desktopBridge"]>;
 
@@ -33,15 +32,9 @@ function swapBaseUrlProtocol(
   return url.toString();
 }
 
-function normalizeHostname(hostname: string): string {
-  return hostname
-    .trim()
-    .toLowerCase()
-    .replace(/^\[(.*)\]$/, "$1");
-}
-
-export function isLoopbackHostname(hostname: string): boolean {
-  return LOOPBACK_HOSTNAMES.has(normalizeHostname(hostname));
+/** `localhost`, `127.0.0.1` or `::1`: the loopback names this app's primary-target checks use. */
+export function isPrimaryLoopbackHostname(hostname: string): boolean {
+  return isLoopbackHostname(hostname, { ipv4: "127.0.0.1" });
 }
 
 function resolveHttpRequestBaseUrl(httpBaseUrl: string): string {
@@ -61,8 +54,8 @@ function resolveHttpRequestBaseUrl(httpBaseUrl: string): string {
   if (
     !isCurrentOriginDevServer ||
     currentUrl.origin === targetUrl.origin ||
-    !isLoopbackHostname(currentUrl.hostname) ||
-    !isLoopbackHostname(targetUrl.hostname)
+    !isPrimaryLoopbackHostname(currentUrl.hostname) ||
+    !isPrimaryLoopbackHostname(targetUrl.hostname)
   ) {
     return httpBaseUrl;
   }

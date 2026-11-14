@@ -16,7 +16,8 @@ import type {
   ProviderInstanceConfigMap,
   ProviderInstanceId,
 } from "@ryco/contracts";
-import { isLoopbackHost, normalizeHubBaseUrl } from "@ryco/shared/cliProxyHubUrl";
+import { HUB_LOOPBACK_HOST, normalizeHubBaseUrl } from "@ryco/shared/cliProxyHubUrl";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 const FIVE_HOUR_MINS = 5 * 60;
 const WEEK_MINS = 7 * 24 * 60;
@@ -92,7 +93,7 @@ function hubRouteKey(raw: string): string | null {
   const baseUrl = normalizeHubBaseUrl(raw);
   if (!baseUrl) return null;
   const url = new URL(baseUrl);
-  if (isLoopbackHost(url.hostname)) url.hostname = "localhost";
+  if (isLoopbackHostname(url.hostname, HUB_LOOPBACK_HOST)) url.hostname = "localhost";
   return `${url.protocol}//${url.host}${url.pathname.replace(/\/v1$/i, "").replace(/\/+$/, "")}`;
 }
 
@@ -102,7 +103,7 @@ function hubRouteKey(raw: string): string | null {
  */
 export function hubAuthAddress(baseUrl: string): string {
   const url = new URL(baseUrl);
-  if (isLoopbackHost(url.hostname)) url.hostname = "localhost";
+  if (isLoopbackHostname(url.hostname, HUB_LOOPBACK_HOST)) url.hostname = "localhost";
   return url.host;
 }
 

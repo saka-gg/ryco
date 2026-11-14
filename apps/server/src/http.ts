@@ -54,6 +54,7 @@ import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { isCanonicalPathInside } from "./pathContainment.ts";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 const PROJECT_FAVICON_CACHE_CONTROL = "private, max-age=3600";
 const PROJECT_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
@@ -69,7 +70,6 @@ const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" vi
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 export const SERVER_ENVIRONMENT_DESCRIPTOR_PATH = "/.well-known/ryco/environment";
 export const LEGACY_SERVER_ENVIRONMENT_DESCRIPTOR_PATH = "/.well-known/s3/environment";
-const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
 const DOWNLOAD_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
 const INLINE_ATTACHMENT_EXTENSIONS = new Set([
@@ -110,14 +110,6 @@ export const BROWSER_API_CORS_OPTIONS = {
 } as const;
 
 export const browserApiCorsLayer = HttpRouter.cors(BROWSER_API_CORS_OPTIONS);
-
-export function isLoopbackHostname(hostname: string): boolean {
-  const normalizedHostname = hostname
-    .trim()
-    .toLowerCase()
-    .replace(/^\[(.*)\]$/, "$1");
-  return LOOPBACK_HOSTNAMES.has(normalizedHostname);
-}
 
 export function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
   const redirectUrl = new URL(devUrl.toString());
@@ -1021,7 +1013,7 @@ export const serveStaticRequest = Effect.gen(function* () {
   }
 
   const config = yield* ServerConfig;
-  if (config.devUrl && isLoopbackHostname(url.value.hostname)) {
+  if (config.devUrl && isLoopbackHostname(url.value.hostname, { ipv4: "127.0.0.1" })) {
     return HttpServerResponse.redirect(resolveDevRedirectUrl(config.devUrl, url.value), {
       status: 302,
     });
@@ -1069,7 +1061,8 @@ export const serveStaticRequest = Effect.gen(function* () {
 
   // The desktop renderer loads the shell over loopback, where decoding a
   // compressed body only costs CPU.
-  const identityOnly = config.mode === "desktop" && isLoopbackHostname(url.value.hostname);
+  const identityOnly =
+    config.mode === "desktop" && isLoopbackHostname(url.value.hostname, { ipv4: "127.0.0.1" });
   const fileInfo = yield* fileSystem.stat(filePath).pipe(Effect.catch(() => Effect.succeed(null)));
   if (!fileInfo || fileInfo.type !== "File") {
     const indexPath = path.resolve(staticRoot, "index.html");

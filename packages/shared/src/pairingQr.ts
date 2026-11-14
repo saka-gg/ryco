@@ -6,22 +6,15 @@
  * @module pairingQr
  */
 
-/**
- * A loopback host: the local machine only. An unset or empty host counts, the way a listener
- * given no host is reached through `localhost`.
- */
-export function isLoopbackHost(host: string | undefined): boolean {
-  if (!host || host.length === 0) {
-    return true;
-  }
+import { isLoopbackHostname } from "./loopbackHost.ts";
 
-  return (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.startsWith("127.")
-  );
+/**
+ * A listener host on the local machine only. An unset or empty host counts, the way a listener
+ * given no host is reached through `localhost`. IPv4 keeps the `127.` prefix rule this check had
+ * before `loopbackHost` existed.
+ */
+export function isLocalListenerHost(host: string | undefined): boolean {
+  return !host || isLoopbackHostname(host, { ipv4: "127-prefix" });
 }
 
 /** The unspecified address: a listener bound to every interface, never a host to dial. */
@@ -38,7 +31,7 @@ export function isWildcardHost(host: string | undefined): boolean {
 export function isHostUnreachableFromAnotherDevice(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/\.$/u, "");
   return (
-    isLoopbackHost(host) ||
+    isLocalListenerHost(host) ||
     host.endsWith(".localhost") ||
     isWildcardHost(host) ||
     /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/u.test(host) ||

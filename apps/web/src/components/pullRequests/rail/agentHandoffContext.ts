@@ -1,7 +1,5 @@
-import {
-  type SourceControlChangeRequestDetail,
-  truncateSourceControlDetailContent,
-} from "@ryco/contracts";
+import type { SourceControlChangeRequestDetail } from "@ryco/contracts";
+import { truncateSourceControlDetailContent } from "@ryco/shared/sourceControlDetailContent";
 
 /**
  * The page's own detail under the composer's caps: body and comments cut to

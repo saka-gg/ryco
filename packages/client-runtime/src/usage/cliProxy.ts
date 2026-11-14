@@ -10,7 +10,8 @@ import type {
   CliProxyRequestCounts,
   ProviderInstanceId,
 } from "@ryco/contracts";
-import { isLoopbackHost } from "@ryco/shared/cliProxyHubUrl";
+import { HUB_LOOPBACK_HOST } from "@ryco/shared/cliProxyHubUrl";
+import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
 
 import {
   clampUsedPercent,
@@ -198,7 +199,7 @@ export interface CliProxyEnvironmentHub {
 export function cliProxyHubIdentity(entry: CliProxyEnvironmentHub): string {
   let loopback = false;
   try {
-    loopback = isLoopbackHost(new URL(entry.hub.url).hostname);
+    loopback = isLoopbackHostname(new URL(entry.hub.url).hostname, HUB_LOOPBACK_HOST);
   } catch {
     loopback = true;
   }

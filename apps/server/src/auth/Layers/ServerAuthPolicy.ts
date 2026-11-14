@@ -4,11 +4,11 @@ import { Effect, Layer } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { ServerAuthPolicy, type ServerAuthPolicyShape } from "../Services/ServerAuthPolicy.ts";
 import { resolveSessionCookieName, resolveSessionCookieScope } from "../utils.ts";
-import { isLoopbackHost, isWildcardHost } from "../../startupAccess.ts";
+import { isLocalListenerHost, isWildcardHost } from "../../startupAccess.ts";
 
 export const makeServerAuthPolicy = Effect.gen(function* () {
   const config = yield* ServerConfig;
-  const isRemoteReachable = isWildcardHost(config.host) || !isLoopbackHost(config.host);
+  const isRemoteReachable = isWildcardHost(config.host) || !isLocalListenerHost(config.host);
 
   const policy =
     config.mode === "desktop"

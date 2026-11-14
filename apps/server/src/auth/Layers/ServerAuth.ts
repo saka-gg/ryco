@@ -10,7 +10,7 @@ import { DateTime, Effect, Layer, Option } from "effect";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
-import { isLoopbackHost } from "../../startupAccess.ts";
+import { isLocalListenerHost } from "../../startupAccess.ts";
 import { AuthControlPlane, OWNER_BOOTSTRAP_PAIRING_SUBJECT } from "../Services/AuthControlPlane.ts";
 import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
 import { BootstrapCredentialService } from "../Services/BootstrapCredentialService.ts";
@@ -159,8 +159,8 @@ function isAcceptedWebSocketOrigin(input: {
     requestHostname !== null &&
     requestPort !== null &&
     originPort === requestPort &&
-    isLoopbackHost(origin.hostname) &&
-    isLoopbackHost(requestHostname)
+    isLocalListenerHost(origin.hostname) &&
+    isLocalListenerHost(requestHostname)
   );
 }
 
