@@ -263,7 +263,7 @@ Notes:
 - For local signed builds, import the Developer ID identity into Keychain and
   set `APPLE_API_KEY` (the private `.p8` file path), `APPLE_API_KEY_ID`, and
   `APPLE_API_ISSUER` in the repo-root `.env.local`. Load that file explicitly:
-  `bun --env-file=.env.local run dist:mac --signed`.
+  `bun --env-file=.env.local run dist:desktop:dmg --signed`.
 
 ## 3) Azure Trusted Signing setup (Windows)
 
