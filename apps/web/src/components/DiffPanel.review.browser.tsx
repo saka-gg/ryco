@@ -163,13 +163,43 @@ function scroller(): HTMLElement {
   return element;
 }
 
-/** Whether `line` of `path` is drawn inside the scroller's viewport. */
-function lineInView(path: string, side: "additions" | "deletions", line: number): boolean {
+/**
+ * How far `line` of `path` sits from the scroller's middle, where a hunk jump centers its row;
+ * null while it is not drawn. A jump that fell back to the file's top leaves the row far from it.
+ */
+function lineOffsetFromMiddle(
+  path: string,
+  side: "additions" | "deletions",
+  line: number,
+): number | null {
   const row = findDiffLineElement(fileElement(path), side, line);
-  if (!row) return false;
-  const rowBox = row.getBoundingClientRect();
+  const rowBox = row?.getBoundingClientRect();
+  if (!rowBox || rowBox.height === 0) return null;
   const viewport = scroller().getBoundingClientRect();
-  return rowBox.height > 0 && rowBox.top >= viewport.top && rowBox.bottom <= viewport.bottom;
+  return Math.abs(rowBox.top + rowBox.height / 2 - (viewport.top + viewport.height / 2));
+}
+
+/** A revealed row is centered; this much drift (about a row) still counts. */
+const CENTERED_TOLERANCE_PX = 24;
+
+/**
+ * Waits for a hunk jump to center `line` of `path` in the panel. A jump into a file pierre has
+ * not drawn yet waits for its highlighter worker, which a cold or busy worker pool can keep for
+ * seconds, as on the first draw (`renderPanel`).
+ */
+async function expectLineRevealed(
+  path: string,
+  side: "additions" | "deletions",
+  line: number,
+): Promise<void> {
+  await vi.waitFor(
+    () => {
+      const offset = lineOffsetFromMiddle(path, side, line);
+      expect(offset, `${path}:${line} from the middle`).not.toBeNull();
+      expect(offset!).toBeLessThanOrEqual(CENTERED_TOLERANCE_PX);
+    },
+    { timeout: 15_000 },
+  );
 }
 
 async function renderPanel(patch: string) {
@@ -272,23 +302,23 @@ describe("Diff panel review tools on the real renderer", () => {
     await expect.element(next).toHaveAttribute("title", expect.stringMatching(/^Next hunk \(/));
 
     await next.click();
-    await vi.waitFor(() => expect(lineInView("src/a.ts", "deletions", changedLine(0))).toBe(true));
+    await expectLineRevealed("src/a.ts", "deletions", changedLine(0));
     await next.click();
-    await vi.waitFor(() => expect(lineInView("src/a.ts", "deletions", changedLine(1))).toBe(true));
+    await expectLineRevealed("src/a.ts", "deletions", changedLine(1));
     await expect.element(previous).toBeEnabled();
 
     // The keys work wherever focus is in the diff (here the button just clicked).
     await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
-    await vi.waitFor(() => expect(lineInView("src/a.ts", "deletions", changedLine(2))).toBe(true));
+    await expectLineRevealed("src/a.ts", "deletions", changedLine(2));
     await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
-    await vi.waitFor(() => expect(lineInView("src/b.ts", "deletions", changedLine(0))).toBe(true));
+    await expectLineRevealed("src/b.ts", "deletions", changedLine(0));
     await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
-    await vi.waitFor(() => expect(lineInView("src/a.ts", "deletions", changedLine(2))).toBe(true));
+    await expectLineRevealed("src/a.ts", "deletions", changedLine(2));
 
     // Scrolled by hand, the next hunk is the first one below the middle of the panel.
     fileElement("src/b.ts").scrollIntoView({ block: "start" });
     await next.click();
-    await vi.waitFor(() => expect(lineInView("src/b.ts", "deletions", changedLine(0))).toBe(true));
+    await expectLineRevealed("src/b.ts", "deletions", changedLine(0));
 
     // A text field keeps the keys for its caret.
     const top = scroller().scrollTop;
@@ -301,7 +331,7 @@ describe("Diff panel review tools on the real renderer", () => {
     await expect.element(markers.getByRole("button").nth(4)).toBeInTheDocument();
     expect(markers.getByRole("button").elements()).toHaveLength(5);
     await markers.getByRole("button", { name: "Changed lines: hunk 2 of 5" }).click();
-    await vi.waitFor(() => expect(lineInView("src/a.ts", "deletions", changedLine(1))).toBe(true));
+    await expectLineRevealed("src/a.ts", "deletions", changedLine(1));
     await screen.unmount();
   });
 });
