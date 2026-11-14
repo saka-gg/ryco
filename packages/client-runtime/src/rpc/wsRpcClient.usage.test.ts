@@ -18,12 +18,15 @@ const request = {
   timeZone: "UTC",
 } as const;
 
-function harness(summary: () => Effect.Effect<unknown, unknown>) {
+function harness(summary: () => Effect.Effect<unknown, string | Error>) {
   const getConfig = vi.fn(() => Effect.succeed({ usageContractVersion: USAGE_CONTRACT_VERSION }));
   const getUsageSummary = vi.fn(() => Effect.suspend(summary));
   const requestOptions: unknown[] = [];
   const transport = {
-    request: (invoke: (client: unknown) => Effect.Effect<unknown, unknown>, options?: unknown) => {
+    request: (
+      invoke: (client: unknown) => Effect.Effect<unknown, string | Error>,
+      options?: unknown,
+    ) => {
       requestOptions.push(options);
       return Effect.runPromise(
         invoke({
@@ -96,7 +99,8 @@ describe("wsRpcClient usage summary", () => {
     let fail = true;
     const { client, getUsageSummary } = harness(() =>
       fail
-        ? Effect.fail(new Error("scan failed"))
+        ? // @effect-diagnostics-next-line globalErrorInEffectFailure:off - fakes an untyped node failure
+          Effect.fail(new Error("scan failed"))
         : Effect.succeed({ contractVersion: USAGE_CONTRACT_VERSION }),
     );
     const error = await rejection(client.server.getUsageSummary(request));

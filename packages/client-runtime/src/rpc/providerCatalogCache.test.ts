@@ -226,7 +226,7 @@ describe("wsRpcClient config subscription", () => {
     };
     const inputOf = (index: number) => {
       const wire = vi.fn((_input: unknown) => Stream.empty);
-      attempts[index]!.connect({ [WS_METHODS.subscribeServerConfig]: wire });
+      void attempts[index]!.connect({ [WS_METHODS.subscribeServerConfig]: wire });
       return wire.mock.calls[0]?.[0];
     };
     return {

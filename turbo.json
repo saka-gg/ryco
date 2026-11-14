@@ -5,6 +5,7 @@
   // could return a stale pass after a shared compiler-option change.
   "globalDependencies": [
     "tsconfig.base.json",
+    "tsconfig.effect.json",
     "tsconfig.node.json",
     // Shared test configuration and build helpers are imported across workspace
     // boundaries that Turbo cannot infer from package dependencies.
