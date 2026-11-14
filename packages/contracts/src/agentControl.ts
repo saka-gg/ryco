@@ -683,7 +683,7 @@ export const AgentControlPlanWorkspaceInput = Schema.Struct({
   ...AgentControlReadWorkspaceInput.fields,
   ...AgentControlWorkspaceLifecycleOptions.fields,
 });
-export const AgentControlProposeWorkspaceInput = Schema.Struct({
+export const AgentControlProposeWorkspaceInput = /* @__PURE__ */ Schema.Struct({
   requestId: AgentControlRequestId,
   plan: AgentControlWorkspaceLifecyclePlan,
 }).pipe(rejectExcessProperties);
@@ -1261,32 +1261,32 @@ export const AgentControlRiskTag = agentControlSlug.pipe(Schema.brand("AgentCont
 export type AgentControlRiskTag = typeof AgentControlRiskTag.Type;
 
 export const AGENT_CONTROL_RISK_TAGS = {
-  createsThreads: AgentControlRiskTag.make("creates-threads"),
-  startsProviderTurn: AgentControlRiskTag.make("starts-provider-turn"),
-  interruptsThread: AgentControlRiskTag.make("interrupts-thread"),
-  modifiesThreadMetadata: AgentControlRiskTag.make("modifies-thread-metadata"),
-  createsProject: AgentControlRiskTag.make("creates-project"),
-  modifiesProjectMetadata: AgentControlRiskTag.make("modifies-project-metadata"),
-  removesProject: AgentControlRiskTag.make("removes-project"),
-  workspaceLifecycle: AgentControlRiskTag.make("workspace-lifecycle"),
-  removesThreads: AgentControlRiskTag.make("removes-threads"),
-  changesSettings: AgentControlRiskTag.make("changes-settings"),
-  sharedLocalCheckout: AgentControlRiskTag.make("shared-local-checkout"),
-  elevatedRuntimeMode: AgentControlRiskTag.make("elevated-runtime-mode"),
-  createsAutomation: AgentControlRiskTag.make("creates-automation"),
-  modifiesAutomation: AgentControlRiskTag.make("modifies-automation"),
-  cancelsAutomation: AgentControlRiskTag.make("cancels-automation"),
-  scheduledRun: AgentControlRiskTag.make("scheduled-run"),
-  deviceMutation: AgentControlRiskTag.make("device-mutation"),
-  deviceLifecycle: AgentControlRiskTag.make("device-lifecycle"),
-  deviceOpenWorld: AgentControlRiskTag.make("device-open-world"),
-  removesLocalTask: AgentControlRiskTag.make("removes-local-task"),
+  createsThreads: /* @__PURE__ */ AgentControlRiskTag.make("creates-threads"),
+  startsProviderTurn: /* @__PURE__ */ AgentControlRiskTag.make("starts-provider-turn"),
+  interruptsThread: /* @__PURE__ */ AgentControlRiskTag.make("interrupts-thread"),
+  modifiesThreadMetadata: /* @__PURE__ */ AgentControlRiskTag.make("modifies-thread-metadata"),
+  createsProject: /* @__PURE__ */ AgentControlRiskTag.make("creates-project"),
+  modifiesProjectMetadata: /* @__PURE__ */ AgentControlRiskTag.make("modifies-project-metadata"),
+  removesProject: /* @__PURE__ */ AgentControlRiskTag.make("removes-project"),
+  workspaceLifecycle: /* @__PURE__ */ AgentControlRiskTag.make("workspace-lifecycle"),
+  removesThreads: /* @__PURE__ */ AgentControlRiskTag.make("removes-threads"),
+  changesSettings: /* @__PURE__ */ AgentControlRiskTag.make("changes-settings"),
+  sharedLocalCheckout: /* @__PURE__ */ AgentControlRiskTag.make("shared-local-checkout"),
+  elevatedRuntimeMode: /* @__PURE__ */ AgentControlRiskTag.make("elevated-runtime-mode"),
+  createsAutomation: /* @__PURE__ */ AgentControlRiskTag.make("creates-automation"),
+  modifiesAutomation: /* @__PURE__ */ AgentControlRiskTag.make("modifies-automation"),
+  cancelsAutomation: /* @__PURE__ */ AgentControlRiskTag.make("cancels-automation"),
+  scheduledRun: /* @__PURE__ */ AgentControlRiskTag.make("scheduled-run"),
+  deviceMutation: /* @__PURE__ */ AgentControlRiskTag.make("device-mutation"),
+  deviceLifecycle: /* @__PURE__ */ AgentControlRiskTag.make("device-lifecycle"),
+  deviceOpenWorld: /* @__PURE__ */ AgentControlRiskTag.make("device-open-world"),
+  removesLocalTask: /* @__PURE__ */ AgentControlRiskTag.make("removes-local-task"),
   /** The action changes another node than the one the agent runs on. */
-  crossNode: AgentControlRiskTag.make("cross-node"),
+  crossNode: /* @__PURE__ */ AgentControlRiskTag.make("cross-node"),
   /** A setup command or a follow-up agent thread runs on the destination. */
-  runsCommands: AgentControlRiskTag.make("runs-commands"),
+  runsCommands: /* @__PURE__ */ AgentControlRiskTag.make("runs-commands"),
   /** Unpushed commits or uncommitted changes leave the source node. */
-  copiesWorkspaceContent: AgentControlRiskTag.make("copies-workspace-content"),
+  copiesWorkspaceContent: /* @__PURE__ */ AgentControlRiskTag.make("copies-workspace-content"),
 } as const;
 
 /**
@@ -1311,23 +1311,25 @@ export const AgentControlErrorCode = agentControlSlug.pipe(Schema.brand("AgentCo
 export type AgentControlErrorCode = typeof AgentControlErrorCode.Type;
 
 export const AGENT_CONTROL_ERROR_CODES = {
-  rejected: AgentControlErrorCode.make("rejected"),
-  expired: AgentControlErrorCode.make("expired"),
-  cancelled: AgentControlErrorCode.make("cancelled"),
-  duplicateRequest: AgentControlErrorCode.make("duplicate-request"),
-  revalidationFailed: AgentControlErrorCode.make("revalidation-failed"),
-  executionFailed: AgentControlErrorCode.make("execution-failed"),
-  featureDisabled: AgentControlErrorCode.make("feature-disabled"),
-  capabilityDenied: AgentControlErrorCode.make("capability-denied"),
-  deviceUnsupportedPlatform: AgentControlErrorCode.make("device.unsupported-platform"),
-  deviceSetupRequired: AgentControlErrorCode.make("device.setup-required"),
-  deviceUnavailable: AgentControlErrorCode.make("device.unavailable"),
-  deviceBootLimitReached: AgentControlErrorCode.make("device.boot-limit-reached"),
-  deviceAttachTimeout: AgentControlErrorCode.make("device.attach-timeout"),
-  deviceStaleState: AgentControlErrorCode.make("device.stale-state"),
-  deviceInvalidInput: AgentControlErrorCode.make("device.invalid-input"),
-  deviceRecordingFailed: AgentControlErrorCode.make("device.recording-failed"),
-  deviceOperationFailed: AgentControlErrorCode.make("device.operation-failed"),
+  rejected: /* @__PURE__ */ AgentControlErrorCode.make("rejected"),
+  expired: /* @__PURE__ */ AgentControlErrorCode.make("expired"),
+  cancelled: /* @__PURE__ */ AgentControlErrorCode.make("cancelled"),
+  duplicateRequest: /* @__PURE__ */ AgentControlErrorCode.make("duplicate-request"),
+  revalidationFailed: /* @__PURE__ */ AgentControlErrorCode.make("revalidation-failed"),
+  executionFailed: /* @__PURE__ */ AgentControlErrorCode.make("execution-failed"),
+  featureDisabled: /* @__PURE__ */ AgentControlErrorCode.make("feature-disabled"),
+  capabilityDenied: /* @__PURE__ */ AgentControlErrorCode.make("capability-denied"),
+  deviceUnsupportedPlatform: /* @__PURE__ */ AgentControlErrorCode.make(
+    "device.unsupported-platform",
+  ),
+  deviceSetupRequired: /* @__PURE__ */ AgentControlErrorCode.make("device.setup-required"),
+  deviceUnavailable: /* @__PURE__ */ AgentControlErrorCode.make("device.unavailable"),
+  deviceBootLimitReached: /* @__PURE__ */ AgentControlErrorCode.make("device.boot-limit-reached"),
+  deviceAttachTimeout: /* @__PURE__ */ AgentControlErrorCode.make("device.attach-timeout"),
+  deviceStaleState: /* @__PURE__ */ AgentControlErrorCode.make("device.stale-state"),
+  deviceInvalidInput: /* @__PURE__ */ AgentControlErrorCode.make("device.invalid-input"),
+  deviceRecordingFailed: /* @__PURE__ */ AgentControlErrorCode.make("device.recording-failed"),
+  deviceOperationFailed: /* @__PURE__ */ AgentControlErrorCode.make("device.operation-failed"),
 } as const;
 
 export const AgentControlErrorEnvelope = Schema.Struct({
@@ -1620,7 +1622,7 @@ export const AgentControlSubscribeProposalsInput = Schema.Struct({
 });
 export type AgentControlSubscribeProposalsInput = typeof AgentControlSubscribeProposalsInput.Type;
 
-export const AgentControlGetProposalResult = Schema.Struct({
+export const AgentControlGetProposalResult = /* @__PURE__ */ Schema.Struct({
   proposal: Schema.NullOr(AgentControlProposal),
 });
 export type AgentControlGetProposalResult = typeof AgentControlGetProposalResult.Type;
@@ -1729,7 +1731,7 @@ export const AgentControlProposalStreamProposalEvent = Schema.Struct({
 export type AgentControlProposalStreamProposalEvent =
   typeof AgentControlProposalStreamProposalEvent.Type;
 
-export const AgentControlProposalStreamEvent = Schema.Union([
+export const AgentControlProposalStreamEvent = /* @__PURE__ */ Schema.Union([
   AgentControlProposalStreamSnapshotEvent,
   AgentControlProposalStreamProposalEvent,
 ]);
@@ -1783,7 +1785,7 @@ export class AgentControlRpcError extends Schema.TaggedError<AgentControlRpcErro
 
 // ── Operations ────────────────────────────────────────────────────────
 
-export const AgentControlOperationStatus = Schema.Literals([
+export const AgentControlOperationStatus = /* @__PURE__ */ Schema.Literals([
   "pending",
   "running",
   "compensating",
@@ -1895,7 +1897,7 @@ export type AgentControlOperationState = typeof AgentControlOperationState.Type;
  * exists per proposal; its monotonic state and resource evidence are what
  * restart recovery replays.
  */
-export const AgentControlOperation = Schema.Struct({
+export const AgentControlOperation = /* @__PURE__ */ Schema.Struct({
   operationId: AgentControlOperationId,
   proposalId: AgentControlProposalId,
   actionKind: AgentControlActionKind,

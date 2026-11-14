@@ -586,7 +586,7 @@ export const ComposerSourceControlContext = Schema.Struct({
 });
 export type ComposerSourceControlContext = typeof ComposerSourceControlContext.Type;
 
-export const SourceControlRepositoryCloneUrls = Schema.Struct({
+export const SourceControlRepositoryCloneUrls = /* @__PURE__ */ Schema.Struct({
   nameWithOwner: TrimmedNonEmptyString,
   url: TrimmedNonEmptyString,
   sshUrl: TrimmedNonEmptyString,

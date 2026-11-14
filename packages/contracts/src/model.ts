@@ -4,7 +4,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
-export const ProviderOptionDescriptorType = Schema.Literals(["select", "boolean"]);
+export const ProviderOptionDescriptorType = /* @__PURE__ */ Schema.Literals(["select", "boolean"]);
 export type ProviderOptionDescriptorType = typeof ProviderOptionDescriptorType.Type;
 
 export const ProviderOptionChoice = Schema.Struct({

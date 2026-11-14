@@ -180,7 +180,7 @@ const LocalTaskRecordFields = {
  * What a node stores for a task. Rows written before links, files and
  * multiple chats existed decode with empty lists.
  */
-export const LocalTaskRecord = Schema.Struct(LocalTaskRecordFields);
+export const LocalTaskRecord = /* @__PURE__ */ Schema.Struct(LocalTaskRecordFields);
 export type LocalTaskRecord = typeof LocalTaskRecord.Type;
 
 export const LocalTask = Schema.Struct({

@@ -136,24 +136,24 @@ export const ProviderTurnStartResult = Schema.Struct({
 });
 export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
 
-export const ProviderTurnSteerResult = Schema.Struct({
+export const ProviderTurnSteerResult = /* @__PURE__ */ Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
 });
 export type ProviderTurnSteerResult = typeof ProviderTurnSteerResult.Type;
 
-export const ProviderInterruptTurnInput = Schema.Struct({
+export const ProviderInterruptTurnInput = /* @__PURE__ */ Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
 });
 export type ProviderInterruptTurnInput = typeof ProviderInterruptTurnInput.Type;
 
-export const ProviderStopSessionInput = Schema.Struct({
+export const ProviderStopSessionInput = /* @__PURE__ */ Schema.Struct({
   threadId: ThreadId,
 });
 export type ProviderStopSessionInput = typeof ProviderStopSessionInput.Type;
 
-export const ProviderStopBackgroundTaskInput = Schema.Struct({
+export const ProviderStopBackgroundTaskInput = /* @__PURE__ */ Schema.Struct({
   expected: Schema.optional(BackgroundTaskStopIdentity),
   threadId: ThreadId,
   /** Provider-runtime task id (task.* linkage fields). */
@@ -165,7 +165,7 @@ export type ProviderStopBackgroundTaskInput = typeof ProviderStopBackgroundTaskI
 export const ProviderMessageBackgroundTaskInput = OrchestrationMessageBackgroundTaskInput;
 export type ProviderMessageBackgroundTaskInput = typeof ProviderMessageBackgroundTaskInput.Type;
 
-export const ProviderRespondToRequestInput = Schema.Struct({
+export const ProviderRespondToRequestInput = /* @__PURE__ */ Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   decision: ProviderApprovalDecision,
@@ -173,7 +173,7 @@ export const ProviderRespondToRequestInput = Schema.Struct({
 });
 export type ProviderRespondToRequestInput = typeof ProviderRespondToRequestInput.Type;
 
-export const ProviderRespondToUserInputInput = Schema.Struct({
+export const ProviderRespondToUserInputInput = /* @__PURE__ */ Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,

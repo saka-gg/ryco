@@ -468,7 +468,7 @@ export const KeybindingsReplaceCustomResult = Schema.Struct({
 });
 export type KeybindingsReplaceCustomResult = typeof KeybindingsReplaceCustomResult.Type;
 
-export const ServerConfigUpdatedPayload = Schema.Struct({
+export const ServerConfigUpdatedPayload = /* @__PURE__ */ Schema.Struct({
   issues: ServerConfigIssues,
   providers: ServerProviders,
   settings: Schema.optional(ServerSettings),

@@ -88,7 +88,7 @@ export type ProviderInstanceId = typeof ProviderInstanceId.Type;
  * branch on driver behavior (icons, capabilities, presentation) without
  * having to look up the instance in the registry.
  */
-export const ProviderInstanceRef = Schema.Struct({
+export const ProviderInstanceRef = /* @__PURE__ */ Schema.Struct({
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,
 });
@@ -135,7 +135,10 @@ export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;
  * Map shape for `ServerSettings.providerInstances`. Keyed by
  * `ProviderInstanceId`, values are envelopes the registry feeds to drivers.
  */
-export const ProviderInstanceConfigMap = Schema.Record(ProviderInstanceId, ProviderInstanceConfig);
+export const ProviderInstanceConfigMap = /* @__PURE__ */ Schema.Record(
+  ProviderInstanceId,
+  ProviderInstanceConfig,
+);
 export type ProviderInstanceConfigMap = typeof ProviderInstanceConfigMap.Type;
 
 /**

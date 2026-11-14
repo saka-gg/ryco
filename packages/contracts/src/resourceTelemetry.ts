@@ -52,7 +52,7 @@ export const ResourceTelemetryProcessIdentity = Schema.Struct({
 });
 export type ResourceTelemetryProcessIdentity = typeof ResourceTelemetryProcessIdentity.Type;
 
-export const ResourceMonitorExternalProcess = Schema.Struct({
+export const ResourceMonitorExternalProcess = /* @__PURE__ */ Schema.Struct({
   pid: PositiveInt,
   startTimeMs: Schema.optional(NonNegativeInt),
 });

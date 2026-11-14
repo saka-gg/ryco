@@ -120,7 +120,7 @@ export const TOOL_LIFECYCLE_ITEM_TYPES = [
   "image_view",
 ] as const;
 
-export const ToolLifecycleItemType = Schema.Literals(TOOL_LIFECYCLE_ITEM_TYPES);
+export const ToolLifecycleItemType = /* @__PURE__ */ Schema.Literals(TOOL_LIFECYCLE_ITEM_TYPES);
 export type ToolLifecycleItemType = typeof ToolLifecycleItemType.Type;
 
 export function isToolLifecycleItemType(value: string): value is ToolLifecycleItemType {
@@ -154,7 +154,7 @@ export const CanonicalRequestType = Schema.Literals([
 ]);
 export type CanonicalRequestType = typeof CanonicalRequestType.Type;
 
-const ProviderRuntimeEventType = Schema.Literals([
+const ProviderRuntimeEventType = /* @__PURE__ */ Schema.Literals([
   "session.started",
   "session.configured",
   "session.state.changed",
@@ -654,7 +654,7 @@ const taskAgentLinkageFields = {
   timelineBypass: Schema.optional(Schema.Boolean),
 } as const;
 
-export const TaskAgentLinkage = Schema.Struct(taskAgentLinkageFields);
+export const TaskAgentLinkage = /* @__PURE__ */ Schema.Struct(taskAgentLinkageFields);
 export type TaskAgentLinkage = typeof TaskAgentLinkage.Type;
 
 const TaskStartedPayload = Schema.Struct({
@@ -1397,7 +1397,7 @@ const ProviderRuntimeErrorEvent = Schema.Struct({
 });
 export type ProviderRuntimeErrorEvent = typeof ProviderRuntimeErrorEvent.Type;
 
-export const ProviderRuntimeEventV2 = Schema.Union([
+export const ProviderRuntimeEventV2 = /* @__PURE__ */ Schema.Union([
   ProviderRuntimeSessionStartedEvent,
   ProviderRuntimeSessionConfiguredEvent,
   ProviderRuntimeSessionStateChangedEvent,
@@ -1477,7 +1477,12 @@ const ProviderRuntimeApprovalResolvedEvent = ProviderRuntimeRequestResolvedEvent
 export type ProviderRuntimeApprovalResolvedEvent = ProviderRuntimeRequestResolvedEvent;
 
 // Legacy helper aliases retained for adapters/tests.
-const ProviderRuntimeToolKind = Schema.Literals(["command", "file-read", "file-change", "other"]);
+const ProviderRuntimeToolKind = /* @__PURE__ */ Schema.Literals([
+  "command",
+  "file-read",
+  "file-change",
+  "other",
+]);
 export type ProviderRuntimeToolKind = typeof ProviderRuntimeToolKind.Type;
 
 export const ProviderRuntimeTurnStatus = RuntimeTurnState;
