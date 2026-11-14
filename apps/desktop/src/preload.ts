@@ -4,9 +4,73 @@ import type { DesktopBridge, DesktopQuitGuardResponder } from "@ryco/contracts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
 import { PASTE_AS_TEXT_CHANNEL } from "./editMenu.ts";
 import { answerQuitGuardRequest, DESKTOP_QUIT_GUARD_IPC } from "./quitGuardChannels.ts";
+import { DESKTOP_SSH_IPC } from "./sshEnvironmentChannels.ts";
 import { DESKTOP_STARTUP_MARKS_CHANNEL, observeRendererStartupMarks } from "./startupMarks.ts";
 import { THREAD_NOTIFICATION_IPC } from "./threadNotificationChannels.ts";
 import { WINDOW_CAPTURE_IPC } from "./windowCaptureChannels.ts";
+import {
+  GET_APP_BRANDING_CHANNEL,
+  GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL,
+  MENU_ACTION_CHANNEL,
+  SYSTEM_RESUMED_CHANNEL,
+  DATABASE_COMPACTION_STATE_CHANNEL,
+  UPDATE_STATE_CHANNEL,
+  QUIT_SHORTCUT_FEEDBACK_CHANNEL,
+  APP_KEYBINDINGS_CHANGED_CHANNEL,
+  SSH_PASSWORD_PROMPT_CHANNEL,
+  PICK_FOLDER_CHANNEL,
+  CONFIRM_CHANNEL,
+  SET_THEME_CHANNEL,
+  SET_WINDOW_MATERIAL_CHANNEL,
+  CONTEXT_MENU_CHANNEL,
+  OPEN_EXTERNAL_CHANNEL,
+  UPDATE_GET_STATE_CHANNEL,
+  UPDATE_CHECK_CHANNEL,
+  UPDATE_DOWNLOAD_CHANNEL,
+  UPDATE_INSTALL_CHANNEL,
+  UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL,
+  DATABASE_COMPACTION_GET_STATE_CHANNEL,
+  DATABASE_COMPACTION_START_CHANNEL,
+  DATABASE_COMPACTION_CANCEL_CHANNEL,
+  SAVE_THREAD_EXPORT_CHANNEL,
+  CLI_COMMAND_STATE_CHANNEL,
+  CLI_COMMAND_INSTALL_CHANNEL,
+  CLI_COMMAND_UNINSTALL_CHANNEL,
+  NIGHTLY_STATE_CHANNEL,
+  NIGHTLY_OPEN_CHANNEL,
+  NIGHTLY_SWITCH_BACK_CHANNEL,
+  APP_ICON_GET_CHANNEL,
+  APP_ICON_SET_CHANNEL,
+  QUIT_SHORTCUT_GET_CHANNEL,
+  QUIT_SHORTCUT_SET_CHANNEL,
+  APP_KEYBINDINGS_READ_CHANNEL,
+  APP_KEYBINDINGS_WRITE_CHANNEL,
+  GET_CLIENT_SETTINGS_CHANNEL,
+  SET_CLIENT_SETTINGS_CHANNEL,
+  GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL,
+  SET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL,
+  GET_SAVED_ENVIRONMENT_SECRET_CHANNEL,
+  SET_SAVED_ENVIRONMENT_SECRET_CHANNEL,
+  REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL,
+  GET_SERVER_EXPOSURE_STATE_CHANNEL,
+  SET_SERVER_EXPOSURE_MODE_CHANNEL,
+  SET_TAILSCALE_SERVE_ENABLED_CHANNEL,
+  GET_ADVERTISED_ENDPOINTS_CHANNEL,
+  GET_KEEP_AWAKE_STATE_CHANNEL,
+  SET_KEEP_AWAKE_MODE_CHANNEL,
+  GET_HUB_LAUNCH_CONFIG_CHANNEL,
+  SET_HUB_LAUNCH_CONFIG_CHANNEL,
+  VALIDATE_HUB_ORIGIN_CHANNEL,
+  RESTART_APP_CHANNEL,
+  GET_HOSTED_IDENTITY_STATUS_CHANNEL,
+  CONNECT_HOSTED_IDENTITY_CHANNEL,
+  DISCONNECT_HOSTED_IDENTITY_CHANNEL,
+  CONNECT_HOSTED_GITHUB_CHANNEL,
+  DISCONNECT_HOSTED_GITHUB_CHANNEL,
+  CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL,
+  DESKTOP_BROWSER_IPC,
+  DESKTOP_COMPUTER_USE_IPC,
+} from "./desktopIpcChannels.ts";
 
 // Capture before app/terminal listeners, without suppressing Electron key releases.
 function suppressQuitShortcut(event: KeyboardEvent): void {
@@ -35,56 +99,6 @@ if (startupTimingEnabled) {
   console.info(`[desktop-startup] preload start elapsedMs=${Math.round(preloadStartMs)}`);
 }
 
-const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
-const CONFIRM_CHANNEL = "desktop:confirm";
-const SET_THEME_CHANNEL = "desktop:set-theme";
-const SET_WINDOW_MATERIAL_CHANNEL = "desktop:set-window-material";
-const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
-const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
-const MENU_ACTION_CHANNEL = "desktop:menu-action";
-const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
-const DATABASE_COMPACTION_STATE_CHANNEL = "desktop:database-compaction-state";
-const UPDATE_STATE_CHANNEL = "desktop:update-state";
-const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
-const UPDATE_CHECK_CHANNEL = "desktop:update-check";
-const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
-const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
-const UPDATE_REMOTE_INSTALL_RESPONSE_CHANNEL = "desktop:update-remote-install-response";
-const GET_APP_BRANDING_CHANNEL = "desktop:get-app-branding";
-const GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL = "desktop:get-local-environment-bootstrap";
-const GET_CLIENT_SETTINGS_CHANNEL = "desktop:get-client-settings";
-const SET_CLIENT_SETTINGS_CHANNEL = "desktop:set-client-settings";
-const GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL = "desktop:get-saved-environment-registry";
-const SET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL = "desktop:set-saved-environment-registry";
-const GET_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:get-saved-environment-secret";
-const SET_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:set-saved-environment-secret";
-const REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:remove-saved-environment-secret";
-const DISCOVER_SSH_HOSTS_CHANNEL = "desktop:discover-ssh-hosts";
-const ENSURE_SSH_ENVIRONMENT_CHANNEL = "desktop:ensure-ssh-environment";
-const DISCONNECT_SSH_ENVIRONMENT_CHANNEL = "desktop:disconnect-ssh-environment";
-const FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL = "desktop:fetch-ssh-environment-descriptor";
-const BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL = "desktop:bootstrap-ssh-bearer-session";
-const FETCH_SSH_SESSION_STATE_CHANNEL = "desktop:fetch-ssh-session-state";
-const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = "desktop:issue-ssh-websocket-token";
-const REVOKE_SSH_CLIENT_SESSION_CHANNEL = "desktop:revoke-ssh-client-session";
-const SSH_PASSWORD_PROMPT_CHANNEL = "desktop:ssh-password-prompt";
-const RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL = "desktop:resolve-ssh-password-prompt";
-const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
-const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
-const SET_TAILSCALE_SERVE_ENABLED_CHANNEL = "desktop:set-tailscale-serve-enabled";
-const GET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:get-hub-launch-config";
-const GET_KEEP_AWAKE_STATE_CHANNEL = "desktop:get-keep-awake-state";
-const SET_KEEP_AWAKE_MODE_CHANNEL = "desktop:set-keep-awake-mode";
-const SET_HUB_LAUNCH_CONFIG_CHANNEL = "desktop:set-hub-launch-config";
-const RESTART_APP_CHANNEL = "desktop:restart-app";
-const VALIDATE_HUB_ORIGIN_CHANNEL = "desktop:validate-hub-origin";
-const GET_HOSTED_IDENTITY_STATUS_CHANNEL = "desktop:get-hosted-identity-status";
-const CONNECT_HOSTED_IDENTITY_CHANNEL = "desktop:connect-hosted-identity";
-const DISCONNECT_HOSTED_IDENTITY_CHANNEL = "desktop:disconnect-hosted-identity";
-const CONNECT_HOSTED_GITHUB_CHANNEL = "desktop:connect-hosted-github";
-const DISCONNECT_HOSTED_GITHUB_CHANNEL = "desktop:disconnect-hosted-github";
-const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-connection";
-const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
 const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 
 // Fixed for the lifetime of a page: main creates the backend URL and token once
@@ -159,11 +173,11 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
 }
 
 contextBridge.exposeInMainWorld("desktopBridge", {
-  saveThreadExport: (input) => ipcRenderer.invoke("desktop:save-thread-export", input),
+  saveThreadExport: (input) => ipcRenderer.invoke(SAVE_THREAD_EXPORT_CHANNEL, input),
   databaseCompaction: {
-    getState: () => ipcRenderer.invoke("desktop:database-compaction-get-state"),
-    start: () => ipcRenderer.invoke("desktop:database-compaction-start"),
-    cancel: () => ipcRenderer.invoke("desktop:database-compaction-cancel"),
+    getState: () => ipcRenderer.invoke(DATABASE_COMPACTION_GET_STATE_CHANNEL),
+    start: () => ipcRenderer.invoke(DATABASE_COMPACTION_START_CHANNEL),
+    cancel: () => ipcRenderer.invoke(DATABASE_COMPACTION_CANCEL_CHANNEL),
     onState: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
         if (typeof state !== "object" || state === null) return;
@@ -176,63 +190,63 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   browser: {
-    getState: () => ipcRenderer.invoke("desktop:browser:state"),
-    open: (input) => ipcRenderer.invoke("desktop:browser:open", input),
-    command: (input) => ipcRenderer.invoke("desktop:browser:command", input),
-    surface: (input) => ipcRenderer.invoke("desktop:browser:surface", input),
-    capture: (tab) => ipcRenderer.invoke("desktop:browser:capture", tab),
-    pick: (tab) => ipcRenderer.invoke("desktop:browser:pick", tab),
-    discover: (cwd) => ipcRenderer.invoke("desktop:browser:discover", cwd),
+    getState: () => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.state),
+    open: (input) => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.open, input),
+    command: (input) => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.command, input),
+    surface: (input) => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.surface, input),
+    capture: (tab) => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.capture, tab),
+    pick: (tab) => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.pick, tab),
+    discover: (cwd) => ipcRenderer.invoke(DESKTOP_BROWSER_IPC.discover, cwd),
     onFocusAddress: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, tab: string) => listener(tab);
-      ipcRenderer.on("desktop:browser:focus-address", wrapped);
-      return () => ipcRenderer.removeListener("desktop:browser:focus-address", wrapped);
+      ipcRenderer.on(DESKTOP_BROWSER_IPC.focusAddress, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_BROWSER_IPC.focusAddress, wrapped);
     },
     onState: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
         listener(state);
-      ipcRenderer.on("desktop:browser:changed", wrapped);
-      return () => ipcRenderer.removeListener("desktop:browser:changed", wrapped);
+      ipcRenderer.on(DESKTOP_BROWSER_IPC.changed, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_BROWSER_IPC.changed, wrapped);
     },
   },
   computerBeta: {
-    getHistory: (input) => ipcRenderer.invoke("desktop:computer-use:beta-history", input),
-    getState: () => ipcRenderer.invoke("desktop:computer-use:beta-state"),
-    checkPermissions: () => ipcRenderer.invoke("desktop:computer-use:beta-check"),
-    setup: () => ipcRenderer.invoke("desktop:computer-use:beta-setup"),
-    turnOn: () => ipcRenderer.invoke("desktop:computer-use:beta-turn-on"),
+    getHistory: (input) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaHistory, input),
+    getState: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaState),
+    checkPermissions: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaCheck),
+    setup: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaSetup),
+    turnOn: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaTurnOn),
     setupPermission: (permission) =>
-      ipcRenderer.invoke("desktop:computer-use:beta-setup-permission", permission),
-    revokeApp: (key) => ipcRenderer.invoke("desktop:computer-use:beta-revoke-app", key),
-    setPreferences: (value) => ipcRenderer.invoke("desktop:computer-use:beta-preferences", value),
+      ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaSetupPermission, permission),
+    revokeApp: (key) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaRevokeApp, key),
+    setPreferences: (value) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaPreferences, value),
     prepare: (threadId, explicit) =>
-      ipcRenderer.invoke("desktop:computer-use:beta-prepare", { threadId, explicit }),
+      ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaPrepare, { threadId, explicit }),
     setPreview: (threadId, visible) =>
-      ipcRenderer.invoke("desktop:computer-use:beta-preview", { threadId, visible }),
-    stopTask: (threadId) => ipcRenderer.invoke("desktop:computer-use:beta-stop", { threadId }),
+      ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaPreview, { threadId, visible }),
+    stopTask: (threadId) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.betaStop, { threadId }),
     onUpdate: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, update: Parameters<typeof listener>[0]) =>
         listener(update);
-      ipcRenderer.on("desktop:computer-beta:update", wrapped);
-      return () => ipcRenderer.removeListener("desktop:computer-beta:update", wrapped);
+      ipcRenderer.on(DESKTOP_COMPUTER_USE_IPC.betaUpdate, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_COMPUTER_USE_IPC.betaUpdate, wrapped);
     },
   },
   computerUse: {
-    getState: () => ipcRenderer.invoke("desktop:computer-use:state"),
-    checkPermissions: () => ipcRenderer.invoke("desktop:computer-use:check-permissions"),
-    refresh: (query) => ipcRenderer.invoke("desktop:computer-use:refresh", query),
-    setPolicy: (policy) => ipcRenderer.invoke("desktop:computer-use:policy", policy),
-    requestPermission: (kind) => ipcRenderer.invoke("desktop:computer-use:permission", kind),
-    pairBrowser: (browser) => ipcRenderer.invoke("desktop:computer-use:pair", browser),
-    showExtension: () => ipcRenderer.invoke("desktop:computer-use:extension"),
+    getState: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.state),
+    checkPermissions: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.checkPermissions),
+    refresh: (query) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.refresh, query),
+    setPolicy: (policy) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.policy, policy),
+    requestPermission: (kind) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.permission, kind),
+    pairBrowser: (browser) => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.pair, browser),
+    showExtension: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.extension),
     openBrowserSetup: (browser) =>
-      ipcRenderer.invoke("desktop:computer-use:browser-setup", browser),
-    stop: () => ipcRenderer.invoke("desktop:computer-use:stop"),
+      ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.browserSetup, browser),
+    stop: () => ipcRenderer.invoke(DESKTOP_COMPUTER_USE_IPC.stop),
     onState: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) =>
         listener(state);
-      ipcRenderer.on("desktop:computer-use:changed", wrapped);
-      return () => ipcRenderer.removeListener("desktop:computer-use:changed", wrapped);
+      ipcRenderer.on(DESKTOP_COMPUTER_USE_IPC.changed, wrapped);
+      return () => ipcRenderer.removeListener(DESKTOP_COMPUTER_USE_IPC.changed, wrapped);
     },
   },
   ...(windowCaptureBridge ? { windowCapture: windowCaptureBridge } : {}),
@@ -259,27 +273,27 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     return bootstrap;
   },
   cliCommand: {
-    getState: () => ipcRenderer.invoke("desktop:cli-command-state"),
-    install: () => ipcRenderer.invoke("desktop:cli-command-install"),
-    uninstall: () => ipcRenderer.invoke("desktop:cli-command-uninstall"),
+    getState: () => ipcRenderer.invoke(CLI_COMMAND_STATE_CHANNEL),
+    install: () => ipcRenderer.invoke(CLI_COMMAND_INSTALL_CHANNEL),
+    uninstall: () => ipcRenderer.invoke(CLI_COMMAND_UNINSTALL_CHANNEL),
   },
   nightly: {
-    getState: () => ipcRenderer.invoke("desktop:nightly-state"),
-    open: (input) => ipcRenderer.invoke("desktop:nightly-open", input),
-    switchBack: () => ipcRenderer.invoke("desktop:nightly-switch-back"),
+    getState: () => ipcRenderer.invoke(NIGHTLY_STATE_CHANNEL),
+    open: (input) => ipcRenderer.invoke(NIGHTLY_OPEN_CHANNEL, input),
+    switchBack: () => ipcRenderer.invoke(NIGHTLY_SWITCH_BACK_CHANNEL),
   },
   appIcon: {
-    getVariant: () => ipcRenderer.invoke("desktop:app-icon-get"),
-    setVariant: (variant) => ipcRenderer.invoke("desktop:app-icon-set", variant),
+    getVariant: () => ipcRenderer.invoke(APP_ICON_GET_CHANNEL),
+    setVariant: (variant) => ipcRenderer.invoke(APP_ICON_SET_CHANNEL, variant),
   },
   quitShortcut: {
-    getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
-    setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),
+    getMode: () => ipcRenderer.invoke(QUIT_SHORTCUT_GET_CHANNEL),
+    setMode: (mode) => ipcRenderer.invoke(QUIT_SHORTCUT_SET_CHANNEL, mode),
     onFeedback: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, state: "press-twice" | "hold" | null) =>
         listener(state);
-      ipcRenderer.on("desktop:quit-shortcut-feedback", handler);
-      return () => ipcRenderer.removeListener("desktop:quit-shortcut-feedback", handler);
+      ipcRenderer.on(QUIT_SHORTCUT_FEEDBACK_CHANNEL, handler);
+      return () => ipcRenderer.removeListener(QUIT_SHORTCUT_FEEDBACK_CHANNEL, handler);
     },
   },
   quitGuard: {
@@ -291,12 +305,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   appKeybindings: {
-    read: () => ipcRenderer.invoke("desktop:app-keybindings-read"),
-    write: (document) => ipcRenderer.invoke("desktop:app-keybindings-write", document),
+    read: () => ipcRenderer.invoke(APP_KEYBINDINGS_READ_CHANNEL),
+    write: (document) => ipcRenderer.invoke(APP_KEYBINDINGS_WRITE_CHANNEL, document),
     onChanged: (listener) => {
       const handler = () => listener();
-      ipcRenderer.on("desktop:app-keybindings-changed", handler);
-      return () => ipcRenderer.removeListener("desktop:app-keybindings-changed", handler);
+      ipcRenderer.on(APP_KEYBINDINGS_CHANGED_CHANNEL, handler);
+      return () => ipcRenderer.removeListener(APP_KEYBINDINGS_CHANGED_CHANNEL, handler);
     },
   },
   getClientSettings: () => ipcRenderer.invoke(GET_CLIENT_SETTINGS_CHANNEL),
@@ -310,23 +324,28 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(SET_SAVED_ENVIRONMENT_SECRET_CHANNEL, environmentId, secret),
   removeSavedEnvironmentSecret: (environmentId) =>
     ipcRenderer.invoke(REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL, environmentId),
-  discoverSshHosts: () => ipcRenderer.invoke(DISCOVER_SSH_HOSTS_CHANNEL),
+  discoverSshHosts: () => ipcRenderer.invoke(DESKTOP_SSH_IPC.discoverHosts),
   ensureSshEnvironment: async (target, options) =>
     unwrapEnsureSshEnvironmentResult(
-      await ipcRenderer.invoke(ENSURE_SSH_ENVIRONMENT_CHANNEL, target, options),
+      await ipcRenderer.invoke(DESKTOP_SSH_IPC.ensureEnvironment, target, options),
     ),
   disconnectSshEnvironment: (target) =>
-    ipcRenderer.invoke(DISCONNECT_SSH_ENVIRONMENT_CHANNEL, target),
+    ipcRenderer.invoke(DESKTOP_SSH_IPC.disconnectEnvironment, target),
   fetchSshEnvironmentDescriptor: (httpBaseUrl) =>
-    ipcRenderer.invoke(FETCH_SSH_ENVIRONMENT_DESCRIPTOR_CHANNEL, httpBaseUrl),
+    ipcRenderer.invoke(DESKTOP_SSH_IPC.fetchEnvironmentDescriptor, httpBaseUrl),
   bootstrapSshBearerSession: (httpBaseUrl, credential) =>
-    ipcRenderer.invoke(BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL, httpBaseUrl, credential),
+    ipcRenderer.invoke(DESKTOP_SSH_IPC.bootstrapBearerSession, httpBaseUrl, credential),
   fetchSshSessionState: (httpBaseUrl, bearerToken) =>
-    ipcRenderer.invoke(FETCH_SSH_SESSION_STATE_CHANNEL, httpBaseUrl, bearerToken),
+    ipcRenderer.invoke(DESKTOP_SSH_IPC.fetchSessionState, httpBaseUrl, bearerToken),
   issueSshWebSocketToken: (httpBaseUrl, bearerToken) =>
-    ipcRenderer.invoke(ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL, httpBaseUrl, bearerToken),
+    ipcRenderer.invoke(DESKTOP_SSH_IPC.issueWebSocketToken, httpBaseUrl, bearerToken),
   revokeSshClientSession: (httpBaseUrl, ownerBearerToken, sessionId) =>
-    ipcRenderer.invoke(REVOKE_SSH_CLIENT_SESSION_CHANNEL, httpBaseUrl, ownerBearerToken, sessionId),
+    ipcRenderer.invoke(
+      DESKTOP_SSH_IPC.revokeClientSession,
+      httpBaseUrl,
+      ownerBearerToken,
+      sessionId,
+    ),
   onSshPasswordPrompt: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, request: unknown) => {
       if (typeof request !== "object" || request === null) return;
@@ -339,7 +358,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   resolveSshPasswordPrompt: (requestId, password) =>
-    ipcRenderer.invoke(RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL, requestId, password),
+    ipcRenderer.invoke(DESKTOP_SSH_IPC.resolvePasswordPrompt, requestId, password),
   getServerExposureState: () => ipcRenderer.invoke(GET_SERVER_EXPOSURE_STATE_CHANNEL),
   setServerExposureMode: (mode, options) =>
     ipcRenderer.invoke(SET_SERVER_EXPOSURE_MODE_CHANNEL, mode, options),

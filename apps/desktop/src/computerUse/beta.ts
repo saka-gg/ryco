@@ -27,6 +27,7 @@ import { CuaDriverHost } from "../cuaDriverHost.ts";
 import { ComputerFrameTapPool } from "../computerFrameTap.ts";
 import { EscapeKillSwitchMonitor } from "../escapeKillSwitchMonitor.ts";
 import { registerComputerDesktopLifecycle } from "../computerDesktopLifecycle.ts";
+import { DESKTOP_COMPUTER_USE_IPC } from "../desktopIpcChannels.ts";
 import { macPrivacySettingsUrl } from "../macAppBundle.ts";
 import {
   asNodeSpawn,
@@ -526,7 +527,7 @@ export class DesktopComputerBeta {
       this.previewTargets.delete(update.threadId);
     const window = this.getWindow();
     if (!this.closed && window && !window.isDestroyed())
-      window.webContents.send("desktop:computer-beta:update", update);
+      window.webContents.send(DESKTOP_COMPUTER_USE_IPC.betaUpdate, update);
   }
   /** Names the target's app in the menu-bar status while its task is still live. */
   private noteActivity(target: CuaPreviewTarget, foreground: boolean): void {

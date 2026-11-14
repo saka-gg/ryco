@@ -28,6 +28,7 @@ import {
 import { Effect, Exit, Layer, ManagedRuntime, Scope } from "effect";
 
 import { DESKTOP_SSH_IPC } from "./sshEnvironmentChannels.ts";
+import { SSH_PASSWORD_PROMPT_CHANNEL } from "./desktopIpcChannels.ts";
 
 export { resolveRemoteRycoCliPackageSpec } from "@ryco/ssh/command";
 
@@ -39,7 +40,6 @@ const BOOTSTRAP_SSH_BEARER_SESSION_CHANNEL = DESKTOP_SSH_IPC.bootstrapBearerSess
 const FETCH_SSH_SESSION_STATE_CHANNEL = DESKTOP_SSH_IPC.fetchSessionState;
 const ISSUE_SSH_WEBSOCKET_TOKEN_CHANNEL = DESKTOP_SSH_IPC.issueWebSocketToken;
 const REVOKE_SSH_CLIENT_SESSION_CHANNEL = DESKTOP_SSH_IPC.revokeClientSession;
-const SSH_PASSWORD_PROMPT_CHANNEL = "desktop:ssh-password-prompt";
 const RESOLVE_SSH_PASSWORD_PROMPT_CHANNEL = DESKTOP_SSH_IPC.resolvePasswordPrompt;
 const DEFAULT_SSH_PASSWORD_PROMPT_TIMEOUT_MS = 3 * 60 * 1000;
 const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";

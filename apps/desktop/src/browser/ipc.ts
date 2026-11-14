@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import { ProjectBrowserCommand, ProjectBrowserSurface } from "@ryco/contracts";
 import type { EmbeddedComputerBrowser } from "../computerUse/embeddedBrowser.ts";
 import { record, textArg } from "../computerUse/native.ts";
+import { DESKTOP_BROWSER_IPC } from "../desktopIpcChannels.ts";
 import { ProjectSiteDiscovery } from "./discovery.ts";
 
 export function registerProjectBrowserIpc(
@@ -10,8 +11,8 @@ export function registerProjectBrowserIpc(
   getWindow: () => BrowserWindow | null,
 ): void {
   const discovery = new ProjectSiteDiscovery();
-  const handle = (name: string, run: (input: unknown, window: BrowserWindow) => unknown) => {
-    ipcMain.handle(`desktop:browser:${name}`, (event, input: unknown) => {
+  const handle = (channel: string, run: (input: unknown, window: BrowserWindow) => unknown) => {
+    ipcMain.handle(channel, (event, input: unknown) => {
       const window = getWindow();
       if (
         !window ||
@@ -27,15 +28,16 @@ export function registerProjectBrowserIpc(
     const window = getWindow();
     if (window && !window.isDestroyed()) {
       window.webContents.focus();
-      window.webContents.send("desktop:browser:focus-address", tab);
+      window.webContents.send(DESKTOP_BROWSER_IPC.focusAddress, tab);
     }
   });
   browser.onState((state) => {
     const window = getWindow();
-    if (window && !window.isDestroyed()) window.webContents.send("desktop:browser:changed", state);
+    if (window && !window.isDestroyed())
+      window.webContents.send(DESKTOP_BROWSER_IPC.changed, state);
   });
-  handle("state", () => browser.state());
-  handle("open", async (input) => {
+  handle(DESKTOP_BROWSER_IPC.state, () => browser.state());
+  handle(DESKTOP_BROWSER_IPC.open, async (input) => {
     const args = record(input);
     return (
       await browser.open(
@@ -46,25 +48,25 @@ export function registerProjectBrowserIpc(
       )
     ).id;
   });
-  handle("command", (input) =>
+  handle(DESKTOP_BROWSER_IPC.command, (input) =>
     browser.command(Schema.decodeUnknownSync(ProjectBrowserCommand)(input)),
   );
-  handle("surface", (input, window) =>
+  handle(DESKTOP_BROWSER_IPC.surface, (input, window) =>
     browser.surface(Schema.decodeUnknownSync(ProjectBrowserSurface)(input), window),
   );
-  handle("capture", (input) => browser.capture(textArg({ tab: input }, "tab")));
+  handle(DESKTOP_BROWSER_IPC.capture, (input) => browser.capture(textArg({ tab: input }, "tab")));
   // A user action: only the Ryco window's main frame can start a pick (agents have no picker).
   // The click that picks lands in the page, whose view then holds the keyboard, and DOM focus in
   // Ryco cannot take it back: hand it to Ryco so the note box that opens gets typing, ⌘↵ and Esc
   // (like Cmd+L above). Only while the window is focused, so a pick never steals focus.
-  handle("pick", (input, window) =>
+  handle(DESKTOP_BROWSER_IPC.pick, (input, window) =>
     browser.pick(textArg({ tab: input }, "tab")).then((result) => {
       if (result.kind === "picked" && !window.isDestroyed() && window.isFocused())
         window.webContents.focus();
       return result;
     }),
   );
-  handle("discover", (input) =>
+  handle(DESKTOP_BROWSER_IPC.discover, (input) =>
     discovery.discover(input === undefined ? undefined : textArg({ cwd: input }, "cwd", 8192)),
   );
 }
