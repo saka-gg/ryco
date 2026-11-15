@@ -299,6 +299,7 @@ type DesktopWorkspaceRelaySocketFactory = (
 export class DesktopWorkspaceRelayManager {
   readonly #authority: DesktopWorkspaceRelayAuthority;
   readonly #emit: (event: DesktopWorkspaceTransportEvent) => void;
+  readonly #onTransportLost: (environmentId: EnvironmentId) => void;
   readonly #now: () => number;
   readonly #socketFactory: DesktopWorkspaceRelaySocketFactory;
   readonly #createUpgradeSocket: typeof openRelayWebSocket;
@@ -314,6 +315,12 @@ export class DesktopWorkspaceRelayManager {
   constructor(input: {
     readonly authority: DesktopWorkspaceRelayAuthority;
     readonly emit: (event: DesktopWorkspaceTransportEvent) => void;
+    /**
+     * A machine transport ended that neither the renderer nor main closed: its
+     * relay dropped, or its attempt failed. Verification transports are not
+     * reported.
+     */
+    readonly onTransportLost?: (environmentId: EnvironmentId) => void;
     readonly now?: () => number;
     readonly socketFactory?: DesktopWorkspaceRelaySocketFactory;
     /** Opens every relay upgrade socket: the one started beside the ticket request and its replacement. */
@@ -327,6 +334,7 @@ export class DesktopWorkspaceRelayManager {
     this.#sessionStream = input.sessionStream ?? (() => undefined);
     this.#authority = input.authority;
     this.#emit = input.emit;
+    this.#onTransportLost = input.onTransportLost ?? (() => undefined);
     this.#now = input.now ?? Date.now;
     this.#socketFactory =
       input.socketFactory ?? ((socketInput) => new DesktopWorkspaceRelaySocket(socketInput));
@@ -551,6 +559,7 @@ export class DesktopWorkspaceRelayManager {
               retryable,
               ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
             });
+            this.#reportLost(prepared);
           },
         },
       });
@@ -571,7 +580,17 @@ export class DesktopWorkspaceRelayManager {
         reason: failureReason,
         retryable,
       });
+      this.#reportLost(prepared);
       throw new Error("Desktop workspace relay activation failed.");
+    }
+  }
+
+  #reportLost(prepared: PreparedTransport): void {
+    if (prepared.pairingOnly) return;
+    try {
+      this.#onTransportLost(prepared.environmentId);
+    } catch {
+      // A listener failure must not disturb the transport's own teardown.
     }
   }
 

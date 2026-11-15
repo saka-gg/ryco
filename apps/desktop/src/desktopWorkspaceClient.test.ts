@@ -15,6 +15,10 @@ import {
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createDesktopWorkspaceMetadataCache } from "./desktopWorkspaceCache.ts";
 import {
+  createDesktopWorkspaceWarmSetStore,
+  type DesktopWorkspaceWarmSetStore,
+} from "./desktopWorkspaceWarmSet.ts";
+import {
   createDesktopWorkspaceIpcHandlers,
   projectDesktopWorkspaceState,
 } from "./desktopWorkspaceIpc.ts";
@@ -132,11 +136,13 @@ function snapshot(
 function fixture(
   input: {
     readonly nodes?: HostedHubNode[];
-    readonly connect?: () => Promise<void>;
+    readonly connect?: (environmentId: EnvironmentId) => Promise<void>;
     readonly trustedNodeIds?: ReadonlySet<string>;
     readonly identityStatus?: DesktopWorkspaceIdentityStatus;
     readonly accountE2ee?: (accountId: string) => DesktopWorkspaceAccountE2ee;
     readonly cache?: WorkspaceMetadataCache;
+    readonly warmSet?: DesktopWorkspaceWarmSetStore;
+    readonly now?: () => number;
     readonly verification?: {
       readonly begin: (input: {
         readonly accountId: string;
@@ -170,11 +176,12 @@ function fixture(
   const disconnect = vi.fn(async () => undefined);
   const connectCalls: Array<{ environmentId: EnvironmentId; delayMs: number }> = [];
   const releaseCalls: EnvironmentId[] = [];
+  const signIn = vi.fn(async () => identityStatus);
   const client = new DesktopWorkspaceClient({
     hubOrigin: "https://hub.example",
     identity: {
       resume: vi.fn(async () => identityStatus),
-      connect: vi.fn(async () => identityStatus),
+      connect: signIn,
       disconnect,
       listNodes: vi.fn(async () => directory),
       renameNode,
@@ -190,15 +197,18 @@ function fixture(
     connection: {
       connect: async (request) => {
         connectCalls.push(request);
-        await input.connect?.();
+        await input.connect?.(request.environmentId);
       },
       release: async (environmentId) => void releaseCalls.push(environmentId),
     },
     ...(input.verification ? { verification: input.verification } : {}),
-    now: (() => {
-      let current = 100;
-      return () => ++current;
-    })(),
+    ...(input.warmSet ? { warmSet: input.warmSet } : {}),
+    now:
+      input.now ??
+      (() => {
+        let current = 100;
+        return () => ++current;
+      })(),
   });
   return {
     client,
@@ -826,6 +836,362 @@ describe("desktop workspace snapshot intake", () => {
       );
     } finally {
       await cache.dispose();
+      FS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("desktop workspace warm restore", () => {
+  function memoryWarmSet(initial: ReadonlyArray<EnvironmentId> = []) {
+    let stored: {
+      readonly hubOrigin: string;
+      readonly accountId: string;
+      readonly environmentIds: ReadonlyArray<EnvironmentId>;
+    } | null =
+      initial.length === 0
+        ? null
+        : { hubOrigin: "https://hub.example", accountId: "account-a", environmentIds: initial };
+    const store = {
+      read: vi.fn((namespace: { readonly hubOrigin: string; readonly accountId: string }) =>
+        stored?.hubOrigin === namespace.hubOrigin && stored.accountId === namespace.accountId
+          ? stored.environmentIds
+          : [],
+      ),
+      write: vi.fn(
+        (
+          namespace: { readonly hubOrigin: string; readonly accountId: string },
+          environmentIds: ReadonlyArray<EnvironmentId>,
+        ) => {
+          stored = { ...namespace, environmentIds };
+        },
+      ),
+      clear: vi.fn(() => {
+        stored = null;
+      }),
+    } satisfies DesktopWorkspaceWarmSetStore;
+    return { store, stored: () => stored?.environmentIds ?? null };
+  }
+
+  function clock(start = 1_000) {
+    let current = start;
+    return {
+      now: () => current,
+      advance: (ms: number) => {
+        current += ms;
+      },
+    };
+  }
+
+  const ids = (indexes: ReadonlyArray<number>) => indexes.map((index) => node(index).environmentId);
+  const connected = (state: DesktopWorkspaceClientSnapshot) =>
+    state.demand.connections
+      .filter((entry) => entry.connected)
+      .map((entry) => entry.environmentId)
+      .toSorted();
+  const warmLeases = (state: DesktopWorkspaceClientSnapshot) =>
+    state.demand.leases.filter((lease) => lease.warm === true).map((lease) => lease.environmentId);
+
+  it("restores the stored warm set once at launch, after both the catalog and the renderer are ready", async () => {
+    const warm = memoryWarmSet(ids([2, 3]));
+    const nodes = [node(1), node(2), node(3)];
+    const f = fixture({ nodes, warmSet: warm.store, now: clock().now });
+    await f.client.resume();
+    // No document receives connection commands yet.
+    expect(f.connectCalls).toEqual([]);
+
+    f.client.attachRenderer();
+    await vi.waitFor(() => expect(f.connectCalls).toHaveLength(2));
+    expect(f.connectCalls).toEqual([
+      { environmentId: node(2).environmentId, delayMs: 0 },
+      { environmentId: node(3).environmentId, delayMs: 250 },
+    ]);
+    expect(warmLeases(f.client.snapshot()).toSorted()).toEqual(ids([2, 3]));
+    expect(connected(f.client.snapshot())).toEqual(ids([2, 3]));
+
+    // Catalog refreshes, a second resume and another attach restore nothing again.
+    await f.client.refreshCatalog();
+    await f.client.resume();
+    f.client.attachRenderer();
+    await f.client.refreshCatalog();
+    expect(f.connectCalls).toHaveLength(2);
+
+    // Renderer attached first: the restore waits for the catalog instead.
+    const early = fixture({ nodes, warmSet: memoryWarmSet(ids([3])).store, now: clock().now });
+    early.client.attachRenderer();
+    expect(early.connectCalls).toEqual([]);
+    await early.client.resume();
+    expect(early.connectCalls).toEqual([{ environmentId: node(3).environmentId, delayMs: 0 }]);
+  });
+
+  it("skips the local, offline, unconnectable and cooling machines and restores at most three", async () => {
+    const nodes = [
+      node(1),
+      node(2, { online: false }),
+      node(3),
+      node(4),
+      node(5),
+      node(6),
+      node(7),
+    ];
+    // The port may hold more than the limit; the restore never takes more.
+    const warm = memoryWarmSet(ids([1, 2, 3, 4, 5, 6, 7]));
+    const f = fixture({
+      nodes,
+      trustedNodeIds: new Set(nodes.filter((entry) => entry !== nodes[2]).map((entry) => entry.id)),
+      warmSet: warm.store,
+      now: clock().now,
+    });
+    f.client.attachRenderer();
+    const state = await f.client.resume();
+    expect(state.localEnvironmentId).toBe(node(1).environmentId);
+    expect(f.connectCalls.map((call) => call.environmentId)).toEqual(ids([4, 5, 6]));
+    expect(connected(f.client.snapshot())).toEqual(ids([4, 5, 6]));
+    expect(f.client.snapshot().queuedEnvironmentIds).toEqual([]);
+  });
+
+  it("never displaces a mounted scope and takes only free slots", async () => {
+    const nodes = [node(1), node(2), node(3), node(4)];
+    const warm = memoryWarmSet(ids([4]));
+    const f = fixture({ nodes, warmSet: warm.store, now: clock().now });
+    await f.client.resume();
+    // The local machine and two remote ones fill every slot.
+    for (const index of [1, 2, 3]) {
+      await f.client.retainScope({
+        environmentId: node(index).environmentId,
+        scope: { type: "thread-detail", threadId: ThreadId.make(`thread-${index}`) },
+      });
+    }
+    // The local machine is reached directly and never joins the warm set.
+    expect(warm.stored()).toEqual(ids([3, 2, 4]));
+    f.connectCalls.length = 0;
+
+    f.client.attachRenderer();
+    await vi.waitFor(() => expect(warmLeases(f.client.snapshot())).toHaveLength(3));
+    expect(f.connectCalls).toEqual([]);
+    expect(f.releaseCalls).toEqual([]);
+    expect(connected(f.client.snapshot())).toEqual(ids([1, 2, 3]));
+    // A warm machine waiting for a slot is not shown as queued.
+    expect(f.client.snapshot().queuedEnvironmentIds).toEqual([]);
+
+    // A warm connection yields to a mounted view that needs its slot.
+    const later = fixture({ nodes, warmSet: memoryWarmSet(ids([4])).store, now: clock().now });
+    later.client.attachRenderer();
+    await later.client.resume();
+    expect(connected(later.client.snapshot())).toEqual(ids([4]));
+    for (const index of [1, 2, 3]) {
+      await later.client.retainScope({
+        environmentId: node(index).environmentId,
+        scope: { type: "interactive" },
+      });
+    }
+    expect(later.releaseCalls).toEqual(ids([4]));
+    expect(connected(later.client.snapshot())).toEqual(ids([1, 2, 3]));
+    expect(later.client.snapshot().queuedEnvironmentIds).toEqual([]);
+  });
+
+  it("restores again after a return from the background and after a renderer reset", async () => {
+    const f = fixture({ warmSet: memoryWarmSet(ids([2])).store, now: clock().now });
+    f.client.attachRenderer();
+    await f.client.resume();
+    expect(f.connectCalls.map((call) => call.environmentId)).toEqual(ids([2]));
+
+    await f.client.setBackgrounded(true);
+    expect(f.releaseCalls).toEqual(ids([2]));
+    expect(warmLeases(f.client.snapshot())).toEqual([]);
+    // Nothing returns while backgrounded.
+    await f.client.refreshCatalog();
+    expect(f.connectCalls).toHaveLength(1);
+
+    await f.client.setBackgrounded(false);
+    expect(f.connectCalls.map((call) => call.environmentId)).toEqual(ids([2, 2]));
+    // Only a return from the background owes a restore.
+    await f.client.setBackgrounded(false);
+    expect(f.connectCalls).toHaveLength(2);
+
+    f.client.resetRenderer();
+    await f.client.refreshCatalog();
+    // The reloaded document has not started its bridge yet.
+    expect(f.connectCalls).toHaveLength(2);
+    f.client.attachRenderer();
+    await vi.waitFor(() => expect(f.connectCalls).toHaveLength(3));
+    expect(f.connectCalls[2]?.environmentId).toBe(node(2).environmentId);
+
+    // A document reloaded while backgrounded gets its warm machines on the return.
+    await f.client.setBackgrounded(true);
+    f.client.resetRenderer();
+    f.client.attachRenderer();
+    await f.client.refreshCatalog();
+    expect(f.connectCalls).toHaveLength(3);
+    await f.client.setBackgrounded(false);
+    expect(f.connectCalls).toHaveLength(4);
+  });
+
+  it("gives a warm machine one attempt and passes it over for the cooldown unless it is used", async () => {
+    const time = clock();
+    let failing = true;
+    const f = fixture({
+      nodes: [node(1), node(2), node(3)],
+      warmSet: memoryWarmSet(ids([2, 3])).store,
+      now: time.now,
+      connect: async (environmentId) => {
+        if (failing && environmentId === node(2).environmentId) throw new Error("unreachable");
+      },
+    });
+    f.client.attachRenderer();
+    await f.client.resume();
+    expect(f.connectCalls.map((call) => call.environmentId)).toEqual(ids([2, 3]));
+    expect(warmLeases(f.client.snapshot())).toEqual(ids([3]));
+    failing = false;
+
+    const restored = async () => {
+      f.connectCalls.length = 0;
+      await f.client.setBackgrounded(true);
+      await f.client.setBackgrounded(false);
+      return f.connectCalls.map((call) => call.environmentId);
+    };
+    expect(await restored()).toEqual(ids([3]));
+    time.advance(300_000);
+    expect(await restored()).toEqual(ids([2, 3]));
+
+    // The renderer could not connect it, or lost it: released, and cooling again.
+    f.releaseCalls.length = 0;
+    f.client.reportConnection(node(2).environmentId, false);
+    expect(f.releaseCalls).toEqual(ids([2]));
+    expect(warmLeases(f.client.snapshot())).toEqual(ids([3]));
+    expect(await restored()).toEqual(ids([3]));
+
+    // Using the machine ends its cooldown.
+    const { leaseId } = await f.client.retainScope({
+      environmentId: node(2).environmentId,
+      scope: { type: "interactive" },
+    });
+    await f.client.releaseScope(leaseId);
+    expect(await restored()).toEqual(ids([2, 3]));
+  });
+
+  it("releases a warm-only machine whose relay dropped instead of letting it reconnect", async () => {
+    const f = fixture({
+      nodes: [node(1), node(2), node(3)],
+      warmSet: memoryWarmSet(ids([2, 3])).store,
+      now: clock().now,
+    });
+    f.client.attachRenderer();
+    await f.client.resume();
+    await f.client.retainScope({
+      environmentId: node(3).environmentId,
+      scope: { type: "interactive" },
+    });
+
+    f.client.reportTransportLost(node(3).environmentId);
+    expect(f.releaseCalls).toEqual([]);
+
+    const state = f.client.reportTransportLost(node(2).environmentId);
+    expect(f.releaseCalls).toEqual(ids([2]));
+    expect(connected(state)).toEqual(ids([3]));
+    expect(warmLeases(state)).toEqual(ids([3]));
+  });
+
+  it("forgets and deletes the warm set on sign-out and revocation, and per account", async () => {
+    const warm = memoryWarmSet(ids([2]));
+    const f = fixture({ warmSet: warm.store, now: clock().now });
+    f.client.attachRenderer();
+    await f.client.resume();
+    expect(warmLeases(f.client.snapshot())).toEqual(ids([2]));
+
+    await f.client.signOut();
+    expect(warm.store.clear).toHaveBeenCalledOnce();
+    expect(warm.stored()).toBeNull();
+    expect(f.client.snapshot().demand.leases).toEqual([]);
+
+    // Signed in again, nothing is left to restore, and use starts a new list.
+    f.connectCalls.length = 0;
+    await f.client.connectIdentity();
+    await f.client.setBackgrounded(true);
+    await f.client.setBackgrounded(false);
+    expect(f.connectCalls).toEqual([]);
+    await f.client.retainScope({
+      environmentId: node(2).environmentId,
+      scope: { type: "interactive" },
+    });
+    expect(warm.stored()).toEqual(ids([2]));
+
+    f.client.invalidateAccess();
+    expect(warm.store.clear).toHaveBeenCalledTimes(2);
+    expect(warm.stored()).toBeNull();
+
+    // Another account on the same Hub reads no list of the first one.
+    const other = memoryWarmSet(ids([2]));
+    const g = fixture({
+      warmSet: other.store,
+      now: clock().now,
+      identityStatus: {
+        status: "ready",
+        accountId: "account-b",
+        nodeId: node(1).id,
+        localNodeHandle: null,
+      },
+    });
+    g.client.attachRenderer();
+    await g.client.resume();
+    expect(g.connectCalls).toEqual([]);
+  });
+
+  it("remembers the warm set across launches in an owner-only file", async () => {
+    const directory = FS.mkdtempSync(Path.join(OS.tmpdir(), "ryco-desktop-workspace-warm-"));
+    const filePath = Path.join(directory, "desktop-workspace-client", "warm-set-v1.json");
+    try {
+      const nodes = [node(1), node(2), node(3), node(4)];
+      const first = fixture({
+        nodes,
+        warmSet: createDesktopWorkspaceWarmSetStore(filePath),
+        now: clock().now,
+      });
+      await first.client.resume();
+      for (const index of [4, 3, 1, 2]) {
+        await first.client.retainScope({
+          environmentId: node(index).environmentId,
+          scope: { type: "interactive" },
+        });
+      }
+      if (process.platform !== "win32") {
+        expect(FS.statSync(filePath).mode & 0o777).toBe(0o600);
+      }
+      expect(JSON.parse(FS.readFileSync(filePath, "utf8"))).toEqual({
+        version: 1,
+        hubOrigin: "https://hub.example",
+        accountId: "account-a",
+        environmentIds: ids([2, 3, 4]),
+      });
+
+      const relaunched = fixture({
+        nodes,
+        warmSet: createDesktopWorkspaceWarmSetStore(filePath),
+        now: clock().now,
+      });
+      relaunched.client.attachRenderer();
+      await relaunched.client.resume();
+      expect(relaunched.connectCalls).toEqual([
+        { environmentId: node(2).environmentId, delayMs: 0 },
+        { environmentId: node(3).environmentId, delayMs: 250 },
+        { environmentId: node(4).environmentId, delayMs: 500 },
+      ]);
+
+      const store = createDesktopWorkspaceWarmSetStore(filePath);
+      expect(store.read({ hubOrigin: "https://HUB.example/", accountId: "account-a" })).toEqual(
+        ids([2, 3, 4]),
+      );
+      expect(store.read({ hubOrigin: "https://hub.example", accountId: "account-b" })).toEqual([]);
+      expect(store.read({ hubOrigin: "https://other.example", accountId: "account-a" })).toEqual(
+        [],
+      );
+
+      await relaunched.client.signOut();
+      expect(FS.existsSync(filePath)).toBe(false);
+
+      FS.mkdirSync(Path.dirname(filePath), { recursive: true });
+      FS.writeFileSync(filePath, "{not json");
+      expect(store.read({ hubOrigin: "https://hub.example", accountId: "account-a" })).toEqual([]);
+    } finally {
       FS.rmSync(directory, { recursive: true, force: true });
     }
   });

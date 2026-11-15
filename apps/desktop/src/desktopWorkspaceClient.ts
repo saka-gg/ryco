@@ -2,6 +2,8 @@ import { EnvironmentId, type DesktopWorkspaceStateProjection } from "@ryco/contr
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import {
   createWorkspaceConnectionDemandState,
+  isWorkspaceEnvironmentWarmOnly,
+  noteRecentWorkspaceEnvironment,
   planWorkspaceConnectionDemand,
   reconcileWorkspaceMachineCatalog,
   releaseWorkspaceConnectionScope,
@@ -10,6 +12,8 @@ import {
   setWorkspaceConnectionBackgrounded,
   setWorkspaceEnvironmentConnected,
   UNIFIED_WORKSPACE_MAX_CONNECTIONS,
+  UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS,
+  UNIFIED_WORKSPACE_WARM_RESTORE_COOLDOWN_MS,
   workspaceMetadataPayloadBytes,
   type WorkspaceConnectionDemandPlan,
   type WorkspaceConnectionDemandState,
@@ -19,6 +23,11 @@ import {
   type WorkspaceMetadataSnapshot,
   type WorkspaceNativeTrustState,
 } from "@ryco/client-runtime/state/workspace";
+
+import type { DesktopWorkspaceWarmSetStore } from "./desktopWorkspaceWarmSet.ts";
+
+/** Wakes after a return from the background, and warm restores, follow each other this far apart. */
+const WAKE_STAGGER_MS = 250;
 
 export type DesktopWorkspaceIdentityStatus =
   | { readonly status: "signed-out" }
@@ -143,6 +152,7 @@ export class DesktopWorkspaceClient {
   readonly #cache: WorkspaceMetadataCache;
   readonly #connection: DesktopWorkspaceConnectionDriver;
   readonly #verification: DesktopWorkspaceVerificationPort | undefined;
+  readonly #warmSet: DesktopWorkspaceWarmSetStore | undefined;
   readonly #now: () => number;
   readonly #listeners = new Set<(snapshot: DesktopWorkspaceClientSnapshot) => void>();
   readonly #snapshots = new Map<EnvironmentId, WorkspaceMetadataSnapshot>();
@@ -156,6 +166,21 @@ export class DesktopWorkspaceClient {
   #queued: ReadonlyArray<EnvironmentId> = [];
   #leaseSequence = 0;
   #published: { readonly state: string; readonly snapshots: string } | null = null;
+  /** The identity whose machine directory the catalog was last listed from. */
+  #catalogIdentity: DesktopWorkspaceIdentityStatus | null = null;
+  /** The account `#recent` belongs to, once its stored list was read. */
+  #warmAccountId: string | null = null;
+  /** The most recently used machines of `#warmAccountId`, newest first: the last warm set. */
+  #recent: ReadonlyArray<EnvironmentId> = [];
+  /** When each machine whose warm lease was dropped may be restored again. */
+  readonly #warmCooldownUntil = new Map<EnvironmentId, number>();
+  /** A launch owes a warm restore, as do a return from the background and a renderer reset. */
+  #warmRestoreOwed = true;
+  /**
+   * The app window's current document started its workspace bridge, so it
+   * receives connection commands. A reset document has not yet.
+   */
+  #rendererAttached = false;
 
   constructor(input: {
     readonly hubOrigin: string;
@@ -164,6 +189,8 @@ export class DesktopWorkspaceClient {
     readonly cache: WorkspaceMetadataCache;
     readonly connection: DesktopWorkspaceConnectionDriver;
     readonly verification?: DesktopWorkspaceVerificationPort;
+    /** Remembers the last warm set across launches; without it only this process does. */
+    readonly warmSet?: DesktopWorkspaceWarmSetStore;
     readonly now?: () => number;
   }) {
     this.#hubOrigin = input.hubOrigin;
@@ -172,6 +199,7 @@ export class DesktopWorkspaceClient {
     this.#cache = input.cache;
     this.#connection = input.connection;
     this.#verification = input.verification;
+    this.#warmSet = input.warmSet;
     this.#now = input.now ?? Date.now;
   }
 
@@ -180,14 +208,20 @@ export class DesktopWorkspaceClient {
     return {
       status: this.#identityStatus.status,
       accountId: ready?.accountId ?? null,
-      localEnvironmentId:
-        this.#catalog.find((entry) => entry.nodeId === ready?.nodeId)?.environmentId ?? null,
+      localEnvironmentId: this.#localEnvironmentId(),
       catalog: this.#catalog,
       snapshots: this.#availableSnapshots(),
       demand: this.#demand,
       queuedEnvironmentIds: this.#queued,
       accountE2ee: ready === null ? null : this.#accountE2ee(ready),
     };
+  }
+
+  /** The colocated machine: reached directly, never over the relay, so never part of the warm set. */
+  #localEnvironmentId(): EnvironmentId | null {
+    if (this.#identityStatus.status !== "ready") return null;
+    const nodeId = this.#identityStatus.nodeId;
+    return this.#catalog.find((entry) => entry.nodeId === nodeId)?.environmentId ?? null;
   }
 
   /** Same eligibility as the unified workspace index: only readable machines contribute. */
@@ -245,6 +279,7 @@ export class DesktopWorkspaceClient {
     this.#snapshots.clear();
     this.#demand = createWorkspaceConnectionDemandState(UNIFIED_WORKSPACE_MAX_CONNECTIONS);
     this.#queued = [];
+    this.#forgetWarmSet({ deleteStored: true });
     return this.#publish();
   }
 
@@ -262,6 +297,7 @@ export class DesktopWorkspaceClient {
     this.#snapshots.clear();
     this.#demand = createWorkspaceConnectionDemandState(UNIFIED_WORKSPACE_MAX_CONNECTIONS);
     this.#queued = [];
+    this.#forgetWarmSet({ deleteStored: true });
     const snapshot = this.#publish();
     for (const environmentId of connected) {
       void this.#connection.release(environmentId).catch(() => undefined);
@@ -276,10 +312,14 @@ export class DesktopWorkspaceClient {
    * next document retains what it needs again, and the planner then sends it
    * fresh connect commands instead of believing the old document's
    * connections still stand. No release is sent: there is nobody to receive
-   * it. The identity, the catalog, the snapshots and `backgrounded` stay.
+   * it. The identity, the catalog, the snapshots and `backgrounded` stay, and
+   * so does the last warm set: the next document gets it back once its bridge
+   * started (`attachRenderer`).
    */
   resetRenderer(): DesktopWorkspaceClientSnapshot {
     this.#rendererEpoch += 1;
+    this.#rendererAttached = false;
+    this.#warmRestoreOwed = true;
     // A reconcile still running re-plans against this state once its current
     // step returns, and does not record what it asked of the gone document.
     this.#demandRevision += 1;
@@ -293,6 +333,17 @@ export class DesktopWorkspaceClient {
     this.#queued = [];
     this.#syncCatalogConnectionStates();
     return this.#publish();
+  }
+
+  /**
+   * The app window's current document started its workspace bridge: it
+   * subscribed to connection commands and read the state. A warm restore owed
+   * since launch or since the previous document went runs now, if the catalog
+   * is ready.
+   */
+  attachRenderer(): void {
+    this.#rendererAttached = true;
+    if (this.#takeWarmRestore()) void this.#applyDemand(WAKE_STAGGER_MS);
   }
 
   async refreshCatalog(): Promise<DesktopWorkspaceClientSnapshot> {
@@ -346,8 +397,12 @@ export class DesktopWorkspaceClient {
     );
     if (this.#identityStatus !== identity) return this.snapshot();
     this.#catalog = reconcileWorkspaceMachineCatalog(inputs);
+    this.#catalogIdentity = identity;
     await this.#releaseIneligibleConnections();
     await this.#reconcileCacheDisposition();
+    if (this.#identityStatus === identity && this.#takeWarmRestore()) {
+      await this.#applyDemand(WAKE_STAGGER_MS);
+    }
     return this.#publish();
   }
 
@@ -412,6 +467,7 @@ export class DesktopWorkspaceClient {
       scope: input.scope,
       now: this.#now(),
     });
+    this.#noteUsed(input.environmentId);
     await this.#applyDemand();
     return { leaseId, snapshot: this.snapshot() };
   }
@@ -432,8 +488,16 @@ export class DesktopWorkspaceClient {
   }
 
   async setBackgrounded(backgrounded: boolean): Promise<DesktopWorkspaceClientSnapshot> {
+    const wasBackgrounded = this.#demand.backgrounded;
     this.#demand = setWorkspaceConnectionBackgrounded(this.#demand, backgrounded);
-    await this.#applyDemand(backgrounded ? 0 : 250);
+    if (backgrounded) {
+      // Background drops the warm set; the return from it restores it.
+      this.#dropWarmLeases(() => true);
+    } else if (wasBackgrounded) {
+      this.#warmRestoreOwed = true;
+      this.#takeWarmRestore();
+    }
+    await this.#applyDemand(backgrounded ? 0 : WAKE_STAGGER_MS);
     return this.snapshot();
   }
 
@@ -444,12 +508,45 @@ export class DesktopWorkspaceClient {
     if (!this.#catalog.some((machine) => machine.environmentId === environmentId)) {
       throw new Error("Desktop workspace machine does not match.");
     }
+    const wasConnected =
+      this.#demand.connections.find((entry) => entry.environmentId === environmentId)?.connected ===
+      true;
+    // A warm machine gets one attempt: one the renderer could not connect, or
+    // lost, is released instead of left to retry, and restores pass it over
+    // for a while.
+    const yielded = !connected && wasConnected && this.#yieldWarm(environmentId);
     this.#demand = setWorkspaceEnvironmentConnected(
       this.#demand,
       environmentId,
       connected,
       this.#now(),
     );
+    if (yielded) void this.#connection.release(environmentId).catch(() => undefined);
+    this.#syncCatalogConnectionStates();
+    return this.#publish();
+  }
+
+  /**
+   * A relay transport of this machine ended without the renderer or main
+   * closing it: the relay dropped, or the attempt failed. A machine nothing
+   * but its warm lease holds is released instead of reconnecting, so a Hub
+   * restart costs no reconnect for it, and restores pass it over for a while.
+   * Any other machine is left to the renderer's reconnect.
+   */
+  reportTransportLost(environmentId: EnvironmentId): DesktopWorkspaceClientSnapshot {
+    if (!this.#yieldWarm(environmentId)) return this.snapshot();
+    const connected =
+      this.#demand.connections.find((entry) => entry.environmentId === environmentId)?.connected ===
+      true;
+    if (connected) {
+      this.#demand = setWorkspaceEnvironmentConnected(
+        this.#demand,
+        environmentId,
+        false,
+        this.#now(),
+      );
+      void this.#connection.release(environmentId).catch(() => undefined);
+    }
     this.#syncCatalogConnectionStates();
     return this.#publish();
   }
@@ -530,9 +627,18 @@ export class DesktopWorkspaceClient {
   ): Promise<DesktopWorkspaceClientSnapshot> {
     this.#identityStatus = status;
     if (status.status !== "ready") {
+      // The Hub answered that this session is signed out: its warm set goes
+      // with it. An unreachable Hub keeps it for the resume that follows.
+      if (status.status === "signed-out") this.#forgetWarmSet({ deleteStored: true });
       this.#catalog = [];
       this.#snapshots.clear();
       return this.#publish();
+    }
+    if (this.#warmAccountId !== status.accountId) {
+      // Another account's machines are not this one's warm set.
+      this.#forgetWarmSet({ deleteStored: false });
+      this.#warmAccountId = status.accountId;
+      this.#recent = this.#readStoredWarmSet(status.accountId);
     }
     for (const record of await this.#cache.list({
       hubOrigin: this.#hubOrigin,
@@ -627,10 +733,16 @@ export class DesktopWorkspaceClient {
           false,
           this.#now(),
         );
+        // A warm machine had its one attempt.
+        this.#yieldWarm(request.environmentId);
       }
     }
     if (this.#identityStatus !== identity) return plan;
-    this.#queued = plan.queued;
+    // A warm machine waiting for a free slot is not demand anyone waits for.
+    const now = this.#now();
+    this.#queued = plan.queued.filter(
+      (environmentId) => !isWorkspaceEnvironmentWarmOnly(this.#demand, environmentId, { now }),
+    );
     this.#syncCatalogConnectionStates();
     this.#publish();
     return plan;
@@ -659,6 +771,138 @@ export class DesktopWorkspaceClient {
         (connection) => !rejected.has(connection.environmentId),
       ),
     };
+  }
+
+  /**
+   * A mounted view, an interactive scope or any other renderer demand used the
+   * machine: it moves to the front of the last warm set, its warm lease lasts
+   * longer and its cooldown ends. The colocated machine is never part of it.
+   */
+  #noteUsed(environmentId: EnvironmentId): void {
+    const identity = this.#identityStatus;
+    if (identity.status !== "ready" || this.#warmAccountId !== identity.accountId) return;
+    if (environmentId === this.#localEnvironmentId()) return;
+    this.#warmCooldownUntil.delete(environmentId);
+    const now = this.#now();
+    this.#demand = {
+      ...this.#demand,
+      leases: this.#demand.leases.map((lease) =>
+        lease.environmentId === environmentId && lease.warm === true && lease.expiresAt > now
+          ? { ...lease, expiresAt: now + UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS }
+          : lease,
+      ),
+    };
+    const next = noteRecentWorkspaceEnvironment(
+      this.#recent,
+      environmentId,
+      UNIFIED_WORKSPACE_MAX_CONNECTIONS,
+    );
+    if (next === this.#recent) return;
+    this.#recent = next;
+    try {
+      this.#warmSet?.write({ hubOrigin: this.#hubOrigin, accountId: identity.accountId }, next);
+    } catch {
+      // A list that could not be stored only costs the next launch its restore.
+    }
+  }
+
+  #readStoredWarmSet(accountId: string): ReadonlyArray<EnvironmentId> {
+    try {
+      return this.#warmSet?.read({ hubOrigin: this.#hubOrigin, accountId }) ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Signed out, revoked or another account: the last warm set and its cooldowns go. */
+  #forgetWarmSet(input: { readonly deleteStored: boolean }): void {
+    this.#recent = [];
+    this.#warmAccountId = null;
+    this.#warmCooldownUntil.clear();
+    this.#dropWarmLeases(() => true);
+    if (!input.deleteStored) return;
+    try {
+      this.#warmSet?.clear();
+    } catch {
+      // Nothing more can be done; the next sign-in reads only its own account's list.
+    }
+  }
+
+  /** Removes the warm leases of the machines `which` selects; `true` when any went. */
+  #dropWarmLeases(which: (environmentId: EnvironmentId) => boolean): boolean {
+    const leases = this.#demand.leases.filter(
+      (lease) => lease.warm !== true || !which(lease.environmentId),
+    );
+    if (leases.length === this.#demand.leases.length) return false;
+    this.#demand = { ...this.#demand, leases };
+    return true;
+  }
+
+  /**
+   * A machine only warm leases hold loses them and is left out of restores
+   * until its cooldown ends or the user uses it. `false` for any other machine.
+   */
+  #yieldWarm(environmentId: EnvironmentId): boolean {
+    const now = this.#now();
+    if (!isWorkspaceEnvironmentWarmOnly(this.#demand, environmentId, { now })) return false;
+    this.#dropWarmLeases((candidate) => candidate === environmentId);
+    this.#warmCooldownUntil.set(environmentId, now + UNIFIED_WORKSPACE_WARM_RESTORE_COOLDOWN_MS);
+    return true;
+  }
+
+  /**
+   * Runs an owed warm restore once everything it needs is there: a signed-in
+   * account whose stored list was read, a catalog listed for it, a renderer
+   * that receives connection commands, and the foreground. It replaces the
+   * warm leases with ones for the most recently used machines that are listed,
+   * connectable, online and not cooling down, at most the connection limit;
+   * the planner then connects them only into free slots, never displacing
+   * other demand. `true` when the leases changed, so demand must be applied.
+   */
+  #takeWarmRestore(): boolean {
+    const identity = this.#identityStatus;
+    if (
+      !this.#warmRestoreOwed ||
+      !this.#rendererAttached ||
+      this.#demand.backgrounded ||
+      identity.status !== "ready" ||
+      this.#catalogIdentity !== identity ||
+      this.#warmAccountId !== identity.accountId
+    ) {
+      return false;
+    }
+    this.#warmRestoreOwed = false;
+    const now = this.#now();
+    for (const [environmentId, until] of Array.from(this.#warmCooldownUntil)) {
+      if (until <= now) this.#warmCooldownUntil.delete(environmentId);
+    }
+    const local = this.#localEnvironmentId();
+    const restored = this.#recent
+      .filter(
+        (environmentId) =>
+          environmentId !== local &&
+          !this.#warmCooldownUntil.has(environmentId) &&
+          this.#catalog.some(
+            (machine) =>
+              machine.environmentId === environmentId &&
+              machine.canConnect &&
+              machine.presence.online,
+          ),
+      )
+      .slice(0, this.#demand.platformMaxConnections);
+    const dropped = this.#dropWarmLeases(() => true);
+    restored.forEach((environmentId, index) => {
+      this.#demand = retainWorkspaceConnectionScope(this.#demand, {
+        leaseId: `desktop-workspace-warm-${++this.#leaseSequence}`,
+        environmentId,
+        scope: { type: "interactive" },
+        // Retain recency keeps the list's order, so the staggered wakes follow it.
+        now: now - index,
+        ttlMs: UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS,
+        warm: true,
+      });
+    });
+    return dropped || restored.length > 0;
   }
 
   #syncCatalogConnectionStates(): void {

@@ -72,6 +72,7 @@ const LAZY_FROM_MAIN = [
   "./desktopWorkspaceClient.ts",
   "./desktopWorkspaceIpc.ts",
   "./desktopWorkspaceRelay.ts",
+  "./desktopWorkspaceWarmSet.ts",
   "./sshEnvironment.ts",
   "./tailscaleEndpointProvider.ts",
   "./bundledGuide.ts",

@@ -296,6 +296,7 @@ function relayFixture(
     readonly sessionStream?: ConstructorParameters<
       typeof DesktopWorkspaceRelayManager
     >[0]["sessionStream"];
+    readonly onTransportLost?: (environmentId: EnvironmentId) => void;
   } = {},
 ) {
   const environmentId = EnvironmentId.make("environment-1");
@@ -337,6 +338,7 @@ function relayFixture(
     emit,
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.sessionStream === undefined ? {} : { sessionStream: options.sessionStream }),
+    ...(options.onTransportLost === undefined ? {} : { onTransportLost: options.onTransportLost }),
   });
   return {
     environmentId,
@@ -456,6 +458,37 @@ describe("desktop relay attempt ownership", () => {
     expect(f.authority.onAccountAuthorizationRevoked).not.toHaveBeenCalled();
     expect(f.close).toHaveBeenCalledOnce();
     expect(f.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("reports a machine transport that ended on its own, never one that was closed", async () => {
+    const onTransportLost = vi.fn();
+    const f = relayFixture({ onTransportLost });
+    const closed = f.manager.prepare(f.environmentId);
+    await f.manager.activate(closed);
+    const closedInput = f.socketFactory.mock.calls[0]![0];
+    f.manager.close(closed);
+    closedInput.events.close(1000, "closed");
+    f.manager.closeAll();
+    expect(onTransportLost).not.toHaveBeenCalled();
+
+    const dropped = f.manager.prepare(f.environmentId);
+    await f.manager.activate(dropped);
+    f.socketFactory.mock.calls[1]![0].events.close(1006, "lost");
+    expect(onTransportLost).toHaveBeenCalledExactlyOnceWith(f.environmentId);
+  });
+
+  it("reports a machine attempt that failed, but not a verification attempt", async () => {
+    const onTransportLost = vi.fn();
+    const environmentId = EnvironmentId.make("environment-1");
+    const manager = new DesktopWorkspaceRelayManager({
+      authority: unavailableAuthority(),
+      emit: () => undefined,
+      onTransportLost,
+    });
+    await expect(manager.activate(manager.prepareVerification(environmentId))).rejects.toThrow();
+    expect(onTransportLost).not.toHaveBeenCalled();
+    await expect(manager.activate(manager.prepare(environmentId))).rejects.toThrow();
+    expect(onTransportLost).toHaveBeenCalledExactlyOnceWith(environmentId);
   });
 
   it("preserves retry hints without interpreting one node's refusal as account revocation", async () => {
