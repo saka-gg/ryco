@@ -180,9 +180,12 @@ describe("LocalFileTracer", () => {
       try {
         yield* Effect.scoped(
           Effect.gen(function* () {
+            // The kept statement outlasts the threshold by far, and the dropped
+            // one would need a stall of the whole threshold to be kept: a
+            // loaded CI runner once stalled a 0 ms statement past 25 ms.
             yield* statement("fast-sql", 0);
-            yield* statement("slow-sql", 40);
-          }).pipe(Effect.provide(makeTestLayer(tracePath, { sqlSpanMinDurationMs: 25 }))),
+            yield* statement("slow-sql", 400);
+          }).pipe(Effect.provide(makeTestLayer(tracePath, { sqlSpanMinDurationMs: 300 }))),
         );
 
         const [fast, slow] = spans;
