@@ -542,6 +542,60 @@ describe("desktop relay attempt ownership", () => {
   });
 });
 
+describe("desktop relay transports of a gone renderer", () => {
+  it("closes every transport, open, activating or only prepared, and frees their capacity", async () => {
+    const f = relayFixture();
+    const open = f.manager.prepare(f.environmentId);
+    await f.manager.activate(open);
+    const target = deferred<typeof f.target>();
+    vi.mocked(f.authority.resolveTarget).mockReturnValue(target.promise);
+    const activating = f.manager.prepare(f.environmentId);
+    const activation = f.manager.activate(activating);
+    const prepared = Array.from({ length: 6 }, () => f.manager.prepare(f.environmentId));
+    expect(() => f.manager.prepare(f.environmentId)).toThrow("capacity is unavailable");
+    f.emit.mockClear();
+
+    f.manager.closeAll();
+
+    expect(f.close).toHaveBeenCalledOnce();
+    expect(f.destroy).toHaveBeenCalledOnce();
+    expect(
+      f.emit.mock.calls.map(([event]) => (event as DesktopWorkspaceTransportEvent).transportId),
+    ).toEqual([open, activating, ...prepared]);
+    // Nothing was refused: a document that is still there may connect again.
+    expect(
+      f.emit.mock.calls.every(
+        ([event]) =>
+          (event as DesktopWorkspaceTransportEvent).type === "close" &&
+          (event as Extract<DesktopWorkspaceTransportEvent, { type: "close" }>).retryable === true,
+      ),
+    ).toBe(true);
+    expect(() => f.manager.send(open, Uint8Array.of(1))).toThrow("unavailable");
+    // A late resolution of the activating attempt opens nothing.
+    target.resolve(f.target);
+    await activation;
+    expect(f.socketFactory).toHaveBeenCalledOnce();
+    // A reloaded document gets the full capacity again.
+    for (let index = 0; index < 8; index += 1) f.manager.prepare(f.environmentId);
+    f.manager.dispose();
+  });
+
+  it("keeps what it learnt about compression, unlike an account or session change", async () => {
+    const f = relayFixture();
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    f.socketFactory.mock.calls[0]![0].callbacks.onFailure({
+      kind: "protocol",
+      retryable: true,
+      closeReason: "channel_rejected",
+      compressionFailed: true,
+    });
+    f.manager.closeAll();
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.socketFactory.mock.calls[1]![0].relayCompression).toBe(false);
+    f.manager.dispose();
+  });
+});
+
 /** A target that asks the Hub for a ticket, so the ticket request is in flight beside the upgrade. */
 function useTicketRequest(f: ReturnType<typeof relayFixture>) {
   vi.mocked(f.authority.resolveTarget).mockResolvedValue({ ...f.target, nativeTrust: "verified" });

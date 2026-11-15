@@ -145,6 +145,11 @@ import {
 } from "./backendStartup.ts";
 import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
 import { createDesktopWorkspaceActivity } from "./desktopBackgroundSignal.ts";
+import type { DesktopHostedIdentityResumeRetry } from "./desktopHostedIdentityRetry.ts";
+import {
+  resetDesktopWorkspaceRenderer,
+  watchDesktopWorkspaceRenderer,
+} from "./desktopWorkspaceRendererLifetime.ts";
 import { readDesktopFlavor } from "./desktopFlavor.ts";
 import {
   configuredDesktopBaseDir,
@@ -499,6 +504,45 @@ const backendAgentWork = new BackendAgentWorkTracker({
 let desktopWorkspaceBackgrounded = false;
 /** The account session socket (`desktopHubSession.ts`), created with the relay manager. */
 let desktopHubSession: ReturnType<typeof DesktopHubStack.startDesktopHubSession> | null = null;
+/**
+ * The background Hub session resume, retried while it ends `unavailable` with
+ * a stored session (`desktopHostedIdentityRetry.ts`). Created with the Hub
+ * stack by the first backend start; each backend start runs a fresh series,
+ * and sign-out and account revocation stop it.
+ */
+let desktopHostedIdentityResumeRetry: DesktopHostedIdentityResumeRetry | null = null;
+function ensureDesktopHostedIdentityResumeRetry(
+  stack: typeof DesktopHubStack,
+): DesktopHostedIdentityResumeRetry {
+  desktopHostedIdentityResumeRetry ??= stack.createDesktopHostedIdentityResumeRetry({
+    resume: async () => {
+      try {
+        return (await (await ensureDesktopWorkspaceClient()).resume()).status;
+      } catch {
+        return (await runDesktopHostedIdentity(false)).status;
+      }
+    },
+    canRetry: () =>
+      desktopHostedIdentityStatus.status === "unavailable" &&
+      desktopSettings.hubOrigin !== null &&
+      desktopProtectedRecordExists({ directory: NATIVE_SECURITY_DIR, name: "hub-session-token" }),
+    onRetry: (attempt, delayMs) =>
+      writeDesktopLogHeader(
+        `native hosted identity resume retry attempt=${attempt} delayMs=${delayMs}`,
+      ),
+  });
+  return desktopHostedIdentityResumeRetry;
+}
+/**
+ * The network may have changed (a wake, an unlock, the renderer saw the
+ * browser go `online`): the account session socket re-checks itself instead
+ * of looking online until its heartbeat notices, and a failed sign-in resume
+ * is tried again.
+ */
+function onDesktopNetworkMayHaveChanged(reason: "wake" | "network"): void {
+  desktopHubSession?.manager.networkChanged();
+  desktopHostedIdentityResumeRetry?.nudge(reason);
+}
 const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
   setBackgrounded: (backgrounded) => {
     desktopWorkspaceBackgrounded = backgrounded;
@@ -507,6 +551,10 @@ const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
   },
   refreshCatalog: () => {
     void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
+  },
+  onReturn: (event) => {
+    if (event === "focus") desktopHostedIdentityResumeRetry?.nudge("focus");
+    else onDesktopNetworkMayHaveChanged("wake");
   },
   isWindowInSight: () =>
     BrowserWindow.getAllWindows().some(
@@ -1228,6 +1276,25 @@ const ensureDesktopThreadContentCache = lazyAsyncResource(
   },
 );
 
+/** The app window's live renderer, which holds the workspace's connections, or null. */
+function desktopWorkspaceRendererContents(): Electron.WebContents | null {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const contents = mainWindow.webContents;
+  return contents.isDestroyed() || contents.isCrashed() ? null : contents;
+}
+
+/**
+ * The app window's renderer document is gone (`desktopWorkspaceRendererLifetime.ts`):
+ * its transports close and its leases and connections are dropped, so the next
+ * document is asked to connect again. Neither owner is created for it.
+ */
+function resetDesktopWorkspaceRendererState(): void {
+  resetDesktopWorkspaceRenderer({
+    client: desktopWorkspaceClient,
+    relay: desktopWorkspaceRelayManager,
+  });
+}
+
 async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   const origin = desktopSettings.hubOrigin;
@@ -1251,6 +1318,7 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
       resume: () => runDesktopHostedIdentity(false),
       connect: () => runDesktopHostedIdentity(true),
       disconnect: async () => {
+        desktopHostedIdentityResumeRetry?.stop();
         desktopWorkspaceRelayManager?.dispose();
         desktopNativeE2eeHandshakeService?.dispose();
         await desktopHostedIdentityCoordinator?.disconnect();
@@ -1272,16 +1340,21 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
       createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
       threadContent,
     ),
+    // The renderer makes every connection and reports back; a command sent
+    // here is all main does. Without a live app document nobody is asked, so
+    // a connect fails and the demand state records no connection.
     connection: {
       connect: async ({ environmentId, delayMs }) => {
-        mainWindow?.webContents.send(DESKTOP_WORKSPACE_IPC.connectionCommand, {
+        const contents = desktopWorkspaceRendererContents();
+        if (contents === null) throw new Error("Desktop workspace renderer is unavailable.");
+        contents.send(DESKTOP_WORKSPACE_IPC.connectionCommand, {
           action: "connect",
           environmentId,
           delayMs,
         });
       },
       release: async (environmentId) => {
-        mainWindow?.webContents.send(DESKTOP_WORKSPACE_IPC.connectionCommand, {
+        desktopWorkspaceRendererContents()?.send(DESKTOP_WORKSPACE_IPC.connectionCommand, {
           action: "release",
           environmentId,
           delayMs: 0,
@@ -1348,6 +1421,8 @@ const ensureDesktopNativeE2eeHandshakeService = lazyAsyncResource(
 );
 
 function invalidateDesktopNativeE2eeAccess(): void {
+  // This `unavailable` is a revocation, not a failed resume: never retried.
+  desktopHostedIdentityResumeRetry?.stop();
   const revokedIdentity = desktopHostedIdentityStatus;
   desktopHostedIdentityStatus = { status: "unavailable" };
   if (revokedIdentity.status === "ready") {
@@ -1385,6 +1460,10 @@ async function runDesktopHostedIdentity(
       desktopSettings.hubOrigin !== null ? { status: "unavailable" } : { status: "signed-out" };
   }
   writeDesktopLogHeader(`native hosted identity status=${desktopHostedIdentityStatus.status}`);
+  // A Connect that settled the status ends a background retry series; the
+  // series watches its own resumes.
+  if (interactive)
+    desktopHostedIdentityResumeRetry?.noteOutcome(desktopHostedIdentityStatus.status);
   return desktopHostedIdentityStatus;
 }
 
@@ -1414,8 +1493,10 @@ function resumeDesktopHostedIdentityForBackend(): void {
   desktopWorkspaceRelayManager?.dispose();
   desktopHostedIdentityControlGeneration = backendControlToken;
   markDesktopStartupPhase("desktop.hub.resume.start");
-  void ensureDesktopWorkspaceClient()
-    .then((client) => client.resume())
+  // The first attempt of a fresh retry series: one that ends `unavailable`
+  // (offline at launch, Hub down) is tried again instead of staying so.
+  void loadDesktopHubStack()
+    .then((stack) => ensureDesktopHostedIdentityResumeRetry(stack).restart())
     .catch(() => runDesktopHostedIdentity(false))
     .finally(() => markDesktopStartupPhase("desktop.hub.resume.end"));
 }
@@ -4480,6 +4561,7 @@ function registerIpcHandlers(): void {
   });
   ipcMain.removeHandler(DISCONNECT_HOSTED_IDENTITY_CHANNEL);
   ipcMain.handle(DISCONNECT_HOSTED_IDENTITY_CHANNEL, async () => {
+    desktopHostedIdentityResumeRetry?.stop();
     if (desktopWorkspaceClient) {
       await desktopWorkspaceClient.signOut().catch(() => undefined);
     } else {
@@ -4693,6 +4775,15 @@ function registerIpcHandlers(): void {
     } catch {
       // Closing an already-expired opaque handle is idempotent.
     }
+  });
+  // Only an app window's own document; the reaction (a session probe, a
+  // pending sign-in retry pulled forward) is cheap and bounded either way.
+  ipcMain.removeAllListeners(DESKTOP_WORKSPACE_IPC.networkOnline);
+  ipcMain.on(DESKTOP_WORKSPACE_IPC.networkOnline, (event) => {
+    if (!appWindowContents.has(event.sender) || event.senderFrame !== event.sender.mainFrame) {
+      return;
+    }
+    onDesktopNetworkMayHaveChanged("network");
   });
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.reportConnection, async (_event, raw: unknown) => {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -5004,6 +5095,12 @@ function createWindow(): BrowserWindow {
     window.setTitle(APP_DISPLAY_NAME);
   });
   desktopWorkspaceActivity.attachWindow(window);
+  watchDesktopWorkspaceRenderer(window, () => {
+    // Only the app window's document holds workspace state. A closed one has
+    // already cleared `mainWindow` when its listener ran first.
+    if (mainWindow !== null && mainWindow !== window) return;
+    resetDesktopWorkspaceRendererState();
+  });
   window.webContents.on("dom-ready", () => {
     const currentUrl = window.webContents.getURL();
     markDesktopWindowStartupLoad("dom-ready", currentUrl);

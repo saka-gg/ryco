@@ -25,6 +25,7 @@ export {
   resolveDesktopNativeSecurityHelperPath,
 } from "./nativeSecurityHelper.ts";
 export { startDesktopHubSession } from "./desktopHubSession.ts";
+export { createDesktopHostedIdentityResumeRetry } from "./desktopHostedIdentityRetry.ts";
 export {
   createDesktopHostedSessionCredentials,
   getOrCreateDesktopInstallationId,

@@ -150,6 +150,8 @@ export class DesktopWorkspaceClient {
   #catalog: ReadonlyArray<WorkspaceMachineCatalogEntry> = [];
   #demandOperation: Promise<WorkspaceConnectionDemandPlan> | null = null;
   #demandRevision = 0;
+  /** Bumped by `resetRenderer`: what was asked of an earlier document is not recorded. */
+  #rendererEpoch = 0;
   #demand = createWorkspaceConnectionDemandState(UNIFIED_WORKSPACE_MAX_CONNECTIONS);
   #queued: ReadonlyArray<EnvironmentId> = [];
   #leaseSequence = 0;
@@ -265,6 +267,32 @@ export class DesktopWorkspaceClient {
       void this.#connection.release(environmentId).catch(() => undefined);
     }
     return snapshot;
+  }
+
+  /**
+   * The renderer document that held every lease and made every connection is
+   * gone: reloaded, crashed or closed with its window. Its leases go, and every
+   * connection counts as disconnected, because it lived in that document. The
+   * next document retains what it needs again, and the planner then sends it
+   * fresh connect commands instead of believing the old document's
+   * connections still stand. No release is sent: there is nobody to receive
+   * it. The identity, the catalog, the snapshots and `backgrounded` stay.
+   */
+  resetRenderer(): DesktopWorkspaceClientSnapshot {
+    this.#rendererEpoch += 1;
+    // A reconcile still running re-plans against this state once its current
+    // step returns, and does not record what it asked of the gone document.
+    this.#demandRevision += 1;
+    this.#demand = {
+      ...this.#demand,
+      leases: [],
+      connections: this.#demand.connections.map((connection) =>
+        connection.connected ? { ...connection, connected: false } : connection,
+      ),
+    };
+    this.#queued = [];
+    this.#syncCatalogConnectionStates();
+    return this.#publish();
   }
 
   async refreshCatalog(): Promise<DesktopWorkspaceClientSnapshot> {
@@ -551,6 +579,9 @@ export class DesktopWorkspaceClient {
 
   async #reconcileDemand(wakeStaggerMs: number): Promise<WorkspaceConnectionDemandPlan> {
     const identity = this.#identityStatus;
+    const rendererEpoch = this.#rendererEpoch;
+    const current = () =>
+      this.#identityStatus === identity && this.#rendererEpoch === rendererEpoch;
     const plan = planWorkspaceConnectionDemand(this.#demand, {
       now: this.#now(),
       wakeStaggerMs,
@@ -558,7 +589,7 @@ export class DesktopWorkspaceClient {
     this.#demand = plan.state;
     for (const environmentId of plan.release) {
       await this.#connection.release(environmentId).catch(() => undefined);
-      if (this.#identityStatus !== identity) break;
+      if (!current()) break;
       this.#demand = setWorkspaceEnvironmentConnected(
         this.#demand,
         environmentId,
@@ -567,7 +598,7 @@ export class DesktopWorkspaceClient {
       );
     }
     for (const request of plan.connect) {
-      if (this.#identityStatus !== identity || identity.status !== "ready") break;
+      if (!current() || identity.status !== "ready") break;
       if (
         !this.#catalog.some(
           (machine) => machine.environmentId === request.environmentId && machine.canConnect,
@@ -580,6 +611,8 @@ export class DesktopWorkspaceClient {
           await this.#connection.release(request.environmentId).catch(() => undefined);
           break;
         }
+        // Asked of a renderer that is gone since: the next plan asks the new one.
+        if (this.#rendererEpoch !== rendererEpoch) break;
         this.#demand = setWorkspaceEnvironmentConnected(
           this.#demand,
           request.environmentId,
@@ -587,7 +620,7 @@ export class DesktopWorkspaceClient {
           this.#now(),
         );
       } catch {
-        if (this.#identityStatus !== identity) break;
+        if (!current()) break;
         this.#demand = setWorkspaceEnvironmentConnected(
           this.#demand,
           request.environmentId,
