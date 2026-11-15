@@ -32,6 +32,36 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.49",
+    date: "November 15, 2026",
+    dateTime: "2026-11-15",
+    summary:
+      "The desktop app keeps its connections to your other machines through reloads, network changes and a Hub that was briefly unreachable, and reconnects your recently used machines when it starts.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.49`,
+    highlights: [
+      {
+        title: "Recent machines ready when the app starts",
+        summary:
+          "The desktop app remembers the last three machines you used on Ryco Cloud and connects them again when it starts, when you come back to it after it was in the background, and after a reload, so opening one of their threads no longer waits for a fresh connection. A machine that cannot be reached is left alone for a few minutes instead of being retried.",
+      },
+      {
+        title: "Machines reconnect after a reload",
+        summary:
+          "After View → Reload, a crashed window that recovered, or closing the window and opening it again, threads on your other machines connect again on their own instead of staying disconnected until the app was minimized for a while.",
+      },
+      {
+        title: "Signed in even when the Hub was unreachable at start",
+        summary:
+          "If the desktop app starts while Ryco Cloud cannot be reached, for example offline or on a captive network, it keeps your sign-in and tries again on its own, at once when the network comes back or the Mac wakes, instead of asking you to sign in.",
+      },
+      {
+        title: "Faster recovery after a network change",
+        summary:
+          "When the Mac wakes, is unlocked or its network comes back, the desktop app checks its Ryco Cloud connection right away, so new connections no longer wait up to 45 seconds on a connection that died with the old network.",
+      },
+    ],
+  },
+  {
     version: "0.1.48",
     date: "November 14, 2026",
     dateTime: "2026-11-14",
