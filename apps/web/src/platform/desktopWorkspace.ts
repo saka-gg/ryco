@@ -674,11 +674,22 @@ export function startDesktopWorkspaceBridge(): () => void {
   // publish the newer state again until the next change.
   let pushedDuringRead = false;
   let pushedSnapshotsDuringRead = false;
+  // Main may restore warm machines as soon as this document read its state,
+  // so a command can arrive before that read's reply was adopted. It waits
+  // for the first state, which names the machines it connects.
+  let stateAdopted = false;
+  const awaitingState: Array<() => void> = [];
+  const markStateAdopted = () => {
+    if (stateAdopted) return;
+    stateAdopted = true;
+    for (const run of awaitingState.splice(0)) run();
+  };
   const unsubscribeState = bridge.onDesktopWorkspaceState?.((state) => {
     if (disposed) return;
     pushedDuringRead = true;
     pushedSnapshotsDuringRead ||= state.snapshots !== undefined;
     adoptPublicationScope(state);
+    markStateAdopted();
     publishLiveMetadata();
     scheduleThreadContentPublication();
   });
@@ -686,11 +697,16 @@ export function startDesktopWorkspaceBridge(): () => void {
     if (disposed || commands.get(command.environmentId)?.action === command.action) return;
     commands.set(command.environmentId, command);
     const isCurrent = () => !disposed && commands.get(command.environmentId) === command;
-    void applyConnectionCommand(command, isCurrent)
-      .catch(() => undefined)
-      .finally(() => {
-        if (isCurrent()) commands.delete(command.environmentId);
-      });
+    const apply = () => {
+      if (!isCurrent()) return;
+      void applyConnectionCommand(command, isCurrent)
+        .catch(() => undefined)
+        .finally(() => {
+          if (isCurrent()) commands.delete(command.environmentId);
+        });
+    };
+    if (stateAdopted) apply();
+    else awaitingState.push(apply);
   });
   const unsubscribeStore = useStore.subscribe((state) => {
     publishLiveMetadata();
@@ -716,10 +732,14 @@ export function startDesktopWorkspaceBridge(): () => void {
         adoptPublicationScope({ ...current, snapshots: state.snapshots });
       }
       // Otherwise a push carried snapshots newer than the read, which it replaces.
+      markStateAdopted();
       publishLiveMetadata();
       scheduleThreadContentPublication();
     })
-    .catch(() => undefined);
+    .catch(() => {
+      // Commands still run, against the state pushes bring.
+      if (!disposed) markStateAdopted();
+    });
 
   return () => {
     disposed = true;

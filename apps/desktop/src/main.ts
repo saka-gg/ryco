@@ -382,6 +382,7 @@ const SAVED_ENVIRONMENT_REGISTRY_PATH = Path.join(STATE_DIR, "saved-environments
 const SHELL_ENVIRONMENT_CACHE_PATH = DESKTOP_PATHS.shellEnvironmentCachePath;
 const DESKTOP_WORKSPACE_CLIENT_DIR = Path.join(STATE_DIR, "desktop-workspace-client");
 const DESKTOP_WORKSPACE_CACHE_PATH = Path.join(DESKTOP_WORKSPACE_CLIENT_DIR, "metadata-v1.json");
+const DESKTOP_WORKSPACE_WARM_SET_PATH = Path.join(DESKTOP_WORKSPACE_CLIENT_DIR, "warm-set-v1.json");
 const DESKTOP_SCHEME = "ryco";
 const DESKTOP_BOOT_HOST = "app";
 const DESKTOP_BOOT_PATH = "/desktop-boot.html";
@@ -1239,6 +1240,10 @@ const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
         if (!mainWindow || mainWindow.isDestroyed()) return;
         mainWindow.webContents.send(DESKTOP_WORKSPACE_IPC.transportEvent, event);
       },
+      // A warm machine whose relay dropped is released instead of reconnecting.
+      onTransportLost: (environmentId) => {
+        desktopWorkspaceClient?.reportTransportLost(environmentId);
+      },
     });
     desktopWorkspaceRelayManager = manager;
     return manager;
@@ -1300,7 +1305,11 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   const origin = desktopSettings.hubOrigin;
   if (origin === null) throw new Error("Desktop Hub is unavailable.");
   const [
-    { createDesktopWorkspaceMetadataCache, DesktopWorkspaceClient },
+    {
+      createDesktopWorkspaceMetadataCache,
+      createDesktopWorkspaceWarmSetStore,
+      DesktopWorkspaceClient,
+    },
     { withThreadContentPurges },
     threadContent,
   ] = await Promise.all([
@@ -1340,6 +1349,8 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
       createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
       threadContent,
     ),
+    // The last warm set, restored at the next launch.
+    warmSet: createDesktopWorkspaceWarmSetStore(DESKTOP_WORKSPACE_WARM_SET_PATH),
     // The renderer makes every connection and reports back; a command sent
     // here is all main does. Without a live app document nobody is asked, so
     // a connect fails and the demand state records no connection.
@@ -4622,8 +4633,17 @@ function registerIpcHandlers(): void {
     ipcMain.removeHandler(channel);
   }
   ipcMain.removeAllListeners(DESKTOP_WORKSPACE_IPC.publishThreadContent);
-  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getState, () =>
-    withDesktopWorkspace((handlers) => handlers.getState()),
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getState, (event) =>
+    withDesktopWorkspace(async (handlers) => {
+      const state = await handlers.getState();
+      // The app document's bridge reads the state right after subscribing to
+      // connection commands: from now on it receives them, so an owed warm
+      // restore may connect machines.
+      if (event.sender === desktopWorkspaceRendererContents()) {
+        desktopWorkspaceClient?.attachRenderer();
+      }
+      return state;
+    }),
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.refreshCatalog, () =>
     withDesktopWorkspace((handlers) => handlers.refreshCatalog()),

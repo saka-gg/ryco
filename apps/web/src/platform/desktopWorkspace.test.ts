@@ -680,6 +680,47 @@ describe("desktop workspace connection demand", () => {
     f.stop();
   });
 
+  it("holds a connect that arrives before the first state until that state names the machine", async () => {
+    vi.useFakeTimers();
+    let listener: ((command: DesktopWorkspaceConnectionCommand) => void) | undefined;
+    let answer!: (state: DesktopWorkspaceStateProjection) => void;
+    const report = vi.fn(async () => workspaceState(true));
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        desktopBridge: {
+          getDesktopWorkspaceState: () =>
+            new Promise<DesktopWorkspaceStateProjection>((resolve) => {
+              answer = resolve;
+            }),
+          onDesktopWorkspaceConnectionCommand: (next: typeof listener) => {
+            listener = next;
+            return () => {
+              listener = undefined;
+            };
+          },
+          reportDesktopWorkspaceConnection: report,
+        },
+      },
+    });
+    vi.spyOn(runtime, "readEnvironmentConnection").mockReturnValue(null);
+    const connect = vi
+      .spyOn(runtime, "connectDesktopWorkspaceEnvironment")
+      .mockRejectedValue(new Error("Relay unavailable"));
+    const stop = startDesktopWorkspaceBridge();
+    // A warm restore main started as soon as this document read its state.
+    listener?.({ environmentId, action: "connect", delayMs: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connect).not.toHaveBeenCalled();
+    expect(report).not.toHaveBeenCalled();
+
+    answer(workspaceState(true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connect).toHaveBeenCalledExactlyOnceWith({ environmentId, label: "Test node" });
+    expect(report).toHaveBeenCalledExactlyOnceWith({ environmentId, connected: false });
+    stop();
+  });
+
   it("cancels a delayed connect when release supersedes it", async () => {
     vi.useFakeTimers();
     vi.spyOn(runtime, "readEnvironmentConnection").mockReturnValue(null);

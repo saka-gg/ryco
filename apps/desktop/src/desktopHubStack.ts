@@ -43,6 +43,7 @@ export { DesktopNativeE2eeHandshakeService } from "./desktopNativeE2eeHandshake.
 export { createDesktopNativeSecretStore } from "./nativeSecretStore.ts";
 export { createDesktopWorkspaceMetadataCache } from "./desktopWorkspaceCache.ts";
 export { DesktopWorkspaceClient } from "./desktopWorkspaceClient.ts";
+export { createDesktopWorkspaceWarmSetStore } from "./desktopWorkspaceWarmSet.ts";
 export {
   createDesktopWorkspaceIpcHandlers,
   projectDesktopWorkspaceState,

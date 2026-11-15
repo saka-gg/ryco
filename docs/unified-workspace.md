@@ -68,8 +68,8 @@ again, so a Hub restart costs one reconnect per demanded environment rather than
 Backgrounding a native client releases non-retained connections; hosted Web does so once a tab has
 been hidden for 90 seconds.
 
-On hosted Web and Mobile, foreground or visibility recovery restores retained demand and then the
-last warm set: the up to three most recently used environments, never the catalog. The warm set
+On hosted Web, Mobile and Desktop, foreground or visibility recovery restores retained demand and
+then the last warm set: the up to three most recently used environments, never the catalog. The warm set
 comes back as preemptible leases that last 10 minutes unless use renews them, only after the
 environment in view has connected, and staggered after it. Warm leases take only free connections:
 they never displace a mounted view or other demand and never close a connection to make room.
@@ -87,6 +87,18 @@ it cached the same way, newest first, and returning to the home screen re-warms 
 machines. Mobile keeps the recently used environments in memory only, so a new process starts with
 none, and it re-warms only on returning to the foreground.
 
+Desktop remembers the warm set across launches: the up to three most recently used machines (a
+machine is used when a view or other demand retains it; the colocated machine, which Desktop
+reaches directly, never counts) are stored, newest first, in a small owner-only file of the
+Desktop client, for one Hub and account. Sign-out, a Hub answer that the session is signed out and
+an account revocation delete it; another account never reads it. Desktop restores the warm set
+once a launch's sign-in resume has listed the machines, on returning from the background, and after
+the app window's document is replaced (a reload or a crashed renderer), each time once and only
+after that document is ready to make connections; the machines must be listed, connectable and
+online. Desktop's main process does not know which machine is in view, so its restore does not wait
+for one: it is staggered, and a view opened meanwhile displaces a warm machine when it needs the
+slot. A warm machine whose relay drops is released instead of reconnecting.
+
 On Desktop, switching to another app or window does not background the client, so warm connections
 survive it. Minimizing or hiding the window, or locking the screen, backgrounds it after a
 three-minute grace period; sleeping does so at once, and any return to use ends it. Machine
@@ -96,8 +108,8 @@ and every 90 seconds while a window is in sight.
 Desktop's machine connections and relay transports live in the app window's document. When that
 document goes away (a reload, a crashed renderer, the window closed), the main process closes its
 transports and drops its scopes and connections, so the next document retains what it shows and
-connects again instead of finding them recorded as still connected. Without a live app window no
-connection is recorded as made.
+connects again instead of finding them recorded as still connected, and the last warm set is
+restored into it. Without a live app window no connection is recorded as made.
 
 A Desktop launch whose background sign-in resume cannot reach the Hub keeps the stored session and
 tries the resume again on a capped backoff (from about 5 seconds to 2 minutes, with jitter), and at
