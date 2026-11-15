@@ -57,6 +57,8 @@ async function staticGraph(entry: string) {
 const LAZY_FROM_MAIN = [
   "./desktopHubStack.ts",
   "./desktopHostedIdentity.ts",
+  // Its backoff is the relay reconnect policy, which reads the relay constants.
+  "./desktopHostedIdentityRetry.ts",
   // Its node-claim schemas share a contracts module with the Hub identity ones.
   "./desktopHubControl.ts",
   "./nativeSecurityHelper.ts",

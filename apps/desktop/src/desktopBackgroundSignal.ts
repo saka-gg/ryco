@@ -192,17 +192,27 @@ export interface DesktopWorkspaceActivity {
   readonly dispose: () => void;
 }
 
+/** Events after which the network or the Hub may be reachable again. */
+export type DesktopReturnEvent = "focus" | "resume" | "unlock";
+
 export function createDesktopWorkspaceActivity(input: {
   readonly setBackgrounded: (backgrounded: boolean) => void;
   /** Fire and forget: the caller owns error handling. */
   readonly refreshCatalog: () => void;
   /** Whether any window is currently visible and not minimized. */
   readonly isWindowInSight: () => boolean;
+  /**
+   * The machine woke, was unlocked, or a window gained focus: sockets open
+   * across the gap may be dead and a failed sign-in may succeed now. Unthrottled;
+   * the receiver throttles what it needs to. Fire and forget.
+   */
+  readonly onReturn?: (event: DesktopReturnEvent) => void;
   readonly graceMs?: number;
   readonly now?: () => number;
   readonly timers?: DesktopActivityTimers;
 }): DesktopWorkspaceActivity {
-  const handlers = [
+  const onReturn = input.onReturn;
+  const handlers: DesktopActivityHandler[] = [
     createDesktopBackgroundSignal({
       setBackgrounded: input.setBackgrounded,
       ...(input.graceMs === undefined ? {} : { graceMs: input.graceMs }),
@@ -214,6 +224,14 @@ export function createDesktopWorkspaceActivity(input: {
       ...(input.timers === undefined ? {} : { timers: input.timers }),
     }),
   ];
+  if (onReturn !== undefined) {
+    handlers.push({
+      handle: (event) => {
+        if (event === "focus" || event === "resume" || event === "unlock") onReturn(event);
+      },
+      dispose: () => undefined,
+    });
+  }
   const dispatch = (event: DesktopActivityEvent) => {
     for (const handler of handlers) handler.handle(event);
   };

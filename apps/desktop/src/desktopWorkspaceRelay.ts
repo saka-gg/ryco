@@ -582,6 +582,10 @@ export class DesktopWorkspaceRelayManager {
   }
 
   close(transportId: string): void {
+    this.#close(transportId, false);
+  }
+
+  #close(transportId: string, retryable: boolean): void {
     const prepared = this.#transports.get(transportId);
     if (!prepared) return;
     this.#transports.delete(transportId);
@@ -596,16 +600,36 @@ export class DesktopWorkspaceRelayManager {
         transportId,
         code: 1000,
         reason: "Workspace closed",
-        retryable: false,
+        retryable,
       });
     }
   }
 
+  /**
+   * Close every transport: the renderer document that held their handles is
+   * gone (reloaded, crashed, its window closed). Its transports would otherwise
+   * stay open, forward to a document that no longer knows them, keep the
+   * account session socket in use and count against the transport limit.
+   * Unlike `dispose`, what was learnt about compression stays: it belongs to
+   * the account session, not to a document, and the closes are retryable:
+   * nothing was refused, so a document that is still there after all (the
+   * signal was wrong) connects again by itself instead of holding sockets that
+   * were ended for good.
+   */
+  closeAll(): void {
+    this.#closeEvery(true);
+  }
+
+  /** An account or session change: every transport closes and nothing learnt is kept. */
   dispose(): void {
+    this.#closeEvery(false);
+    this.#compressionDisabledUntil.clear();
+  }
+
+  #closeEvery(retryable: boolean): void {
     // Closing publishes an event; snapshot ownership before reentrant listeners run.
     const transportIds = Array.from(this.#transports.keys());
-    for (const transportId of transportIds) this.close(transportId);
-    this.#compressionDisabledUntil.clear();
+    for (const transportId of transportIds) this.#close(transportId, retryable);
   }
 
   #compressionAllowed(environmentId: EnvironmentId): boolean {

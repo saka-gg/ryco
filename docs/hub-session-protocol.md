@@ -166,7 +166,9 @@ polling exactly as before (`HostedHubApi.hubFeatures`, `HUB_NATIVE_SESSION_FEATU
   hands the session to its owner to revalidate and opens again at most once a minute. The phone's
   upgrade is minted asynchronously before the socket exists
   (`@ryco/client-runtime/relay/deferredHubSessionSocket`); the Mac holds the socket in its main
-  process (`apps/desktop/src/desktopHubSession.ts`).
+  process (`apps/desktop/src/desktopHubSession.ts`). A network change makes the session check
+  itself at once instead of at its next heartbeat: on the phone its network-change event, on the
+  Mac a wake, an unlock or the app window's browser `online` event.
 
 ## Subscriptions and lifecycle
 

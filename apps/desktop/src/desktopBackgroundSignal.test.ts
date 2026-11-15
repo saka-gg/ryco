@@ -258,10 +258,12 @@ describe("desktop workspace activity wiring", () => {
     const state = { windowInSight: true };
     const setBackgrounded = vi.fn();
     const refreshCatalog = vi.fn();
+    const onReturn = vi.fn();
     const activity = createDesktopWorkspaceActivity({
       setBackgrounded,
       refreshCatalog,
       isWindowInSight: () => state.windowInSight,
+      onReturn,
       now: clock.now,
       timers: clock.timers,
     });
@@ -269,8 +271,29 @@ describe("desktop workspace activity wiring", () => {
     const power = new FakePower();
     activity.attachWindow(window);
     activity.attachPower(power);
-    return { clock, state, setBackgrounded, refreshCatalog, activity, window, power };
+    return { clock, state, setBackgrounded, refreshCatalog, onReturn, activity, window, power };
   }
+
+  it("reports every focus, wake and unlock as a return, unthrottled", () => {
+    const f = makeActivity();
+    f.window.emit("focus");
+    f.window.emit("focus");
+    f.power.emit("resume");
+    f.power.emit("unlock-screen");
+    f.window.emit("minimize");
+    f.window.emit("restore");
+    f.window.emit("show");
+    f.power.emit("lock-screen");
+    f.power.emit("suspend");
+    expect(f.onReturn.mock.calls).toEqual([["focus"], ["focus"], ["resume"], ["unlock"]]);
+  });
+
+  it("reports a wake with the window out of sight as a return too", () => {
+    const f = makeActivity();
+    f.state.windowInSight = false;
+    f.power.emit("resume");
+    expect(f.onReturn).toHaveBeenCalledExactlyOnceWith("resume");
+  });
 
   it("keeps warm connections when the app only loses focus", () => {
     const f = makeActivity();

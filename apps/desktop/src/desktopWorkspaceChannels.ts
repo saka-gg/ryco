@@ -26,4 +26,6 @@ export const DESKTOP_WORKSPACE_IPC = {
   closeTransport: "desktop:workspace-close-transport",
   reportConnection: "desktop:workspace-report-connection",
   transportEvent: "desktop:workspace-transport-event",
+  /** One-way: the app document saw the browser `online` event. */
+  networkOnline: "desktop:workspace-network-online",
 } as const;

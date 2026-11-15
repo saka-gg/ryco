@@ -93,6 +93,18 @@ three-minute grace period; sleeping does so at once, and any return to use ends 
 presence is refreshed when the window gains focus (at most every 30 seconds), on wake and unlock,
 and every 90 seconds while a window is in sight.
 
+Desktop's machine connections and relay transports live in the app window's document. When that
+document goes away (a reload, a crashed renderer, the window closed), the main process closes its
+transports and drops its scopes and connections, so the next document retains what it shows and
+connects again instead of finding them recorded as still connected. Without a live app window no
+connection is recorded as made.
+
+A Desktop launch whose background sign-in resume cannot reach the Hub keeps the stored session and
+tries the resume again on a capped backoff (from about 5 seconds to 2 minutes, with jitter), and at
+once on wake, unlock, network return or window focus (at most every 30 seconds), until it is signed
+in or the Hub answers that it is signed out. Sign-out stops it, and an account revocation is never
+retried.
+
 ## Cache and failure behavior
 
 The shared workspace index contains bounded project, worktree, thread-shell, and status summaries.

@@ -64,6 +64,7 @@ describe("Desktop workspace IPC boundary", () => {
       "closeTransport",
       "reportConnection",
       "transportEvent",
+      "networkOnline",
     ]);
     for (const forbidden of [
       "accessToken",

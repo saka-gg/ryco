@@ -93,6 +93,11 @@ function suppressQuitShortcut(event: KeyboardEvent): void {
 window.addEventListener("keydown", suppressQuitShortcut, true);
 window.addEventListener("keyup", suppressQuitShortcut, true);
 
+// Main has no network-change signal of its own; the browser's `online` event
+// tells it the account session socket should re-check itself (and a failed
+// sign-in resume may succeed now). One-way, carries nothing.
+window.addEventListener("online", () => ipcRenderer.send(DESKTOP_WORKSPACE_IPC.networkOnline));
+
 const startupTimingEnabled = process.env.RYCO_DESKTOP_STARTUP_TIMING_STDOUT === "1";
 const preloadStartMs = performance.now();
 if (startupTimingEnabled) {

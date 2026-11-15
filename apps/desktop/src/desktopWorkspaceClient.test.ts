@@ -583,6 +583,91 @@ describe("desktop workspace demand serialization", () => {
     expect(f.client.snapshot().demand.connections).toEqual([]);
   });
 
+  it("reconnects a reloaded renderer once the gone one is reset", async () => {
+    const f = fixture();
+    await f.client.resume();
+    const environmentId = node(2).environmentId;
+    const { leaseId } = await f.client.retainScope({
+      environmentId,
+      scope: { type: "interactive" },
+    });
+    expect(f.connectCalls).toHaveLength(1);
+    // A reloaded document retains again without releasing or reporting
+    // anything. Until main learns the old document is gone, the connection it
+    // made counts as standing and no connect command is sent.
+    await f.client.retainScope({ environmentId, scope: { type: "interactive" } });
+    expect(f.connectCalls).toHaveLength(1);
+    await f.client.setBackgrounded(true);
+    const catalogBefore = f.client.snapshot().catalog.map((entry) => entry.environmentId);
+
+    const reset = f.client.resetRenderer();
+
+    expect(reset.demand.leases).toEqual([]);
+    expect(reset.demand.connections.filter((entry) => entry.connected)).toEqual([]);
+    expect(reset.demand.backgrounded).toBe(true);
+    expect(reset.status).toBe("ready");
+    expect(reset.catalog.map((entry) => entry.environmentId)).toEqual(catalogBefore);
+    expect(
+      reset.catalog.find((entry) => entry.environmentId === environmentId)?.connectionState,
+    ).toBe("disconnected");
+    // Nobody is left to receive a release.
+    expect(f.releaseCalls).toEqual([]);
+    await expect(f.client.renewScope(leaseId)).rejects.toThrow("lease expired");
+
+    await f.client.setBackgrounded(false);
+    await f.client.retainScope({ environmentId, scope: { type: "interactive" } });
+    expect(f.connectCalls.map((call) => call.environmentId)).toEqual([
+      environmentId,
+      environmentId,
+    ]);
+    expect(f.client.snapshot().demand.connections.filter((entry) => entry.connected)).toEqual([
+      expect.objectContaining({ environmentId, connected: true }),
+    ]);
+  });
+
+  it("does not record a connection asked of a renderer that was reset meanwhile", async () => {
+    let complete!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    let calls = 0;
+    const f = fixture({ connect: () => (++calls === 1 ? pending : Promise.resolve()) });
+    await f.client.resume();
+    const environmentId = node(2).environmentId;
+    const first = f.client.retainScope({ environmentId, scope: { type: "interactive" } });
+    await vi.waitFor(() => expect(f.connectCalls).toHaveLength(1));
+    f.client.resetRenderer();
+    complete();
+    await first;
+    expect(f.client.snapshot().demand.connections.filter((entry) => entry.connected)).toEqual([]);
+
+    await f.client.retainScope({ environmentId, scope: { type: "interactive" } });
+    expect(f.connectCalls).toHaveLength(2);
+  });
+
+  it("records no connection when no renderer can be asked to make it", async () => {
+    let rendererPresent = false;
+    const f = fixture({
+      connect: async () => {
+        if (!rendererPresent) throw new Error("No app window");
+      },
+    });
+    await f.client.resume();
+    const environmentId = node(2).environmentId;
+    const { leaseId } = await f.client.retainScope({
+      environmentId,
+      scope: { type: "interactive" },
+    });
+    expect(f.client.snapshot().demand.connections.filter((entry) => entry.connected)).toEqual([]);
+    rendererPresent = true;
+    await f.client.renewScope(leaseId);
+    expect(f.connectCalls).toHaveLength(2);
+    expect(
+      f.client.snapshot().demand.connections.find((entry) => entry.environmentId === environmentId)
+        ?.connected,
+    ).toBe(true);
+  });
+
   it("rejects renewal of a removed lease so the renderer can reacquire demand", async () => {
     const f = fixture();
     await f.client.resume();
