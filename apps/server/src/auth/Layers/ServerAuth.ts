@@ -252,11 +252,9 @@ export const makeServerAuth = Effect.gen(function* () {
     );
 
   const authenticateRequest = (request: HttpServerRequest.HttpServerRequest) => {
-    const cookieToken =
-      request.cookies[sessions.cookieName] ??
-      sessions.legacyCookieNames
-        .map((cookieName) => request.cookies[cookieName])
-        .find((token): token is string => typeof token === "string" && token.length > 0);
+    const cookieToken = [sessions.cookieName, ...sessions.legacyCookieNames]
+      .map((cookieName) => request.cookies[cookieName])
+      .find((token): token is string => typeof token === "string" && token.length > 0);
     const bearerToken = parseBearerToken(request);
     const credential = cookieToken ?? bearerToken;
     if (!credential) {
