@@ -1,7 +1,8 @@
 /**
- * The web app's mutation hook: one request at a time per hook, with `onMutate`, `onSuccess`,
- * `onError` and `onSettled` callbacks and a state that re-renders the caller. It depends on no
- * query cache, so atom-backed modules use it without loading `queryClient`.
+ * The web app's mutation hook: with `onMutate`, `onSuccess`, `onError` and `onSettled` callbacks
+ * and a state that re-renders the caller. Its state follows the latest call; an earlier call that
+ * settles later still resolves its own promise and callbacks but no longer changes the state. It
+ * depends on no query cache, so atom-backed modules use it without loading `queryClient`.
  *
  * @module useMutation
  */
@@ -84,6 +85,7 @@ export function useMutation<TData = unknown, TVariables = void, TContext = unkno
   );
   const [, forceRender] = useReducer((tick: number) => tick + 1, 0);
   const mountedRef = useRef(true);
+  const latestCallRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -105,6 +107,7 @@ export function useMutation<TData = unknown, TVariables = void, TContext = unkno
       callbacks?: MutateCallbacks<TData, TVariables>,
     ): Promise<TData> => {
       const current = optionsRef.current;
+      const call = ++latestCallRef.current;
       setState({ status: "pending", data: undefined, error: null, variables });
       let context: TContext | undefined;
       try {
@@ -114,7 +117,9 @@ export function useMutation<TData = unknown, TVariables = void, TContext = unkno
         await callbacks?.onSuccess?.(data, variables);
         await current.onSettled?.(data, null, variables, context);
         await callbacks?.onSettled?.(data, null, variables);
-        setState({ status: "success", data, error: null, variables });
+        if (call === latestCallRef.current) {
+          setState({ status: "success", data, error: null, variables });
+        }
         return data;
       } catch (rawError) {
         const error = toError(rawError);
@@ -122,7 +127,9 @@ export function useMutation<TData = unknown, TVariables = void, TContext = unkno
         await callbacks?.onError?.(error, variables);
         await current.onSettled?.(undefined, error, variables, context);
         await callbacks?.onSettled?.(undefined, error, variables);
-        setState({ status: "error", data: undefined, error, variables });
+        if (call === latestCallRef.current) {
+          setState({ status: "error", data: undefined, error, variables });
+        }
         throw error;
       }
     },
@@ -142,6 +149,8 @@ export function useMutation<TData = unknown, TVariables = void, TContext = unkno
   );
 
   const reset = useCallback(() => {
+    // Calls still in flight no longer own the state.
+    latestCallRef.current += 1;
     setState(INITIAL_MUTATION_STATE as MutationState<TData, TVariables>);
   }, [setState]);
 
