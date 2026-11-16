@@ -256,6 +256,7 @@ import {
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
 import { resolveDesktopAppBranding } from "./appBranding.ts";
+import { createAppMenuActionDispatch, createAppWindowRegistry } from "./appWindows.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
 import {
   createWindowTranslucencyController,
@@ -558,9 +559,7 @@ const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
     else onDesktopNetworkMayHaveChanged("wake");
   },
   isWindowInSight: () =>
-    BrowserWindow.getAllWindows().some(
-      (window) => !window.isDestroyed() && window.isVisible() && !window.isMinimized(),
-    ),
+    appWindows.list().some((window) => window.isVisible() && !window.isMinimized()),
 });
 // The Hub connector configuration the running backend was launched with.
 let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
@@ -614,6 +613,16 @@ let backendEverReady = false;
 const appShellUsableContents = new WeakSet<Electron.WebContents>();
 // The app's own pages (one per `createWindow`), which load the preload and answer menu actions.
 const appWindowContents = new WeakSet<Electron.WebContents>();
+// The app's windows (one per `createWindow`). `BrowserWindow.getAllWindows()` also lists the
+// embedded browser's hidden tab hosts, overlays and sign-in popups: never count or pick app
+// windows from it.
+const appWindows = createAppWindowRegistry<BrowserWindow>({
+  // Outside macOS the app quits with its last window, whatever non-app windows remain
+  // (`window-all-closed` would wait for the hidden tab hosts, which live until quit).
+  onLastClosed: () => {
+    if (process.platform !== "darwin" && !isQuitting) app.quit();
+  },
+});
 // Reopens the window where it was (bounds and maximized state).
 const desktopWindowState = createDesktopWindowStateStore({
   filePath: DESKTOP_WINDOW_STATE_PATH,
@@ -1905,7 +1914,7 @@ async function waitForDevelopmentWindowReady(): Promise<BackendReadySource | "ht
 }
 
 function ensureDevelopmentInitialWindowOpen(): void {
-  const existingWindow = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  const existingWindow = appWindows.pick(mainWindow);
   if (!isDevelopment || existingWindow !== null || developmentInitialWindowOpenInFlight !== null) {
     return;
   }
@@ -1928,7 +1937,7 @@ function ensureDevelopmentInitialWindowOpen(): void {
       console.warn("[desktop] readiness check timed out during dev bootstrap", error);
     })
     .finally(() => {
-      if (!(mainWindow ?? BrowserWindow.getAllWindows()[0])) {
+      if (appWindows.pick(mainWindow) === null) {
         mainWindow = createWindow();
         writeDesktopLogHeader("bootstrap main window created");
       }
@@ -1945,7 +1954,7 @@ function ensurePackagedBootstrapWindowOpen(reason: string): BrowserWindow | null
     return null;
   }
 
-  const existingWindow = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  const existingWindow = appWindows.pick(mainWindow);
   if (existingWindow !== null) {
     return existingWindow;
   }
@@ -2095,7 +2104,7 @@ function recoverCrashedAppWindow(window: BrowserWindow, attempt: RendererRecover
  */
 function loadPackagedBackendAppWindowOnBind(): void {
   if (isDevelopment) return;
-  const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  const window = appWindows.pick(mainWindow);
   if (window) loadPackagedBackendAppWindow(window, "backend-bound", "bound");
 }
 
@@ -2106,8 +2115,7 @@ function loadPackagedBackendAppWindowOnBind(): void {
  */
 function returnEarlyLoadedWindowsToBootPage(child: ChildProcess.ChildProcess): void {
   if (isDevelopment) return;
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (window.isDestroyed()) continue;
+  for (const window of appWindows.list()) {
     const contents = window.webContents;
     if (
       appLoadRequestedFrom.get(contents)?.backend !== child ||
@@ -2595,26 +2603,17 @@ function registerDesktopProtocol(): void {
   desktopProtocolRegistered = true;
 }
 
+// The focused window only when it is an app window: a popped-out browser tab has no listener.
+const appMenuActions = createAppMenuActionDispatch<BrowserWindow>({
+  target: () => appWindows.pick(BrowserWindow.getFocusedWindow(), mainWindow),
+  isShellUsable: (window) => appShellUsableContents.has(window.webContents),
+  send: (window, action) => window.webContents.send(MENU_ACTION_CHANNEL, action),
+  reveal: revealWindow,
+  open: openMainWindow,
+});
+
 function dispatchMenuAction(action: string): void {
-  const existingWindow =
-    BrowserWindow.getFocusedWindow() ?? mainWindow ?? BrowserWindow.getAllWindows()[0];
-  const targetWindow = existingWindow ?? createWindow();
-  if (!existingWindow) {
-    mainWindow = targetWindow;
-  }
-
-  const send = () => {
-    if (targetWindow.isDestroyed()) return;
-    targetWindow.webContents.send(MENU_ACTION_CHANNEL, action);
-    revealWindow(targetWindow);
-  };
-
-  if (targetWindow.webContents.isLoadingMainFrame()) {
-    targetWindow.webContents.once("did-finish-load", send);
-    return;
-  }
-
-  send();
+  appMenuActions.dispatch(action);
 }
 
 function handleCheckForUpdatesMenuClick(): void {
@@ -2631,9 +2630,7 @@ function handleCheckForUpdatesMenuClick(): void {
     return;
   }
 
-  if (!BrowserWindow.getAllWindows().length) {
-    mainWindow = createWindow();
-  }
+  if (appWindows.pick(mainWindow) === null) openMainWindow();
   void checkForUpdatesFromMenu();
 }
 
@@ -2865,7 +2862,7 @@ function registerDesktopAuthorizationProtocol(): void {
 
 function handleDesktopAuthorizationCallback(rawUrl: string): boolean {
   if (!desktopAuthorizationBroker.accept(rawUrl)) return false;
-  const window = mainWindow ?? BrowserWindow.getAllWindows()[0];
+  const window = appWindows.pick(mainWindow);
   if (window) revealWindow(window);
   return true;
 }
@@ -2906,11 +2903,19 @@ function revealWindow(window: BrowserWindow): void {
 
 /** Bring the main window forward, opening one when none exists (dock or notification click). */
 function revealOrOpenMainWindow(): void {
-  const existingWindow = mainWindow ?? BrowserWindow.getAllWindows()[0];
+  const existingWindow = appWindows.pick(mainWindow);
   if (existingWindow) {
     revealWindow(existingWindow);
     return;
   }
+  openMainWindow();
+}
+
+/**
+ * Open the app window the way startup does: a packaged build shows the boot page and loads the
+ * app once the backend serves (a bare `createWindow()` would stay on the boot page).
+ */
+function openMainWindow(): void {
   if (isDevelopment) {
     ensureDevelopmentInitialWindowOpen();
     return;
@@ -3049,8 +3054,7 @@ function logDesktopRendererStartupPerformance(
 }
 
 function emitUpdateState(): void {
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (window.isDestroyed()) continue;
+  for (const window of appWindows.list()) {
     window.webContents.send(UPDATE_STATE_CHANNEL, updateState);
   }
   // Repeats are dropped per pipe, so re-emitting for a loaded window sends nothing.
@@ -3435,9 +3439,9 @@ function handleAppUpdateRequest(
 
 /** Nobody may see the window's countdown: say so natively. The countdown runs either way. */
 function notifyRemoteInstallCountdown(remoteInstall: DesktopRemoteInstallState): void {
-  const windowShown = BrowserWindow.getAllWindows().some(
-    (window) => !window.isDestroyed() && window.isVisible() && !window.isMinimized(),
-  );
+  const windowShown = appWindows
+    .list()
+    .some((window) => window.isVisible() && !window.isMinimized());
   if (windowShown || !Notification.isSupported()) return;
   closeRemoteInstallNotification();
   const native = new Notification({
@@ -3764,8 +3768,8 @@ async function showBackendStartupFailure(
   detail: string,
   fatalCode: string | null = null,
 ): Promise<void> {
-  const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
-  if (window && !window.isDestroyed()) revealWindow(window);
+  const window = appWindows.pick(mainWindow);
+  if (window) revealWindow(window);
   // A newer Ryco upgraded the database: offer its newest backup this build opens, where an
   // in-place restore can work at all (it needs lsof or /proc to see other processes).
   const backup =
@@ -3853,11 +3857,9 @@ let databaseCompactionAbort: AbortController | null = null;
 
 function publishDatabaseCompactionState(state: DesktopDatabaseCompactionState): void {
   databaseCompactionState = state;
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) {
-      window.webContents.send(DATABASE_COMPACTION_STATE_CHANNEL, state);
-      window.setProgressBar(state.phase === "running" ? (state.fraction ?? 2) : -1);
-    }
+  for (const window of appWindows.list()) {
+    window.webContents.send(DATABASE_COMPACTION_STATE_CHANNEL, state);
+    window.setProgressBar(state.phase === "running" ? (state.fraction ?? 2) : -1);
   }
 }
 
@@ -4433,6 +4435,8 @@ function registerIpcHandlers(): void {
     // Every report follows the primary shell becoming usable.
     appShellUsableContents.add(event.sender);
     rendererCrashRecoveries.get(event.sender)?.noteShellUsable();
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (appWindows.has(window)) appMenuActions.shellUsable(window);
     markDesktopStartupPhase(
       `desktop.window.app.${report.phase}`,
       formatRendererStartupMarks(report.marks),
@@ -4833,8 +4837,8 @@ function registerIpcHandlers(): void {
     ipcMain,
     onWindowFocus: (listener) => app.on("browser-window-focus", listener),
     onBeforeQuit: (listener) => app.on("before-quit", listener),
-    getMainWindow: () => mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null,
-    getAllWindows: () => BrowserWindow.getAllWindows(),
+    getMainWindow: () => appWindows.pick(mainWindow),
+    getAllWindows: () => appWindows.list(),
     revealWindow,
     notificationsSupported: () => Notification.isSupported(),
     showNotification: ({ title, body, onClick, onClose }) => {
@@ -4935,7 +4939,8 @@ function syncWindowAppearance(window: BrowserWindow): void {
 }
 
 function syncAllWindowAppearance(): void {
-  for (const window of BrowserWindow.getAllWindows()) {
+  // Not the overlays (transparent) or browser tab hosts (no title bar overlay to set).
+  for (const window of appWindows.list()) {
     syncWindowAppearance(window);
   }
 }
@@ -5004,6 +5009,7 @@ function createWindow(): BrowserWindow {
     },
   });
   appWindowContents.add(window.webContents);
+  appWindows.track(window);
   desktopWindowState.track(window, restoredWindowState);
 
   const quitGuard = createQuitShortcutGuard({
@@ -5336,8 +5342,8 @@ app.on("second-instance", (_event, commandLine, _workingDirectory, additionalDat
     callbackUri: desktopAuthorizationCallbackUri(desktopAuthorizationVariant()),
   });
   if (callback !== null) handleDesktopAuthorizationCallback(callback);
-  const [existing] = BrowserWindow.getAllWindows();
-  if (existing === undefined) return;
+  const existing = appWindows.pick(mainWindow);
+  if (existing === null) return;
   if (existing.isMinimized()) existing.restore();
   existing.focus();
 });
@@ -5737,11 +5743,7 @@ const quitGuardRequester = createQuitGuardRequester<Electron.WebContents>({
 
 /** The app window whose renderer can answer: shell reported usable, not crashed or destroyed. */
 function findQuitGuardWindow(): { window: BrowserWindow; contents: Electron.WebContents } | null {
-  const candidates = [
-    BrowserWindow.getFocusedWindow(),
-    mainWindow,
-    ...BrowserWindow.getAllWindows(),
-  ];
+  const candidates = [BrowserWindow.getFocusedWindow(), mainWindow, ...appWindows.list()];
   for (const window of candidates) {
     if (!window || window.isDestroyed()) continue;
     const contents = window.webContents;
@@ -5854,11 +5856,9 @@ app
     handleFatalStartupError("whenReady", error);
   });
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin" && !isQuitting) {
-    app.quit();
-  }
-});
+// The last app window's `closed` decides whether to quit (`appWindows`); without a listener
+// here Electron would quit on every platform once no window at all is left.
+app.on("window-all-closed", () => undefined);
 
 // Log only: Chromium restarts a GPU or utility process itself.
 app.on("child-process-gone", (_event, details) => {

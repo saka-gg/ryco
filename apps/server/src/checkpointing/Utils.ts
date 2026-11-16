@@ -5,6 +5,12 @@ import { CheckpointRef, ProjectId, type ThreadId } from "@ryco/contracts";
 export const RYCO_REFS_PREFIX = "refs/ryco";
 export const CHECKPOINT_REFS_PREFIX = `${RYCO_REFS_PREFIX}/checkpoints`;
 export const FORK_PIN_REFS_PREFIX = `${RYCO_REFS_PREFIX}/forks`;
+/**
+ * The pull request heads Ryco last fetched into a local branch, per remote and number, so the
+ * next fetch can tell a branch nobody committed to (an ancestor of the earlier head) from one
+ * with commits of its own after the head was force-pushed.
+ */
+export const PULL_REQUEST_HEAD_REFS_PREFIX = `${RYCO_REFS_PREFIX}/pull-heads`;
 
 export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
   return CheckpointRef.make(

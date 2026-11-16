@@ -315,6 +315,12 @@ export interface GitDeleteBranchInput {
   force?: boolean;
 }
 
+/**
+ * Fetches a pull request's head and points the local branch `branch` at it: creates
+ * it, or moves it when every commit it has is one the head has or had when Ryco last
+ * fetched it (so a force-pushed head replaces it). A branch with commits of its own
+ * is left as it is.
+ */
 export interface GitFetchPullRequestBranchInput {
   cwd: string;
   prNumber: number;
@@ -332,6 +338,13 @@ export interface GitFetchRemoteBranchInput {
   remoteName: string;
   remoteBranch: string;
   localBranch: string;
+  /**
+   * An existing `localBranch` moves to the fetched head only when every commit it
+   * has is one the remote branch has or had before this fetch (a force-pushed or
+   * rebased head still replaces it); one with commits of its own is left as it is.
+   * Without it the branch is reset to the head (`gh pr checkout --force`).
+   */
+  keepLocalCommits?: boolean;
 }
 
 export interface GitFetchRemoteTrackingBranchInput {
@@ -525,7 +538,8 @@ function splitNullSeparatedPaths(input: string, truncated: boolean): string[] {
   return parts.filter((value) => value.length > 0);
 }
 
-function chunkPathsForGitCheckIgnore(relativePaths: ReadonlyArray<string>): string[][] {
+/** Splits paths into `git check-ignore --stdin -z` inputs of bounded size. */
+export function chunkPathsForGitCheckIgnore(relativePaths: ReadonlyArray<string>): string[][] {
   const chunks: string[][] = [];
   let chunk: string[] = [];
   let chunkBytes = 0;

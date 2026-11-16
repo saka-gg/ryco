@@ -228,6 +228,15 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
       };
     });
 
+  /**
+   * Why a guarded write that requires a live (not revoked, not expired) integration matched no
+   * row. Revocation is permanent, so a row that is still there and not revoked had expired.
+   */
+  const failUnusable = (integrationId: AgentControlIntegrationId) =>
+    getStored(integrationId).pipe(
+      Effect.flatMap((stored) => fail(stored.revokedAt !== null ? "revoked" : "expired")),
+    );
+
   const update: AgentControlExternalIntegrationServiceShape["update"] = (input) =>
     Effect.gen(function* () {
       yield* policy.requireEnabled("external integration update");
@@ -247,10 +256,25 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
       };
       if (next.activeTaskLimit < next.activeTaskCount) return yield* fail("capacity-exhausted");
       yield* validateConfiguration(next);
-      const replaced = yield* repository.replaceIntegration(next);
-      if (!replaced) return yield* fail("not-found");
+      // Writes the editable columns only; the SQL re-checks the limit against the live count.
+      const updated = yield* repository.updateIntegrationSettings({
+        integrationId: next.integrationId,
+        displayName: next.displayName,
+        clientKind: next.clientKind,
+        projectScope: next.projectScope,
+        capabilities: next.capabilities,
+        rateLimitPerMinute: next.rateLimitPerMinute,
+        activeTaskLimit: next.activeTaskLimit,
+        expiresAt: next.expiresAt,
+        updatedAt: next.updatedAt,
+      });
+      if (!updated) {
+        // Deleted meanwhile reports not-found; otherwise a reservation raced past the new limit.
+        yield* getStored(next.integrationId);
+        return yield* fail("capacity-exhausted");
+      }
       yield* PubSub.publish(changes, next.integrationId);
-      return { integration: toPublicIntegration(next) };
+      return { integration: toPublicIntegration(yield* getStored(next.integrationId)) };
     });
 
   const resumePairing: AgentControlExternalIntegrationServiceShape["resumePairing"] = (
@@ -265,21 +289,17 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
       }
       const now = new Date();
       const pairingCode = generateAgentControlPairingCode();
-      const next: StoredAgentControlExternalIntegration = {
-        ...current,
-        pairingState: "pending",
+      const restarted = yield* repository.restartPairing({
+        integrationId,
         pairingCodeHash: pairingCodeHash(integrationId, pairingCode),
         pairingCodeExpiresAt: new Date(
           now.getTime() + AGENT_CONTROL_EXTERNAL_PAIRING_CODE_TTL_MS,
         ).toISOString(),
-        pairedAt: null,
-        credentialAudience: null,
-        credentialHash: null,
-        updatedAt: now.toISOString(),
-      };
-      yield* repository.replaceIntegration(next);
+        now: now.toISOString(),
+      });
+      if (!restarted) return yield* failUnusable(integrationId);
       yield* PubSub.publish(changes, integrationId);
-      return { detail: detailFor(next), pairingCode };
+      return { detail: detailFor(yield* getStored(integrationId)), pairingCode };
     });
 
   const revoke: AgentControlExternalIntegrationServiceShape["revoke"] = (integrationId) =>
@@ -287,20 +307,13 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
       yield* policy.requireEnabled("external integration revoke");
       const current = yield* getStored(integrationId);
       if (current.revokedAt !== null) return { integration: toPublicIntegration(current) };
-      const now = new Date().toISOString();
-      const next: StoredAgentControlExternalIntegration = {
-        ...current,
-        revokedAt: now,
-        pairingState: "unpaired",
-        pairingCodeHash: null,
-        pairingCodeExpiresAt: null,
-        credentialAudience: null,
-        credentialHash: null,
-        updatedAt: now,
-      };
-      yield* repository.replaceIntegration(next);
-      yield* PubSub.publish(changes, integrationId);
-      return { integration: toPublicIntegration(next) };
+      const revoked = yield* repository.revokeIntegration({
+        integrationId,
+        now: new Date().toISOString(),
+      });
+      // A miss means a concurrent revoke won; the re-read reports that revocation.
+      if (revoked) yield* PubSub.publish(changes, integrationId);
+      return { integration: toPublicIntegration(yield* getStored(integrationId)) };
     });
 
   const deleteIntegration: AgentControlExternalIntegrationServiceShape["delete"] = (
@@ -357,19 +370,12 @@ const makeAgentControlExternalIntegration = Effect.gen(function* () {
         return yield* fail("expired");
       }
       const credential = generateAgentControlExternalCredential();
-      const now = new Date().toISOString();
-      const next: StoredAgentControlExternalIntegration = {
-        ...current,
-        pairingState: "paired",
-        pairingCodeHash: null,
-        pairingCodeExpiresAt: null,
-        pairedAt: now,
-        credentialAudience: AGENT_CONTROL_EXTERNAL_CREDENTIAL_AUDIENCE,
+      const rotated = yield* repository.rotateCredential({
+        integrationId,
         credentialHash: hashAgentControlExternalSecret(credential),
-        updatedAt: now,
-      };
-      const replaced = yield* repository.replaceIntegration(next);
-      if (!replaced) return yield* fail("not-found");
+        now: new Date().toISOString(),
+      });
+      if (!rotated) return yield* failUnusable(integrationId);
       yield* PubSub.publish(changes, integrationId);
       return { integrationId, credential: Redacted.make(credential) };
     });

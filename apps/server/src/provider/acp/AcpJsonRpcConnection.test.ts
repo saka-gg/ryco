@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, Stream } from "effect";
+import { Deferred, Effect, Stream } from "effect";
 import type { ChildProcessSpawner } from "effect/process";
 import { describe, expect } from "vite-plus/test";
 
@@ -640,6 +640,100 @@ describe("AcpSessionRuntime", () => {
       Effect.ensuring(Effect.sync(() => rmSync(tempDir, { recursive: true, force: true }))),
     );
   });
+  it.live("keeps answering while the agent writes more to stderr than a pipe holds", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+      // The mock answers only once its stderr write is flushed, as a blocking writer would.
+      const result = yield* runtime
+        .prompt({ prompt: [{ type: "text", text: "hi" }] })
+        .pipe(Effect.timeout("15 seconds"));
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: bunExe,
+            args: [mockAgentPath],
+            env: { RYCO_ACP_PROMPT_STDERR_BYTES: String(4 * 1024 * 1024) },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("settles an events mark only once every earlier event is consumed", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "hi" }] });
+      const reached = yield* runtime.markEvents;
+      expect(yield* Deferred.isDone(reached)).toBe(false);
+
+      const events = Array.from(
+        yield* Stream.runCollect(
+          runtime.getEvents().pipe(Stream.takeUntil((event) => event._tag === "EventsMark")),
+        ),
+      );
+      expect(events.map((event) => event._tag)).toEqual([
+        "PlanUpdated",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+        "EventsMark",
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: { command: bunExe, args: [mockAgentPath] },
+          cwd: process.cwd(),
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  for (const [ending, expected] of [
+    ["3", 3],
+    ["SIGKILL", undefined],
+  ] as const) {
+    it.live(`reports an agent that ends on its own (${ending}) through onProcessExit`, () =>
+      Effect.gen(function* () {
+        const exited = yield* Deferred.make<number | undefined>();
+        yield* Effect.gen(function* () {
+          const runtime = yield* AcpSessionRuntime;
+          yield* runtime.start();
+          yield* runtime.prompt({ prompt: [{ type: "text", text: "hi" }] });
+          const exitCode = yield* Deferred.await(exited).pipe(Effect.timeout("10 seconds"));
+          expect(exitCode).toBe(expected);
+        }).pipe(
+          Effect.provide(
+            AcpSessionRuntime.layer({
+              spawn: {
+                command: bunExe,
+                args: [mockAgentPath],
+                env: { RYCO_ACP_EXIT_AFTER_PROMPT: ending },
+              },
+              cwd: process.cwd(),
+              clientInfo: { name: "ryco-test", version: "0.0.0" },
+              authMethodId: "test",
+              onProcessExit: (exitCode) => Deferred.succeed(exited, exitCode).pipe(Effect.asVoid),
+            }),
+          ),
+          Effect.scoped,
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  }
+
   it.live("fails a startup phase that does not answer in time with an actionable message", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime;

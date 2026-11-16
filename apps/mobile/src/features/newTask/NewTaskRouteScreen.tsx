@@ -73,6 +73,7 @@ import {
   type NewTaskLaunchDraft,
 } from "./newTaskLaunch";
 import { createNewTaskLaunchDeps } from "./newTaskLaunchRuntime";
+import { startNewTaskFromSource } from "./newTaskSourceStart";
 import { NewTaskComposer } from "./NewTaskComposer";
 import { NewTaskContextSheet, type NewTaskWorktreeSelection } from "./NewTaskContextSheet";
 import {
@@ -796,64 +797,68 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     const previous = sourceThread.current;
     const threadId = previous?.key === sourceKey ? previous.threadId : newThreadId();
     sourceThread.current = { key: sourceKey, threadId };
+    const showFailure = (error: unknown, fallback: string) =>
+      setFailure({
+        message:
+          error instanceof Error && error.message.trim().length > 0 ? error.message : fallback,
+      });
+    // Built before the node makes anything: a draft that cannot start fails here, not after an
+    // empty worktree and thread exist.
+    let baseAttempt: NewTaskAttempt;
+    try {
+      baseAttempt = createAttempt(threadId);
+    } catch (error) {
+      showFailure(error, "The task could not be started. Your draft is still here.");
+      return;
+    }
+    const draft: NewTaskLaunchDraft = {
+      environmentId: baseAttempt.environmentId,
+      projectId,
+      newProjectPath: "",
+      newProjectTitle: "",
+      worktree: { kind: "local" },
+      newBranch: "",
+      baseBranch: "",
+      prompt,
+      attachments: newTaskDraftImages(attachments),
+      modelSelection,
+      runtimeMode,
+      interactionMode: selectedInteractionMode,
+      ...(taskLink ? { task: taskLink } : {}),
+    };
     setStartingFromSource(true);
     setFailure(null);
-    void createSourceWorktree(environment.environmentId, project.id, intent, threadId).then(
-      (created) => {
-        // The node made the worktree and its thread: the task goes into it even when the sheet
-        // was closed meanwhile, so no empty chat is left behind.
+    void startNewTaskFromSource({
+      attempt: baseAttempt,
+      createWorktree: () =>
+        createSourceWorktree(environment.environmentId, project.id, intent, threadId),
+      // The node made the worktree and its thread: the task goes into it even when the sheet
+      // was closed meanwhile, so no empty chat is left behind.
+      launch: (attempt) => {
         if (mounted.current) setStartingFromSource(false);
-        const attempt: NewTaskAttempt = {
-          ...createAttempt(created.sessionId),
-          worktree: { kind: "local" },
-          threadCommandAccepted: true,
-          threadReady: true,
-          worktreeAttached: true,
-          // The node made the thread in full access and default modes: the chosen ones are
-          // written to it before the first turn.
-          threadSettingsPending: true,
-        };
-        const draft: NewTaskLaunchDraft = {
-          environmentId: attempt.environmentId,
-          projectId,
-          newProjectPath: "",
-          newProjectTitle: "",
-          worktree: { kind: "local" },
-          newBranch: "",
-          baseBranch: "",
-          prompt,
-          attachments: newTaskDraftImages(attachments),
-          modelSelection,
-          runtimeMode,
-          interactionMode: selectedInteractionMode,
-          ...(taskLink ? { task: taskLink } : {}),
-        };
         startNewTaskLaunch({
           attempt,
           draft,
           deps: createNewTaskLaunchDeps(attempt.environmentId),
         });
-        if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
-        if (!mounted.current) return;
-        useStore.getState().setActiveEnvironmentId(attempt.environmentId);
-        navigation.dispatch(
-          StackActions.replace("Thread", {
-            environmentId: attempt.environmentId,
-            threadId: attempt.threadId,
-          }),
-        );
       },
-      (error: unknown) => {
+      onFailure: (error) => {
         if (!mounted.current) return;
         setStartingFromSource(false);
-        setFailure({
-          message:
-            error instanceof Error && error.message.trim().length > 0
-              ? error.message
-              : "The worktree could not be created. Your draft is still here.",
-        });
+        showFailure(error, "The worktree could not be created. Your draft is still here.");
       },
-    );
+    }).then((attempt) => {
+      if (!attempt) return;
+      if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
+      if (!mounted.current) return;
+      useStore.getState().setActiveEnvironmentId(attempt.environmentId);
+      navigation.dispatch(
+        StackActions.replace("Thread", {
+          environmentId: attempt.environmentId,
+          threadId: attempt.threadId,
+        }),
+      );
+    });
   };
 
   const send = () => {

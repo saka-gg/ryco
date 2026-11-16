@@ -33,6 +33,20 @@ export const StoredAgentControlExternalIntegration = Schema.Struct({
 export type StoredAgentControlExternalIntegration =
   typeof StoredAgentControlExternalIntegration.Type;
 
+/** The columns an owner edits; never revocation, pairing, credential or usage state. */
+export type AgentControlExternalIntegrationSettings = Pick<
+  StoredAgentControlExternalIntegration,
+  | "integrationId"
+  | "displayName"
+  | "clientKind"
+  | "projectScope"
+  | "capabilities"
+  | "rateLimitPerMinute"
+  | "activeTaskLimit"
+  | "expiresAt"
+  | "updatedAt"
+>;
+
 export const StoredAgentControlExternalTask = Schema.Struct({
   taskId: AgentControlExternalTaskId,
   integrationId: AgentControlIntegrationId,
@@ -79,9 +93,30 @@ export interface AgentControlExternalRepositoryShape {
     ReadonlyArray<StoredAgentControlExternalIntegration>,
     AgentControlExternalRepositoryError
   >;
-  readonly replaceIntegration: (
-    integration: StoredAgentControlExternalIntegration,
+  // Each mutation of an existing integration writes only its own columns, guarded in SQL, so a
+  // stale read can never write back a revocation, a credential, the task counter or last use.
+  /** Writes the owner-editable columns, only while the active task count fits the new limit. */
+  readonly updateIntegrationSettings: (
+    settings: AgentControlExternalIntegrationSettings,
   ) => Effect.Effect<boolean, AgentControlExternalRepositoryError>;
+  /** Drops the credential and issues a new pairing code, only while not revoked or expired. */
+  readonly restartPairing: (input: {
+    readonly integrationId: AgentControlIntegrationId;
+    readonly pairingCodeHash: AgentControlExternalSecretHash;
+    readonly pairingCodeExpiresAt: IsoDateTime;
+    readonly now: IsoDateTime;
+  }) => Effect.Effect<boolean, AgentControlExternalRepositoryError>;
+  /** Revokes and drops all pairing and credential material, only while not yet revoked. */
+  readonly revokeIntegration: (input: {
+    readonly integrationId: AgentControlIntegrationId;
+    readonly now: IsoDateTime;
+  }) => Effect.Effect<boolean, AgentControlExternalRepositoryError>;
+  /** Replaces the credential, only while not revoked or expired. */
+  readonly rotateCredential: (input: {
+    readonly integrationId: AgentControlIntegrationId;
+    readonly credentialHash: AgentControlExternalSecretHash;
+    readonly now: IsoDateTime;
+  }) => Effect.Effect<boolean, AgentControlExternalRepositoryError>;
   readonly deleteIntegration: (
     integrationId: AgentControlIntegrationId,
   ) => Effect.Effect<boolean, AgentControlExternalRepositoryError>;

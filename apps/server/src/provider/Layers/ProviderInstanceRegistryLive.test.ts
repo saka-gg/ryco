@@ -33,7 +33,7 @@ import {
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
 } from "@ryco/contracts";
-import { Deferred, Effect, Exit, Layer, Schema, Scope } from "effect";
+import { Deferred, Effect, Exit, Fiber, Layer, Schema, Scope } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../../config.ts";
@@ -409,6 +409,21 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
 describe("ProviderInstanceRegistryLive — teardown", () => {
   const fakeDriverKind = ProviderDriverKind.make("fakeTeardown");
 
+  const makeFakeInstance = (input: {
+    readonly instanceId: ProviderInstance["instanceId"];
+    readonly displayName: ProviderInstance["displayName"];
+    readonly enabled: boolean;
+  }): ProviderInstance => ({
+    instanceId: input.instanceId,
+    driverKind: fakeDriverKind,
+    continuationIdentity: { driverKind: fakeDriverKind, continuationKey: input.instanceId },
+    displayName: input.displayName,
+    enabled: input.enabled,
+    snapshot: {} as never,
+    adapter: {} as never,
+    textGeneration: {} as never,
+  });
+
   /**
    * A driver whose instances hold their teardown until every instance's
    * teardown has started. Sequential teardown can never get past the first
@@ -439,16 +454,7 @@ describe("ProviderInstanceRegistryLive — teardown", () => {
             input.finished.push(instanceId);
           }),
         );
-        return {
-          instanceId,
-          driverKind: fakeDriverKind,
-          continuationIdentity: { driverKind: fakeDriverKind, continuationKey: instanceId },
-          displayName,
-          enabled,
-          snapshot: {} as never,
-          adapter: {} as never,
-          textGeneration: {} as never,
-        } satisfies ProviderInstance;
+        return makeFakeInstance({ instanceId, displayName, enabled });
       }),
   });
 
@@ -500,6 +506,67 @@ describe("ProviderInstanceRegistryLive — teardown", () => {
 
       yield* Scope.close(registryScope, Exit.void);
       expect(started).toEqual(["fake_a", "fake_b"]);
+    }),
+  );
+
+  it.live("hides a replaced instance from lookups while its replacement builds", () =>
+    Effect.gen(function* () {
+      const replacementStarted = yield* Deferred.make<void>();
+      const releaseReplacement = yield* Deferred.make<void>();
+      const lookups: { current: Effect.Effect<ProviderInstance | undefined> | undefined } = {
+        current: undefined,
+      };
+      const seenWhileClosing: Array<ProviderInstance | undefined> = [];
+      let creates = 0;
+      const driver: AnyProviderDriver = {
+        driverKind: fakeDriverKind,
+        metadata: { displayName: "Fake rebuild" },
+        configSchema: Schema.Struct({}),
+        defaultConfig: () => ({}),
+        create: ({ instanceId, displayName, enabled }) =>
+          Effect.gen(function* () {
+            creates++;
+            if (creates > 1) {
+              yield* Deferred.succeed(replacementStarted, undefined);
+              yield* Deferred.await(releaseReplacement);
+            }
+            yield* Effect.addFinalizer(() =>
+              lookups.current === undefined
+                ? Effect.void
+                : lookups.current.pipe(Effect.map((seen) => void seenWhileClosing.push(seen))),
+            );
+            return makeFakeInstance({ instanceId, displayName, enabled });
+          }),
+      };
+      const id = ProviderInstanceId.make("fake_a");
+      const configWithName = (displayName: string): ProviderInstanceConfigMap => ({
+        [id]: { driver: fakeDriverKind, displayName, config: {} },
+      });
+      const registryScope = yield* Scope.make();
+      const { registry, mutator } = yield* makeProviderInstanceRegistry({
+        drivers: [driver],
+        configMap: configWithName("Before"),
+      }).pipe(Effect.provideService(Scope.Scope, registryScope));
+      lookups.current = registry.getInstance(id);
+      expect((yield* registry.getInstance(id))?.displayName).toBe("Before");
+
+      const reconcileFiber = yield* mutator
+        .reconcile(configWithName("After"))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(replacementStarted);
+
+      // The old instance was already gone from the map when its scope closed,
+      // and stays gone until the replacement is published.
+      expect(seenWhileClosing).toEqual([undefined]);
+      expect(yield* registry.getInstance(id)).toBeUndefined();
+      expect(yield* registry.listInstances).toEqual([]);
+
+      yield* Deferred.succeed(releaseReplacement, undefined);
+      yield* Fiber.join(reconcileFiber);
+      expect((yield* registry.getInstance(id))?.displayName).toBe("After");
+
+      lookups.current = undefined;
+      yield* Scope.close(registryScope, Exit.void);
     }),
   );
 });

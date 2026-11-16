@@ -612,6 +612,72 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("skips a notification the schema rejects and keeps the transport up", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const logged: Array<string> = [];
+      const terminated = yield* Ref.make(false);
+      const received = yield* Deferred.make<AcpProtocol.AcpIncomingNotification>();
+      yield* Effect.gen(function* () {
+        const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio,
+          serverRequestMethods: new Set(),
+          onNotification: (notification) => Deferred.succeed(received, notification),
+          onTermination: () => Ref.set(terminated, true),
+        });
+        const send = (message: unknown) =>
+          Queue.offer(input, new TextEncoder().encode(JSON.stringify(message) + "\n"));
+        // An update kind newer than the pinned schema, then an elicitation completion without
+        // its id: neither can be decoded, and no reply is owed for either.
+        yield* send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "session-1",
+            update: { sessionUpdate: "future_kind", detail: "from a newer agent" },
+          },
+        });
+        yield* send({
+          jsonrpc: "2.0",
+          method: "session/elicitation/complete",
+          params: { elicitationId: 42 },
+        });
+        yield* send({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            sessionId: "session-1",
+            update: { sessionUpdate: "plan", entries: [] },
+          },
+        });
+        // Before the fix the first update ended the transport and this never arrived.
+        const notification = yield* Deferred.await(received).pipe(
+          Effect.timeout("5 seconds"),
+          TestClock.withLive,
+        );
+        assert.equal(notification._tag, "SessionUpdate");
+        // The transport still writes, so it did not terminate.
+        yield* transport.notify("session/cancel", { sessionId: "session-1" });
+      }).pipe(
+        Effect.provide(
+          Logger.layer([
+            Logger.make(({ message }) => {
+              logged.push(JSON.stringify(message));
+            }),
+          ]),
+        ),
+      );
+      assert.isFalse(yield* Ref.get(terminated));
+      const skipped = logged.filter((line) =>
+        line.includes("ACP notification does not match the schema"),
+      );
+      assert.equal(skipped.length, 2);
+      assert.isTrue(skipped[0]?.includes("future_kind"));
+      assert.isFalse(skipped[0]?.includes("from a newer agent"));
+      assert.isTrue(skipped[1]?.includes("session/elicitation/complete"));
+    }),
+  );
+
   it.effect("logs a failing notification handler and keeps dispatching", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();

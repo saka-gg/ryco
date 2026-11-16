@@ -31,6 +31,7 @@ export const metricNames = {
   providerTurnsTotal: "ryco_provider_turns_total",
   providerTurnDuration: "ryco_provider_turn_duration",
   providerRuntimeEventsTotal: "ryco_provider_runtime_events_total",
+  providerRuntimeEventsDroppedTotal: "ryco_provider_runtime_events_dropped_total",
   providerRuntimeStaleEventsTotal: "ryco_provider_runtime_stale_events_total",
   providerStaleStopTimeoutsTotal: "ryco_provider_stale_stop_timeouts_total",
   contextHandoffsTotal: "ryco_context_handoffs_total",
@@ -110,6 +111,14 @@ export const providerTurnDuration = Metric.timer(metricNames.providerTurnDuratio
 export const providerRuntimeEventsTotal = Metric.counter(metricNames.providerRuntimeEventsTotal, {
   description: "Total canonical provider runtime events processed.",
 });
+
+export const providerRuntimeEventsDroppedTotal = Metric.counter(
+  metricNames.providerRuntimeEventsDroppedTotal,
+  {
+    description:
+      "Total provider runtime events dropped because processing them hit a defect (an adapter invariant breach).",
+  },
+);
 
 export const providerRuntimeStaleEventsTotal = Metric.counter(
   metricNames.providerRuntimeStaleEventsTotal,

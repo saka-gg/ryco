@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
+import { McpServerName, ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
 import { Effect, FileSystem, Layer, Path } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/process";
@@ -85,6 +85,46 @@ it.layer(NodeServices.layer)("CodexMcpService", (it) => {
           CODEX_HOME: shadowHome,
           CODEX_SQLITE_HOME: instanceHome,
         });
+      }),
+    );
+  });
+
+  describe("removing a server", () => {
+    it.effect("reports a failed `codex mcp remove` as a typed settings error, not a defect", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "ryco-codex-mcp-rm-" });
+        const home = path.join(root, "codex-home");
+        yield* fileSystem.makeDirectory(home, { recursive: true });
+        yield* fileSystem.writeFileString(path.join(home, "config.toml"), "# codex\n");
+        const { spawner } = recordingSpawner();
+        const service = yield* makeCodexMcpService.pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ServerSettingsService.layerTest({
+                providers: { codex: { enabled: false } },
+                providerInstances: {
+                  [ProviderInstanceId.make("codex_missing")]: {
+                    driver: ProviderDriverKind.make("codex"),
+                    environment: [{ name: "CODEX_HOME", value: home, sensitive: false }],
+                    // The CLI cannot start, so `codex mcp remove` rejects.
+                    config: { binaryPath: path.join(root, "missing-codex") },
+                  },
+                },
+              }),
+              ServerConfig.layerTest(root, path.join(root, "ryco")),
+              Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            ),
+          ),
+        );
+        const { workspaces } = yield* service.listWorkspaces;
+        expect(workspaces).toHaveLength(1);
+
+        const error = yield* service
+          .removeServer({ workspaceId: workspaces[0]!.id, name: McpServerName.make("ryco") })
+          .pipe(Effect.flip);
+        expect(error._tag).toBe("McpSettingsError");
       }),
     );
   });

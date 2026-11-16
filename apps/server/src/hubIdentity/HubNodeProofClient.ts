@@ -8,6 +8,7 @@ import {
 } from "@ryco/contracts/relay";
 
 import { fetchBoundedJson, type BoundedJsonFailure } from "./BoundedHttp.ts";
+import { isWellFormedHubChallenge } from "./HubChallenge.ts";
 import type { LocalHubIdentityStateStore } from "./LocalHubIdentityState.ts";
 import type { NodeSigningIdentity } from "./NodeSigningIdentity.ts";
 
@@ -125,16 +126,11 @@ function proofTransportError(failure: BoundedJsonFailure): never {
 function validateChallenge(
   value: HubNodeChallenge,
   requested: { readonly protocolMajor: number; readonly protocolMinor: number },
-  now: number,
 ): HubNodeChallenge {
   if (
     value.protocolMajor !== requested.protocolMajor ||
     value.protocolMinor !== requested.protocolMinor ||
-    !(value.challenge instanceof Uint8Array) ||
-    value.challenge.byteLength !== 32 ||
-    !Number.isSafeInteger(value.challengeExpiresAt) ||
-    value.challengeExpiresAt <= now ||
-    value.challengeExpiresAt > now + 60_000
+    !isWellFormedHubChallenge(value)
   ) {
     return proofError("protocol_invalid");
   }
@@ -192,7 +188,6 @@ export function makeHubNodeProofClient(dependencies: {
               ...protocol,
             }),
             protocol,
-            now(),
           );
         } catch (error) {
           if (error instanceof HubNodeProofClientError) throw error;

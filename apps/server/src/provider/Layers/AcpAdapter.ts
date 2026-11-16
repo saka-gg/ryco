@@ -301,6 +301,26 @@ interface AcpSessionContext {
   currentModelId: string | undefined;
   promptImages: boolean;
   stopped: boolean;
+  /** Set once the agent process ended on its own; its `code` is undefined after a signal kill. */
+  processExit: AcpProcessExit | undefined;
+}
+
+interface AcpProcessExit {
+  readonly code: number | undefined;
+}
+
+/** `session.exited` for a session that stops: an error when its agent process died. */
+function acpSessionExitedPayload(processExit: AcpProcessExit | undefined) {
+  if (processExit === undefined) return { exitKind: "graceful" as const };
+  const reason =
+    processExit.code === undefined
+      ? "The agent process was killed."
+      : `The agent process exited with code ${processExit.code}.`;
+  return {
+    reason,
+    recoverable: true,
+    exitKind: processExit.code === 0 ? ("graceful" as const) : ("error" as const),
+  };
 }
 
 function settlePendingApprovalsAsCancelled(
@@ -426,6 +446,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
   const normalizeModel = options.normalizeModel;
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make(PROVIDER);
+    const adapterScope = yield* Scope.Scope;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -562,8 +583,44 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
           ...(yield* makeEventStamp()),
           provider: PROVIDER,
           threadId: ctx.threadId,
-          payload: { exitKind: "graceful" },
+          payload: acpSessionExitedPayload(ctx.processExit),
         });
+      });
+
+    /**
+     * Retires a session whose agent process died, so the next turn recovers it instead of
+     * routing to the dead runtime. Leaves a newer session of the thread alone.
+     */
+    const stopExitedSession = (threadId: ThreadId, exited: () => AcpSessionContext | undefined) =>
+      withThreadLock(
+        threadId,
+        Effect.gen(function* () {
+          const ctx = exited();
+          if (ctx === undefined || ctx.stopped || sessions.get(threadId) !== ctx) return;
+          yield* stopSessionInternal(ctx);
+        }),
+      );
+
+    /**
+     * Waits until the notification fiber has handled every event the agent sent so far, so a
+     * turn's own updates carry its id and go out before the turn closes. Returns early once that
+     * fiber has ended (the session stopped).
+     */
+    const awaitQueuedEventsHandled = (ctx: AcpSessionContext) => {
+      const handled = ctx.acp.markEvents.pipe(Effect.flatMap(Deferred.await));
+      return ctx.notificationFiber === undefined
+        ? handled
+        : Effect.raceFirst(handled, Fiber.await(ctx.notificationFiber).pipe(Effect.asVoid));
+    };
+
+    /** Ends `turnId` as the session's active turn, unless a newer turn has replaced it. */
+    const clearActiveTurn = (ctx: AcpSessionContext, turnId: TurnId) =>
+      Effect.gen(function* () {
+        if (ctx.activeTurnId === turnId) ctx.activeTurnId = undefined;
+        if (ctx.session.activeTurnId === turnId) {
+          const { activeTurnId: _ended, ...session } = ctx.session;
+          ctx.session = { ...session, updatedAt: yield* nowIso };
+        }
       });
 
     const startSession: AcpAdapterShape["startSession"] = (input) =>
@@ -677,8 +734,6 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                       }),
                     ),
                   ),
-                onProcessExit: () =>
-                  agentControl ? agentControl.revoke("runtime-teardown") : Effect.void,
                 onMcpSetupFailure: () =>
                   agentControl
                     ? agentControl
@@ -687,6 +742,19 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                     : Effect.void,
               }
             : {};
+
+          let processExit: AcpProcessExit | undefined;
+          const onProcessExit = (exitCode: number | undefined) =>
+            Effect.gen(function* () {
+              processExit = { code: exitCode };
+              if (ctx !== undefined) ctx.processExit = processExit;
+              if (agentControl) yield* agentControl.revoke("runtime-teardown");
+              // Into the adapter's scope: the stop closes the session scope this fiber runs in.
+              yield* stopExitedSession(
+                input.threadId,
+                () => ctx as AcpSessionContext | undefined,
+              ).pipe(Effect.forkIn(adapterScope));
+            });
 
           const resumeSessionId = acpResume?.sessionId;
           const acpNativeLoggers = makeAcpNativeLoggers({
@@ -720,6 +788,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                   }
                 : {}),
               ...agentControlRuntimeHooks,
+              onProcessExit,
               ...acpNativeLoggers,
             })
             .pipe(
@@ -908,6 +977,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             promptImages:
               started.initializeResult.agentCapabilities?.promptCapabilities?.image === true,
             stopped: false,
+            processExit,
           };
 
           // Fork into the session scope, not the calling fiber: ProviderService runs
@@ -918,6 +988,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
                 switch (event._tag) {
+                  case "EventsMark":
+                    yield* Deferred.succeed(event.reached, undefined);
+                    return;
                   case "CommandsUpdated":
                     // A late update after a close is dropped. Only the mapped copy is kept,
                     // never the raw payload.
@@ -1234,6 +1307,8 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 ctx.agentControl ? ctx.agentControl.retireTurn(prepared.turnId) : Effect.void,
               ),
             );
+          // The agent sent the turn's updates before its answer; they close with the turn.
+          yield* awaitQueuedEventsHandled(ctx);
 
           return yield* withThreadLock(
             input.threadId,
@@ -1250,10 +1325,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
               ctx.turnIds.push(prepared.turnId);
               ctx.session = {
                 ...ctx.session,
-                activeTurnId: prepared.turnId,
                 updatedAt: yield* nowIso,
                 ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
               };
+              yield* clearActiveTurn(ctx, prepared.turnId);
 
               yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
                 type: "turn.completed",
@@ -1283,6 +1358,11 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             // labels the turn instead.
             emitFailed: (errorMessage) =>
               Effect.gen(function* () {
+                yield* awaitQueuedEventsHandled(prepared.ctx);
+                yield* withThreadLock(
+                  input.threadId,
+                  clearActiveTurn(prepared.ctx, prepared.turnId),
+                );
                 yield* offerRuntimeEventForRuntime(prepared.runtimeSessionId, {
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),

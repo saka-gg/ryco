@@ -237,7 +237,10 @@ import { useScopedState } from "../hooks/useScopedState";
 import { useEvent } from "../hooks/useEvent";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
-import { useReducedMotionEffective } from "../hooks/useAppearancePreference";
+import {
+  useAppearancePreference,
+  useReducedMotionEffective,
+} from "../hooks/useAppearancePreference";
 import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
@@ -323,6 +326,7 @@ import {
   pinTimelineToEnd,
 } from "./chat/MessagesTimeline.logic";
 import { NewThreadContextBar } from "./chat/NewThreadContextBar";
+import { LazyEmptyChatBackground } from "./chat/lazyEmptyChatBackground";
 import { NewThreadHero } from "./chat/NewThreadHero";
 import { ThreadHistorySkeleton } from "./chat/ThreadHistorySkeleton";
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
@@ -7042,6 +7046,21 @@ export default function ChatView(props: ChatViewProps) {
       },
     },
   );
+  // The empty chat's animated field (Settings → Appearance → Chat background).
+  // The frozen phone tier keeps its plain background.
+  const chatBackground = useAppearancePreference("chatBackground");
+  const chatBackgroundVariant =
+    presentationTier !== "phone" &&
+    showNewThreadSurface &&
+    (chatBackground === "flow" || chatBackground === "halftone")
+      ? chatBackground
+      : null;
+  // Decorative: a failed chunk just leaves the plain background.
+  const chatBackgroundReady = useLazyComponentReady(
+    LazyEmptyChatBackground,
+    chatBackgroundVariant !== null,
+    { onLoadError: () => {} },
+  );
   const linkedItemDialogReady = useLazyComponentReady(
     LazyLinkedWorktreeItemDialog,
     paneFocused && headerLinkedItem !== null,
@@ -7511,7 +7530,18 @@ export default function ChatView(props: ChatViewProps) {
       {/* Main content area with optional plan sidebar */}
       <div className="flex min-h-0 min-w-0 flex-1">
         {/* Chat column */}
-        <div ref={chatColumnRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div
+          ref={chatColumnRef}
+          className={cn(
+            "relative flex min-h-0 min-w-0 flex-1 flex-col",
+            // Its own stacking context, so the background's -z-10 sits behind
+            // the hero and composer but above the pane's background.
+            chatBackgroundVariant !== null && "isolate",
+          )}
+        >
+          {chatBackgroundVariant !== null && chatBackgroundReady ? (
+            <LazyEmptyChatBackground variant={chatBackgroundVariant} containerRef={chatColumnRef} />
+          ) : null}
           {/* A device (or other workspace content) floating over the chat. */}
           {presentationTier !== "phone" ? (
             <WorkspaceMiniPlayerHost

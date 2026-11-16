@@ -236,6 +236,39 @@ describe("Hub key rotation client", () => {
     expect((await stateful.stateStore.readOrCreate()).activeNode?.activeKeyId).toBe(newKeyId);
   });
 
+  it("proves a challenge whatever the skew between this clock and the Hub's", async () => {
+    // The Hub stamps challengeExpiresAt on its own clock: 90 s in this node's past when the
+    // node runs ahead, 10 min in its future when the node runs behind.
+    for (const challengeExpiresAt of [now - 60_000, now + 600_000]) {
+      const proved: Array<number> = [];
+      const test = await harness({
+        begin: async () => ({ ...challenge(), challengeExpiresAt }),
+        prove: async () => {
+          proved.push(challengeExpiresAt);
+          return { status: "awaiting_owner" };
+        },
+        status: async () => ({ status: "awaiting_owner" }),
+      });
+      expect(await test.makeClient().stage(hubOrigin, { continuity: "continue" })).toEqual({
+        status: "awaiting_owner",
+      });
+      expect(proved).toEqual([challengeExpiresAt]);
+    }
+  });
+
+  it("still refuses a challenge without a usable expiry", async () => {
+    for (const challengeExpiresAt of [0, 1.5, Number.NaN]) {
+      const test = await harness({
+        begin: async () => ({ ...challenge(), challengeExpiresAt }),
+        prove: async () => ({ status: "awaiting_owner" }),
+        status: async () => ({ status: "awaiting_owner" }),
+      });
+      await expect(
+        test.makeClient().stage(hubOrigin, { continuity: "continue" }),
+      ).rejects.toMatchObject({ code: "rotation_response_invalid" });
+    }
+  });
+
   it("keeps the old key and deletes a rejected staged key", async () => {
     const transport: HubKeyRotationTransport = {
       begin: async () => challenge(),

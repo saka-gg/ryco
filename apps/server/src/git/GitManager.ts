@@ -937,11 +937,14 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
         url: remoteUrl,
       });
 
+      // The local branch may be the user's own (a same-repository pull request's
+      // head branch): never rewind commits it has that the head lacks.
       yield* gitCore.fetchRemoteBranch({
         cwd,
         remoteName,
         remoteBranch: pullRequest.headBranch,
         localBranch,
+        keepLocalCommits: true,
       });
       yield* gitCore.setBranchUpstream({
         cwd,
