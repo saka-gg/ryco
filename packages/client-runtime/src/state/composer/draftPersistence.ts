@@ -41,7 +41,6 @@ import {
 import { chatDraftLogicalProjectKey, isChatDraftLogicalProjectKey } from "./chatDrafts.ts";
 import type {
   ComposerDraftImage,
-  ComposerDraftStoreState,
   ComposerThreadDraftState,
   DraftId,
   DraftThreadState,
@@ -1210,29 +1209,6 @@ export function partializeComposerThreadDraftState<TImage extends ComposerDraftI
     ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
     ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
     ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
-  };
-}
-
-export function partializeComposerDraftStoreState<TImage extends ComposerDraftImage>(
-  state: ComposerDraftStoreState<TImage>,
-): PersistedComposerDraftStoreState {
-  const persistedDraftsByThreadKey: Record<string, PersistedComposerThreadDraftState> = {};
-  for (const [threadKey, draft] of Object.entries(state.draftsByThreadKey)) {
-    if (typeof threadKey !== "string" || threadKey.length === 0) {
-      continue;
-    }
-    const persistedDraft = partializeComposerThreadDraftState(draft);
-    if (persistedDraft !== null) persistedDraftsByThreadKey[threadKey] = persistedDraft;
-  }
-  return {
-    draftsByThreadKey: persistedDraftsByThreadKey,
-    draftThreadsByThreadKey: state.draftThreadsByThreadKey,
-    logicalProjectDraftThreadKeyByLogicalProjectKey:
-      state.logicalProjectDraftThreadKeyByLogicalProjectKey,
-    stickyModelSelectionByProvider: compactModelSelectionByProvider(
-      state.stickyModelSelectionByProvider,
-    ),
-    stickyActiveProvider: state.stickyActiveProvider,
   };
 }
 

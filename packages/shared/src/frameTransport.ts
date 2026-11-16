@@ -122,14 +122,6 @@ export const decodeFrameEnvelope = (
   };
 };
 
-export const peekFrameHeader = (
-  config: FrameCodecConfig,
-  bytes: Uint8Array,
-): FrameHeader | null => {
-  const result = decodeFrameEnvelope(config, bytes);
-  return result.ok ? result.frame.header : null;
-};
-
 export interface FrameSink {
   readonly send: (bytes: Uint8Array) => void;
   readonly bufferedAmount: () => number;

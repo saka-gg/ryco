@@ -390,11 +390,3 @@ export function compareDoneTasks(left: SortableTask, right: SortableTask): numbe
     compareDescending(left.taskId, right.taskId)
   );
 }
-
-export function sortOpenTasks<T extends SortableTask>(tasks: ReadonlyArray<T>): T[] {
-  return tasks.toSorted(compareOpenTasks);
-}
-
-export function sortDoneTasks<T extends SortableTask>(tasks: ReadonlyArray<T>): T[] {
-  return tasks.toSorted(compareDoneTasks);
-}

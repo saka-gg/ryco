@@ -1,6 +1,5 @@
 import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import type { SettingsSharingNamespace } from "@ryco/client-runtime/state/settings/settingsSharingClock";
-import type { SettingsSharingRunnerOptions } from "@ryco/client-runtime/state/settings/sharedDeviceSettingsRunner";
 
 import { isHostedHubMode } from "../env";
 import { subscribeHostedRpcCapabilities } from "../hostedHub/capabilities";
@@ -101,12 +100,3 @@ export function subscribeSettingsSharingTargets(listener: () => void): () => voi
     for (const unsubscribe of unsubscribes) unsubscribe();
   };
 }
-
-/** The runner's device options on the web; the caller adds its clock and cache. */
-export const webSettingsSharingRunnerTargets: Pick<
-  SettingsSharingRunnerOptions,
-  "readTargets" | "subscribe"
-> = {
-  readTargets: readSettingsSharingTargets,
-  subscribe: subscribeSettingsSharingTargets,
-};

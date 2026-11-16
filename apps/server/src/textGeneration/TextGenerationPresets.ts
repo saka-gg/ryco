@@ -1,10 +1,6 @@
 import type { GitWritingStyle, ServerSettings } from "@ryco/contracts";
 
-import type {
-  RepositoryWritingExamples,
-  TextGenerationPolicy,
-  TextGenerationPolicyKind,
-} from "./TextGenerationPolicy.ts";
+import type { RepositoryWritingExamples, TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 export const defaultTextGenerationPolicy: TextGenerationPolicy = {
   kind: "default",
@@ -37,15 +33,6 @@ export const customTextGenerationPolicy = (
   inferRepositoryConventions: false,
   ...overrides,
 });
-
-export const textGenerationPresets: Record<
-  Exclude<TextGenerationPolicyKind, "custom">,
-  TextGenerationPolicy
-> = {
-  default: defaultTextGenerationPolicy,
-  conventional_commits: conventionalCommitsTextGenerationPolicy,
-  repo_conventions: repositoryConventionsTextGenerationPolicy,
-};
 
 /** The preset behind each Git writing style setting. */
 export const GIT_WRITING_STYLE_PRESETS: Record<GitWritingStyle, TextGenerationPolicy> = {

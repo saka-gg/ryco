@@ -33,9 +33,6 @@ export const goalContinuationIds = (threadId: string, turnId: string) => ({
   messageId: `${GOAL_CONTINUATION_MESSAGE_ID_PREFIX}${threadId}:${turnId}`,
 });
 
-export const isGoalContinuationMessageId = (messageId: string): boolean =>
-  messageId.startsWith(GOAL_CONTINUATION_MESSAGE_ID_PREFIX);
-
 /** The next turn's message. The `<ryco_goal>` block that leads every turn names the objective. */
 export const goalContinuationPrompt = (threadId: string): string =>
   `Continue working toward this thread's goal.

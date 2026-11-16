@@ -134,9 +134,3 @@ export function closeDeviceTab(state: ThreadDeviceTabs, tabId: string): ThreadDe
   if (state.activeId !== tabId) return { tabs, activeId: state.activeId };
   return { tabs, activeId: (tabs[index] ?? tabs[index - 1])?.id ?? null };
 }
-
-/** Close the tab showing a device, if one does. */
-export function closeDeviceTabForUdid(state: ThreadDeviceTabs, udid: string): ThreadDeviceTabs {
-  const tab = state.tabs.find((candidate) => candidate.udid === udid);
-  return tab ? closeDeviceTab(state, tab.id) : state;
-}
