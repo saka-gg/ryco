@@ -39,4 +39,26 @@ describe("main.ts app window wiring", () => {
     expect(registry).toContain('if (process.platform !== "darwin" && !isQuitting) app.quit();');
     expect(main).toContain('app.on("window-all-closed", () => undefined);');
   });
+
+  it("opens a missing window for menu actions through the path that loads the app", () => {
+    expect(topLevelFunction("dispatchMenuAction")).not.toContain("createWindow(");
+    const checkForUpdates = topLevelFunction("handleCheckForUpdatesMenuClick");
+    expect(checkForUpdates).not.toContain("createWindow(");
+    expect(checkForUpdates).toContain("openMainWindow();");
+    const open = topLevelFunction("openMainWindow");
+    expect(open).toContain("ensureDevelopmentInitialWindowOpen();");
+    expect(open).toContain("ensureInitialBackendWindowOpen();");
+    expect(main).toContain("open: openMainWindow,");
+  });
+
+  it("delivers a held menu action once an app window's shell reports usable", () => {
+    const usable = main.indexOf("appShellUsableContents.add(event.sender);");
+    expect(usable).toBeGreaterThanOrEqual(0);
+    expect(main.slice(usable, usable + 400)).toContain(
+      "if (appWindows.has(window)) appMenuActions.shellUsable(window);",
+    );
+    expect(main).toContain(
+      "isShellUsable: (window) => appShellUsableContents.has(window.webContents),",
+    );
+  });
 });

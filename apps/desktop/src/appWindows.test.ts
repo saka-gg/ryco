@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { createAppWindowRegistry } from "./appWindows.ts";
+import { createAppMenuActionDispatch, createAppWindowRegistry } from "./appWindows.ts";
 
 class FakeWindow extends EventEmitter {
   destroyed = false;
@@ -65,5 +65,64 @@ describe("createAppWindowRegistry", () => {
     second.close();
     expect(onLastClosed).toHaveBeenCalledTimes(1);
     expect(host.isDestroyed()).toBe(false);
+  });
+});
+
+function setup(options: { target: FakeWindow | null; usable?: ReadonlySet<FakeWindow> }) {
+  const usable = new Set(options.usable ?? []);
+  const calls: string[] = [];
+  let target = options.target;
+  const dispatch = createAppMenuActionDispatch<FakeWindow>({
+    target: () => target,
+    isShellUsable: (window) => usable.has(window),
+    send: (window, action) => calls.push(`send ${window.name} ${action}`),
+    reveal: (window) => calls.push(`reveal ${window.name}`),
+    open: () => calls.push("open"),
+  });
+  return {
+    dispatch,
+    calls,
+    setTarget: (next: FakeWindow | null) => {
+      target = next;
+    },
+    markUsable: (window: FakeWindow) => {
+      usable.add(window);
+      dispatch.shellUsable(window);
+    },
+  };
+}
+
+describe("createAppMenuActionDispatch", () => {
+  it("sends to an app window whose shell is usable, then reveals it", () => {
+    const app = new FakeWindow("app");
+    const { dispatch, calls } = setup({ target: app, usable: new Set([app]) });
+    dispatch.dispatch("open-settings");
+    expect(calls).toEqual(["send app open-settings", "reveal app"]);
+  });
+
+  it("with no app window, opens one through `open` and sends once its shell is usable", () => {
+    const { dispatch, calls, setTarget, markUsable } = setup({ target: null });
+    dispatch.dispatch("open-settings");
+    expect(calls).toEqual(["open"]);
+
+    // The packaged window shows the boot page first: nothing is sent to it.
+    const opened = new FakeWindow("opened");
+    setTarget(opened);
+    expect(calls).toEqual(["open"]);
+
+    markUsable(opened);
+    expect(calls).toEqual(["open", "send opened open-settings", "reveal opened"]);
+    // A later shell-usable report (shell-painted) sends nothing more.
+    dispatch.shellUsable(opened);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("holds the action for an app window that is still booting", () => {
+    const booting = new FakeWindow("booting");
+    const { dispatch, calls, markUsable } = setup({ target: booting });
+    dispatch.dispatch("open-settings");
+    expect(calls).toEqual(["reveal booting"]);
+    markUsable(booting);
+    expect(calls).toEqual(["reveal booting", "send booting open-settings", "reveal booting"]);
   });
 });

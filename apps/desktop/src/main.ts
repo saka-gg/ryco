@@ -256,7 +256,7 @@ import {
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
 import { resolveDesktopAppBranding } from "./appBranding.ts";
-import { createAppWindowRegistry } from "./appWindows.ts";
+import { createAppMenuActionDispatch, createAppWindowRegistry } from "./appWindows.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
 import {
   createWindowTranslucencyController,
@@ -2603,26 +2603,17 @@ function registerDesktopProtocol(): void {
   desktopProtocolRegistered = true;
 }
 
+// The focused window only when it is an app window: a popped-out browser tab has no listener.
+const appMenuActions = createAppMenuActionDispatch<BrowserWindow>({
+  target: () => appWindows.pick(BrowserWindow.getFocusedWindow(), mainWindow),
+  isShellUsable: (window) => appShellUsableContents.has(window.webContents),
+  send: (window, action) => window.webContents.send(MENU_ACTION_CHANNEL, action),
+  reveal: revealWindow,
+  open: openMainWindow,
+});
+
 function dispatchMenuAction(action: string): void {
-  // The focused window only when it is an app window: a popped-out browser tab has no listener.
-  const existingWindow = appWindows.pick(BrowserWindow.getFocusedWindow(), mainWindow);
-  const targetWindow = existingWindow ?? createWindow();
-  if (!existingWindow) {
-    mainWindow = targetWindow;
-  }
-
-  const send = () => {
-    if (targetWindow.isDestroyed()) return;
-    targetWindow.webContents.send(MENU_ACTION_CHANNEL, action);
-    revealWindow(targetWindow);
-  };
-
-  if (targetWindow.webContents.isLoadingMainFrame()) {
-    targetWindow.webContents.once("did-finish-load", send);
-    return;
-  }
-
-  send();
+  appMenuActions.dispatch(action);
 }
 
 function handleCheckForUpdatesMenuClick(): void {
@@ -2639,9 +2630,7 @@ function handleCheckForUpdatesMenuClick(): void {
     return;
   }
 
-  if (appWindows.pick(mainWindow) === null) {
-    mainWindow = createWindow();
-  }
+  if (appWindows.pick(mainWindow) === null) openMainWindow();
   void checkForUpdatesFromMenu();
 }
 
@@ -2919,6 +2908,14 @@ function revealOrOpenMainWindow(): void {
     revealWindow(existingWindow);
     return;
   }
+  openMainWindow();
+}
+
+/**
+ * Open the app window the way startup does: a packaged build shows the boot page and loads the
+ * app once the backend serves (a bare `createWindow()` would stay on the boot page).
+ */
+function openMainWindow(): void {
   if (isDevelopment) {
     ensureDevelopmentInitialWindowOpen();
     return;
@@ -4438,6 +4435,8 @@ function registerIpcHandlers(): void {
     // Every report follows the primary shell becoming usable.
     appShellUsableContents.add(event.sender);
     rendererCrashRecoveries.get(event.sender)?.noteShellUsable();
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (appWindows.has(window)) appMenuActions.shellUsable(window);
     markDesktopStartupPhase(
       `desktop.window.app.${report.phase}`,
       formatRendererStartupMarks(report.marks),

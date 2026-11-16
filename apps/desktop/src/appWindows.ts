@@ -47,3 +47,48 @@ export function createAppWindowRegistry<W extends AppWindowLike>(options: {
     pick: (...preferred) => preferred.find(has) ?? list()[0] ?? null,
   };
 }
+
+export interface AppMenuActionDispatch<W> {
+  /** Sends `action` to the app window it is for, opening or revealing one when needed. */
+  dispatch(action: string): void;
+  /** `window`'s app shell reported usable: it can take an action that was held. */
+  shellUsable(window: W): void;
+}
+
+/**
+ * Menu actions (Settings…) for the app. Only an app shell that reported usable has the listener,
+ * so an action goes to such a window at once; otherwise the newest one is held until an app
+ * window's shell reports usable. With no app window open, one is opened through `open` (the path
+ * that loads the app), never as a bare window.
+ */
+export function createAppMenuActionDispatch<W extends AppWindowLike>(options: {
+  /** The app window an action is for (the focused one, else the main one), or null. */
+  readonly target: () => W | null;
+  readonly isShellUsable: (window: W) => boolean;
+  readonly send: (window: W, action: string) => void;
+  readonly reveal: (window: W) => void;
+  readonly open: () => void;
+}): AppMenuActionDispatch<W> {
+  let held: string | null = null;
+  const deliver = (window: W, action: string) => {
+    held = null;
+    options.send(window, action);
+    options.reveal(window);
+  };
+  return {
+    dispatch: (action) => {
+      const window = options.target();
+      if (window !== null && options.isShellUsable(window)) {
+        deliver(window, action);
+        return;
+      }
+      held = action;
+      if (window === null) options.open();
+      else options.reveal(window);
+    },
+    shellUsable: (window) => {
+      if (held === null || window.isDestroyed()) return;
+      deliver(window, held);
+    },
+  };
+}
