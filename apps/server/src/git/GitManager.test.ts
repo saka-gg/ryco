@@ -5124,6 +5124,97 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         ).toBe(remoteHead);
       }),
     );
+
+    for (const localCommit of [false, true]) {
+      it.effect(
+        localCommit
+          ? `keeps a local commit after the PR head was force-pushed (${variant})`
+          : `opens a force-pushed PR head over a local branch with no commits of its own (${variant})`,
+        () =>
+          Effect.gen(function* () {
+            const repoDir = yield* makeTempDir("ryco-git-manager-");
+            yield* initRepo(repoDir);
+            const remoteDir = yield* createBareRemote();
+            yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+            yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+            yield* runGit(repoDir, ["checkout", "-b", "feature/pr-rewritten"]);
+            fs.writeFileSync(path.join(repoDir, "first.txt"), "first\n");
+            yield* runGit(repoDir, ["add", "first.txt"]);
+            yield* runGit(repoDir, ["commit", "-m", "First version"]);
+            yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-rewritten"]);
+            yield* runGit(repoDir, ["push", "origin", "HEAD:refs/pull/90/head"]);
+            yield* runGit(repoDir, ["checkout", "main"]);
+
+            const { manager } = yield* makeManager({
+              ghScenario: {
+                pullRequest: {
+                  number: 90,
+                  title: "Rewritten PR",
+                  url: "https://github.com/pingdotgg/codething-mvp/pull/90",
+                  baseRefName: "main",
+                  headRefName: "feature/pr-rewritten",
+                  state: "open",
+                  ...(headRepositoryMetadata
+                    ? {
+                        isCrossRepository: false,
+                        headRepositoryNameWithOwner: "pingdotgg/codething-mvp",
+                        headRepositoryOwnerLogin: "pingdotgg",
+                      }
+                    : {}),
+                },
+                ...(headRepositoryMetadata
+                  ? {
+                      repositoryCloneUrls: {
+                        "pingdotgg/codething-mvp": { url: remoteDir, sshUrl: remoteDir },
+                      },
+                    }
+                  : {}),
+              },
+            });
+            const open = preparePullRequestThread(manager, {
+              cwd: repoDir,
+              reference: "90",
+              mode: "worktree",
+            });
+
+            // Opened once, then the worktree was removed; the branch stays.
+            const first = yield* open;
+            if (localCommit) {
+              fs.writeFileSync(path.join(first.worktreePath as string, "mine.txt"), "mine\n");
+              yield* runGit(first.worktreePath as string, ["add", "mine.txt"]);
+              yield* runGit(first.worktreePath as string, ["commit", "-m", "Local commit"]);
+            }
+            const localHead = (yield* runGit(repoDir, [
+              "rev-parse",
+              "refs/heads/feature/pr-rewritten",
+            ])).stdout.trim();
+            yield* runGit(repoDir, ["worktree", "remove", "--force", first.worktreePath as string]);
+
+            // The author rebases the pull request and force-pushes it.
+            const authorDir = yield* makeTempDir("ryco-git-manager-author-");
+            yield* runGit(authorDir, ["clone", "--branch", "feature/pr-rewritten", remoteDir, "."]);
+            yield* configureTestGitCommitIdentity(authorDir, runGit);
+            fs.writeFileSync(path.join(authorDir, "first.txt"), "rewritten\n");
+            yield* runGit(authorDir, ["commit", "--amend", "-am", "Rewritten version"]);
+            const rewrittenHead = (yield* runGit(authorDir, ["rev-parse", "HEAD"])).stdout.trim();
+            yield* runGit(authorDir, ["push", "--force", "origin", "HEAD:feature/pr-rewritten"]);
+            yield* runGit(authorDir, ["push", "--force", "origin", "HEAD:refs/pull/90/head"]);
+
+            const second = yield* open;
+
+            const expectedHead = localCommit ? localHead : rewrittenHead;
+            expect(
+              (yield* runGit(repoDir, [
+                "rev-parse",
+                "refs/heads/feature/pr-rewritten",
+              ])).stdout.trim(),
+            ).toBe(expectedHead);
+            expect(
+              (yield* runGit(second.worktreePath as string, ["rev-parse", "HEAD"])).stdout.trim(),
+            ).toBe(expectedHead);
+          }),
+      );
+    }
   }
 
   it.effect("launches setup only when creating a new PR worktree", () =>

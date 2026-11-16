@@ -316,8 +316,10 @@ export interface GitDeleteBranchInput {
 }
 
 /**
- * Fetches a pull request's head into the local branch `branch`: creates it, or
- * fast-forwards it. A branch with commits the head lacks is left as it is.
+ * Fetches a pull request's head and points the local branch `branch` at it: creates
+ * it, or moves it when every commit it has is one the head has or had when Ryco last
+ * fetched it (so a force-pushed head replaces it). A branch with commits of its own
+ * is left as it is.
  */
 export interface GitFetchPullRequestBranchInput {
   cwd: string;
@@ -337,9 +339,10 @@ export interface GitFetchRemoteBranchInput {
   remoteBranch: string;
   localBranch: string;
   /**
-   * An existing `localBranch` is only fast-forwarded to the fetched head; one
-   * with commits the head lacks is left as it is. Without it the branch is
-   * reset to the head (`gh pr checkout --force`).
+   * An existing `localBranch` moves to the fetched head only when every commit it
+   * has is one the remote branch has or had before this fetch (a force-pushed or
+   * rebased head still replaces it); one with commits of its own is left as it is.
+   * Without it the branch is reset to the head (`gh pr checkout --force`).
    */
   keepLocalCommits?: boolean;
 }

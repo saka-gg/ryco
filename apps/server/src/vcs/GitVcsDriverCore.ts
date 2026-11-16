@@ -66,6 +66,7 @@ import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPo
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { resolveGitExecutable } from "./gitExecutable.ts";
 import { readGitStagedIndex } from "./GitIndexReview.ts";
+import { PULL_REQUEST_HEAD_REFS_PREFIX } from "../checkpointing/Utils.ts";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -3383,62 +3384,125 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
   }, Effect.scoped);
 
-  const logKeptLocalBranch = (localBranch: string, head: string) =>
-    Effect.logWarning(
-      `Kept the local branch ${localBranch} as it is: it has commits ${head} lacks, so it was not moved.`,
+  /** The commit `ref` names, or null when it names none (a ref not fetched yet). */
+  const resolveCommitOid = (cwd: string, ref: string) =>
+    executeGit(
+      "GitVcsDriver.resolveCommitOid",
+      cwd,
+      ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`],
+      { allowNonZeroExit: true, readOnly: true, timeoutMs: 5_000 },
+    ).pipe(
+      Effect.map((result) =>
+        result.exitCode === 0 && result.stdout.trim().length > 0 ? result.stdout.trim() : null,
+      ),
     );
+
+  /**
+   * Points the local branch `localBranch` at the fetched `head`, creating it when missing. With
+   * `keepLocalCommits` an existing branch moves only when every commit it has is one the remote
+   * has or had: it is an ancestor of `head`, or of `previousHead` (what the remote had before
+   * this fetch). So a force-pushed or rebased head replaces a branch nobody committed to, and a
+   * branch with commits of its own is left as it is.
+   */
+  const pointLocalBranchAtFetchedHead = Effect.fn("pointLocalBranchAtFetchedHead")(
+    function* (input: {
+      readonly operation: string;
+      readonly cwd: string;
+      readonly localBranch: string;
+      readonly head: string;
+      readonly previousHead: string | null;
+      readonly keepLocalCommits: boolean;
+    }) {
+      const exists = yield* branchExists(input.cwd, input.localBranch);
+      if (exists && input.keepLocalCommits) {
+        const local = `refs/heads/${input.localBranch}`;
+        const remoteHeads =
+          input.previousHead === null ? [input.head] : [input.head, input.previousHead];
+        let unknown = false;
+        let movable = false;
+        for (const remoteHead of remoteHeads) {
+          const ancestor = yield* isAncestorCommit({
+            cwd: input.cwd,
+            ancestor: local,
+            descendant: remoteHead,
+          });
+          if (ancestor === true) {
+            movable = true;
+            break;
+          }
+          if (ancestor === null) unknown = true;
+        }
+        if (!movable) {
+          return yield* Effect.logWarning(
+            unknown
+              ? `Kept the local branch ${input.localBranch} as it is: git could not compare it with ${input.head}.`
+              : `Kept the local branch ${input.localBranch} as it is: it has commits ${input.head} does not have and did not have before this fetch.`,
+          );
+        }
+      }
+      yield* runGit(
+        input.operation,
+        input.cwd,
+        exists
+          ? ["branch", "--force", input.localBranch, input.head]
+          : ["branch", input.localBranch, input.head],
+      );
+    },
+  );
 
   const fetchPullRequestBranch: GitVcsDriver.GitVcsDriverShape["fetchPullRequestBranch"] =
     Effect.fn("fetchPullRequestBranch")(function* (input) {
       const remoteName = yield* resolvePrimaryRemoteName(input.cwd);
-      const operation = "GitVcsDriver.fetchPullRequestBranch";
-      const head = `refs/pull/${input.prNumber}/head`;
-      // No `+`: git creates or fast-forwards the branch and rejects anything else, so a
-      // branch the user committed to is never rewound. Not `--quiet`: that hides the rejection.
-      const args = ["fetch", "--no-tags", remoteName, `${head}:refs/heads/${input.branch}`];
-      const result = yield* executeGit(operation, input.cwd, args, { allowNonZeroExit: true });
-      if (result.exitCode === 0) return;
-      if (/^\s*! \[rejected\].*\(non-fast-forward\)\s*$/m.test(result.stderr)) {
-        return yield* logKeptLocalBranch(input.branch, head);
-      }
-      return yield* createGitCommandError(
-        operation,
+      // Fetched into a hidden ref, not straight into the branch, so the next fetch still knows
+      // this head after the pull request is force-pushed.
+      const headRef = `${PULL_REQUEST_HEAD_REFS_PREFIX}/${remoteName}/${input.prNumber}`;
+      const previousHead = yield* resolveCommitOid(input.cwd, headRef);
+      yield* executeGit(
+        "GitVcsDriver.fetchPullRequestBranch",
         input.cwd,
-        args,
-        result.stderr.trim() || "git fetch pull request branch failed",
+        [
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          remoteName,
+          `+refs/pull/${input.prNumber}/head:${headRef}`,
+        ],
+        {
+          fallbackErrorMessage: "git fetch pull request branch failed",
+        },
       );
+      yield* pointLocalBranchAtFetchedHead({
+        operation: "GitVcsDriver.fetchPullRequestBranch.materialize",
+        cwd: input.cwd,
+        localBranch: input.branch,
+        head: headRef,
+        previousHead,
+        keepLocalCommits: true,
+      });
     });
 
   const fetchRemoteBranch: GitVcsDriver.GitVcsDriverShape["fetchRemoteBranch"] = Effect.fn(
     "fetchRemoteBranch",
   )(function* (input) {
+    const trackingRef = `refs/remotes/${input.remoteName}/${input.remoteBranch}`;
+    const keepLocalCommits = input.keepLocalCommits === true;
+    // What the remote had before this fetch: a branch it contains has no commits of its own.
+    const previousHead = keepLocalCommits ? yield* resolveCommitOid(input.cwd, trackingRef) : null;
     yield* runGit("GitVcsDriver.fetchRemoteBranch.fetch", input.cwd, [
       "fetch",
       "--quiet",
       "--no-tags",
       input.remoteName,
-      `+refs/heads/${input.remoteBranch}:refs/remotes/${input.remoteName}/${input.remoteBranch}`,
+      `+refs/heads/${input.remoteBranch}:${trackingRef}`,
     ]);
-
-    const localBranchAlreadyExists = yield* branchExists(input.cwd, input.localBranch);
-    const targetRef = `${input.remoteName}/${input.remoteBranch}`;
-    if (localBranchAlreadyExists && input.keepLocalCommits === true) {
-      const fastForward = yield* isAncestorCommit({
-        cwd: input.cwd,
-        ancestor: `refs/heads/${input.localBranch}`,
-        descendant: `refs/remotes/${targetRef}`,
-      });
-      if (fastForward !== true) {
-        return yield* logKeptLocalBranch(input.localBranch, targetRef);
-      }
-    }
-    yield* runGit(
-      "GitVcsDriver.fetchRemoteBranch.materialize",
-      input.cwd,
-      localBranchAlreadyExists
-        ? ["branch", "--force", input.localBranch, targetRef]
-        : ["branch", input.localBranch, targetRef],
-    );
+    yield* pointLocalBranchAtFetchedHead({
+      operation: "GitVcsDriver.fetchRemoteBranch.materialize",
+      cwd: input.cwd,
+      localBranch: input.localBranch,
+      head: trackingRef,
+      previousHead,
+      keepLocalCommits,
+    });
   });
 
   const fetchRemoteTrackingBranch: GitVcsDriver.GitVcsDriverShape["fetchRemoteTrackingBranch"] =
