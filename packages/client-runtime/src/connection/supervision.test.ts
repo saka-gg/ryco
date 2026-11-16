@@ -396,6 +396,64 @@ describe("saved environment retry", () => {
       stop();
     });
 
+    it("leaves a socket a reconnect just opened to the grace window", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      // Reconnected two seconds ago: no pong yet, but not silent for minutes either.
+      const lan = heartbeatConnection("env-lan", reconnected);
+      lan.pong.at = 0;
+      lan.pong.reopenedAt = Date.now() - 2_000;
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual([]);
+      await vi.advanceTimersByTimeAsync(3_000);
+      lan.pong.at = Date.now();
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+
+    it("still reconnects a freshly opened socket that never answers within the grace window", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      lan.pong.at = 0;
+      lan.pong.reopenedAt = Date.now() - 2_000;
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual([]);
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual(["env-lan"]);
+      stop();
+    });
+
+    it("does not reconnect again on a wake a socket that opened moments ago", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      lan.pong.at = 0;
+      lan.pong.reopenedAt = Date.now() - 1_000;
+      supervisor.register(lan.connection);
+
+      resume("system-resume");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+
     it("reconnects at once a socket silent for minutes: the machine slept or the page froze", async () => {
       const reconnected: string[] = [];
       const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
