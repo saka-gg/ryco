@@ -210,6 +210,17 @@ describe("desktopSettings", () => {
     });
   });
 
+  it("keeps the configured Tailscale Serve port when the requested port is invalid", () => {
+    for (const port of [70_000, 0, 1.5, Number.NaN]) {
+      const next = setDesktopTailscaleServePreference(
+        { ...DEFAULT_DESKTOP_SETTINGS, tailscaleServePort: 8443 },
+        { enabled: true, port },
+      );
+      expect(next.tailscaleServePort).toBe(8443);
+      expect(next.tailscaleServeEnabled).toBe(true);
+    }
+  });
+
   it("measures a Tailscale Serve request against what the running backend serves", () => {
     const serving = setDesktopTailscaleServePreference(DEFAULT_DESKTOP_SETTINGS, {
       enabled: true,

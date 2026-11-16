@@ -170,7 +170,7 @@ export function setDesktopTailscaleServePreference(
   const port =
     input.port === undefined
       ? settings.tailscaleServePort
-      : normalizeTailscaleServePort(input.port);
+      : normalizeTailscaleServePort(input.port, settings.tailscaleServePort);
   return settings.tailscaleServeEnabled === input.enabled && settings.tailscaleServePort === port
     ? settings
     : {
