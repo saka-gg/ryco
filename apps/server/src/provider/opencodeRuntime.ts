@@ -586,15 +586,20 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const stderrRef = yield* Ref.make("");
       const readyDeferred = yield* Deferred.make<string, OpenCodeRuntimeError>();
 
+      // After startup the readers keep draining (an unread pipe would block the server) but keep nothing.
+      let startupSettled = false;
+
       const setReadyFromStdoutChunk = (chunk: string) =>
-        Ref.updateAndGet(stdoutRef, (stdout) => `${stdout}${chunk}`).pipe(
-          Effect.flatMap((nextStdout) => {
-            const parsed = parseServerUrlFromOutput(nextStdout);
-            return parsed
-              ? Deferred.succeed(readyDeferred, parsed).pipe(Effect.ignore)
-              : Effect.void;
-          }),
-        );
+        startupSettled
+          ? Effect.void
+          : Ref.updateAndGet(stdoutRef, (stdout) => `${stdout}${chunk}`).pipe(
+              Effect.flatMap((nextStdout) => {
+                const parsed = parseServerUrlFromOutput(nextStdout);
+                return parsed
+                  ? Deferred.succeed(readyDeferred, parsed).pipe(Effect.ignore)
+                  : Effect.void;
+              }),
+            );
 
       const stdoutFiber = yield* child.stdout.pipe(
         Stream.decodeText(),
@@ -604,7 +609,9 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       );
       const stderrFiber = yield* child.stderr.pipe(
         Stream.decodeText(),
-        Stream.runForEach((chunk) => Ref.update(stderrRef, (stderr) => `${stderr}${chunk}`)),
+        Stream.runForEach((chunk) =>
+          startupSettled ? Effect.void : Ref.update(stderrRef, (stderr) => `${stderr}${chunk}`),
+        ),
         Effect.ignore,
         Effect.forkIn(runtimeScope),
       );
@@ -639,13 +646,12 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         Deferred.await(readyDeferred).pipe(timeoutWhileResponsiveOption(timeoutMs)),
       );
 
-      // Startup-time fibers are no longer needed once ready has resolved (either
-      // way). The exit fiber is only interrupted on failure; on success it keeps
-      // the caller's `exitCode` effect observable until the scope closes.
-      yield* Fiber.interrupt(stdoutFiber).pipe(Effect.ignore);
-      yield* Fiber.interrupt(stderrFiber).pipe(Effect.ignore);
-
+      // The fibers are only interrupted on failure. On success the output readers keep draining
+      // the pipes (without accumulating) and the exit fiber keeps the caller's `exitCode` effect
+      // observable; all of them end with the scope.
       if (Exit.isFailure(readyExit)) {
+        yield* Fiber.interrupt(stdoutFiber).pipe(Effect.ignore);
+        yield* Fiber.interrupt(stderrFiber).pipe(Effect.ignore);
         yield* Fiber.interrupt(exitFiber).pipe(Effect.ignore);
         const squashed = Cause.squash(readyExit.cause);
         return yield* ensureRuntimeError(
@@ -657,6 +663,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
       const readyOption = readyExit.value;
       if (Option.isNone(readyOption)) {
+        yield* Fiber.interrupt(stdoutFiber).pipe(Effect.ignore);
+        yield* Fiber.interrupt(stderrFiber).pipe(Effect.ignore);
         yield* Fiber.interrupt(exitFiber).pipe(Effect.ignore);
         return yield* new OpenCodeRuntimeError({
           operation: "startOpenCodeServerProcess",
@@ -665,6 +673,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       }
 
       const url = readyOption.value;
+      startupSettled = true;
       ownedServers.set(url, generation);
       // Registered after the kill, so it runs first: the entry is gone before the port is free.
       yield* Scope.addFinalizer(

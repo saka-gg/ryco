@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
-import { Effect, Fiber, Layer, Sink, Stream } from "effect";
+import { Effect, Fiber, Layer, Queue, Sink, Stream } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
@@ -429,6 +429,65 @@ describe("OpenCode serve teardown", () => {
       }).pipe(Effect.provide(layer));
     },
   );
+
+  effectIt.live("keeps draining the server's stdout and stderr after startup", () => {
+    const encoder = new TextEncoder();
+    return Effect.gen(function* () {
+      const stdoutQueue = yield* Queue.unbounded<Uint8Array>();
+      const stderrQueue = yield* Queue.unbounded<Uint8Array>();
+      let stdoutPulled = 0;
+      let stderrPulled = 0;
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(2_147_483_000),
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.concat(
+              Stream.make(encoder.encode("opencode server listening on http://127.0.0.1:4096\n")),
+              Stream.fromQueue(stdoutQueue).pipe(
+                Stream.tap(() =>
+                  Effect.sync(() => {
+                    stdoutPulled += 1;
+                  }),
+                ),
+              ),
+            ),
+            stderr: Stream.fromQueue(stderrQueue).pipe(
+              Stream.tap(() =>
+                Effect.sync(() => {
+                  stderrPulled += 1;
+                }),
+              ),
+            ),
+            all: Stream.empty,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+          }),
+        ),
+      );
+      const layer = OpenCodeRuntimeLive.pipe(
+        Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+      );
+      yield* Effect.gen(function* () {
+        const runtime = yield* OpenCodeRuntime;
+        yield* runtime.startOpenCodeServerProcess({
+          binaryPath: "opencode",
+          verifiedBinaryVersion: "1.18.34",
+          port: 4096,
+        });
+        yield* Queue.offer(stdoutQueue, encoder.encode("chatty line 1\n"));
+        yield* Queue.offer(stdoutQueue, encoder.encode("chatty line 2\n"));
+        yield* Queue.offer(stderrQueue, encoder.encode("chatty warning\n"));
+        yield* Effect.sleep("50 millis");
+        expect(stdoutPulled).toBe(2);
+        expect(stderrPulled).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(layer));
+    });
+  });
 });
 
 describe("OpenCode agent priority", () => {
