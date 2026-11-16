@@ -13,13 +13,9 @@ const baseProps = {
   interactionMode: "default" as const,
   runtimeMode: "full-access" as const,
   tokenMode: "balanced" as const,
-  showPlanToggle: true,
-  planSidebarLabel: "Plan",
-  planSidebarOpen: false,
   onInteractionModeChange: vi.fn(),
   onRuntimeModeChange: vi.fn(),
   onTokenModeChange: vi.fn(),
-  onTogglePlanSidebar: vi.fn(),
 };
 
 // Must exceed ChatComposer's select reopen suppression window.
@@ -68,7 +64,7 @@ describe("ComposerFooterModeControls", () => {
       const controls = document.querySelectorAll(
         '[data-composer-expandable-label-control="true"][data-collapsed="true"]',
       );
-      expect(controls.length).toBe(4);
+      expect(controls.length).toBe(3);
     });
   });
 
