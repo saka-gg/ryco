@@ -25,18 +25,7 @@ export interface LatestStateQueuePolicy {
   readonly recovery: "process-latest";
 }
 
-export interface BoundedRecoverableQueuePolicy {
-  readonly strategy: "bounded-recoverable";
-  readonly component: string;
-  readonly capacity: number;
-  readonly overflow: "fail-subscriber" | "fail-session" | "drop-low-priority";
-  readonly recovery: "resync" | "restart" | "emit-summary";
-}
-
-export type QueuePolicy =
-  | LosslessBackpressureQueuePolicy
-  | LatestStateQueuePolicy
-  | BoundedRecoverableQueuePolicy;
+export type QueuePolicy = LosslessBackpressureQueuePolicy | LatestStateQueuePolicy;
 
 function validCapacity(capacity: number): number {
   if (!Number.isSafeInteger(capacity) || capacity <= 0) {
@@ -73,20 +62,5 @@ export function latestStateQueuePolicy(input: {
     capacity: validCapacity(input.capacity),
     overflow: "backpressure-unique-keys",
     recovery: "process-latest",
-  };
-}
-
-export function boundedRecoverableQueuePolicy(input: {
-  readonly component: string;
-  readonly capacity: number;
-  readonly overflow: BoundedRecoverableQueuePolicy["overflow"];
-  readonly recovery: BoundedRecoverableQueuePolicy["recovery"];
-}): BoundedRecoverableQueuePolicy {
-  return {
-    strategy: "bounded-recoverable",
-    component: validComponent(input.component),
-    capacity: validCapacity(input.capacity),
-    overflow: input.overflow,
-    recovery: input.recovery,
   };
 }
