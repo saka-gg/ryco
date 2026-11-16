@@ -1,6 +1,6 @@
 import * as OS from "node:os";
 import * as Path from "node:path";
-import type { ProviderInstanceConfigMap, ServerSettings } from "@ryco/contracts";
+import type { ServerSettings } from "@ryco/contracts";
 import { parseProviderSourcePaths } from "../provider/ProviderSourcePaths.ts";
 
 export class UsageProtectedPathError extends Error {
@@ -58,40 +58,17 @@ export type UsageProtectionSettings = Pick<ServerSettings, "providers" | "provid
 
 /** Authoritative cleanup protection. Pure path resolution, including disabled
  * instances and legacy/default provider roots. Production must pass CURRENT full
- * settings for scan, preview and final revalidation; the map overload is compatibility only.
+ * settings for scan, preview and final revalidation.
  * Returns lexical absolute paths; the cleanup owner must resolve aliases and
  * protect both ancestors and descendants. No contents/credentials are read. */
 export function resolveUsageProtectedPaths(
-  instances: ProviderInstanceConfigMap,
-  baseEnvironment?: NodeJS.ProcessEnv,
-  home?: string,
-): readonly string[];
-export function resolveUsageProtectedPaths(
   settings: UsageProtectionSettings,
-  baseEnvironment?: NodeJS.ProcessEnv,
-  home?: string,
-): readonly string[];
-export function resolveUsageProtectedPaths(
-  input: ProviderInstanceConfigMap | UsageProtectionSettings,
   baseEnvironment: NodeJS.ProcessEnv = process.env,
   home = OS.homedir(),
 ): readonly string[] {
-  // Keep the historical instance-only call compatible. Production cleanup must
-  // supply full CURRENT settings: UsageService also reads legacy/default roots.
-  const settings =
-    "providers" in input &&
-    "providerInstances" in input &&
-    typeof input.providers === "object" &&
-    input.providers !== null &&
-    !("driver" in input.providers)
-      ? (input as UsageProtectionSettings)
-      : undefined;
-  if (
-    settings !== undefined &&
-    (typeof settings.providerInstances !== "object" || settings.providerInstances === null)
-  )
+  if (typeof settings.providerInstances !== "object" || settings.providerInstances === null)
     throw new UsageProtectedPathError();
-  const instances = settings?.providerInstances ?? (input as ProviderInstanceConfigMap);
+  const instances = settings.providerInstances;
   const paths = new Set<string>();
   const absolute = (value: string, expandTilde = false): string => {
     const expanded =
@@ -133,46 +110,44 @@ export function resolveUsageProtectedPaths(
     else if (driver === "codex") addCodexHistory(providerHome);
     else addClaudeHistory(providerHome);
   };
-  if (settings !== undefined) {
-    const claudeHome = pathField(settings.providers.claudeAgent, "homePath");
-    const codexHome = pathField(settings.providers.codex, "homePath");
-    // Retain historical OS/legacy sources, including disabled defaults, in
-    // addition to the current environment authority resolved below.
-    addClaudeHistory(absolute(claudeHome || home, true));
-    addCodexHistory(absolute(codexHome || Path.join(home, ".codex"), true));
-    const shadowHome = pathField(settings.providers.codex, "shadowHomePath");
-    if (shadowHome) addProviderHome(shadowHome, "codex");
-    const exportPath = pathField(settings.providers.cursor, "usageExportPath");
-    if (exportPath) add(exportPath);
-    // Imports always declare the process-default stores, even when no provider
-    // instances exist or legacy providers are disabled. Drivers also resolve
-    // legacy configurations against this environment. Preserve the OS-based
-    // statistics paths above AND these actual runtime/discovery authorities.
-    const environment = {
-      HOME: baseEnvironment.HOME,
-      CODEX_HOME: baseEnvironment.CODEX_HOME,
-      CLAUDE_CONFIG_DIR: baseEnvironment.CLAUDE_CONFIG_DIR,
-    };
-    for (const driver of ["codex", "claudeAgent"] as const) {
-      const defaults = parseProviderSourcePaths(driver, {}, environment, home);
-      const legacy = parseProviderSourcePaths(
-        driver,
-        {
-          homePath: driver === "codex" ? codexHome : claudeHome,
-          ...(driver === "codex" ? { shadowHomePath: shadowHome } : {}),
-        },
-        environment,
-        home,
-      );
-      addProviderHome(defaults.root, driver);
-      addProviderHome(legacy.root, driver);
-      if (legacy.shadow) addProviderHome(legacy.shadow, driver);
-      if (driver === "claudeAgent") {
-        // Statistics also read both HOME layouts independently of the SDK
-        // configuration-store override used by imports/continuation.
-        addClaudeHistory(defaults.home);
-        addClaudeHistory(legacy.home);
-      }
+  const claudeHome = pathField(settings.providers.claudeAgent, "homePath");
+  const codexHome = pathField(settings.providers.codex, "homePath");
+  // Retain historical OS/legacy sources, including disabled defaults, in
+  // addition to the current environment authority resolved below.
+  addClaudeHistory(absolute(claudeHome || home, true));
+  addCodexHistory(absolute(codexHome || Path.join(home, ".codex"), true));
+  const shadowHome = pathField(settings.providers.codex, "shadowHomePath");
+  if (shadowHome) addProviderHome(shadowHome, "codex");
+  const exportPath = pathField(settings.providers.cursor, "usageExportPath");
+  if (exportPath) add(exportPath);
+  // Imports always declare the process-default stores, even when no provider
+  // instances exist or legacy providers are disabled. Drivers also resolve
+  // legacy configurations against this environment. Preserve the OS-based
+  // statistics paths above AND these actual runtime/discovery authorities.
+  const environment = {
+    HOME: baseEnvironment.HOME,
+    CODEX_HOME: baseEnvironment.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: baseEnvironment.CLAUDE_CONFIG_DIR,
+  };
+  for (const driver of ["codex", "claudeAgent"] as const) {
+    const defaults = parseProviderSourcePaths(driver, {}, environment, home);
+    const legacy = parseProviderSourcePaths(
+      driver,
+      {
+        homePath: driver === "codex" ? codexHome : claudeHome,
+        ...(driver === "codex" ? { shadowHomePath: shadowHome } : {}),
+      },
+      environment,
+      home,
+    );
+    addProviderHome(defaults.root, driver);
+    addProviderHome(legacy.root, driver);
+    if (legacy.shadow) addProviderHome(legacy.shadow, driver);
+    if (driver === "claudeAgent") {
+      // Statistics also read both HOME layouts independently of the SDK
+      // configuration-store override used by imports/continuation.
+      addClaudeHistory(defaults.home);
+      addClaudeHistory(legacy.home);
     }
   }
   for (const instance of Object.values(instances)) {
@@ -212,28 +187,24 @@ export function resolveUsageProtectedPaths(
         field("homePath") || env.get("CODEX_HOME") || Path.join(userHome, ".codex"),
         "codex",
       );
-      if (settings !== undefined) {
-        // Missing instance field inherits the legacy setting; an explicit blank
-        // selects the driver default. Include both runtime and statistics roots.
-        const statisticsHome =
-          config.homePath === undefined
-            ? pathField(settings.providers.codex, "homePath")
-            : field("homePath");
-        addCodexHistory(absolute(statisticsHome || Path.join(home, ".codex"), true));
-      }
+      // Missing instance field inherits the legacy setting; an explicit blank
+      // selects the driver default. Include both runtime and statistics roots.
+      const statisticsHome =
+        config.homePath === undefined
+          ? pathField(settings.providers.codex, "homePath")
+          : field("homePath");
+      addCodexHistory(absolute(statisticsHome || Path.join(home, ".codex"), true));
       const shadow = field("shadowHomePath");
       if (shadow) addProviderHome(shadow, "codex");
     } else {
       const configuredHome = field("homePath");
       if (configuredHome) addProviderHome(configuredHome, "claudeAgent");
       else add(Path.join(userHome, ".claude"));
-      if (settings !== undefined) {
-        const statisticsHome =
-          config.homePath === undefined
-            ? pathField(settings.providers.claudeAgent, "homePath")
-            : configuredHome;
-        addClaudeHistory(absolute(statisticsHome || home, true));
-      }
+      const statisticsHome =
+        config.homePath === undefined
+          ? pathField(settings.providers.claudeAgent, "homePath")
+          : configuredHome;
+      addClaudeHistory(absolute(statisticsHome || home, true));
       const configured = env.get("CLAUDE_CONFIG_DIR");
       if (configured !== undefined) addProviderHome(configured, "claudeAgent");
     }
