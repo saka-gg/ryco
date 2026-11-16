@@ -34,6 +34,8 @@ const advertiseHttpMcp = readEnv("RYCO_ACP_ADVERTISE_HTTP_MCP") === "1";
 const failMcpSetupOnce = readEnv("RYCO_ACP_FAIL_MCP_SETUP_ONCE") === "1";
 const exitOnSetConfigOption = readEnv("RYCO_ACP_EXIT_ON_SET_CONFIG_OPTION") === "1";
 const promptResponseText = readEnv("RYCO_ACP_PROMPT_RESPONSE_TEXT");
+// Bytes each prompt writes to stderr, waiting until they are flushed, before it answers.
+const promptStderrBytes = Number(readEnv("RYCO_ACP_PROMPT_STDERR_BYTES") ?? "0");
 // Number of assistant history chunks `session/load` replays before it answers.
 const replayHistoryChunks = Number(readEnv("RYCO_ACP_REPLAY_HISTORY_CHUNKS") ?? "0");
 // JSON arrays of commands: advertised while `session/new` runs, and during each prompt.
@@ -811,6 +813,15 @@ const program = Effect.gen(function* () {
           content: { type: "text", text: promptResponseText ?? "hello from mock" },
         },
       });
+
+      if (promptStderrBytes > 0) {
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              process.stderr.write("x".repeat(promptStderrBytes), () => resolve());
+            }),
+        );
+      }
 
       if (emitUsageUpdate) {
         yield* agent.client.sessionUpdate({

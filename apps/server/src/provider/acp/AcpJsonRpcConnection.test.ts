@@ -640,6 +640,33 @@ describe("AcpSessionRuntime", () => {
       Effect.ensuring(Effect.sync(() => rmSync(tempDir, { recursive: true, force: true }))),
     );
   });
+  it.live("keeps answering while the agent writes more to stderr than a pipe holds", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+      // The mock answers only once its stderr write is flushed, as a blocking writer would.
+      const result = yield* runtime
+        .prompt({ prompt: [{ type: "text", text: "hi" }] })
+        .pipe(Effect.timeout("15 seconds"));
+      expect(result).toMatchObject({ stopReason: "end_turn" });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: {
+            command: bunExe,
+            args: [mockAgentPath],
+            env: { RYCO_ACP_PROMPT_STDERR_BYTES: String(4 * 1024 * 1024) },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
   it.live("fails a startup phase that does not answer in time with an actionable message", () =>
     Effect.gen(function* () {
       const runtime = yield* AcpSessionRuntime;

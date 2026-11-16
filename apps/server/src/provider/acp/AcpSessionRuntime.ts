@@ -369,6 +369,10 @@ const makeAcpSessionRuntime = (
       ),
     );
 
+    // Nothing else reads the agent's stderr. Left unread, an agent that logs there fills the
+    // pipe, blocks on its next write and stops answering.
+    yield* child.stderr.pipe(Stream.runDrain, Effect.ignore, Effect.forkScoped);
+
     if (options.onProcessExit) {
       yield* child.exitCode.pipe(
         Effect.flatMap(() => options.onProcessExit!()),
