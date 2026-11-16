@@ -4,9 +4,10 @@ import { assert, it } from "@effect/vitest";
 import { NodePtyProcess, ensureNodePtySpawnHelperExecutable, loadNodePty } from "./NodePTY.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
-const fakePty = (readProcess: () => unknown) =>
+const fakePty = (readProcess: () => unknown, kill?: (signal?: string) => void) =>
   ({
     pid: 4242,
+    kill,
     get process() {
       return readProcess();
     },
@@ -49,6 +50,38 @@ it("leaves Linux and Windows to the process table", () => {
         platform,
       ).foregroundProcessName(),
     );
+  }
+});
+
+// node-pty 1.1.0's WindowsTerminal.kill: `if (signal) throw new Error('Signals not supported
+// on windows.')`, and otherwise ends the conpty agent and its console tree.
+const fakeKillablePty = (platform: NodeJS.Platform) => {
+  const kills: Array<string | undefined> = [];
+  const pty = fakePty(
+    () => undefined,
+    (signal) => {
+      if (platform === "win32" && signal) throw new Error("Signals not supported on windows.");
+      kills.push(signal);
+    },
+  );
+  return { pty, kills };
+};
+
+it("kills a Windows pty without a signal, once, through the SIGTERM and SIGKILL steps", () => {
+  const { pty, kills } = fakeKillablePty("win32");
+  const terminal = new NodePtyProcess(pty, "win32");
+  terminal.kill("SIGTERM");
+  terminal.kill("SIGKILL");
+  assert.deepEqual(kills, [undefined]);
+});
+
+it("passes the signal through to node-pty outside Windows", () => {
+  for (const platform of ["darwin", "linux"] as const) {
+    const { pty, kills } = fakeKillablePty(platform);
+    const terminal = new NodePtyProcess(pty, platform);
+    terminal.kill("SIGTERM");
+    terminal.kill("SIGKILL");
+    assert.deepEqual(kills, ["SIGTERM", "SIGKILL"]);
   }
 });
 
