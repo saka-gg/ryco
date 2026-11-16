@@ -11,6 +11,7 @@ import {
   Duration,
   Effect,
   Exit,
+  Fiber,
   FileSystem,
   Layer,
   Option,
@@ -1227,9 +1228,17 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
 ): Effect.fn.Return<SshEnvironmentManagerShape, never, Scope.Scope> {
   const managerScope = yield* Scope.Scope;
   const tunnels = new Map<string, SshTunnelEntry>();
+  /**
+   * One in-flight creation per key. The creator runs in its own fiber, owned
+   * by the manager rather than by the caller that started it, so cancelling
+   * the record stops the creation itself; every caller awaits the Deferred.
+   */
   const pendingTunnelEntries = new Map<
     string,
-    Deferred.Deferred<SshTunnelEntry, SshEnvironmentEffectError>
+    {
+      readonly deferred: Deferred.Deferred<SshTunnelEntry, SshEnvironmentEffectError>;
+      readonly fiber: Fiber.Fiber<SshTunnelEntry, SshEnvironmentEffectError>;
+    }
   >();
   const authSecrets = new Map<string, string>();
 
@@ -1260,7 +1269,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       return;
     }
     pendingTunnelEntries.delete(key);
-    yield* Deferred.fail(pending, makeSshTunnelCancelledError(target)).pipe(Effect.ignore);
+    yield* Deferred.fail(pending.deferred, makeSshTunnelCancelledError(target)).pipe(Effect.ignore);
+    // Waits for the creator to stop, so it can neither publish a tunnel nor
+    // keep launching the remote server after the cancel returns.
+    yield* Fiber.interrupt(pending.fiber);
   });
 
   yield* Scope.addFinalizer(
@@ -1388,6 +1400,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     readonly key: string;
     readonly resolvedTarget: DesktopSshEnvironmentTarget;
     readonly runner?: RemoteRycoRunnerOptions;
+    /** Whether this creation is still the key's pending one, i.e. not cancelled. */
+    readonly isCurrent: () => boolean;
   }): Effect.fn.Return<SshTunnelEntry, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
     yield* Effect.logDebug("ssh.environment.tunnel.create.start", {
       ...sshTargetLogFields(input.resolvedTarget),
@@ -1417,85 +1431,96 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remotePort,
     });
     const entryScope = yield* Scope.make("sequential");
-    const tunnelEntry = yield* runWithSshAuth({
-      key: input.key,
-      target: input.resolvedTarget,
-      operation: (authOptions) =>
-        startSshTunnel({
-          key: input.key,
-          resolvedTarget: input.resolvedTarget,
-          remotePort,
-          localPort,
-          httpBaseUrl,
-          wsBaseUrl,
-          authOptions,
-          remoteServerKind: remoteLaunch.remoteServerKind,
-          scope: entryScope,
-        }).pipe(Effect.provideService(Scope.Scope, entryScope)),
+    return yield* Effect.gen(function* () {
+      const tunnelEntry = yield* runWithSshAuth({
+        key: input.key,
+        target: input.resolvedTarget,
+        operation: (authOptions) =>
+          startSshTunnel({
+            key: input.key,
+            resolvedTarget: input.resolvedTarget,
+            remotePort,
+            localPort,
+            httpBaseUrl,
+            wsBaseUrl,
+            authOptions,
+            remoteServerKind: remoteLaunch.remoteServerKind,
+            scope: entryScope,
+          }).pipe(Effect.provideService(Scope.Scope, entryScope)),
+      });
+      const spawnerService = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystemService = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      yield* Scope.addFinalizer(
+        entryScope,
+        Effect.gen(function* () {
+          if (tunnels.get(tunnelEntry.key) !== tunnelEntry) {
+            return;
+          }
+          yield* Effect.logDebug("ssh.environment.tunnel.finalizer.start", {
+            ...sshTargetLogFields(tunnelEntry.target),
+            key: tunnelEntry.key,
+            localPort: tunnelEntry.localPort,
+            remotePort: tunnelEntry.remotePort,
+          });
+          tunnels.delete(tunnelEntry.key);
+          const authSecret = authSecrets.get(tunnelEntry.key) ?? null;
+          yield* Effect.all(
+            [
+              tunnelEntry.process.kill({
+                killSignal: "SIGTERM",
+                forceKillAfter: TUNNEL_SHUTDOWN_TIMEOUT_MS,
+              }),
+              stopRemoteServer(
+                tunnelEntry.target,
+                authSecret === null
+                  ? {
+                      batchMode: "yes",
+                      interactiveAuth: false,
+                    }
+                  : {
+                      authSecret,
+                      batchMode: "no",
+                      interactiveAuth: true,
+                    },
+              ).pipe(
+                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawnerService),
+                Effect.provideService(FileSystem.FileSystem, fileSystemService),
+                Effect.provideService(Path.Path, pathService),
+              ),
+            ],
+            { concurrency: "unbounded" },
+          ).pipe(Effect.ignore);
+          yield* Effect.logDebug("ssh.environment.tunnel.finalizer.succeeded", {
+            ...sshTargetLogFields(tunnelEntry.target),
+            key: tunnelEntry.key,
+            localPort: tunnelEntry.localPort,
+            remotePort: tunnelEntry.remotePort,
+          });
+        }).pipe(Effect.ignore),
+      );
+      // Publish only after the finalizer above is in place, and only while this
+      // creation is still current: a cancelled one must not replace (and so
+      // orphan) whatever the map holds now.
+      if (!input.isCurrent()) {
+        return yield* makeSshTunnelCancelledError(input.resolvedTarget);
+      }
+      tunnels.set(input.key, tunnelEntry);
+      yield* Effect.logDebug("ssh.environment.tunnel.create.succeeded", {
+        ...sshTargetLogFields(input.resolvedTarget),
+        key: input.key,
+        localPort,
+        remotePort,
+      });
+      return tunnelEntry;
     }).pipe(
+      // Failure or interruption anywhere after the scope exists closes it,
+      // killing the tunnel process; an entry already published also stops
+      // its remote server through the finalizer.
       Effect.onExit((exit) =>
         Exit.isSuccess(exit) ? Effect.void : Scope.close(entryScope, Exit.void).pipe(Effect.ignore),
       ),
     );
-    tunnels.set(input.key, tunnelEntry);
-    const spawnerService = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const fileSystemService = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-    yield* Scope.addFinalizer(
-      entryScope,
-      Effect.gen(function* () {
-        if (tunnels.get(tunnelEntry.key) !== tunnelEntry) {
-          return;
-        }
-        yield* Effect.logDebug("ssh.environment.tunnel.finalizer.start", {
-          ...sshTargetLogFields(tunnelEntry.target),
-          key: tunnelEntry.key,
-          localPort: tunnelEntry.localPort,
-          remotePort: tunnelEntry.remotePort,
-        });
-        tunnels.delete(tunnelEntry.key);
-        const authSecret = authSecrets.get(tunnelEntry.key) ?? null;
-        yield* Effect.all(
-          [
-            tunnelEntry.process.kill({
-              killSignal: "SIGTERM",
-              forceKillAfter: TUNNEL_SHUTDOWN_TIMEOUT_MS,
-            }),
-            stopRemoteServer(
-              tunnelEntry.target,
-              authSecret === null
-                ? {
-                    batchMode: "yes",
-                    interactiveAuth: false,
-                  }
-                : {
-                    authSecret,
-                    batchMode: "no",
-                    interactiveAuth: true,
-                  },
-            ).pipe(
-              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawnerService),
-              Effect.provideService(FileSystem.FileSystem, fileSystemService),
-              Effect.provideService(Path.Path, pathService),
-            ),
-          ],
-          { concurrency: "unbounded" },
-        ).pipe(Effect.ignore);
-        yield* Effect.logDebug("ssh.environment.tunnel.finalizer.succeeded", {
-          ...sshTargetLogFields(tunnelEntry.target),
-          key: tunnelEntry.key,
-          localPort: tunnelEntry.localPort,
-          remotePort: tunnelEntry.remotePort,
-        });
-      }).pipe(Effect.ignore),
-    );
-    yield* Effect.logDebug("ssh.environment.tunnel.create.succeeded", {
-      ...sshTargetLogFields(input.resolvedTarget),
-      key: input.key,
-      localPort,
-      remotePort,
-    });
-    return tunnelEntry;
   });
 
   const ensureTunnelEntry = Effect.fn("ssh/tunnel.ensureTunnelEntry")(function* (
@@ -1503,7 +1528,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     resolvedTarget: DesktopSshEnvironmentTarget,
     runner?: RemoteRycoRunnerOptions,
   ): Effect.fn.Return<SshTunnelEntry, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
-    let entry = tunnels.get(key) ?? null;
+    const entry = tunnels.get(key) ?? null;
 
     if (entry !== null) {
       yield* Effect.logDebug("ssh.environment.tunnel.existing.check", {
@@ -1532,8 +1557,10 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         cause: readinessExit.cause,
       });
       yield* closeTunnelEntry(entry);
-      yield* cancelPendingTunnelEntry(key, resolvedTarget);
-      entry = null;
+      // The readiness probe took time: another caller may have replaced the
+      // stale entry or started a creation meanwhile, so look again rather than
+      // cancelling or overwriting its work.
+      return yield* ensureTunnelEntry(key, resolvedTarget, runner);
     }
 
     const pending = pendingTunnelEntries.get(key);
@@ -1542,16 +1569,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         ...sshTargetLogFields(resolvedTarget),
         key,
       });
-      return yield* Deferred.await(pending);
+      return yield* Deferred.await(pending.deferred);
     }
 
     const deferred = yield* Deferred.make<SshTunnelEntry, SshEnvironmentEffectError>();
-    pendingTunnelEntries.set(key, deferred);
-
-    return yield* createTunnelEntry({
+    const isCurrent = () => pendingTunnelEntries.get(key)?.deferred === deferred;
+    const fiber = yield* createTunnelEntry({
       key,
       resolvedTarget,
       ...(runner === undefined ? {} : { runner }),
+      isCurrent,
     }).pipe(
       Effect.tapError((cause) =>
         Effect.logWarning("ssh.environment.tunnel.create.failed", {
@@ -1562,12 +1589,16 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ),
       Effect.onExit((exit) =>
         Effect.sync(() => {
-          if (pendingTunnelEntries.get(key) === deferred) {
+          if (isCurrent()) {
             pendingTunnelEntries.delete(key);
           }
         }).pipe(Effect.andThen(Deferred.done(deferred, exit))),
       ),
+      Effect.forkIn(managerScope),
     );
+    pendingTunnelEntries.set(key, { deferred, fiber });
+
+    return yield* Deferred.await(deferred);
   });
 
   const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
@@ -1648,17 +1679,19 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ...(target.port !== null ? { port: target.port } : {}),
     };
     const key = targetConnectionKey(resolvedTarget);
-    const entry = tunnels.get(key) ?? null;
     yield* Effect.logDebug("ssh.environment.disconnect.targetResolved", {
       ...sshTargetLogFields(resolvedTarget),
       key,
-      hasTunnel: entry !== null,
+      hasTunnel: tunnels.has(key),
       hasPendingTunnel: pendingTunnelEntries.has(key),
     });
+    // Stop an in-flight creation first: it may still publish its tunnel, and
+    // the remote server must not be stopped while it is being launched.
+    yield* cancelPendingTunnelEntry(key, resolvedTarget);
+    const entry = tunnels.get(key) ?? null;
     if (entry !== null) {
       yield* closeTunnelEntry(entry);
     }
-    yield* cancelPendingTunnelEntry(key, resolvedTarget);
     if (entry === null) {
       yield* runWithSshAuth({
         key,
