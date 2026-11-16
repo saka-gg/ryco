@@ -49,6 +49,8 @@ export async function startFakeScrcpyServer(options: {
   readonly video: boolean;
   readonly refuseFirst?: number;
   readonly initialVideo?: Buffer;
+  /** Acknowledge SET_CLIPBOARD; false leaves every clipboard request unconfirmed. */
+  readonly ackClipboard?: boolean;
 }): Promise<FakeScrcpyServer> {
   let accepted = 0;
   let refused = 0;
@@ -97,7 +99,7 @@ export async function startFakeScrcpyServer(options: {
                     : Infinity
                   : 1;
         if (rest < size) break;
-        if (type === 9) {
+        if (type === 9 && options.ackClipboard !== false) {
           const ack = Buffer.alloc(9);
           ack[0] = 1;
           controlBytes.copy(ack, 1, parsed + 1, parsed + 9);
