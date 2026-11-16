@@ -47,7 +47,6 @@ function invalidate(
       Effect.provideService(ProjectionPendingApprovalRepository, {
         upsert: () => Effect.void,
         deleteByThreadId: () => Effect.void,
-        deleteByRequestId: () => Effect.void,
         listByThreadId: () => Effect.succeed([]),
         getByRequestId: () =>
           Effect.succeed(

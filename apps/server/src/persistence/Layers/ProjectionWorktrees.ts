@@ -13,7 +13,6 @@ import {
   ProjectionWorktreeRepository,
   type ProjectionWorktreeRepositoryShape,
   SetProjectionWorktreeManualPositionInput,
-  UpdateProjectionWorktreeMetaInput,
 } from "../Services/ProjectionWorktrees.ts";
 import { WorktreeId, WorktreePullRequestLink } from "@ryco/contracts";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
@@ -344,16 +343,6 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
       `,
   });
 
-  const updateProjectionWorktreeMeta = SqlSchema.void({
-    Request: UpdateProjectionWorktreeMetaInput,
-    execute: ({ worktreeId, title, updatedAt }) =>
-      sql`
-        UPDATE projection_worktrees
-        SET title = ${title}, updated_at = ${updatedAt}
-        WHERE worktree_id = ${worktreeId}
-      `,
-  });
-
   const setProjectionWorktreeManualPosition = SqlSchema.void({
     Request: SetProjectionWorktreeManualPositionInput,
     execute: ({ worktreeId, position }) =>
@@ -479,11 +468,6 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionWorktreeRepository.deleteById:query")),
     );
 
-  const updateMeta: ProjectionWorktreeRepositoryShape["updateMeta"] = (input) =>
-    updateProjectionWorktreeMeta(input).pipe(
-      Effect.mapError(toPersistenceSqlError("ProjectionWorktreeRepository.updateMeta:query")),
-    );
-
   const setManualPosition: ProjectionWorktreeRepositoryShape["setManualPosition"] = (input) =>
     setProjectionWorktreeManualPosition(input).pipe(
       Effect.mapError(
@@ -501,7 +485,6 @@ const makeProjectionWorktreeRepository = Effect.gen(function* () {
     findActiveByWorktreePath,
     markArchived,
     markRestored,
-    updateMeta,
     deleteById,
     setManualPosition,
   } satisfies ProjectionWorktreeRepositoryShape;

@@ -47,47 +47,6 @@ layer("ProjectionWorktreeRepository", (it) => {
     }),
   );
 
-  it.effect("updateMeta changes the persisted title", () =>
-    Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 39 });
-      const repo = yield* ProjectionWorktreeRepository;
-
-      const id = WorktreeId.make("worktree-title-test");
-      yield* repo.upsert({
-        worktreeId: id,
-        projectId: ProjectId.make("project-x"),
-        title: null,
-        branch: "main",
-        worktreePath: null,
-        origin: "main",
-        prNumber: null,
-        issueNumber: null,
-        prTitle: null,
-        issueTitle: null,
-        prState: null,
-        prIsDraft: null,
-        issueState: null,
-        createdAt: "2026-05-08T00:00:00.000Z",
-        updatedAt: "2026-05-08T00:00:00.000Z",
-        archivedAt: null,
-        manualPosition: 0,
-      });
-
-      yield* repo.updateMeta({
-        worktreeId: id,
-        title: "Renamed Worktree",
-        updatedAt: "2026-05-08T01:00:00.000Z",
-      });
-
-      const row = yield* repo.getById({ worktreeId: id });
-      assert.isTrue(Option.isSome(row));
-      if (Option.isSome(row)) {
-        assert.equal(row.value.title, "Renamed Worktree");
-        assert.equal(row.value.updatedAt, "2026-05-08T01:00:00.000Z");
-      }
-    }),
-  );
-
   it.effect("findByOrigin returns the matching open worktree", () =>
     Effect.gen(function* () {
       yield* runMigrations({ toMigrationInclusive: 39 });
