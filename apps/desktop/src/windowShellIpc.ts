@@ -264,7 +264,7 @@ export function registerWindowShellIpc(deps: WindowShellIpcDeps): void {
 
   handleAppInvoke(
     OPEN_EXTERNAL_CHANNEL,
-    async (event, rawUrl: unknown) => {
+    async (_event, rawUrl: unknown) => {
       const externalUrl = deps.getSafeExternalUrl(rawUrl);
       if (externalUrl) {
         try {
@@ -274,11 +274,7 @@ export function registerWindowShellIpc(deps: WindowShellIpcDeps): void {
           return false;
         }
       }
-
-      const { resolveBundledRelayGuidePath } = await import("./bundledGuide.ts");
-      const guidePath = resolveBundledRelayGuidePath(rawUrl, event.sender.getURL());
-      if (guidePath === null) return false;
-      return (await shell.openPath(guidePath)) === "";
+      return false;
     },
     { requireMainFrame: false },
   );
