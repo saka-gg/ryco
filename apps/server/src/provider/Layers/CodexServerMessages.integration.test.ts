@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
-import { type ProviderEvent, RuntimeSessionId, ThreadId } from "@ryco/contracts";
+import { type ProviderEvent, ProviderItemId, RuntimeSessionId, ThreadId } from "@ryco/contracts";
 import { Deferred, Effect, Ref, Stream } from "effect";
 import fixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
@@ -12,7 +12,7 @@ import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
  * `notifications` and `serverRequests` after `turn/start`.
  */
 const root = fixture.rootThreadId;
-const turnId = "drift-turn";
+const turnId = "wire-turn";
 
 const startHarness = (input: {
   readonly name: string;
@@ -45,29 +45,41 @@ const startHarness = (input: {
       environment: { ...process.env, RYCO_CODEX_COLLAB_SCRIPT: scriptPath },
     });
     const seen = yield* Ref.make<ReadonlyArray<ProviderEvent>>([]);
-    const firsts = new Map<string, Deferred.Deferred<ProviderEvent>>();
-    const first = (method: string) =>
-      Effect.sync(() => {
-        const existing = firsts.get(method);
-        if (existing) return existing;
-        const created = Deferred.makeUnsafe<ProviderEvent>();
-        firsts.set(method, created);
-        return created;
-      });
+    const waiters: Array<{
+      readonly method: string;
+      readonly count: number;
+      readonly done: Deferred.Deferred<ReadonlyArray<ProviderEvent>>;
+    }> = [];
+    const settle = (events: ReadonlyArray<ProviderEvent>) =>
+      Effect.forEach(
+        waiters,
+        (waiter) => {
+          const matching = events.filter((event) => event.method === waiter.method);
+          return matching.length >= waiter.count
+            ? Deferred.succeed(waiter.done, matching)
+            : Effect.void;
+        },
+        { discard: true },
+      );
     yield* runtime.events.pipe(
       Stream.runForEach((event) =>
-        Ref.update(seen, (current) => [...current, event]).pipe(
-          Effect.andThen(first(event.method)),
-          Effect.flatMap((deferred) => Deferred.succeed(deferred, event)),
-        ),
+        Ref.updateAndGet(seen, (current) => [...current, event]).pipe(Effect.flatMap(settle)),
       ),
       Effect.forkScoped,
     );
+    /** The first `count` events with this method, once they arrived. */
+    const waitForEvents = (method: string, count: number) =>
+      Effect.gen(function* () {
+        const done = yield* Deferred.make<ReadonlyArray<ProviderEvent>>();
+        waiters.push({ method, count, done });
+        yield* settle(yield* Ref.get(seen));
+        return (yield* Deferred.await(done)).slice(0, count);
+      }).pipe(Effect.timeout("10 seconds"));
     const waitForEvent = (method: string) =>
-      first(method).pipe(Effect.flatMap(Deferred.await), Effect.timeout("10 seconds"));
+      waitForEvents(method, 1).pipe(Effect.map((events) => events[0]!));
     yield* runtime.start();
     yield* runtime.sendTurn({ input: "Go" });
-    return { runtime, waitForEvent, events: Ref.get(seen) };
+    return { runtime, waitForEvent, waitForEvents };
   });
 
 it.live("ends a turn whose turn/completed carries an error kind newer than the schema", () =>
@@ -101,5 +113,57 @@ it.live("ends a turn whose turn/completed carries an error kind newer than the s
     assert.equal(session.status, "error");
     assert.equal(session.activeTurnId, undefined);
     assert.equal(session.lastError, "Rate limit reached");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.live("matches serverRequest/resolved to the approval by its JSON-RPC id", () =>
+  Effect.gen(function* () {
+    const { waitForEvent, waitForEvents } = yield* startHarness({
+      name: "approval-resolved",
+      serverRequests: [
+        {
+          id: 7,
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: root,
+            turnId,
+            itemId: "item-command",
+            approvalId: "approval-command",
+            command: "rm -rf build",
+            startedAtMs: 1,
+          },
+          resolveAfterMs: 150,
+        },
+        {
+          id: 8,
+          method: "item/fileChange/requestApproval",
+          params: { threadId: root, turnId, itemId: "item-file", startedAtMs: 1 },
+          resolveAfterMs: 200,
+        },
+      ],
+    });
+    const command = yield* waitForEvent("item/commandExecution/requestApproval");
+    const fileChange = yield* waitForEvent("item/fileChange/requestApproval");
+    // Codex withdrew both itself (an interrupt): each resolution names its own approval.
+    const resolved = yield* waitForEvents("serverRequest/resolved", 2);
+    assert.deepEqual(
+      resolved.map((event) => ({
+        requestId: event.requestId,
+        requestKind: event.requestKind,
+        itemId: event.itemId,
+      })),
+      [
+        {
+          requestId: command.requestId,
+          requestKind: "command",
+          itemId: ProviderItemId.make("item-command"),
+        },
+        {
+          requestId: fileChange.requestId,
+          requestKind: "file-change",
+          itemId: ProviderItemId.make("item-file"),
+        },
+      ],
+    );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

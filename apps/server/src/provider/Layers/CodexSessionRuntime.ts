@@ -407,7 +407,6 @@ export class CodexSessionRuntimeCompactionNotStartedError extends Schema.TaggedE
 
 interface PendingApproval {
   readonly requestId: ApprovalRequestId;
-  readonly jsonRpcId: string;
   readonly requestKind: ProviderRequestKind;
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
@@ -2242,9 +2241,11 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
-    yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
+    yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload, context) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* Effect.sync(() => crypto.randomUUID()));
+        // `serverRequest/resolved` names the request by its JSON-RPC id, not by item or approval id.
+        const jsonRpcId = String(context.requestId);
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -2253,7 +2254,6 @@ export const makeCodexSessionRuntime = (
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.approvalId ?? payload.itemId,
             requestKind: "command",
             turnId,
             itemId,
@@ -2263,7 +2263,7 @@ export const makeCodexSessionRuntime = (
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.approvalId ?? payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
             requestKind: "command",
             turnId,
@@ -2298,9 +2298,10 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
-    yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
+    yield* client.handleServerRequest("item/fileChange/requestApproval", (payload, context) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* Effect.sync(() => crypto.randomUUID()));
+        const jsonRpcId = String(context.requestId);
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -2309,7 +2310,6 @@ export const makeCodexSessionRuntime = (
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.itemId,
             requestKind: "file-change",
             turnId,
             itemId,
@@ -2319,7 +2319,7 @@ export const makeCodexSessionRuntime = (
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
             requestKind: "file-change",
             turnId,
