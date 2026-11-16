@@ -1,6 +1,6 @@
 /**
  * Where an agent's requested secret is written: one `KEY='value'` line in a dotenv file of the
- * requesting thread's own checkout (docs/secret-requests.md).
+ * requesting thread's own checkout (docs/agent-control.md, "Secret requests").
  *
  * Each check, and what it defends against:
  * - The file is a relative path of plain segments (letters, digits, `.`, `_`, `-`, `@`, `+`):
