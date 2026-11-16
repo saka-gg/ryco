@@ -30,15 +30,17 @@ class NativeClaimOperationFailed extends Data.TaggedError("NativeClaimOperationF
   readonly cause: unknown;
 }> {}
 
-function activeHubConfig(config: ServerConfigShape): {
-  readonly origin: string;
-  readonly nodeName: string | undefined;
-} {
+function activeHubConfig(
+  config: ServerConfigShape,
+): Effect.Effect<
+  { readonly origin: string; readonly nodeName: string | undefined },
+  NodeNativeClaimError
+> {
   const hub = config.hubConnector;
   if (hub?.enabled !== true || hub.origin === undefined || hub.configurationIssue !== undefined) {
-    throw new NodeNativeClaimError("native_node_claim_unavailable");
+    return Effect.fail(new NodeNativeClaimError("native_node_claim_unavailable"));
   }
-  return { origin: hub.origin, nodeName: hub.nodeName };
+  return Effect.succeed({ origin: hub.origin, nodeName: hub.nodeName });
 }
 
 function errorStatus(code: NodeNativeClaimErrorCode): number {
@@ -83,7 +85,7 @@ export const desktopNativeNodeClaimDescriptorRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* requireDesktopLocalControl;
     const config = yield* ServerConfig;
-    const hub = activeHubConfig(config);
+    const hub = yield* activeHubConfig(config);
     const environment = yield* ServerEnvironment;
     const environmentDescriptor = yield* environment.getDescriptor;
     const connector = yield* awaitHubConnector;
@@ -124,7 +126,7 @@ export const desktopNativeNodeClaimSignRouteLayer = HttpRouter.add(
     const body = yield* HttpServerRequest.schemaBodyJson(DesktopNativeNodeClaimSignRequest).pipe(
       Effect.mapError(() => new DesktopLocalControlRefused({ reason: "body" })),
     );
-    const hub = activeHubConfig(yield* ServerConfig);
+    const hub = yield* activeHubConfig(yield* ServerConfig);
     const connector = yield* awaitHubConnector;
     const signature = yield* Effect.tryPromise({
       try: () =>
@@ -154,7 +156,7 @@ export const desktopNativeNodeClaimCommitRouteLayer = HttpRouter.add(
       Effect.mapError(() => new DesktopLocalControlRefused({ reason: "body" })),
     );
     const config = yield* ServerConfig;
-    const hub = activeHubConfig(config);
+    const hub = yield* activeHubConfig(config);
     const environment = yield* ServerEnvironment;
     const environmentDescriptor = yield* environment.getDescriptor;
     const expectedLabel = resolveHubEnrollmentLabel({
