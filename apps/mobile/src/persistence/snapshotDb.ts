@@ -551,29 +551,29 @@ export function createSnapshotDb(
     // (whose rows may still roll back).
     listEnvironmentCacheStats: () =>
       write(async (handle) => {
-      const rows = await handle.getAllAsync<{
-        environment_id: string;
-        updated_at: number;
-        thread_count: number;
-        project_count: number;
-        bytes: number;
-      }>(
-        `SELECT e.environment_id, e.updated_at, e.thread_count, e.project_count,
+        const rows = await handle.getAllAsync<{
+          environment_id: string;
+          updated_at: number;
+          thread_count: number;
+          project_count: number;
+          bytes: number;
+        }>(
+          `SELECT e.environment_id, e.updated_at, e.thread_count, e.project_count,
                 e.payload_bytes
                 + COALESCE((SELECT SUM(t.payload_bytes) FROM environment_threads t
                              WHERE t.environment_id = e.environment_id), 0)
                 + COALESCE((SELECT SUM(b.payload_bytes) FROM environment_thread_bodies b
                              WHERE b.environment_id = e.environment_id), 0) AS bytes
            FROM environment_envelopes e`,
-        [],
-      );
-      return rows.map((row) => ({
-        environmentId: row.environment_id,
-        bytes: Number(row.bytes),
-        updatedAt: row.updated_at,
-        threadCount: row.thread_count,
-        projectCount: row.project_count,
-      }));
+          [],
+        );
+        return rows.map((row) => ({
+          environmentId: row.environment_id,
+          bytes: Number(row.bytes),
+          updatedAt: row.updated_at,
+          threadCount: row.thread_count,
+          projectCount: row.project_count,
+        }));
       }),
     removeThreadBodies: (environmentId) =>
       write(async (handle) => {

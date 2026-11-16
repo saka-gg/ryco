@@ -972,7 +972,9 @@ describe("threadOutbox hydration", () => {
     enqueueThreadOutboxMessage({ ...queued("m1", AT), text: "edited" });
     await hydrating;
     const inMemory = listThreadOutboxMessages();
-    expect(inMemory.map((message) => [message.messageId, message.text])).toEqual([["m1", "edited"]]);
+    expect(inMemory.map((message) => [message.messageId, message.text])).toEqual([
+      ["m1", "edited"],
+    ]);
     const stored = JSON.parse(kv.get("ryco.threadOutbox.v1") ?? "[]") as QueuedThreadMessage[];
     expect(stored.map((message) => [message.messageId, message.text])).toEqual([["m1", "edited"]]);
   });
@@ -992,8 +994,6 @@ describe("threadOutbox hydration", () => {
     const stored = JSON.parse(kv.get("ryco.threadOutboxHolds.v1") ?? "{}") as {
       acknowledged: Record<string, unknown>;
     };
-    expect(Object.keys(stored.acknowledged)).toEqual(
-      expect.arrayContaining([`${ENV}:t0`, KEY]),
-    );
+    expect(Object.keys(stored.acknowledged)).toEqual(expect.arrayContaining([`${ENV}:t0`, KEY]));
   });
 });

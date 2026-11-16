@@ -155,7 +155,9 @@ describe("attachment files", () => {
     for (let index = 1; index < 160; index += 1) await read(`att-${index}`);
     expect(peekStoredAttachmentFile(heldKey)).toBe(heldUri);
     expect(hoisted.files.has(heldUri)).toBe(true);
-    expect(peekStoredAttachmentFile(attachmentFileKey(reference("env-a", "att-0")))).toBeUndefined();
+    expect(
+      peekStoredAttachmentFile(attachmentFileKey(reference("env-a", "att-0"))),
+    ).toBeUndefined();
     expect(hoisted.files.has(firstUri)).toBe(false);
     expect(() => release()).not.toThrow();
   });

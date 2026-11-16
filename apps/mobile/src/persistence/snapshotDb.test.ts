@@ -302,7 +302,7 @@ describe("snapshotDb", () => {
       rowsWrite("env-2", {
         upsertThreads: [
           threadRow("t1", "{}"),
-          { ...threadRow("t2", "{}"), threadId: null as never },
+          Object.assign(threadRow("t2", "{}"), { threadId: null }),
         ],
       }),
     );
