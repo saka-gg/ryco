@@ -55,6 +55,29 @@ describe("ScrcpySession", () => {
     await server.close();
   });
 
+  it("rejects a clipboard request whose session ends before the device acknowledges", async () => {
+    const server = await startFakeScrcpyServer({ video: false, ackClipboard: false });
+    const fake = host(server.port);
+    const session = await ScrcpySession.start(fake.host, { transportId: "1", video: null });
+    const clipboard = session.setClipboard("hé", true);
+    await vi.waitFor(() => expect(server.control().byteLength).toBe(14 + 3));
+    await server.close();
+    await expect(clipboard).rejects.toThrow(
+      "closed before the emulator confirmed the clipboard, so it is unknown whether the text arrived",
+    );
+    expect(session.isOpen).toBe(false);
+  });
+
+  it("rejects a pending clipboard request when the session is closed", async () => {
+    const server = await startFakeScrcpyServer({ video: false, ackClipboard: false });
+    const fake = host(server.port);
+    const session = await ScrcpySession.start(fake.host, { transportId: "1", video: null });
+    const clipboard = session.setClipboard("hé", true);
+    await session.close();
+    await expect(clipboard).rejects.toThrow("before the emulator confirmed the clipboard");
+    await server.close();
+  });
+
   it("streams video events in order and ends once when the socket closes", async () => {
     const server = await startFakeScrcpyServer({
       video: true,
