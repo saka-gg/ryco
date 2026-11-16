@@ -118,12 +118,15 @@ final class BrokerSession {
 
     private var hostWatch: DispatchSourceTimer?
 
-    /// SIGTERM every child, SIGKILL whatever is left after a second, then exit.
-    func end() {
+    /// SIGTERM every child, SIGKILL whatever is left after a second, then exit. A concurrent caller
+    /// waits for that exit.
+    func end() -> Never {
         childrenLock.lock()
         if ending {
             childrenLock.unlock()
-            return
+            // The first caller is in its SIGTERM wait and exits the process itself. Returning here
+            // would let applicationWillTerminate finish termination before its SIGKILL pass.
+            while true { pause() }
         }
         ending = true
         let live = Array(children.values)
