@@ -174,3 +174,13 @@ export function tokenPopupSpot(input: {
   }
   return { left, top };
 }
+
+/** A new draft's untouched default branch follows the device; a chosen or saved one stays. */
+export function baseRefAfterDeviceSwitch(input: {
+  readonly isNew: boolean;
+  readonly baseRef: string;
+  readonly fromMainBranch: string;
+  readonly toMainBranch: string;
+}): string {
+  return input.isNew && input.baseRef === input.fromMainBranch ? input.toMainBranch : input.baseRef;
+}

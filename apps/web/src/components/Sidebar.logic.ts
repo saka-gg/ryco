@@ -86,6 +86,8 @@ export function deriveStatusBucket(input: DeriveStatusBucketInput): SidebarStatu
     case "Monitoring":
     case "Connecting":
       return "in_progress";
+    // A usage limit waits on the user like a plan does (same rank in THREAD_STATUS_PRIORITY).
+    case "Limited":
     case "Plan Ready":
     case "Pending Approval":
     case "Awaiting Input":

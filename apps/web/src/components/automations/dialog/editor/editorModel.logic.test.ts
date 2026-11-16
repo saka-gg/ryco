@@ -16,6 +16,7 @@ import { DAY_MS } from "@ryco/shared/automationSchedule";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  baseRefAfterDeviceSwitch,
   editorHint,
   editorOpening,
   tokenPopupSpot,
@@ -249,5 +250,51 @@ describe("where a token's popover lands", () => {
         gap: 8,
       }).top,
     ).toBe(800 - 12 - 400);
+  });
+});
+
+describe("baseRefAfterDeviceSwitch", () => {
+  it("moves a new draft's untouched default to the new device's main branch", () => {
+    expect(
+      baseRefAfterDeviceSwitch({
+        isNew: true,
+        baseRef: "main",
+        fromMainBranch: "main",
+        toMainBranch: "develop",
+      }),
+    ).toBe("develop");
+  });
+
+  it("keeps a branch the user chose", () => {
+    expect(
+      baseRefAfterDeviceSwitch({
+        isNew: true,
+        baseRef: "feature/x",
+        fromMainBranch: "main",
+        toMainBranch: "develop",
+      }),
+    ).toBe("feature/x");
+  });
+
+  it("never changes an existing schedule", () => {
+    expect(
+      baseRefAfterDeviceSwitch({
+        isNew: false,
+        baseRef: "main",
+        fromMainBranch: "main",
+        toMainBranch: "develop",
+      }),
+    ).toBe("main");
+  });
+
+  it("follows a second switch back", () => {
+    expect(
+      baseRefAfterDeviceSwitch({
+        isNew: true,
+        baseRef: "develop",
+        fromMainBranch: "develop",
+        toMainBranch: "main",
+      }),
+    ).toBe("main");
   });
 });
