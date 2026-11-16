@@ -136,6 +136,10 @@ describe("environmentActions", () => {
 
     expect(reg.spies.persistRecord).toHaveBeenCalledTimes(1);
     expect(reg.spies.writeBearerToken).toHaveBeenCalledWith(ENV, "bearer-xyz");
+    // The credential first: no record is ever saved without one.
+    expect(reg.spies.writeBearerToken.mock.invocationCallOrder[0]).toBeLessThan(
+      reg.spies.persistRecord.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(reg.spies.upsert).toHaveBeenCalledTimes(1);
     expect(reg.spies.ensureSavedEnvironmentConnection).toHaveBeenCalledTimes(1);
     // A connect still running on the replaced credential is not joined.
@@ -182,23 +186,55 @@ describe("environmentActions", () => {
     );
   });
 
-  it("rolls back and throws the exact message when the token write fails", async () => {
-    const prior = {
-      environmentId: ENV,
-      label: "Old",
-      httpBaseUrl: "http://old/",
-      wsBaseUrl: "ws://old/",
-      createdAt: "2026-07-01T00:00:00.000Z",
-      lastConnectedAt: null,
-    } as SavedEnvironmentRecord;
-    const reg = fakeRegistry({ writeBearerToken: async () => false, priorRecord: prior });
+  const PRIOR = {
+    environmentId: ENV,
+    label: "Old",
+    httpBaseUrl: "http://old/",
+    wsBaseUrl: "ws://old/",
+    createdAt: "2026-07-01T00:00:00.000Z",
+    lastConnectedAt: null,
+  } as SavedEnvironmentRecord;
+
+  it("saves nothing and throws the exact message when the token write fails", async () => {
+    const reg = fakeRegistry({ writeBearerToken: async () => false, priorRecord: PRIOR });
 
     await expect(
       actions(reg).addSavedEnvironment({ label: "My node", pairingUrl: "ryco://x" }),
     ).rejects.toThrow("Unable to persist saved environment credentials.");
-    // The failing path restores the prior record and never upserts.
-    expect(reg.spies.persistRecord).toHaveBeenLastCalledWith(prior);
+    expect(reg.spies.persistRecord).not.toHaveBeenCalled();
     expect(reg.spies.upsert).not.toHaveBeenCalled();
+  });
+
+  it("a first pairing whose token write fails leaves no record behind", async () => {
+    const reg = fakeRegistry({ writeBearerToken: async () => false });
+
+    await expect(
+      actions(reg).addSavedEnvironment({ label: "My node", pairingUrl: "ryco://x" }),
+    ).rejects.toThrow("Unable to persist saved environment credentials.");
+    expect(reg.spies.persistRecord).not.toHaveBeenCalled();
+    expect(reg.spies.upsert).not.toHaveBeenCalled();
+    expect(reg.spies.ensureSavedEnvironmentConnection).not.toHaveBeenCalled();
+  });
+
+  it("a first pairing whose record write fails removes its token", async () => {
+    const reg = fakeRegistry();
+    reg.spies.persistRecord.mockRejectedValueOnce(new Error("kv down"));
+
+    await expect(
+      actions(reg).addSavedEnvironment({ label: "My node", pairingUrl: "ryco://x" }),
+    ).rejects.toThrow("kv down");
+    expect(reg.spies.removeBearerToken).toHaveBeenCalledWith(ENV);
+    expect(reg.spies.upsert).not.toHaveBeenCalled();
+  });
+
+  it("a re-pairing whose record write fails keeps the new token", async () => {
+    const reg = fakeRegistry({ priorRecord: PRIOR });
+    reg.spies.persistRecord.mockRejectedValueOnce(new Error("kv down"));
+
+    await expect(
+      actions(reg).addSavedEnvironment({ label: "My node", pairingUrl: "ryco://x" }),
+    ).rejects.toThrow("kv down");
+    expect(reg.spies.removeBearerToken).not.toHaveBeenCalled();
   });
 
   it("removeSavedEnvironment clears the supervisor, catalog, runtime, store, and token", async () => {
