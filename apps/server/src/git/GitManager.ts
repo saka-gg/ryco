@@ -2214,7 +2214,16 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     // Keyed by the branch read from disk, so a checkout switch misses at once.
     const head = yield* readCheckoutHead(cacheKey);
     const key = `${cacheKey}\u0000${head?.branch ?? ""}`;
+    refSummaryKeysByCwd.delete(cacheKey);
     refSummaryKeysByCwd.set(cacheKey, key);
+    if (refSummaryKeysByCwd.size > STATUS_RESULT_CACHE_CAPACITY) {
+      const oldest = refSummaryKeysByCwd.entries().next().value;
+      if (oldest !== undefined) {
+        refSummaryKeysByCwd.delete(oldest[0]);
+        // The summary cached under it could no longer be invalidated through its checkout.
+        yield* Cache.invalidate(refSummaryCache, oldest[1]);
+      }
+    }
     return yield* Cache.get(refSummaryCache, key);
   });
 

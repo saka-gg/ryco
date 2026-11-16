@@ -448,6 +448,13 @@ const controlDescriptors: ReadonlyArray<ExternalMcpToolDescriptor> = (
   ] as const
 ).map(([name, description]) => ({ name, description, inputSchema: externalInputSchema(name) }));
 
+/** Automation proposals also need task authority: every automation lifecycle plan is refused without it. */
+const AUTOMATION_PROPOSAL_TOOLS: ReadonlySet<string> = new Set([
+  AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationCreate,
+  AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationUpdate,
+  AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationCancel,
+]);
+
 const toolCapability = (name: string): AgentControlCapability | null => {
   switch (name) {
     case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listAllowedProjects:
@@ -558,6 +565,11 @@ export const makeExternalMcpTools = (deps: {
   const descriptorsFor = (integration: AgentControlExternalIntegration) =>
     [...descriptors, ...readDescriptors, ...controlDescriptors].filter((descriptor) => {
       if (isControlRequestTool(descriptor.name)) return canCreateRequests(integration);
+      if (
+        AUTOMATION_PROPOSAL_TOOLS.has(descriptor.name) &&
+        !integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask)
+      )
+        return false;
       const capability = toolCapability(descriptor.name);
       return capability === null || integration.capabilities.includes(capability);
     });
@@ -1085,6 +1097,9 @@ export const makeExternalMcpTools = (deps: {
             tool: name,
             requiredCapability: AGENT_CONTROL_CAPABILITIES.externalManageAutomations,
           });
+          if (!integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask)) {
+            return yield* Effect.fail(new Error("Task capability required"));
+          }
           const current = yield* findAutomation(integration, input.automationId);
           if (current.revision !== input.expectedRevision) {
             return yield* Effect.fail(new Error("Revision changed"));

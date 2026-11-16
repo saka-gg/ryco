@@ -452,6 +452,32 @@ describe("external Agent Control read catalog", () => {
     expect(workspaceNames).not.toContain(T.sendMessage);
   });
 
+  it("offers automation proposals only with task authority", async () => {
+    const proposalTools = [
+      T.proposeAutomationCreate,
+      T.proposeAutomationUpdate,
+      T.proposeAutomationCancel,
+    ];
+    const manageOnly = fixture([C.externalManageAutomations, C.externalReadAutomations]);
+    const manageNames = manageOnly.tools
+      .descriptorsFor(manageOnly.integration())
+      .map((tool) => tool.name);
+    for (const tool of proposalTools) expect(manageNames).not.toContain(tool);
+    expect(manageNames).toContain(T.listAutomations);
+
+    const full = fixture([C.externalManageAutomations, C.externalCreateTask]);
+    const fullNames = full.tools.descriptorsFor(full.integration()).map((tool) => tool.name);
+    for (const tool of proposalTools) expect(fullNames).toContain(tool);
+
+    const result = await manageOnly.call(T.proposeAutomationCancel, {
+      requestId: "request-cancel",
+      automationId: "automation-x",
+      expectedRevision: 1,
+    });
+    expect(result.isError).toBe(true);
+    expect(manageOnly.submit).not.toHaveBeenCalled();
+  });
+
   it("submits thread control as an approval proposal with shared presentation", async () => {
     const { call, validateExternalSubmission, submit } = fixture([C.externalControlThreads]);
     const result = await call(T.sendMessage, {

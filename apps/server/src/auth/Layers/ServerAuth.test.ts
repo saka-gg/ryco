@@ -103,11 +103,12 @@ const makeCookieRequest = (
   }) as unknown as Parameters<ServerAuthShape["authenticateHttpRequest"]>[0];
 
 const makeBearerRequest = (
-  token: string,
+  token: string | undefined,
+  cookies: Record<string, string> = {},
 ): Parameters<ServerAuthShape["authenticateHttpRequest"]>[0] =>
   ({
-    cookies: {},
-    headers: { authorization: `Bearer ${token}` },
+    cookies,
+    headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
   }) as unknown as Parameters<ServerAuthShape["authenticateHttpRequest"]>[0];
 
 const requestMetadata = {
@@ -388,6 +389,26 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       expect(atCap.role).toBe("owner");
       const client = yield* authControlPlane.createPairingLink({ ttl: Duration.hours(1) });
       expect(client.role).toBe("client");
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
+  it.effect("ignores an empty session cookie and uses the bearer header", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const pairing = yield* serverAuth.issuePairingCredential();
+      const { sessionToken } = yield* serverAuth.exchangeBootstrapCredential(
+        pairing.credential,
+        requestMetadata,
+      );
+      const session = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(sessionToken, { ryco_session: "" }),
+      );
+      expect(session.sessionId.length).toBeGreaterThan(0);
+
+      const refused = yield* Effect.flip(
+        serverAuth.authenticateHttpRequest(makeBearerRequest(undefined, { ryco_session: "" })),
+      );
+      expect(refused.status).toBe(401);
     }).pipe(Effect.provide(makeServerAuthLayer())),
   );
 

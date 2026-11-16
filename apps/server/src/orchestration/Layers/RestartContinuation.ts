@@ -41,6 +41,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { currentCommandReadModel } from "../currentCommandReadModel.ts";
+import { isSettledDispatchRejection } from "../Errors.ts";
 import {
   NO_RESTART_SIGNALS,
   RESTART_BACKGROUND_WORK_STOPPED_KIND,
@@ -110,19 +111,6 @@ const logFailure =
             ),
       ),
     );
-
-function isSettledRejection(cause: Cause.Cause<unknown>): boolean {
-  const error = Cause.findErrorOption(cause);
-  if (Option.isNone(error)) return false;
-  const tag =
-    typeof error.value === "object" && error.value !== null && "_tag" in error.value
-      ? (error.value as { readonly _tag?: unknown })._tag
-      : undefined;
-  return (
-    tag === "OrchestrationCommandInvariantError" ||
-    tag === "OrchestrationCommandPreviouslyRejectedError"
-  );
-}
 
 function compactBackgroundWork(
   work: ReturnType<typeof deriveBackgroundWork>,
@@ -683,7 +671,9 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
               return yield* settle(record.threadId, record.sourceTurnId, "dispatched", null);
             }
             if (Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.interrupt;
-            if (isSettledRejection(exit.cause)) return yield* skip(record, "thread-changed");
+            const failure = Cause.findErrorOption(exit.cause);
+            if (Option.isSome(failure) && isSettledDispatchRejection(failure.value))
+              return yield* skip(record, "thread-changed");
             yield* Effect.logWarning("restart continuation dispatch failed", {
               threadId: record.threadId,
               cause: Cause.pretty(exit.cause),

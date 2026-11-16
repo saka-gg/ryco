@@ -105,13 +105,7 @@ export function acquireWorktreeCreationLease(sql: SqlClient.SqlClient, candidate
         return yield* new StorageError({
           detail: "Checkout cleanup is pending. Creation cannot replace an in-flight removal.",
         });
-      creations.set(canonical, (creations.get(canonical) ?? 0) + 1);
-      return Effect.sync(() => {
-        const remaining = (creations.get(canonical) ?? 1) - 1;
-        if (remaining > 0) creations.set(canonical, remaining);
-        else creations.delete(canonical);
-        noteStorageActivity();
-      });
+      return takePathUse(canonical);
     }),
   );
 }
