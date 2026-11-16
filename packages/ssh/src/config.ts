@@ -198,8 +198,7 @@ export function parseKnownHostsEntries(raw: string): ReadonlyArray<KnownHostsEnt
   }
 
   return [...entries.values()].toSorted(
-    (left, right) =>
-      left.host.localeCompare(right.host) || (left.port ?? 0) - (right.port ?? 0),
+    (left, right) => left.host.localeCompare(right.host) || (left.port ?? 0) - (right.port ?? 0),
   );
 }
 

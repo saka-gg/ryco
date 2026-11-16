@@ -152,7 +152,10 @@ describe("ssh config", () => {
       const homeDir = yield* makeTempHomeDir();
       const sshDir = path.join(homeDir, ".ssh");
       yield* fs.makeDirectory(sshDir, { recursive: true });
-      yield* fs.writeFileString(path.join(sshDir, "config"), "Host devbox\n  HostName devbox.example.com\n");
+      yield* fs.writeFileString(
+        path.join(sshDir, "config"),
+        "Host devbox\n  HostName devbox.example.com\n",
+      );
       yield* fs.writeFileString(
         path.join(sshDir, "known_hosts"),
         "[devbox]:2222 ssh-ed25519 AAAA\n",
