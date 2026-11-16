@@ -1,5 +1,5 @@
 import "../../index.css";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
@@ -42,6 +42,7 @@ describe("statistics charts", () => {
     expect(niceTicks(-40, 120)).toEqual([-40, 0, 40, 80, 120]);
     expect(niceTicks(0, 0)).toEqual([0, 1, 2, 3, 4]);
     expect(niceTicks(0, 0.37)).toEqual([0, 0.095, 0.19, 0.285, 0.38]);
+    expect(niceTicks(0, 1, { allowDecimals: false })).toEqual([0, 1, 2, 3, 4]);
     const indexes = visibleTickIndexes(["Aug 1", "Aug 2", "Aug 3", "Aug 4", "Aug 5"], 20, 28);
     expect(indexes.at(-1)).toBe(4);
     expect(indexes.length).toBeLessThan(5);
@@ -141,5 +142,55 @@ describe("statistics charts", () => {
     await expect.element(page.getByText("Alpha")).toBeVisible();
     const changes = page.getByRole("img", { name: "Code changes" });
     expect(changes.element().querySelectorAll("path").length).toBe(3);
+  });
+
+  it("labels line counts with whole numbers", async () => {
+    await render(
+      <div style={{ width: 500 }}>
+        <CodeChangesChart data={[day("2026-08-01", 1, 0)]} />
+      </div>,
+    );
+    const changes = page.getByRole("img", { name: "Code changes" });
+    await expect.element(changes).toBeVisible();
+    const labels = [...changes.element().querySelectorAll("text")].map(
+      (text) => text.textContent ?? "",
+    );
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels.filter((label) => label.includes("."))).toEqual([]);
+  });
+
+  it("draws one bar each for projects that share a title", async () => {
+    const projects: ProjectAggregate[] = ["p1", "p2"].map((projectId, index) => ({
+      projectId,
+      title: "app",
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: (index + 1) * 1000,
+      turns: 0,
+      activeMs: 0,
+      toolUses: 0,
+      filesChanged: 0,
+      additions: 0,
+      deletions: 0,
+      commits: 0,
+      pushes: 0,
+      threadsCreated: 0,
+    }));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await render(
+        <div style={{ width: 500 }}>
+          <ProjectBars data={projects} />
+        </div>,
+      );
+      const bars = page.getByRole("img", { name: "Projects" });
+      await expect.element(bars).toBeVisible();
+      expect(bars.element().querySelectorAll("path").length).toBe(2);
+      expect(error.mock.calls.filter((call) => String(call[0]).includes("same key"))).toEqual([]);
+    } finally {
+      error.mockRestore();
+    }
   });
 });

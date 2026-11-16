@@ -87,6 +87,11 @@ export function useCrownShipBinding(input: GitActionRunnerInput & { readonly ena
     null,
   );
 
+  // Gives the field its text back, without overwriting what the user typed meanwhile.
+  const restoreCommitMessage = (message: string) => {
+    if (message) setCommitMessage((current) => (current === "" ? message : current));
+  };
+
   const cancel = useEvent(() => {
     const arm = armRef.current;
     if (!arm) return;
@@ -111,21 +116,29 @@ export function useCrownShipBinding(input: GitActionRunnerInput & { readonly ena
     const { steps, action } = plan;
     const message = steps.includes("commit") ? commitMessage.trim() : "";
     if (message) setCommitMessage("");
+    let committed = false;
     setRun({ phase: "running", steps, activeStep: steps[0] ?? null, details: stepDetails });
     try {
       if (steps[0] === "pull") {
         const pulled = await runPull();
-        if (!pulled) return;
+        if (!pulled) {
+          restoreCommitMessage(message);
+          return;
+        }
       }
       if (action) {
         const firstAfterPull = steps.find((step) => step !== "pull") ?? null;
         setRun((current) => current && { ...current, activeStep: firstAfterPull });
-        await runGitActionWithToast({
+        const ran = await runGitActionWithToast({
           action,
           ...(message ? { commitMessage: message } : {}),
-          onProgressPhase: (phase) =>
-            setRun((current) => current && { ...current, activeStep: stepForPhase(phase) }),
+          onProgressPhase: (phase) => {
+            // A later phase means the commit landed.
+            if (phase === "push" || phase === "pr") committed = true;
+            setRun((current) => current && { ...current, activeStep: stepForPhase(phase) });
+          },
         });
+        if (!ran && !committed) restoreCommitMessage(message);
       }
     } finally {
       setRun(null);
@@ -181,6 +194,8 @@ export function useCrownShipBinding(input: GitActionRunnerInput & { readonly ena
     void runGitActionWithToast({
       action: "commit",
       ...(message ? { commitMessage: message } : {}),
+    }).then((ran) => {
+      if (!ran) restoreCommitMessage(message);
     });
   });
 

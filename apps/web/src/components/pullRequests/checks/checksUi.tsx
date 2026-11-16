@@ -11,7 +11,7 @@ import {
 
 import { cn } from "../../../lib/utils";
 import { usePullRequestsPage } from "../PullRequestsPageContext";
-import { usePullRequestReaderStore } from "../pullRequestsLayoutStore";
+import { readPullRequestScrollTop, usePullRequestReaderStore } from "../pullRequestsLayoutStore";
 import type { PullRequestsTab } from "../pullRequestsSearch";
 
 /**
@@ -114,7 +114,7 @@ export function useTabScrollMemory(tab: PullRequestsTab, ready: boolean) {
   useLayoutEffect(() => {
     if (!ready || restoredRef.current || readerKey === null) return;
     restoredRef.current = true;
-    const top = usePullRequestReaderStore.getState().scrollTop[`${readerKey}\0${tab}`];
+    const top = readPullRequestScrollTop(readerKey, tab);
     if (top && ref.current) ref.current.scrollTop = top;
   }, [ready, readerKey, tab]);
 

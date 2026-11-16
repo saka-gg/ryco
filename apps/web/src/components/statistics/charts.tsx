@@ -534,7 +534,12 @@ export function ProjectBars({
   const rows = [...data]
     .toSorted((left, right) => valueOf(right) - valueOf(left))
     .slice(0, 6)
-    .map((entry, index) => ({ name: entry.title, value: valueOf(entry), fill: chartColor(index) }));
+    .map((entry, index) => ({
+      id: entry.projectId,
+      name: entry.title,
+      value: valueOf(entry),
+      fill: chartColor(index),
+    }));
 
   if (rows.length === 0) {
     return (
@@ -585,7 +590,7 @@ export function ProjectBars({
               };
               return (
                 <g
-                  key={row.name}
+                  key={row.id}
                   onPointerMove={onPointer}
                   onPointerDown={onPointer}
                   onPointerLeave={() => setHover(null)}
@@ -656,7 +661,7 @@ export function CodeChangesChart({ data }: { data: ReadonlyArray<DayPoint> }) {
   const labels = useMemo(() => data.map((point) => formatDayLabel(point.date)), [data]);
   const maxAdded = data.reduce((max, point) => Math.max(max, point.additions), 0);
   const maxRemoved = data.reduce((max, point) => Math.max(max, point.deletions), 0);
-  const ticks = niceTicks(-maxRemoved, maxAdded);
+  const ticks = niceTicks(-maxRemoved, maxAdded, { allowDecimals: false });
   const low = ticks[0] ?? 0;
   const high = ticks.at(-1) ?? 1;
   const hoveredPoint = hover === null ? undefined : data[hover.index];

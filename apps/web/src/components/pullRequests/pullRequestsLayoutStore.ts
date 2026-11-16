@@ -188,7 +188,8 @@ export function pullRequestReaderKey(repositoryKey: string, pr: number): string 
 
 interface PullRequestReaderState {
   readonly visitedTabs: Readonly<Record<string, ReadonlyArray<PullRequestsTab>>>;
-  readonly scrollTop: Readonly<Record<string, number>>;
+  /** Scroll offsets per tab, nested per reader so one trim bounds the memory. */
+  readonly scrollTop: Readonly<Record<string, Readonly<Partial<Record<PullRequestsTab, number>>>>>;
   readonly expandedJobs: Readonly<Record<string, ReadonlyArray<string>>>;
   /** Conversation masthead scrolled out of view, so the bar shows the title. */
   readonly mastheadHidden: Readonly<Record<string, boolean>>;
@@ -201,17 +202,25 @@ interface PullRequestReaderState {
   setJobExpanded: (readerKey: string, jobId: string, expanded: boolean) => void;
 }
 
-const MAX_REMEMBERED_READERS = 24;
+export const MAX_REMEMBERED_READERS = 24;
 
+/** Keeps the most recently touched readers, and `keep` (just written) as the newest. */
 function trimRecord<T>(record: Readonly<Record<string, T>>, keep: string): Record<string, T> {
-  const keys = Object.keys(record);
-  if (keys.length <= MAX_REMEMBERED_READERS) return { ...record };
+  const others = Object.keys(record).filter((key) => key !== keep);
   const next: Record<string, T> = {};
-  for (const key of keys.slice(keys.length - MAX_REMEMBERED_READERS + 1)) {
+  for (const key of others.slice(Math.max(0, others.length - (MAX_REMEMBERED_READERS - 1)))) {
     next[key] = record[key] as T;
   }
   next[keep] = record[keep] as T;
   return next;
+}
+
+/** The remembered scroll offset of a reader's tab, if any. */
+export function readPullRequestScrollTop(
+  readerKey: string,
+  tab: PullRequestsTab,
+): number | undefined {
+  return usePullRequestReaderStore.getState().scrollTop[readerKey]?.[tab];
 }
 
 export const usePullRequestReaderStore = create<PullRequestReaderState>()((set) => ({
@@ -222,10 +231,13 @@ export const usePullRequestReaderStore = create<PullRequestReaderState>()((set) 
   titleEditRequest: {},
   requestTitleEdit: (readerKey) =>
     set((state) => ({
-      titleEditRequest: {
-        ...state.titleEditRequest,
-        [readerKey]: (state.titleEditRequest[readerKey] ?? 0) + 1,
-      },
+      titleEditRequest: trimRecord(
+        {
+          ...state.titleEditRequest,
+          [readerKey]: (state.titleEditRequest[readerKey] ?? 0) + 1,
+        },
+        readerKey,
+      ),
     })),
   setMastheadHidden: (readerKey, hidden) =>
     set((state) =>
@@ -247,7 +259,16 @@ export const usePullRequestReaderStore = create<PullRequestReaderState>()((set) 
       };
     }),
   setScrollTop: (readerKey, tab, top) =>
-    set((state) => ({ scrollTop: { ...state.scrollTop, [`${readerKey}\0${tab}`]: top } })),
+    set((state) => {
+      const current = state.scrollTop[readerKey];
+      if (current?.[tab] === top) return state;
+      return {
+        scrollTop: trimRecord(
+          { ...state.scrollTop, [readerKey]: { ...current, [tab]: top } },
+          readerKey,
+        ),
+      };
+    }),
   setJobExpanded: (readerKey, jobId, expanded) =>
     set((state) => {
       const current = state.expandedJobs[readerKey] ?? [];

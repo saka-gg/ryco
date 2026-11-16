@@ -199,6 +199,18 @@ function userScrollableAncestor(element: HTMLElement): HTMLElement | null {
   return null;
 }
 
+/** A verified password-reset attempt, as the Hub answers a valid link. */
+function verifiedPasswordReset(input: { readonly requiresTotp: boolean }) {
+  return {
+    status: "verified",
+    attemptId: "reset_aaaaaaaaaaaaaaaaaaaaaa",
+    attemptSecret: "D".repeat(43),
+    requiresTotp: input.requiresTotp,
+    issuedAt: 1,
+    expiresAt: 2,
+  } as never;
+}
+
 describe("HostedHubRoot accessibility and responsive flows", () => {
   it("opens home and discovers uncached device lists without replacing the workspace", async () => {
     navigateHubPathname("/", { replace: true });
@@ -781,14 +793,9 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
   it("consumes a fragment reset link, changes the password, and keeps the bearer out of history", async () => {
     const token = "C".repeat(43);
     window.history.replaceState(null, "", `/password-reset#token=${token}`);
-    const verify = vi.spyOn(hostedHubApi, "verifyPasswordReset").mockResolvedValue({
-      status: "verified",
-      attemptId: "reset_aaaaaaaaaaaaaaaaaaaaaa",
-      attemptSecret: "D".repeat(43),
-      requiresTotp: true,
-      issuedAt: 1,
-      expiresAt: 2,
-    } as never);
+    const verify = vi
+      .spyOn(hostedHubApi, "verifyPasswordReset")
+      .mockResolvedValue(verifiedPasswordReset({ requiresTotp: true }));
     const finish = vi.spyOn(hostedHubApi, "finishPasswordReset").mockResolvedValue({
       status: "complete",
     });
@@ -809,6 +816,36 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       factor: { kind: "totp", code: "123456" },
     });
     await expect.element(page.getByText("Password changed")).toBeVisible();
+  });
+
+  it("verifies a reset link once under StrictMode and leaves the form usable", async () => {
+    window.history.replaceState(null, "", `/password-reset#token=${"F".repeat(43)}`);
+    // Whether each request was still live when the server answered it.
+    const liveWhenAnswered: boolean[] = [];
+    vi.spyOn(hostedHubApi, "verifyPasswordReset").mockImplementation(
+      (_input, signal) =>
+        new Promise((resolve, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+          setTimeout(() => {
+            liveWhenAnswered.push(signal?.aborted === false);
+            resolve(verifiedPasswordReset({ requiresTotp: false }));
+          }, 10);
+        }),
+    );
+    mounted = await render(
+      <StrictMode>
+        <HostedHubRoot />
+      </StrictMode>,
+    );
+
+    await expect.element(page.getByLabelText("New password")).toBeVisible();
+    await expect.element(page.getByLabelText("New password")).toBeEnabled();
+    await expect
+      .element(page.getByText("This reset link could not be verified."))
+      .not.toBeInTheDocument();
+    expect(liveWhenAnswered).toContain(true);
   });
 
   it("verifies an existing-account email from a scrubbed fragment link", async () => {
