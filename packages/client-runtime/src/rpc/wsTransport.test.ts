@@ -12,7 +12,7 @@ import { fakeSocketPlatform, type FakeWebSocket } from "../../test/fakeWebSocket
 import { makeProjectCopyRpcProtocolClient } from "./projectCopyRpcClient.ts";
 import { type RpcRequestAdmission, type WsProtocolLifecycleHandlers } from "./protocol.ts";
 import { resetRequestLatencyStateForTests } from "./requestLatencyState.ts";
-import { resetWsConnectionStateForTests } from "./wsConnectionState.ts";
+import { getWsConnectionStatus, resetWsConnectionStateForTests } from "./wsConnectionState.ts";
 import { setRetryJitterForTests } from "./retryJitter.ts";
 import {
   disconnectedSubscriptionRetryDelayMs,
@@ -832,6 +832,50 @@ describe("WsTransport keepalive", () => {
       sockets[0]!.reply({ _tag: "Pong" });
       await vi.advanceTimersByTimeAsync(expected);
       expect(pings(sockets[0]!)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("WsTransport heartbeat timeout", () => {
+  // A socket whose pings go unanswered past twice the keepalive interval.
+  async function timeOutHeartbeat(recordConnectionState: boolean) {
+    const onHeartbeatTimeout = vi.fn();
+    const transport = new WsTransport("ws://relay.test/relay", fakeSocketPlatform(sockets), {
+      preserveSocketPath: true,
+      shouldReconnect: () => false,
+      recordConnectionState,
+      onHeartbeatTimeout,
+    });
+    transports.push(transport);
+    subscribeProposals(transport, () => undefined);
+    for (let turn = 0; turn < 50 && sockets.length === 0; turn += 1) {
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(3 * 8_000);
+    return onHeartbeatTimeout;
+  }
+
+  it("records the timeout on the socket that owns the connection status", async () => {
+    vi.useFakeTimers();
+    try {
+      const onHeartbeatTimeout = await timeOutHeartbeat(true);
+      expect(onHeartbeatTimeout).toHaveBeenCalled();
+      expect(getWsConnectionStatus().lastError).toBe("WebSocket heartbeat timed out.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the app's connection status alone for a secondary channel", async () => {
+    vi.useFakeTimers();
+    try {
+      const before = getWsConnectionStatus();
+      const onHeartbeatTimeout = await timeOutHeartbeat(false);
+      expect(onHeartbeatTimeout).toHaveBeenCalled();
+      expect(getWsConnectionStatus()).toBe(before);
     } finally {
       vi.useRealTimers();
     }
