@@ -857,10 +857,12 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                   endToEndEncrypted: () => e2ee.mode() === "e2ee",
                   tunnel: frameTunnel,
                 }),
-                // The channel-fatal verdict has already emitted its §11 record
-                // and asked for the close by the time this runs; nothing further
-                // is owed here.
-                onInboundRejected: () => undefined,
+                // An interceptor verdict has already emitted its §11 record and
+                // closed the E2EE session by the time this runs, which makes
+                // `abandon` a no-op. A payload the session could not reassemble
+                // or decode has closed nothing yet, so the channel ends here
+                // instead of waiting for the peer's next frame to be refused.
+                onInboundRejected: () => e2ee.abandon(),
                 // Allowlisted snapshot-class responses, once this channel's client
                 // advertised it can inflate. On an `e2ee` channel the frame is
                 // the inner record body, so the Hub sees only its padded length.
