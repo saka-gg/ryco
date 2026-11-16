@@ -25,8 +25,6 @@ import type { DraftComposerAttachment } from "../lib/composerFiles";
 // client-runtime queue policy (`resolveQueueDrainStep`). Kept node-testable (no
 // store / react-native / native KV).
 
-const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
-
 export interface QueuedThreadMessage {
   /**
    * The send stopped at a choice the user did not confirm (the Claude resume review, or
@@ -231,10 +229,6 @@ export function flattenQueuedThreadMessages(
   queues: Record<string, ReadonlyArray<QueuedThreadMessage>>,
 ): ReadonlyArray<QueuedThreadMessage> {
   return Object.values(queues).flat();
-}
-
-export function threadOutboxRetryDelayMs(attempt: number): number {
-  return Math.min(1_000 * 2 ** Math.max(0, attempt - 1), THREAD_OUTBOX_MAX_RETRY_DELAY_MS);
 }
 
 function errorMessage(error: unknown): string | null {
