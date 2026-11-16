@@ -29,7 +29,7 @@ import { Duration, Effect, Exit, Fiber, Layer, Scope, Semaphore } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { timeoutWhileResponsiveOrElse } from "@ryco/shared/responsiveDeadline";
 
-import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { buildCodexInitializeParams } from "../codexInitializeParams.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 
 export interface CodexStoredThreadReaderOptions {

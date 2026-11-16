@@ -20,13 +20,13 @@ export class CodexAppServerModuleLoadError extends Data.TaggedError(
 
 export const loadCodexAppServerModule = Effect.tryPromise({
   try: async () => {
-    const [client, provider] = await Promise.all([
+    const [client, initializeParams] = await Promise.all([
       import("effect-codex-app-server/client"),
-      import("./Layers/CodexProvider.ts"),
+      import("./codexInitializeParams.ts"),
     ]);
     return {
       CodexClient: client,
-      buildCodexInitializeParams: provider.buildCodexInitializeParams,
+      buildCodexInitializeParams: initializeParams.buildCodexInitializeParams,
     };
   },
   catch: (cause) =>

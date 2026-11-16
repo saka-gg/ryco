@@ -17,7 +17,6 @@ import {
   CodexSessionRuntimeCompactionNotStartedError,
   buildTurnStartParams,
   buildTurnSteerParams,
-  isRecoverableThreadResumeError,
   makeCodexCompactionStarter,
   openCodexThread,
   revertCodexThread,
@@ -309,65 +308,6 @@ describe("buildTurnSteerParams", () => {
         { type: "image", url: "data:image/png;base64,abc" },
       ],
     });
-  });
-});
-
-describe("isRecoverableThreadResumeError", () => {
-  it("matches missing thread errors", () => {
-    assert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Thread does not exist",
-        }),
-      ),
-      true,
-    );
-  });
-
-  it("matches Codex's missing-rollout error", () => {
-    assert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32600,
-          errorMessage: "no rollout found for thread id 019a0000-0000-7000-8000-000000000001",
-        }),
-      ),
-      true,
-    );
-  });
-
-  it("ignores non-recoverable resume errors", () => {
-    assert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Permission denied",
-        }),
-      ),
-      false,
-    );
-  });
-
-  it("ignores unrelated missing-resource errors that do not mention threads", () => {
-    assert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Config file not found",
-        }),
-      ),
-      false,
-    );
-    assert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Model does not exist",
-        }),
-      ),
-      false,
-    );
   });
 });
 

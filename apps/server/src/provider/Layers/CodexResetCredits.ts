@@ -10,6 +10,7 @@ import {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import { expandHomePath } from "../../pathExpansion.ts";
+import { buildCodexInitializeParams } from "../codexInitializeParams.ts";
 import { codexRuntimeBinding } from "../codexRuntimeBinding.ts";
 import {
   timeoutWhileResponsive,
@@ -147,10 +148,7 @@ export const withResetCreditClient = <A, E, R>(
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(context),
     );
-    yield* client.request("initialize", {
-      clientInfo: { name: "ryco", version: "0.1.0" },
-      capabilities: { experimentalApi: true },
-    });
+    yield* client.request("initialize", buildCodexInitializeParams());
     yield* client.notify("initialized", undefined);
     return yield* run(client);
   }).pipe(timeoutWhileResponsive(Duration.seconds(20)), scopedSafeTeardown("codex-reset-credits"));
