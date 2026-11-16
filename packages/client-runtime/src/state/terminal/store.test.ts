@@ -124,6 +124,25 @@ describe("terminal store replay events", () => {
   });
 });
 
+describe("ensureTerminal", () => {
+  it("adds an unknown terminal without opening a closed drawer unless asked", () => {
+    const store = createTerminalStateStore();
+    store.getState().setTerminalOpen(thread, false);
+
+    store.getState().ensureTerminal(thread, "bg", { active: false });
+    expect(terminalState(store).terminalOpen).toBe(false);
+    expect(terminalState(store).terminalIds).toEqual(["default", "bg"]);
+    expect(terminalState(store).activeTerminalId).toBe("default");
+
+    store.getState().ensureTerminal(thread, "bg2");
+    expect(terminalState(store).terminalOpen).toBe(false);
+    expect(terminalState(store).activeTerminalId).toBe("bg2");
+
+    store.getState().ensureTerminal(thread, "x", { open: true });
+    expect(terminalState(store).terminalOpen).toBe(true);
+  });
+});
+
 describe("terminal store event history", () => {
   it("forgets one closed session's events and reconciliation without touching its siblings", () => {
     const store = createTerminalStateStore();

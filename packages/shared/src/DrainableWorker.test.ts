@@ -103,4 +103,32 @@ describe("makeDrainableWorker", () => {
       }),
     ),
   );
+
+  it.live("keeps processing and draining after an item fails or dies", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const worker = yield* makeDrainableWorker({
+          policy: losslessBackpressureQueuePolicy({
+            component: "drainable-worker-failure-test",
+            capacity: 4,
+          }),
+          process: (item: string): Effect.Effect<void, string> =>
+            item === "fail"
+              ? Effect.fail("boom")
+              : item === "die"
+                ? Effect.die(new Error("defect"))
+                : Effect.sync(() => void processed.push(item)),
+        });
+
+        yield* worker.enqueue("fail");
+        yield* worker.enqueue("die");
+        yield* worker.enqueue("ok");
+        yield* worker.drain.pipe(Effect.timeout("2 seconds"));
+
+        expect(processed).toEqual(["ok"]);
+        expect((yield* worker.metrics).depth).toBe(0);
+      }),
+    ),
+  );
 });

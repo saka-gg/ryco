@@ -138,6 +138,18 @@ describe("ssh tunnel scripts", () => {
     assert.notInclude(script, "exec npx --yes ryco-cli@nightly; touch /tmp/ryco-owned");
   });
 
+  it("inserts placeholder values verbatim, dollar sequences included", () => {
+    const script = buildRemoteRycoRunnerScript({
+      nodeScriptPath: "/srv/my$&app/$$/bin.mjs",
+      packageSpec: "ryco-cli@1.0.0+$`x",
+    });
+
+    assert.include(script, "RYCO_NODE_SCRIPT_PATH='/srv/my$&app/$$/bin.mjs'");
+    assert.include(script, "'ryco-cli@1.0.0+$`x'");
+    // The runner script is itself a placeholder value of the launch script.
+    assert.include(buildRemoteLaunchScript({ nodeScriptPath: "/a/$$/b.mjs" }), "'/a/$$/b.mjs'");
+  });
+
   it("builds the remote ryco runner with a node script override", () => {
     const script = buildRemoteRycoRunnerScript({
       nodeScriptPath: "/Users/julius/Development/Work/codething-mvp/apps/server/dist/bin.mjs",

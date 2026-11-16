@@ -21,12 +21,12 @@
  * @module KeyedSerialWorker
  */
 import type * as Scope from "effect/Scope";
-import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as TxRef from "effect/TxRef";
 
 import type { LosslessBackpressureQueuePolicy, QueuePolicyMetricsSnapshot } from "./QueuePolicy.ts";
+import { logQueueItemFailure } from "./QueuePolicy.ts";
 
 export interface KeyedSerialWorkerMetricsSnapshot extends QueuePolicyMetricsSnapshot {
   /** Keys with a running lane. */
@@ -144,12 +144,7 @@ export const makeKeyedSerialWorker = <K, A, E, R>(options: {
 
     const processItem = (key: K, item: A): Effect.Effect<void> =>
       options.process(key, item).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning(`${options.policy.component} failed to process an item`, {
-            interruptOnly: Cause.hasInterruptsOnly(cause),
-            cause: Cause.pretty(cause),
-          }),
-        ),
+        Effect.catchCause((cause) => logQueueItemFailure(options.policy.component, cause)),
         Effect.ensuring(releaseOne),
         Effect.withSpan(`${options.policy.component}.item`, { root: true }),
         Effect.provideContext(context),

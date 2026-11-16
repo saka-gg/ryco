@@ -32,6 +32,7 @@ import {
 // client implementation has to stay loaded for it.
 const TailscaleEndpointLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
 const TAILSCALE_STATUS_CACHE_TTL_MS = 60_000;
+const TAILSCALE_STATUS_FAILURE_CACHE_TTL_MS = 5_000;
 
 export const TAILSCALE_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
   id: "tailscale",
@@ -51,11 +52,6 @@ function createTailscaleEndpoint(
   });
 }
 
-let cachedTailscaleStatus: {
-  readonly expiresAtMs: number;
-  readonly promise: Promise<TailscaleStatus | null>;
-} | null = null;
-
 async function readDefaultTailscaleStatus(): Promise<TailscaleStatus | null> {
   return Effect.runPromise(
     readTailscaleStatus.pipe(
@@ -65,22 +61,43 @@ async function readDefaultTailscaleStatus(): Promise<TailscaleStatus | null> {
   );
 }
 
-/** This machine's Tailscale status, or `null` without Tailscale (or its CLI). Cached for a minute. */
-export function readCachedTailscaleStatus(): Promise<TailscaleStatus | null> {
-  const now = Date.now();
-  if (cachedTailscaleStatus && cachedTailscaleStatus.expiresAtMs > now) {
-    return cachedTailscaleStatus.promise;
-  }
+/** @internal Exported for tests. */
+export function makeCachedTailscaleStatusReader(
+  read: () => Promise<TailscaleStatus | null>,
+): () => Promise<TailscaleStatus | null> {
+  let cached: {
+    expiresAtMs: number;
+    readonly promise: Promise<TailscaleStatus | null>;
+  } | null = null;
+  return () => {
+    const now = Date.now();
+    if (cached && cached.expiresAtMs > now) return cached.promise;
 
-  const promise = readDefaultTailscaleStatus();
-  cachedTailscaleStatus = {
-    expiresAtMs: now + TAILSCALE_STATUS_CACHE_TTL_MS,
-    promise,
+    const entry = { expiresAtMs: now + TAILSCALE_STATUS_CACHE_TTL_MS, promise: read() };
+    cached = entry;
+    // No status (no daemon yet, a slow first call, no CLI) is asked again soon, not in a minute.
+    const retrySoon = () => {
+      entry.expiresAtMs = Math.min(
+        entry.expiresAtMs,
+        Date.now() + TAILSCALE_STATUS_FAILURE_CACHE_TTL_MS,
+      );
+    };
+    entry.promise.then((status) => {
+      if (status === null) retrySoon();
+    }, retrySoon);
+    return entry.promise;
   };
-  return promise;
 }
 
-/** The local MagicDNS name, or `null` without Tailscale. Cached for a minute. */
+/**
+ * This machine's Tailscale status, or `null` without Tailscale (or its CLI). Cached for a minute;
+ * no status for 5 seconds.
+ */
+export const readCachedTailscaleStatus = makeCachedTailscaleStatusReader(
+  readDefaultTailscaleStatus,
+);
+
+/** The local MagicDNS name, or `null` without Tailscale. Cached like {@link readCachedTailscaleStatus}. */
 export function readCachedTailscaleMagicDnsName(): Promise<string | null> {
   return readCachedTailscaleStatus().then((status) => status?.magicDnsName ?? null);
 }

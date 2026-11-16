@@ -269,6 +269,97 @@ describe("WsTransport resync failures", () => {
     ).toHaveLength(1);
     stop();
   });
+
+  it("backs off resubscribing an orchestration stream whose live queue overflowed", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = sockets[0]!;
+    socket.open();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stop = transport.subscribe(
+      (client) =>
+        client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId: ThreadId.make("thread-1") }),
+      () => undefined,
+      { retryDelay: 25, tag: ORCHESTRATION_WS_METHODS.subscribeThread },
+    );
+    const requests = () =>
+      socket
+        .requests()
+        .filter((request) => request.tag === ORCHESTRATION_WS_METHODS.subscribeThread);
+    const arrivals: number[] = [];
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await vi.waitFor(() => expect(requests()).toHaveLength(attempt), { timeout: 2_000 });
+      arrivals.push(Date.now());
+      socket.reply({
+        _tag: "Exit",
+        requestId: requests().at(-1)!.id,
+        exit: {
+          _tag: "Failure",
+          cause: [
+            {
+              _tag: "Fail",
+              error: {
+                _tag: "OrchestrationGetSnapshotError",
+                message:
+                  "Orchestration thread live event queue overflowed; reconnect to resynchronize",
+              },
+            },
+          ],
+        },
+      });
+    }
+    await vi.waitFor(() => expect(requests()).toHaveLength(5), { timeout: 2_000 });
+    arrivals.push(Date.now());
+    // Delays of 25, 50, 100 and 200 ms: each retry waits about twice as long as the last.
+    expect(arrivals[4]! - arrivals[3]!).toBeGreaterThanOrEqual(180);
+    expect(arrivals[4]! - arrivals[3]!).toBeGreaterThan(arrivals[1]! - arrivals[0]!);
+    expect(
+      warn.mock.calls.filter(
+        ([message]) => message === "WebSocket RPC subscription resynchronizing",
+      ),
+    ).toHaveLength(1);
+    stop();
+  });
+});
+
+describe("WsTransport clean stream ends", () => {
+  beforeEach(() => {
+    setRetryJitterForTests({ enabled: false });
+  });
+
+  afterEach(() => {
+    setRetryJitterForTests(null);
+  });
+
+  it("backs off resubscribing a stream the server keeps ending", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = sockets[0]!;
+    socket.open();
+    const stop = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeTerminalEvents]({}),
+      () => undefined,
+      { retryDelay: 25, tag: WS_METHODS.subscribeTerminalEvents },
+    );
+    const requests = () =>
+      socket.requests().filter((request) => request.tag === WS_METHODS.subscribeTerminalEvents);
+    const arrivals: number[] = [];
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await vi.waitFor(() => expect(requests()).toHaveLength(attempt), { timeout: 2_000 });
+      arrivals.push(Date.now());
+      socket.reply({
+        _tag: "Exit",
+        requestId: requests().at(-1)!.id,
+        exit: { _tag: "Success", value: null },
+      });
+    }
+    await vi.waitFor(() => expect(requests()).toHaveLength(5), { timeout: 2_000 });
+    arrivals.push(Date.now());
+    // Delays of 25, 50, 100 and 200 ms: each resubscribe waits about twice as long as the last.
+    expect(arrivals[4]! - arrivals[3]!).toBeGreaterThanOrEqual(180);
+    expect(arrivals[4]! - arrivals[3]!).toBeGreaterThan(arrivals[1]! - arrivals[0]!);
+    stop();
+  });
 });
 
 describe("WsTransport stream chunks", () => {

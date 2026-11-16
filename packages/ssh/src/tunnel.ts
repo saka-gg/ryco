@@ -209,7 +209,8 @@ function applyScriptPlaceholders(
 ): string {
   let result = template;
   for (const [token, value] of Object.entries(replacements)) {
-    result = result.replaceAll(`@@${token}@@`, value);
+    // A function replacement inserts the value verbatim; a string one would expand $&, $' and $$.
+    result = result.replaceAll(`@@${token}@@`, () => value);
   }
   return result;
 }

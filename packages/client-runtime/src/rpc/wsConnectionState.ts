@@ -312,8 +312,12 @@ export function setBrowserOnlineStatus(online: boolean): WsConnectionStatus {
   }));
 }
 
-export function resetWsReconnectBackoff(): WsConnectionStatus {
-  return updateWsConnectionStatus((current) => ({
+/**
+ * Clears the reconnect backoff of the environment's slot and, unless `recordGlobal` is false, the
+ * global status.
+ */
+export function resetWsReconnectBackoff(metadata?: WsConnectionMetadata): WsConnectionStatus {
+  return recordTransition(metadata, (current) => ({
     ...current,
     nextRetryAt: null,
     reconnectAttemptCount: 0,

@@ -102,4 +102,53 @@ describe("makeKeyedCoalescingWorker", () => {
       }),
     ),
   );
+
+  it.live("keeps the key and the worker alive through failures in a row", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const firstStarted = yield* Deferred.make<void>();
+        const releaseFirst = yield* Deferred.make<void>();
+        const secondStarted = yield* Deferred.make<void>();
+        const releaseSecond = yield* Deferred.make<void>();
+
+        const worker = yield* makeKeyedCoalescingWorker<string, string, string, never>({
+          policy: latestStateQueuePolicy({ component: "repeated-failure-test", capacity: 2 }),
+          merge: (_current, next) => next,
+          process: (key, value) =>
+            Effect.gen(function* () {
+              processed.push(`${key}:${value}`);
+
+              if (value === "first") {
+                yield* Deferred.succeed(firstStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseFirst);
+                return yield* Effect.fail("boom");
+              }
+
+              if (value === "second") {
+                yield* Deferred.succeed(secondStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseSecond);
+                return yield* Effect.die(new Error("defect"));
+              }
+            }),
+        });
+
+        yield* worker.enqueue("k", "first");
+        yield* Deferred.await(firstStarted);
+        yield* worker.enqueue("k", "second");
+        yield* Deferred.succeed(releaseFirst, undefined);
+        yield* Deferred.await(secondStarted);
+        yield* worker.enqueue("k", "third");
+        yield* Deferred.succeed(releaseSecond, undefined);
+        yield* worker.drainKey("k").pipe(Effect.timeout("2 seconds"));
+
+        expect(processed).toEqual(["k:first", "k:second", "k:third"]);
+        expect((yield* worker.metrics).recoveryCount).toBe(2);
+
+        yield* worker.enqueue("other", "x");
+        yield* worker.drainKey("other").pipe(Effect.timeout("2 seconds"));
+        expect(processed).toContain("other:x");
+      }),
+    ),
+  );
 });
