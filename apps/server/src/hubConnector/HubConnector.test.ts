@@ -3421,6 +3421,55 @@ describe("HubConnector", () => {
     await expect(connector.leave()).rejects.not.toThrow("Keychains");
   });
 
+  it("reports a failed erase from a revoked connector as an identity failure", async () => {
+    const clock = scheduler();
+    const socket = new FakeSocket();
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity({
+        leave: async () => {
+          throw new Error("keychain locked");
+        },
+      }),
+      transport: { open: () => socket },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+    });
+    const starting = connector.start();
+    await settle();
+    socket.emit("open", {} as Event);
+    socket.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    socket.emit("message", {
+      data: encoded({
+        type: "error",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        code: "revoked",
+        fatal: true,
+      }),
+    } as MessageEvent);
+    await settle();
+    expect(connector.status().state).toBe("revoked");
+
+    await expect(connector.leave()).rejects.toThrow("Hub identity could not be erased.");
+    expect(connector.status()).toMatchObject({
+      state: "degraded",
+      degradedMode: "operator_action_required",
+      failure: "identity_unavailable",
+    });
+    await connector.stop();
+  });
+
   it("leaves a disabled connector disabled rather than claiming it is enrolling", async () => {
     const connector = new HubConnector({
       config: DEFAULT_HUB_CONNECTOR_CONFIG,

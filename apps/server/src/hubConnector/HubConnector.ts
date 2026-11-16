@@ -1005,14 +1005,24 @@ export class HubConnector {
     // Budgets earned by the identity being erased say nothing about the next one.
     this.#slowAttempts.clear();
     this.#slowRetryLog.clear();
+    this.#attempt = 0;
+    this.#protocolViolations = 0;
+    this.#staleProofRetries = 0;
+    this.#proofFirst = false;
     try {
       await this.#identity.leave();
     } catch (error: unknown) {
-      this.#state.transition("degraded", {
-        degradedMode: "operator_action_required",
-        failure: identityFailure(error),
-      });
-      await releaseLeaveClaim();
+      try {
+        // `revoked` and `version_incompatible` cannot become `degraded` directly. `disabled` is
+        // legal from every state, and it is true here: the teardown above left no socket or timer.
+        this.#state.transition("disabled");
+        this.#state.transition("degraded", {
+          degradedMode: "operator_action_required",
+          failure: identityFailure(error),
+        });
+      } finally {
+        await releaseLeaveClaim();
+      }
       // The cause aids local diagnosis; it never reaches a caller, because the
       // route replaces this error with a bounded message.
       throw new Error("Hub identity could not be erased.", { cause: error });
