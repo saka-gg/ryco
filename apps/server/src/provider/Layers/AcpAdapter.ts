@@ -566,6 +566,28 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
         });
       });
 
+    /**
+     * Waits until the notification fiber has handled every event the agent sent so far, so a
+     * turn's own updates carry its id and go out before the turn closes. Returns early once that
+     * fiber has ended (the session stopped).
+     */
+    const awaitQueuedEventsHandled = (ctx: AcpSessionContext) => {
+      const handled = ctx.acp.markEvents.pipe(Effect.flatMap(Deferred.await));
+      return ctx.notificationFiber === undefined
+        ? handled
+        : Effect.raceFirst(handled, Fiber.await(ctx.notificationFiber).pipe(Effect.asVoid));
+    };
+
+    /** Ends `turnId` as the session's active turn, unless a newer turn has replaced it. */
+    const clearActiveTurn = (ctx: AcpSessionContext, turnId: TurnId) =>
+      Effect.gen(function* () {
+        if (ctx.activeTurnId === turnId) ctx.activeTurnId = undefined;
+        if (ctx.session.activeTurnId === turnId) {
+          const { activeTurnId: _ended, ...session } = ctx.session;
+          ctx.session = { ...session, updatedAt: yield* nowIso };
+        }
+      });
+
     const startSession: AcpAdapterShape["startSession"] = (input) =>
       withThreadLock(
         input.threadId,
@@ -918,6 +940,9 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
                 switch (event._tag) {
+                  case "EventsMark":
+                    yield* Deferred.succeed(event.reached, undefined);
+                    return;
                   case "CommandsUpdated":
                     // A late update after a close is dropped. Only the mapped copy is kept,
                     // never the raw payload.
@@ -1234,6 +1259,8 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 ctx.agentControl ? ctx.agentControl.retireTurn(prepared.turnId) : Effect.void,
               ),
             );
+          // The agent sent the turn's updates before its answer; they close with the turn.
+          yield* awaitQueuedEventsHandled(ctx);
 
           return yield* withThreadLock(
             input.threadId,
@@ -1250,10 +1277,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
               ctx.turnIds.push(prepared.turnId);
               ctx.session = {
                 ...ctx.session,
-                activeTurnId: prepared.turnId,
                 updatedAt: yield* nowIso,
                 ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
               };
+              yield* clearActiveTurn(ctx, prepared.turnId);
 
               yield* offerRuntimeEventForRuntime(ctx.session.runtimeSessionId!, {
                 type: "turn.completed",
@@ -1283,6 +1310,11 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             // labels the turn instead.
             emitFailed: (errorMessage) =>
               Effect.gen(function* () {
+                yield* awaitQueuedEventsHandled(prepared.ctx);
+                yield* withThreadLock(
+                  input.threadId,
+                  clearActiveTurn(prepared.ctx, prepared.turnId),
+                );
                 yield* offerRuntimeEventForRuntime(prepared.runtimeSessionId, {
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),

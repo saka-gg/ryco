@@ -25,6 +25,7 @@ import {
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { installProcessDeviceToolGateway } from "../../providerTools/deviceToolGateway.ts";
 import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
 import {
   assertTurnIdsOnly,
@@ -696,6 +697,71 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       assert.isTrue(requests.some((entry) => entry.method === "session/new"));
       assert.isFalse(requests.some((entry) => entry.method === "session/prompt"));
     }),
+  );
+
+  it.effect("ends the turn when it completes, after every update of the turn went out", () =>
+    Effect.gen(function* () {
+      let isTurnActive: (() => boolean) | undefined;
+      installProcessDeviceToolGateway({
+        createBinding: (input) => {
+          isTurnActive = input.isTurnActive;
+          return {
+            url: "http://127.0.0.1:46000/device",
+            headers: { Authorization: "Bearer device-token" },
+            dispose: () => undefined,
+          };
+        },
+        close: async () => undefined,
+      });
+      const threadId = ThreadId.make("grok-turn-end-thread");
+      // Enough updates that the adapter is still handling them when the prompt answers.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_PROMPT_EXTRA_CONTENT_CHUNKS: "300" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)).pipe(
+          Effect.andThen(
+            event.type === "turn.completed"
+              ? Deferred.succeed(turnCompleted, undefined)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-turn-end"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      assert.isDefined(isTurnActive);
+      assert.isFalse(isTurnActive!());
+
+      const turn = yield* adapter.sendTurn({ threadId, input: "hello grok", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+
+      // Device tools close with the turn, and the session no longer names it.
+      assert.isFalse(isTurnActive!());
+      const [session] = yield* adapter.listSessions();
+      assert.isDefined(session);
+      assert.isUndefined(session?.activeTurnId);
+
+      const completedAt = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      const deltas = runtimeEvents
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => event.type === "content.delta");
+      assert.equal(deltas.length, 301);
+      for (const { event, index } of deltas) {
+        assert.equal(event.turnId, turn.turnId);
+        assert.isBelow(index, completedAt);
+      }
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(Effect.sync(() => installProcessDeviceToolGateway(null)))),
   );
 
   it.effect("retention: keeps no prompts, image attachments or results of completed turns", () =>

@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, Stream } from "effect";
+import { Deferred, Effect, Stream } from "effect";
 import type { ChildProcessSpawner } from "effect/process";
 import { describe, expect } from "vite-plus/test";
 
@@ -657,6 +657,40 @@ describe("AcpSessionRuntime", () => {
             args: [mockAgentPath],
             env: { RYCO_ACP_PROMPT_STDERR_BYTES: String(4 * 1024 * 1024) },
           },
+          cwd: process.cwd(),
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          authMethodId: "test",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    ),
+  );
+
+  it.effect("settles an events mark only once every earlier event is consumed", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime;
+      yield* runtime.start();
+      yield* runtime.prompt({ prompt: [{ type: "text", text: "hi" }] });
+      const reached = yield* runtime.markEvents;
+      expect(yield* Deferred.isDone(reached)).toBe(false);
+
+      const events = Array.from(
+        yield* Stream.runCollect(
+          runtime.getEvents().pipe(Stream.takeUntil((event) => event._tag === "EventsMark")),
+        ),
+      );
+      expect(events.map((event) => event._tag)).toEqual([
+        "PlanUpdated",
+        "AssistantItemStarted",
+        "ContentDelta",
+        "AssistantItemCompleted",
+        "EventsMark",
+      ]);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          spawn: { command: bunExe, args: [mockAgentPath] },
           cwd: process.cwd(),
           clientInfo: { name: "ryco-test", version: "0.0.0" },
           authMethodId: "test",

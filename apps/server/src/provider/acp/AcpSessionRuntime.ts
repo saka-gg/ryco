@@ -174,6 +174,17 @@ export interface AcpSessionRuntimeStartResult {
   readonly modelConfigId: string | undefined;
 }
 
+/**
+ * A point in the event stream (`markEvents`): the consumer settles `reached` once it has handled
+ * every event queued before it.
+ */
+export interface AcpEventsMark {
+  readonly _tag: "EventsMark";
+  readonly reached: Deferred.Deferred<void>;
+}
+
+export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpEventsMark;
+
 export interface AcpSessionRuntimeShape {
   readonly handleRequestPermission: EffectAcpClient.AcpClientShape["handleRequestPermission"];
   readonly handleElicitation: EffectAcpClient.AcpClientShape["handleElicitation"];
@@ -195,7 +206,12 @@ export interface AcpSessionRuntimeShape {
     methodId: string,
   ) => Effect.Effect<EffectAcpSchema.AuthenticateResponse, EffectAcpErrors.AcpError>;
   readonly start: () => Effect.Effect<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
-  readonly getEvents: () => Stream.Stream<AcpParsedSessionEvent, never>;
+  readonly getEvents: () => Stream.Stream<AcpSessionRuntimeEvent, never>;
+  /**
+   * Queues an `EventsMark` behind every event received so far and returns its `reached`. It is
+   * already settled when the event stream has ended.
+   */
+  readonly markEvents: Effect.Effect<Deferred.Deferred<void>>;
   readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
   readonly getConfigOptions: Effect.Effect<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>;
   readonly prompt: (
@@ -285,7 +301,7 @@ const makeAcpSessionRuntime = (
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
-    const eventQueue = yield* Queue.bounded<AcpParsedSessionEvent>(2_048);
+    const eventQueue = yield* Queue.bounded<AcpSessionRuntimeEvent>(2_048);
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallState>());
     const assistantSegmentRef = yield* Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 });
@@ -781,6 +797,12 @@ const makeAcpSessionRuntime = (
       authenticate,
       start: () => start,
       getEvents: () => Stream.fromQueue(eventQueue),
+      markEvents: Effect.gen(function* () {
+        const reached = yield* Deferred.make<void>();
+        const queued = yield* Queue.offer(eventQueue, { _tag: "EventsMark", reached });
+        if (!queued) yield* Deferred.succeed(reached, undefined);
+        return reached;
+      }),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
       prompt: (payload) =>
@@ -890,7 +912,7 @@ const handleSessionUpdate = ({
   startupMetadataRef,
   params,
 }: {
-  readonly queue: Queue.Queue<AcpParsedSessionEvent>;
+  readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
@@ -1018,7 +1040,7 @@ const ensureActiveAssistantSegment = ({
   sessionId,
   runtimeId,
 }: {
-  readonly queue: Queue.Queue<AcpParsedSessionEvent>;
+  readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly sessionId: string;
   readonly runtimeId: string;
@@ -1056,7 +1078,7 @@ const closeActiveAssistantSegment = ({
   queue,
   assistantSegmentRef,
 }: {
-  readonly queue: Queue.Queue<AcpParsedSessionEvent>;
+  readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
 }) =>
   Ref.modify(assistantSegmentRef, (current) => {
