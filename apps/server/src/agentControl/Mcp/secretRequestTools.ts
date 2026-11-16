@@ -1,6 +1,6 @@
 /**
  * `ryco_request_secret`: an agent asks the user for a secret (an API key, a token) through a
- * private card in its own thread (docs/secret-requests.md). The node writes the answer into a
+ * private card in its own thread (docs/agent-control.md, "Secret requests"). The node writes the answer into a
  * Git-ignored dotenv file of the caller's own checkout; the agent only ever hears pending,
  * provided, declined or expired.
  *

@@ -1,13 +1,5 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
-import { randomUUID } from "node:crypto";
-import type { ProviderApprovalDecision } from "@ryco/contracts";
 import { COMPUTER_APPROVAL_UNNAMED_APP } from "./computerApprovalTargets.ts";
-
-interface PendingApproval {
-  readonly threadId: string;
-  readonly turnId?: string | undefined;
-  readonly settle: (decision: ProviderApprovalDecision) => void;
-}
 
 /** The app one Computer action targets, as the approval dialog names it. */
 export interface ComputerApprovalApp {
@@ -37,29 +29,19 @@ interface AppDialog {
 /** Threads whose chat approvals are remembered; the oldest are forgotten first. */
 export const COMPUTER_APP_APPROVAL_THREAD_LIMIT = 256;
 
-interface TaskApproval {
-  readonly turnId: string;
-  granted?: boolean;
-  pending?: Promise<boolean> | undefined;
-}
-
 /** Rejection when no more consent prompts fit, global or for one chat. */
 export const COMPUTER_APPROVAL_QUEUE_FULL_CODE = "approval_queue_full";
-export const COMPUTER_APPROVAL_QUEUE_GLOBAL_LIMIT = 128;
-export const COMPUTER_APPROVAL_QUEUE_THREAD_LIMIT = 8;
 
 export class ComputerApprovalQueueFullError extends Error {
   readonly code = COMPUTER_APPROVAL_QUEUE_FULL_CODE;
   readonly effect = "not-dispatched";
   /** False once the desktop stopped asking for this turn. */
   readonly retryable: boolean;
-  constructor(scope: "thread" | "global", retryable = true) {
+  constructor(retryable = true) {
     super(
-      !retryable
-        ? "Other computer approvals kept the dialog from showing; no input was sent. Do not ask again in this turn; tell the user what needs approval."
-        : scope === "thread"
-          ? "Too many computer approvals are waiting for this chat; try again once an earlier prompt settles."
-          : "Too many computer approvals are waiting.",
+      retryable
+        ? "Too many computer approvals are waiting."
+        : "Other computer approvals kept the dialog from showing; no input was sent. Do not ask again in this turn; tell the user what needs approval.",
     );
     this.retryable = retryable;
     this.name = "ComputerApprovalQueueFullError";
@@ -148,13 +130,12 @@ export function computerApprovalRefusalPayload(error: ComputerApprovalRefusal) {
   };
 }
 
-/** Synara-owned Computer consent, scoped to one live turn. Clipboard reads use
- * separate per-call approvals. The runtime routes user decisions here first;
- * restart, Stop and terminal events discard pending prompts.
+/**
+ * Per-app Computer consent for live turns: "Always allow", "Allow for this chat", per-turn
+ * declines and one shared dialog per thread, turn and app. The desktop owns the dialog and its
+ * timeout. Clipboard reads use separate per-call approvals.
  */
 export class ComputerApprovalGate {
-  private readonly pending = new Map<string, PendingApproval>();
-  private readonly tasks = new Map<string, TaskApproval>();
   /** "Allow for this chat" answers, per thread. */
   private readonly chatApps = new Map<string, Set<string>>();
   /**
@@ -172,8 +153,6 @@ export class ComputerApprovalGate {
   private readonly appDialogs = new Map<string, AppDialog>();
 
   cancelThread(threadId: string, turnId?: string): void {
-    const task = this.tasks.get(threadId);
-    if (turnId === undefined || task?.turnId === turnId) this.tasks.delete(threadId);
     const denied = this.deniedApps.get(threadId);
     if (turnId === undefined || denied?.turnId === turnId) this.deniedApps.delete(threadId);
     if (turnId === undefined || this.turnUnnamed.get(threadId) === turnId)
@@ -184,12 +163,6 @@ export class ComputerApprovalGate {
       dialog.cancelled = true;
       this.appDialogs.delete(key);
     }
-    for (const [id, pending] of this.pending) {
-      if (pending.threadId !== threadId || (turnId !== undefined && pending.turnId !== turnId))
-        continue;
-      this.pending.delete(id);
-      pending.settle("cancel");
-    }
   }
 
   /** A removed thread drops its chat approvals too. */
@@ -199,23 +172,12 @@ export class ComputerApprovalGate {
   }
 
   /**
-   * A desktop interruption (screen lock, sleep, or a session switch the GUI
-   * host reported) revokes every standing task grant: consent answered
-   * before the interruption must not silently authorize the post-interruption
-   * desktop, so the next mutating call republishes its prompt — the explicit
-   * re-auth half of the locked-use boundary.
-   *
-   * Two states deliberately survive. Declines stay declined: a refusal is
-   * not the authority a lock needs to break, and re-asking a refused thread
-   * on every unlock would only nag. Pending prompts stay open: the prompt
-   * is unreachable while the desktop is interrupted, so any decision that
-   * arrives afterward already postdates the interruption — that answer IS
-   * the re-auth, and cancelling it would just ask the same question twice.
+   * A desktop interruption (screen lock, sleep, session switch) clears "Allow for this chat"
+   * answers and this turn's unnamed-target approval, so consent given before the interruption
+   * cannot authorize the desktop after it. "Always allow", declines for the turn and open app
+   * dialogs stay (an answer to a dialog still open postdates the interruption).
    */
   revokeTaskGrants(): void {
-    for (const task of this.tasks.values()) {
-      if (task.granted === true) delete task.granted;
-    }
     // "Allow for this chat" is consent given before the interruption too.
     // "Always allow" is the user's standing choice and stays. An app dialog still
     // open stays as well: its answer postdates the interruption.
@@ -310,120 +272,6 @@ export class ComputerApprovalGate {
     else this.deniedApps.set(threadId, { turnId, keys: new Set([key]) });
     while (this.deniedApps.size > COMPUTER_APP_APPROVAL_THREAD_LIMIT)
       this.deniedApps.delete(this.deniedApps.keys().next().value!);
-  }
-
-  /** One consent for routine actions in the exact active turn, never a provider-wide grant. */
-  async requestTask(input: {
-    threadId: string;
-    turnId: string;
-    signal: AbortSignal;
-    publish: (requestId: string, decision?: ProviderApprovalDecision) => Promise<void>;
-  }): Promise<boolean> {
-    input.signal.throwIfAborted();
-    let task = this.tasks.get(input.threadId);
-    if (task?.turnId !== input.turnId) {
-      this.cancelThread(input.threadId);
-      task = { turnId: input.turnId };
-      this.tasks.set(input.threadId, task);
-    }
-    if (task.granted !== undefined) return task.granted;
-    const current = task;
-    current.pending ??= this.request(input)
-      .then((accepted) => {
-        if (this.tasks.get(input.threadId) !== current || input.signal.aborted) return false;
-        current.granted = accepted;
-        return accepted;
-      })
-      .finally(() => {
-        current.pending = undefined;
-      });
-    // A concurrent follower can be cancelled independently of the first call
-    // that published the shared prompt. Do not leave it waiting for user input.
-    let cancel: (() => void) | undefined;
-    const aborted = new Promise<never>((_resolve, reject) => {
-      cancel = () => reject(input.signal.reason);
-      input.signal.addEventListener("abort", cancel, { once: true });
-    });
-    let accepted: boolean;
-    try {
-      input.signal.throwIfAborted();
-      accepted = await Promise.race([current.pending, aborted]);
-    } finally {
-      if (cancel) input.signal.removeEventListener("abort", cancel);
-    }
-    input.signal.throwIfAborted();
-    return accepted && this.tasks.get(input.threadId) === current;
-  }
-
-  respond(threadId: string, requestId: string, decision: ProviderApprovalDecision): boolean {
-    const pending = this.pending.get(requestId);
-    if (!pending || pending.threadId !== threadId) return false;
-    this.pending.delete(requestId);
-    // Session-wide approval is deliberately unavailable for this gate.
-    const effective = decision === "acceptForSession" ? "decline" : decision;
-    pending.settle(effective);
-    return true;
-  }
-
-  async request(input: {
-    threadId: string;
-    turnId?: string | undefined;
-    signal: AbortSignal;
-    publish: (requestId: string, decision?: ProviderApprovalDecision) => Promise<void>;
-  }): Promise<boolean> {
-    input.signal.throwIfAborted();
-    // A stuck turn must not starve every other chat: each thread gets a small
-    // cap inside the shared one, and both refuse retryably so the model waits
-    // instead of treating a full queue as a denial.
-    let threadPending = 0;
-    for (const pending of this.pending.values()) {
-      if (pending.threadId === input.threadId) threadPending += 1;
-    }
-    if (threadPending >= COMPUTER_APPROVAL_QUEUE_THREAD_LIMIT) {
-      throw new ComputerApprovalQueueFullError("thread");
-    }
-    if (this.pending.size >= COMPUTER_APPROVAL_QUEUE_GLOBAL_LIMIT) {
-      throw new ComputerApprovalQueueFullError("global");
-    }
-    const requestId = `computer:${randomUUID()}`;
-    let settle!: (decision: ProviderApprovalDecision) => void;
-    const answer = new Promise<ProviderApprovalDecision>((resolve) => {
-      settle = resolve;
-    });
-    this.pending.set(requestId, {
-      threadId: input.threadId,
-      turnId: input.turnId,
-      settle,
-    });
-    const cancel = () => settle("cancel");
-    input.signal.addEventListener("abort", cancel, { once: true });
-    const timeout = setTimeout(cancel, 5 * 60_000);
-    timeout.unref?.();
-    let decision: ProviderApprovalDecision = "cancel";
-    try {
-      // Publish is on the critical path but is not the decision path: an
-      // answer that settles first (a cancel, or a decision that arrived
-      // while publish was still in flight) releases the slot instead of
-      // leaving the consent pending on a wedged publish forever.
-      const published = input.publish(requestId).then(() => "ok" as const);
-      const outcome = await Promise.race([published, answer]);
-      void published.catch(() => undefined);
-      if (outcome === "ok") {
-        if (input.signal.aborted) cancel();
-        decision = await answer;
-      } else {
-        decision = outcome;
-      }
-      input.signal.throwIfAborted();
-      return decision === "accept";
-    } finally {
-      clearTimeout(timeout);
-      input.signal.removeEventListener("abort", cancel);
-      this.pending.delete(requestId);
-      // Best-effort dismissal: a hung or failed publish must not turn an
-      // accepted consent into a rejection or hold the caller.
-      void input.publish(requestId, decision).catch(() => undefined);
-    }
   }
 }
 

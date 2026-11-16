@@ -37,10 +37,14 @@ const instances = (
     config: { homePath: "/fixture/claude" },
   },
 });
+const withInstances = (providerInstances: ProviderInstanceConfigMap): UsageProtectionSettings => ({
+  providers: DEFAULT_SERVER_SETTINGS.providers,
+  providerInstances,
+});
 describe("authoritative usage cleanup protection", () => {
   it("protects disabled tracked export and explicit DB paths inside otherwise eligible folders", () => {
     const paths = resolveUsageProtectedPaths(
-      instances(),
+      withInstances(instances()),
       { HOME: "/fixture/home" },
       "/fixture/home",
     );
@@ -77,20 +81,34 @@ describe("authoritative usage cleanup protection", () => {
         throw new Error("credential read");
       },
     };
-    expect(resolveUsageProtectedPaths(instances(), environment)).not.toContain(
+    expect(resolveUsageProtectedPaths(withInstances(instances()), environment)).not.toContain(
       "/fixture/new/export.json",
     );
     expect(
-      resolveUsageProtectedPaths(instances("/fixture/new/export.json"), environment),
+      resolveUsageProtectedPaths(withInstances(instances("/fixture/new/export.json")), environment),
     ).toContain("/fixture/new/export.json");
   });
   it("fails visibly instead of dropping malformed authoritative protection", () => {
     expect(() =>
-      resolveUsageProtectedPaths(instances("relative/export.json"), { HOME: "/fixture/home" }),
+      resolveUsageProtectedPaths(withInstances(instances("relative/export.json")), {
+        HOME: "/fixture/home",
+      }),
     ).toThrow("Cleanup must stop");
     expect(() =>
-      resolveUsageProtectedPaths(instances(), { HOME: "/fixture/home", XDG_DATA_HOME: "relative" }),
+      resolveUsageProtectedPaths(withInstances(instances()), {
+        HOME: "/fixture/home",
+        XDG_DATA_HOME: "relative",
+      }),
     ).toThrow("Cleanup must stop");
+  });
+  it("rejects settings whose provider instances are not an object", () => {
+    // Settings from storage can be malformed; parse them as untyped JSON rather than casting.
+    const malformed: UsageProtectionSettings = JSON.parse(
+      '{"providers":{},"providerInstances":null}',
+    );
+    expect(() => resolveUsageProtectedPaths(malformed, { HOME: "/fixture/home" })).toThrow(
+      "Cleanup must stop",
+    );
   });
 });
 

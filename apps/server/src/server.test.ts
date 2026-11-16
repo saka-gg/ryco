@@ -1008,7 +1008,6 @@ const buildAppUnderTest = (options?: {
           findActiveByLinkedNumber: () => Effect.succeed([]),
           markArchived: () => Effect.void,
           markRestored: () => Effect.void,
-          updateMeta: () => Effect.void,
           deleteById: () => Effect.void,
           setManualPosition: () => Effect.void,
           ...options?.layers?.projectionWorktreeRepository,

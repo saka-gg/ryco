@@ -278,7 +278,6 @@ const runOrphanedSessionReconciliation = (input: {
     Effect.provideService(ProjectionPendingApprovalRepository, {
       upsert: () => Effect.void,
       listByThreadId: () => Effect.succeed([]),
-      deleteByRequestId: () => Effect.void,
       deleteByThreadId: () => Effect.void,
       getByRequestId: ({ threadId, requestId }) =>
         Effect.succeed(

@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { makeBootOwnershipStore, orphanedBootUdids, processIsAlive } from "./bootOwnership.ts";
+import { makeBootOwnershipStore, processIsAlive } from "./bootOwnership.ts";
 
 const store = async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ryco-boot-own-"));
@@ -48,40 +48,30 @@ describe("the boot ownership record", () => {
     // failure that looks identical to corruption.
     expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ version: 1, udids: [] });
   });
-});
 
-describe("deciding which boots to reclaim", () => {
-  const dead = () => false;
-  const alive = () => true;
+  it("lands concurrent writes in call order", async () => {
+    // Every write goes through one temporary path; unserialized, a stale snapshot could rename
+    // over a newer one or find its temporary file already gone.
+    for (let round = 0; round < 20; round += 1) {
+      const { dir, file } = await store();
+      const owned = makeBootOwnershipStore(file, 1);
+      await Promise.all([
+        owned.write(["A"]),
+        owned.write(["A", "B"]),
+        owned.write(["A", "B", "C"]),
+      ]);
 
-  it("reclaims devices a dead process left booted", async () => {
-    expect(orphanedBootUdids({ pid: 123, udids: ["A", "B"] }, ["A", "B"], dead)).toEqual([
-      "A",
-      "B",
-    ]);
+      expect((await owned.read())?.udids).toEqual(["A", "B", "C"]);
+      expect(await readdir(dir)).toEqual(["ownership.json"]);
+    }
   });
 
-  it("leaves a live sibling server's devices alone", () => {
-    // Two Ryco processes can run at once; the older record belongs to the
-    // one still running, and shutting its simulators down would be a bug.
-    expect(orphanedBootUdids({ pid: 123, udids: ["A"] }, ["A"], alive)).toEqual([]);
-  });
+  it("a clear after a write wins", async () => {
+    const { file } = await store();
+    const owned = makeBootOwnershipStore(file, 1);
+    await Promise.all([owned.write(["A"]), owned.clear()]);
 
-  it("never reclaims a device the user booted themselves", () => {
-    // The safety property that matters most: only udids we recorded are
-    // candidates, so anything else running stays running.
-    expect(orphanedBootUdids({ pid: 9, udids: ["OURS"] }, ["OURS", "THEIRS"], dead)).toEqual([
-      "OURS",
-    ]);
-  });
-
-  it("ignores recorded devices that are already shut down", () => {
-    expect(orphanedBootUdids({ pid: 9, udids: ["A"] }, [], dead)).toEqual([]);
-  });
-
-  it("does nothing without a record", () => {
-    expect(orphanedBootUdids(null, ["A"], dead)).toEqual([]);
-    expect(orphanedBootUdids({ pid: 9, udids: [] }, ["A"], dead)).toEqual([]);
+    expect((await owned.read())?.udids).toEqual([]);
   });
 });
 

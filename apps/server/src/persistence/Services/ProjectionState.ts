@@ -7,7 +7,7 @@
  * @module ProjectionStateRepository
  */
 import { IsoDateTime, NonNegativeInt } from "@ryco/contracts";
-import { Option, Schema, Context } from "effect";
+import { Schema, Context } from "effect";
 import type { Effect } from "effect";
 
 import type { ProjectionRepositoryError } from "../Errors.ts";
@@ -19,22 +19,10 @@ export const ProjectionState = Schema.Struct({
 });
 export type ProjectionState = typeof ProjectionState.Type;
 
-export const GetProjectionStateInput = Schema.Struct({
-  projector: Schema.String,
-});
-export type GetProjectionStateInput = typeof GetProjectionStateInput.Type;
-
 /**
  * ProjectionStateRepositoryShape - Service API for projector state records.
  */
 export interface ProjectionStateRepositoryShape {
-  /**
-   * Insert or replace a projection cursor row.
-   *
-   * Upserts by projector name.
-   */
-  readonly upsert: (row: ProjectionState) => Effect.Effect<void, ProjectionRepositoryError>;
-
   /**
    * Insert or replace multiple projection cursors with one database statement.
    * Empty batches are a no-op.
@@ -44,23 +32,9 @@ export interface ProjectionStateRepositoryShape {
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
-   * Read projection cursor state for a projector key.
-   */
-  readonly getByProjector: (
-    input: GetProjectionStateInput,
-  ) => Effect.Effect<Option.Option<ProjectionState>, ProjectionRepositoryError>;
-
-  /**
    * List all projector cursor rows.
    */
   readonly listAll: () => Effect.Effect<ReadonlyArray<ProjectionState>, ProjectionRepositoryError>;
-
-  /**
-   * Read the minimum applied sequence across all projectors.
-   *
-   * Returns `null` when no projector state rows exist.
-   */
-  readonly minLastAppliedSequence: () => Effect.Effect<number | null, ProjectionRepositoryError>;
 }
 
 /**

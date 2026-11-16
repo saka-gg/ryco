@@ -61,15 +61,6 @@ export const ThreadForkPhase = Schema.Literals([
 ]);
 export type ThreadForkPhase = typeof ThreadForkPhase.Type;
 
-export const THREAD_FORK_UNFINISHED_PHASES: ReadonlyArray<ThreadForkPhase> = [
-  "accepted",
-  "checkout-preparing",
-  "checkout-ready",
-  "provider-forking",
-  "provider-ready",
-  "published",
-];
-
 export const ThreadForkDestinationKind = Schema.Literals([
   "current-checkout",
   "new-worktree",

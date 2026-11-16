@@ -3,7 +3,7 @@ import * as Schema from "effect/Schema";
 import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
- * Secrets an agent asks the user for (docs/secret-requests.md).
+ * Secrets an agent asks the user for (docs/agent-control.md, "Secret requests"; the user's side: docs/user/secret-requests.md).
  *
  * An agent calls `ryco_request_secret` with an environment variable name, a short purpose and a
  * dotenv file in its own thread's checkout. The thread records only the request

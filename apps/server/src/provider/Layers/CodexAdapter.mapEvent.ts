@@ -922,18 +922,6 @@ const CODEX_EVENT_MAPPERS: ReadonlyMap<string, CodexEventMapper> = new Map(
         },
       ];
     },
-    "session/started": (event, canonicalThreadId) => {
-      return [
-        {
-          ...runtimeEventBase(event, canonicalThreadId),
-          type: "session.started",
-          payload: {
-            ...(event.message ? { message: event.message } : {}),
-            ...(event.payload !== undefined ? { resume: event.payload } : {}),
-          },
-        },
-      ];
-    },
     "session/exited": mapSessionEnded,
     "session/closed": mapSessionEnded,
     "thread/started": (event, canonicalThreadId) => {
@@ -1057,17 +1045,6 @@ const CODEX_EVENT_MAPPERS: ReadonlyMap<string, CodexEventMapper> = new Map(
           payload: {
             state: completed.status,
             ...(completed.errorMessage ? { errorMessage: completed.errorMessage } : {}),
-          },
-        },
-      ];
-    },
-    "turn/aborted": (event, canonicalThreadId) => {
-      return [
-        {
-          ...runtimeEventBase(event, canonicalThreadId),
-          type: "turn.aborted",
-          payload: {
-            reason: event.message ?? "Turn aborted",
           },
         },
       ];

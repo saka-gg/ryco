@@ -86,10 +86,6 @@ export function mcpToolResultError(text: string): McpToolCallResult {
   return { content: [{ type: "text", text }], isError: true };
 }
 
-export function mcpToolResultJson(value: unknown): McpToolCallResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
-}
-
 export function jsonRpcResult(id: JsonRpcId, result: unknown): Record<string, unknown> {
   return { jsonrpc: "2.0", id, result };
 }
@@ -172,7 +168,7 @@ export function buildMcpInitializeResult(input: {
     },
     serverInfo: {
       name: "synara",
-      title: "Synara App Control",
+      title: "Ryco App Control",
       version: input.serverVersion,
     },
     instructions: input.instructions,
