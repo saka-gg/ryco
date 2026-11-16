@@ -42,7 +42,6 @@ describe("model picker", () => {
     const model = buildModelPickerModel({
       serverConfig: null,
       currentSelection: null,
-      providerLocked: false,
     });
     expect(model.loading).toBe(true);
     expect(model.pillLabel).toBe("Loading…");
@@ -53,7 +52,6 @@ describe("model picker", () => {
     const model = buildModelPickerModel({
       serverConfig: config(),
       currentSelection: null,
-      providerLocked: false,
     });
     expect(model.loading).toBe(false);
     expect(model.groups).toEqual([]);
@@ -63,7 +61,6 @@ describe("model picker", () => {
     const model = buildModelPickerModel({
       serverConfig: config(CODEX, CLAUDE),
       currentSelection: selection("codex-1", "gpt-5.6"),
-      providerLocked: false,
     });
     expect(model.groups.map((group) => group.providerKey)).toEqual(["codex-1", "claude-1"]);
     expect(model.groups[0]?.providerDriver).toBe("codex");
@@ -79,7 +76,7 @@ describe("model picker", () => {
     const model = buildModelPickerModel({
       serverConfig: config(CODEX, CLAUDE),
       currentSelection: selection("codex-1", "gpt-5.4"),
-      providerLocked: true,
+      lockedProviderKey: "codex-1",
     });
     expect(model.lockedProviderKey).toBe("codex-1");
     expect(model.lockNotice).toContain("become idle");
@@ -97,7 +94,6 @@ describe("model picker", () => {
     const model = buildModelPickerModel({
       serverConfig: config(CODEX, CLAUDE),
       currentSelection: selection("codex-1", "gpt-5.4"),
-      providerLocked: false,
     });
     expect(model.lockedProviderKey).toBeNull();
     expect(model.groups.flatMap((g) => g.entries).every((entry) => !entry.disabled)).toBe(true);
@@ -107,7 +103,6 @@ describe("model picker", () => {
     const model = buildModelPickerModel({
       serverConfig: config(CODEX, CLAUDE),
       currentSelection: null,
-      providerLocked: false,
       query: "opus",
     });
     expect(model.groups.map((group) => group.providerKey)).toEqual(["claude-1"]);
@@ -118,7 +113,6 @@ describe("model picker", () => {
     const noMatch = buildModelPickerModel({
       serverConfig: config(CODEX),
       currentSelection: null,
-      providerLocked: false,
       query: "zzzz",
     });
     expect(noMatch.emptyForQuery).toBe(true);
@@ -126,7 +120,6 @@ describe("model picker", () => {
     const noModels = buildModelPickerModel({
       serverConfig: config(),
       currentSelection: null,
-      providerLocked: false,
     });
     expect(noModels.emptyForQuery).toBe(false);
   });
@@ -136,7 +129,7 @@ describe("resolveModelPickerSelection", () => {
   const model = buildModelPickerModel({
     serverConfig: config(CODEX, CLAUDE),
     currentSelection: selection("codex-1", "gpt-5.4"),
-    providerLocked: true,
+    lockedProviderKey: "codex-1",
   });
 
   it("returns the selection for an enabled, unselected entry", () => {
@@ -306,7 +299,6 @@ describe("model options", () => {
     const model = buildModelPickerModel({
       serverConfig: config(CODEX),
       currentSelection: selection("codex-1", "gpt-5.4"),
-      providerLocked: false,
     });
     expect(model.options).toEqual([]);
     expect(model.hasOptionRail).toBe(false);
@@ -316,7 +308,6 @@ describe("model options", () => {
     const model = buildModelPickerModel({
       serverConfig: config(withCaps(["opus-5"])),
       currentSelection: selection("claude-1", "opus-5"),
-      providerLocked: false,
     });
     const entry = model.groups.flatMap((group) => group.entries)[0];
     expect(entry?.capabilities).not.toBeUndefined();
@@ -326,7 +317,6 @@ describe("model options", () => {
     const model = buildModelPickerModel({
       serverConfig: null,
       currentSelection: selection("claude-1", "opus-5"),
-      providerLocked: false,
     });
     expect(model.hasOptionRail).toBe(false);
   });
@@ -395,7 +385,6 @@ describe("composer chip summary", () => {
     const model = buildModelPickerModel({
       serverConfig: config(CODEX),
       currentSelection: selection("codex-1", "gpt-5.4"),
-      providerLocked: false,
     });
     // A placeholder would be worse than silence: there is no level to report.
     expect(model.pillReasoningLabel).toBeNull();
@@ -406,7 +395,6 @@ describe("composer chip summary", () => {
     const model = buildModelPickerModel({
       serverConfig: null,
       currentSelection: selection("claude-1", "opus-5"),
-      providerLocked: false,
     });
     expect(model.pillReasoningLabel).toBeNull();
     expect(model.pillFastEnabled).toBe(false);
@@ -417,7 +405,6 @@ describe("composer chip summary", () => {
     const model = buildModelPickerModel({
       serverConfig: config(withCaps()),
       currentSelection: selection("claude-1", "opus-5"),
-      providerLocked: false,
     });
     if (model.pillReasoningLabel !== null) {
       expect(model.pillAccessibilityLabel).not.toContain(model.pillReasoningLabel + ".");
