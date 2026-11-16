@@ -488,7 +488,14 @@ export function useGitActionRunner({
   }, [gitStatusForActions, threadToastData]);
 
   // A result's follow-up ("Create PR") runs another action through this runner.
-  const followUpRef = useRef<((input: RunGitActionWithToastInput) => Promise<void>) | null>(null);
+  const followUpRef = useRef<((input: RunGitActionWithToastInput) => Promise<boolean>) | null>(
+    null,
+  );
+  /**
+   * Resolves false when the action failed or never started, so a caller can give back input it
+   * cleared; true when it succeeded or waits in the default-branch dialog (which carries the
+   * commit message).
+   */
   const runGitActionWithToast = useEvent(
     async ({
       action,
@@ -520,7 +527,7 @@ export function useGitActionRunner({
           action !== "commit_push" &&
           action !== "commit_push_pr"
         ) {
-          return;
+          return false;
         }
         setPendingDefaultBranchAction({
           action,
@@ -531,7 +538,7 @@ export function useGitActionRunner({
           ...(filePaths ? { filePaths } : {}),
           ...(pullRequest ? { pullRequest } : {}),
         });
-        return;
+        return true;
       }
       onConfirmed?.();
 
@@ -714,8 +721,10 @@ export function useGitActionRunner({
 
       try {
         finishSucceeded(await promise);
+        return true;
       } catch (err) {
         finishFailed(err);
+        return false;
       }
     },
   );

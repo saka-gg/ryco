@@ -869,6 +869,20 @@ describe("useCrownShipBinding", () => {
     return { notices, release };
   }
 
+  /** Reports the server's "push" phase to the run the probe started. */
+  function emitPushPhase() {
+    const [args] = runStackedActionMutateAsyncSpy.mock.calls[0] as unknown as [
+      { actionId: string; onProgress: (event: unknown) => void },
+    ];
+    args.onProgress({
+      kind: "phase_started",
+      actionId: args.actionId,
+      cwd: GIT_CWD,
+      phase: "push",
+      label: "Pushing...",
+    });
+  }
+
   it("ships local changes in one click once the grace has passed", async () => {
     const { notices, release } = collectNotices();
     await mountShip(dirty);
@@ -903,16 +917,7 @@ describe("useCrownShipBinding", () => {
       })
       .toBe(1);
     expect(shipRef.current?.activeStep).toBe("commit");
-    const [args] = runStackedActionMutateAsyncSpy.mock.calls[0] as unknown as [
-      { actionId: string; onProgress: (event: unknown) => void },
-    ];
-    args.onProgress({
-      kind: "phase_started",
-      actionId: args.actionId,
-      cwd: GIT_CWD,
-      phase: "push",
-      label: "Pushing...",
-    });
+    emitPushPhase();
     await expect.poll(() => shipRef.current?.activeStep).toBe("push");
   });
 
@@ -960,6 +965,54 @@ describe("useCrownShipBinding", () => {
       .toBe("idle");
     expect(pullMutateAsyncSpy).toHaveBeenCalledTimes(1);
     expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("gives the commit message back when the pull fails", async () => {
+    pullMutateAsyncSpy.mockImplementationOnce(() => Promise.reject(new Error("not fast-forward")));
+    await mountShip({ ...dirty, behindCount: 2 });
+    shipRef.current!.setCommitMessage("Keep me");
+    await expect.poll(() => shipRef.current?.commitMessage).toBe("Keep me");
+    await page.getByRole("button", { name: "Ship" }).click();
+    await expect
+      .poll(() => shipRef.current?.phase, { timeout: CROWN_SHIP_GRACE_MS + 1_000 })
+      .toBe("idle");
+    expect(shipRef.current?.commitMessage).toBe("Keep me");
+    expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("gives the commit message back when the commit fails", async () => {
+    await mountShip(dirty);
+    shipRef.current!.setCommitMessage("Keep me");
+    await expect.poll(() => shipRef.current?.commitMessage).toBe("Keep me");
+    await page.getByRole("button", { name: "Ship" }).click();
+    await expect
+      .poll(() => runStackedActionMutateAsyncSpy.mock.calls.length, {
+        timeout: CROWN_SHIP_GRACE_MS + 1_000,
+      })
+      .toBe(1);
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ commitMessage: "Keep me" }),
+    );
+    expect(shipRef.current?.commitMessage).toBe("");
+    activeRunStackedActionDeferredRef.current.reject(new Error("hook failed"));
+    await expect.poll(() => shipRef.current?.commitMessage).toBe("Keep me");
+  });
+
+  it("keeps the field empty once the commit landed", async () => {
+    await mountShip(dirty);
+    shipRef.current!.setCommitMessage("Keep me");
+    await expect.poll(() => shipRef.current?.commitMessage).toBe("Keep me");
+    await page.getByRole("button", { name: "Ship" }).click();
+    await expect
+      .poll(() => runStackedActionMutateAsyncSpy.mock.calls.length, {
+        timeout: CROWN_SHIP_GRACE_MS + 1_000,
+      })
+      .toBe(1);
+    emitPushPhase();
+    await expect.poll(() => shipRef.current?.activeStep).toBe("push");
+    activeRunStackedActionDeferredRef.current.reject(new Error("push failed"));
+    await expect.poll(() => shipRef.current?.phase).toBe("idle");
+    expect(shipRef.current?.commitMessage).toBe("");
   });
 
   it("cannot ship a diverged branch", async () => {
