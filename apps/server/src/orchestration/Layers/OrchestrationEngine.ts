@@ -315,7 +315,12 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
         return;
       }
 
-      commandReadModel = yield* projectEventsOntoReadModel(commandReadModel, persistedEvents);
+      // A failure after the commit already advanced the model: fold only what it lacks.
+      const appliedThrough = commandReadModel.snapshotSequence;
+      const unapplied = persistedEvents.filter((event) => event.sequence > appliedThrough);
+      if (unapplied.length > 0) {
+        commandReadModel = yield* projectEventsOntoReadModel(commandReadModel, unapplied);
+      }
       workspaceCommitFence.publish();
       workspaceAuthorityHealthy = true;
 
