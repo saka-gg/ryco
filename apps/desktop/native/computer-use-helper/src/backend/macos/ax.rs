@@ -871,7 +871,7 @@ fn permission_refusal(window: &WindowInfo) -> InteractiveResult {
         Refusal::new(
             RefusalCode::PermissionDenied,
             "Accessibility permission is required to control macOS apps.",
-            "Grant Accessibility permission to Poracode in System Settings, then retry.",
+            "Grant Accessibility permission to Ryco Computer Use in System Settings, then retry.",
         ),
     )
 }

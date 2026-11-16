@@ -51,6 +51,23 @@ describe("main.ts app window wiring", () => {
     expect(main).toContain("open: openMainWindow,");
   });
 
+  it("waits on every development backend child, not only the first", () => {
+    expect(topLevelFunction("ensureInitialBackendWindowOpen")).toContain(
+      "if (developmentReadinessWatchArmed) ensureDevelopmentInitialWindowOpen();",
+    );
+    const development = topLevelFunction("ensureDevelopmentInitialWindowOpen");
+    expect(development).not.toContain("existingWindow !== null");
+    expect(development).toContain("resumeDesktopHostedIdentityForBackend();");
+    expect(topLevelFunction("bootstrap")).toContain("developmentReadinessWatchArmed = true;");
+  });
+
+  it("guards the app window's top-frame navigation", () => {
+    const create = topLevelFunction("createWindow");
+    expect(create).toContain('"will-navigate"');
+    expect(create).toContain('"will-redirect"');
+    expect(create).toContain("isAppWindowNavigationAllowed(");
+  });
+
   it("delivers a held menu action once an app window's shell reports usable", () => {
     const usable = main.indexOf("appShellUsableContents.add(event.sender);");
     expect(usable).toBeGreaterThanOrEqual(0);

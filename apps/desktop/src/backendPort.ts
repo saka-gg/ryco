@@ -2,6 +2,8 @@ import * as FS from "node:fs";
 import * as Net from "node:net";
 import * as Path from "node:path";
 
+import { writeFileAtomicallySync } from "./atomicFileWrite.ts";
+
 /**
  * Ryco's own default backend port ("RYCO" on a phone keypad). The renderer's
  * origin is the backend URL, so the port decides where localStorage (drafts, UI
@@ -89,15 +91,10 @@ export function readDesktopRendererOriginPort(userDataPath: string): number | nu
  * needs.
  */
 export function writeDesktopRendererOriginPort(userDataPath: string, port: number): void {
-  const recordPath = Path.join(userDataPath, DESKTOP_RENDERER_ORIGIN_RECORD_FILE);
-  const tempPath = `${recordPath}.${process.pid}.${Date.now()}.tmp`;
-  FS.mkdirSync(userDataPath, { recursive: true, mode: 0o700 });
-  FS.writeFileSync(
-    tempPath,
+  writeFileAtomicallySync(
+    Path.join(userDataPath, DESKTOP_RENDERER_ORIGIN_RECORD_FILE),
     `${JSON.stringify({ version: DESKTOP_RENDERER_ORIGIN_RECORD_VERSION, port })}\n`,
-    { encoding: "utf8", mode: 0o600 },
   );
-  FS.renameSync(tempPath, recordPath);
 }
 
 /**

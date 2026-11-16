@@ -9,3 +9,5 @@ Copyright belongs to the upstream contributors. The Apache-2.0 license is includ
 - Corrected the ANSI shift-modifier unit test to exercise the ANSI fallback explicitly. The original test used the host's active keyboard layout and incorrectly required US punctuation modifier rules on non-US keyboards. Runtime behavior is unchanged.
 
 - Renamed the Rust package and binary to `ryco-computer-use` and the library to `ryco_computer_use`; updated build staging, test references, and helper documentation. The packaged executable remains `ryco-computer-use-helper`, and runtime behavior and protocol are unchanged.
+
+- Refusal hints name Ryco (Ryco Computer Use for the macOS Accessibility grant) instead of the upstream product. Protocol and behavior are unchanged.

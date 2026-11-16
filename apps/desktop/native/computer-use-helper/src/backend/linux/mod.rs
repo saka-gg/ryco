@@ -105,7 +105,7 @@ impl LinuxBackend {
             Refusal::new(
                 code,
                 error.message.clone(),
-                "Grant Poracode's Remote Desktop portal request and retry. The portal controls the real pointer and keyboard.",
+                "Grant Ryco's Remote Desktop portal request and retry. The portal controls the real pointer and keyboard.",
             ),
         )
     }
