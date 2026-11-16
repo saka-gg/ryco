@@ -169,7 +169,7 @@ fn sends_background_events_and_captures_an_xwayland_window() {
             overlay,
             AtomEnum::WM_NAME,
             AtomEnum::STRING,
-            b"Poracode Computer Use Overlay",
+            b"Ryco Computer Use Overlay",
         )
         .expect("set overlay title");
     connection
@@ -287,7 +287,7 @@ fn sends_background_events_and_captures_an_xwayland_window() {
             .resolve_window(&WindowRef {
                 app: Some("PoracodeOverlay".into()),
                 id: i64::from(overlay),
-                title: Some("Poracode Computer Use Overlay".into()),
+                title: Some("Ryco Computer Use Overlay".into()),
             })
             .is_err(),
         "overlay must not be selected by exact-id or recovery resolution"

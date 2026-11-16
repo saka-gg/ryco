@@ -22,7 +22,7 @@ fn reports_tcc_state_and_returns_structured_permission_failures() {
     assert!(
         windows
             .iter()
-            .all(|window| window.title != "Poracode Computer Use Overlay")
+            .all(|window| window.title != "Ryco Computer Use Overlay")
     );
     let launch_error = backend
         .launch_app(

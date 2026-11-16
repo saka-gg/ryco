@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import { DesktopComputerUseRuntime } from "../src/computerUse/runtime.ts";
-import { ComputerUseOverlay } from "../src/computerUse/overlay.ts";
+import { COMPUTER_USE_OVERLAY_TITLE, ComputerUseOverlay } from "../src/computerUse/overlay.ts";
 
 // Run the bundled script with Electron from the repository root. Only temporary
 // profiles and a disposable local page are used; no personal browser is opened.
@@ -179,7 +179,7 @@ async function main() {
     );
     assert.equal(BrowserWindow.getFocusedWindow(), focus, "Agent overlay must not steal focus");
     const window = BrowserWindow.getAllWindows().find(
-      (candidate) => candidate.getTitle() === "Ryco Computer Use Overlay",
+      (candidate) => candidate.getTitle() === COMPUTER_USE_OVERLAY_TITLE,
     );
     assert(window?.isVisible());
     const transform = await window.webContents.executeJavaScript(

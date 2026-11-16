@@ -109,7 +109,11 @@ export class ScrcpySession {
   private closing = false;
   /** Set once `open()` succeeds; `onEnded` is only for sessions callers hold. */
   private opened = false;
-  private readonly acks = new Map<bigint, () => void>();
+  /** Clipboard requests waiting for the device's `ack-clipboard`, by sequence. */
+  private readonly acks = new Map<
+    bigint,
+    { readonly resolve: () => void; readonly reject: (error: Error) => void }
+  >();
   private nextSequence = 1n;
   private readonly diagnostics: string[] = [];
 
@@ -239,7 +243,7 @@ export class ScrcpySession {
       try {
         for (const message of parser.push(chunk)) {
           if (message.kind === "ack-clipboard") {
-            this.acks.get(message.sequence)?.();
+            this.acks.get(message.sequence)?.resolve();
             this.acks.delete(message.sequence);
           }
         }
@@ -309,8 +313,16 @@ export class ScrcpySession {
   private end(reason: string): void {
     if (this.ended) return;
     this.ended = true;
-    for (const resolve of this.acks.values()) resolve();
+    // Only the device's acknowledgement confirms a clipboard request. The
+    // message may still have been delivered, so the outcome is unknown.
+    const pending = [...this.acks.values()];
     this.acks.clear();
+    for (const ack of pending)
+      ack.reject(
+        new ScrcpySessionError(
+          `The Android input channel closed before the emulator confirmed the clipboard, so it is unknown whether the text arrived (${reason}).`,
+        ),
+      );
     if (this.opened && !this.closing) this.options.onEnded?.(reason);
     void this.teardown();
   }
@@ -332,9 +344,15 @@ export class ScrcpySession {
         reject(new ScrcpySessionError("The emulator did not confirm the clipboard."));
       }, CLIPBOARD_ACK_TIMEOUT_MS);
       timer.unref?.();
-      this.acks.set(sequence, () => {
-        clearTimeout(timer);
-        resolve();
+      this.acks.set(sequence, {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       try {
         this.send(encodeSetClipboard(text, paste, sequence));
