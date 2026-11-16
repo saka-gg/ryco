@@ -57,6 +57,8 @@ import {
   acquireAttachmentFile,
   attachmentFileSegment,
   clearAttachmentFilesFromEarlierRuns,
+  holdAttachmentFile,
+  peekStoredAttachmentFile,
   purgeAttachmentFiles,
   readStoredAttachmentFile,
   attachmentFileKey,
@@ -137,6 +139,52 @@ describe("attachment files", () => {
     expect(readStoredAttachmentFile(attachmentFileKey(reference("env-a", "att-2")))).toBe(
       undefined,
     );
+  });
+
+  it("keeps a file a row holds when the budget evicts, and evicts the next oldest instead", async () => {
+    const machine = transport();
+    const read = (attachmentId: string) =>
+      acquireAttachmentFile({
+        reference: reference("env-a", attachmentId),
+        currentTransport: () => machine,
+      }).promise;
+    const heldUri = await read("held");
+    const heldKey = attachmentFileKey(reference("env-a", "held"));
+    const release = holdAttachmentFile(heldKey);
+    const firstUri = await read("att-0");
+    for (let index = 1; index < 160; index += 1) await read(`att-${index}`);
+    expect(peekStoredAttachmentFile(heldKey)).toBe(heldUri);
+    expect(hoisted.files.has(heldUri)).toBe(true);
+    expect(
+      peekStoredAttachmentFile(attachmentFileKey(reference("env-a", "att-0"))),
+    ).toBeUndefined();
+    expect(hoisted.files.has(firstUri)).toBe(false);
+    expect(() => release()).not.toThrow();
+  });
+
+  it("lets held files run over the budget and trims one once released", async () => {
+    const machine = transport();
+    const keys: string[] = [];
+    const uris: string[] = [];
+    const releases: Array<() => void> = [];
+    for (let index = 0; index <= 160; index += 1) {
+      const next = reference("env-a", `att-${index}`);
+      const key = attachmentFileKey(next);
+      keys.push(key);
+      releases.push(holdAttachmentFile(key));
+      uris.push(
+        await acquireAttachmentFile({ reference: next, currentTransport: () => machine }).promise,
+      );
+    }
+    for (const key of keys) expect(peekStoredAttachmentFile(key)).toBeDefined();
+    releases[0]?.();
+    expect(peekStoredAttachmentFile(keys[0] ?? "")).toBeUndefined();
+    expect(hoisted.files.has(uris[0] ?? "")).toBe(false);
+    expect(peekStoredAttachmentFile(keys[1] ?? "")).toBeDefined();
+    // A second release changes nothing.
+    releases[0]?.();
+    expect(peekStoredAttachmentFile(keys[1] ?? "")).toBeDefined();
+    expect(peekStoredAttachmentFile(keys[160] ?? "")).toBeDefined();
   });
 
   it("purges one machine's files with its device data", async () => {

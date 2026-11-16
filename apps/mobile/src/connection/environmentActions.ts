@@ -88,7 +88,7 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     });
     const environmentId = descriptor.environmentId;
 
-    // §3-22 single-record snapshot for rollback (no bulk registry API on mobile).
+    // The record this pairing replaces, if any: its label and creation time carry over.
     const prior = registry.catalog.get(environmentId);
 
     const bearerSession = await registry.remoteApi.bootstrapRemoteBearerSession({
@@ -108,16 +108,20 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
       lastConnectedAt: isoNow(),
     };
 
-    await registry.catalog.persistRecord(record);
+    // The bearer first (as linked direct access does): a record saved without one would
+    // come back after a restart as a machine with nothing to sign in with.
     const didPersistToken = await registry.catalog.writeBearerToken(
       environmentId,
       bearerSession.sessionToken,
     );
-    if (!didPersistToken) {
-      // Roll the registry back BEFORE the upsert (the failing path never upserts,
-      // so the store needs no rollback).
-      if (prior) await registry.catalog.persistRecord(prior);
-      throw new Error(MISSING_CREDENTIAL_MESSAGE);
+    if (!didPersistToken) throw new Error(MISSING_CREDENTIAL_MESSAGE);
+    try {
+      await registry.catalog.persistRecord(record);
+    } catch (error) {
+      // A first pairing leaves no credential behind; a re-pairing keeps the new one, which
+      // signs in to the same machine as the record already saved.
+      if (prior === null) await registry.catalog.removeBearerToken(environmentId).catch(() => {});
+      throw error;
     }
 
     // The upsert auto-persists and fires the supervisor's registry subscription.

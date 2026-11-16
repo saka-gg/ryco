@@ -189,6 +189,10 @@ const EMPTY_PREFERENCES: Preferences = {};
 let state: PreferencesStoreState = { preferences: EMPTY_PREFERENCES, hydrated: false };
 const listeners = new Set<Listener>();
 let hydrationStarted = false;
+/** Changes made before the stored preferences loaded, merged over them once they do. */
+let pendingBeforeHydration: Partial<Preferences> | null = null;
+/** Bumped by the test reset, so a load still in flight cannot land in a fresh store. */
+let hydrationGeneration = 0;
 
 function emit(): void {
   for (const listener of listeners) listener();
@@ -199,33 +203,55 @@ function setState(next: PreferencesStoreState): void {
   emit();
 }
 
+function persistPreferences(preferences: Preferences): void {
+  void mobileKV.setItem(PREFERENCES_KEY, JSON.stringify(preferences)).catch(() => {
+    // Fire-and-forget: a failed write leaves the in-memory value authoritative
+    // until the next successful write (last-write-wins).
+  });
+}
+
 /** Idempotently async-load the persisted blob once, then mark hydrated. */
 export function hydratePreferences(): void {
   if (hydrationStarted) return;
   hydrationStarted = true;
+  const generation = hydrationGeneration;
   void (async () => {
+    let stored: Preferences = EMPTY_PREFERENCES;
+    let read = true;
     try {
-      const raw = await mobileKV.getItem(PREFERENCES_KEY);
-      const parsed = parsePayload(raw);
-      setState({
-        preferences: parsed ? sanitizePreferences(parsed) : EMPTY_PREFERENCES,
-        hydrated: true,
-      });
+      const parsed = parsePayload(await mobileKV.getItem(PREFERENCES_KEY));
+      if (parsed) stored = sanitizePreferences(parsed);
     } catch {
       // Degrade to defaults on any read failure (MVP last-write-wins).
-      setState({ preferences: EMPTY_PREFERENCES, hydrated: true });
+      read = false;
     }
+    if (generation !== hydrationGeneration) return;
+    const pending = pendingBeforeHydration;
+    pendingBeforeHydration = null;
+    const preferences = pending === null ? stored : sanitizePreferences({ ...stored, ...pending });
+    setState({ preferences, hydrated: true });
+    // A change made while loading is saved over what was stored; after a failed read nothing
+    // is written, so preferences that could not be read are not replaced by the change alone.
+    if (pending !== null && read) persistPreferences(preferences);
   })();
 }
 
-/** Shallow-merge a patch and fire-and-forget the persisted write. */
+/**
+ * Shallow-merge a patch and persist it; before hydration the patch is merged over the stored
+ * preferences once they load.
+ */
 export function updatePreferences(patch: Partial<Preferences>): void {
   const next = sanitizePreferences({ ...state.preferences, ...patch });
+  if (!state.hydrated) {
+    // Shown at once, saved once the stored preferences are loaded: writing now would
+    // replace all of them with this change.
+    pendingBeforeHydration = { ...pendingBeforeHydration, ...patch };
+    setState({ preferences: next, hydrated: false });
+    hydratePreferences();
+    return;
+  }
   setState({ preferences: next, hydrated: true });
-  void mobileKV.setItem(PREFERENCES_KEY, JSON.stringify(next)).catch(() => {
-    // Fire-and-forget: a failed write leaves the in-memory value authoritative
-    // until the next successful write (last-write-wins).
-  });
+  persistPreferences(next);
 }
 
 export function getPreferencesSnapshot(): Preferences {
@@ -290,5 +316,7 @@ export function useIsPreferencesHydrated(): boolean {
 export function resetPreferencesStoreForTests(): void {
   state = { preferences: EMPTY_PREFERENCES, hydrated: false };
   hydrationStarted = false;
+  pendingBeforeHydration = null;
+  hydrationGeneration += 1;
   listeners.clear();
 }
