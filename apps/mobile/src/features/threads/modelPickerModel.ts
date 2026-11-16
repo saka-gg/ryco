@@ -122,8 +122,6 @@ export interface ModelPickerInput {
   readonly lockedProviderKey?: string | null;
   /** Human-readable explanation for the temporary lock. */
   readonly lockNotice?: string | null;
-  /** @deprecated Compatibility for New Task and older pure-model callers. */
-  readonly providerLocked?: boolean;
   readonly query?: string;
   /** Provider snapshots, for the notices naming the update a model needs. */
   readonly providers?: ReadonlyArray<ServerProvider> | undefined;
@@ -154,9 +152,7 @@ export function buildModelPickerModelFromOptions(
   const query = input.query?.trim().toLocaleLowerCase() ?? "";
   const loading = input.loading ?? false;
   const options = input.modelOptions;
-  const lockedProviderKey =
-    input.lockedProviderKey ??
-    (input.providerLocked ? (input.currentSelection?.instanceId ?? null) : null);
+  const lockedProviderKey = input.lockedProviderKey ?? null;
   const lockNotice = input.lockNotice ?? LOCK_NOTICE;
 
   const selectedKey = input.currentSelection
