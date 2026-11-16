@@ -12,18 +12,9 @@ import { Effect, Layer, Option, Redacted, Schema } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
-import { makeCodexMcpService } from "../../mcp/CodexMcpService.ts";
-import { makeClaudeMcpAdapter } from "../../mcp/adapters/ClaudeMcpAdapter.ts";
-import { makeCodexMcpAdapter } from "../../mcp/adapters/CodexMcpAdapter.ts";
-import { makeCopilotMcpAdapter } from "../../mcp/adapters/CopilotMcpAdapter.ts";
-import { makeCursorMcpAdapter } from "../../mcp/adapters/CursorMcpAdapter.ts";
-import { makeGrokMcpAdapter } from "../../mcp/adapters/GrokMcpAdapter.ts";
-import { makeOpenCodeMcpAdapter } from "../../mcp/adapters/OpenCodeMcpAdapter.ts";
 import { externalAgentControlConfigFingerprint } from "../../mcp/externalAgentControlEntry.ts";
-import {
-  makeProviderMcpRegistry,
-  type ProviderMcpRegistryShape,
-} from "../../mcp/ProviderMcpRegistry.ts";
+import type { ProviderMcpRegistryShape } from "../../mcp/ProviderMcpRegistry.ts";
+import { ProviderMcpRegistryService } from "../../mcp/ProviderMcpRegistryService.ts";
 import {
   AgentControlMcpInstallationRepository,
   type StoredAgentControlMcpInstallation,
@@ -384,69 +375,79 @@ export const makeAgentControlExternalInstallation = (
               installationError("storage", "Failed to create the external integration."),
             ),
           );
-        const desired = {
-          workspaceId: workspace.id,
-          command: created.detail.setup.serveCommand.command,
-          args: [...created.detail.setup.serveCommand.args],
-        };
-        const primary = yield* registry.inspectExternalAgentControl({
-          ...desired,
-          name: McpServerName.make("ryco"),
-        });
-        const selectedName =
-          primary.state === "different"
-            ? McpServerName.make("ryco-agent-control")
-            : McpServerName.make("ryco");
-        const selected =
-          selectedName === "ryco"
-            ? primary
-            : yield* registry.inspectExternalAgentControl({ ...desired, name: selectedName });
-        if (selected.state === "different") {
-          yield* integrations.revoke(created.detail.integration.integrationId).pipe(Effect.ignore);
-          return yield* Effect.fail(
-            installationError(
-              "conflict",
-              "Both Ryco MCP server names are already used by unrelated provider entries.",
-            ),
-          );
-        }
-        const now = new Date().toISOString();
-        let current: StoredAgentControlMcpInstallation = {
-          installationId: AgentControlMcpInstallationId.make(crypto.randomUUID()),
-          integrationId: created.detail.integration.integrationId,
-          workspaceId: workspace.id,
-          driver: workspace.driver,
-          serverName: selectedName,
-          state: "planned",
-          desiredFingerprint: externalAgentControlConfigFingerprint({
-            transport: "stdio",
-            command: desired.command,
-            args: desired.args,
-            env: {},
-            envVars: [],
-            httpHeaders: {},
-            envHttpHeaders: {},
-            enabled: true,
-            enabledTools: [],
-            disabledTools: [],
-            oauthScopes: [],
-          }),
-          nativeFingerprint: null,
-          lastError: null,
-          ownsNativeConfig: false,
-          preservedUserChanges: false,
-          revision: 0,
-          createdAt: now,
-          updatedAt: now,
-          connectedAt: null,
-        };
-        const inserted = yield* repository.insert(current);
-        if (!inserted) {
-          yield* integrations.revoke(current.integrationId).pipe(Effect.ignore);
-          return yield* Effect.fail(
-            installationError("conflict", "This provider profile is already being connected."),
-          );
-        }
+        // Failing anywhere between creating the integration and a stored installation row would
+        // leave a paired integration nothing references; after the insert the row owns recovery.
+        const prepared = yield* Effect.gen(function* () {
+          const desired = {
+            workspaceId: workspace.id,
+            command: created.detail.setup.serveCommand.command,
+            args: [...created.detail.setup.serveCommand.args],
+          };
+          const primary = yield* registry.inspectExternalAgentControl({
+            ...desired,
+            name: McpServerName.make("ryco"),
+          });
+          const selectedName =
+            primary.state === "different"
+              ? McpServerName.make("ryco-agent-control")
+              : McpServerName.make("ryco");
+          const selected =
+            selectedName === "ryco"
+              ? primary
+              : yield* registry.inspectExternalAgentControl({ ...desired, name: selectedName });
+          if (selected.state === "different") {
+            return yield* Effect.fail(
+              installationError(
+                "conflict",
+                "Both Ryco MCP server names are already used by unrelated provider entries.",
+              ),
+            );
+          }
+          const now = new Date().toISOString();
+          const row: StoredAgentControlMcpInstallation = {
+            installationId: AgentControlMcpInstallationId.make(crypto.randomUUID()),
+            integrationId: created.detail.integration.integrationId,
+            workspaceId: workspace.id,
+            driver: workspace.driver,
+            serverName: selectedName,
+            state: "planned",
+            desiredFingerprint: externalAgentControlConfigFingerprint({
+              transport: "stdio",
+              command: desired.command,
+              args: desired.args,
+              env: {},
+              envVars: [],
+              httpHeaders: {},
+              envHttpHeaders: {},
+              enabled: true,
+              enabledTools: [],
+              disabledTools: [],
+              oauthScopes: [],
+            }),
+            nativeFingerprint: null,
+            lastError: null,
+            ownsNativeConfig: false,
+            preservedUserChanges: false,
+            revision: 0,
+            createdAt: now,
+            updatedAt: now,
+            connectedAt: null,
+          };
+          const inserted = yield* repository.insert(row);
+          if (!inserted) {
+            return yield* Effect.fail(
+              installationError("conflict", "This provider profile is already being connected."),
+            );
+          }
+          return { desired, selected, selectedName, row } as const;
+        }).pipe(
+          Effect.onError(() =>
+            integrations.revoke(created.detail.integration.integrationId).pipe(Effect.ignore),
+          ),
+        );
+        const { desired, selected, selectedName } = prepared;
+        let current: StoredAgentControlMcpInstallation = prepared.row;
+        const now = current.createdAt;
         const run = Effect.gen(function* () {
           yield* writeCredential({
             integrationId: current.integrationId,
@@ -534,20 +535,7 @@ export const makeAgentControlExternalInstallation = (
   });
 
 const makeLive = Effect.gen(function* () {
-  const codexMcp = yield* makeCodexMcpService;
-  const claudeMcp = yield* makeClaudeMcpAdapter();
-  const copilotMcp = yield* makeCopilotMcpAdapter();
-  const cursorMcp = yield* makeCursorMcpAdapter();
-  const grokMcp = yield* makeGrokMcpAdapter();
-  const openCodeMcp = yield* makeOpenCodeMcpAdapter();
-  const registry = yield* makeProviderMcpRegistry([
-    makeCodexMcpAdapter(codexMcp),
-    claudeMcp,
-    copilotMcp,
-    cursorMcp,
-    grokMcp,
-    openCodeMcp,
-  ]);
+  const registry = yield* ProviderMcpRegistryService;
   return yield* makeAgentControlExternalInstallation(registry);
 });
 

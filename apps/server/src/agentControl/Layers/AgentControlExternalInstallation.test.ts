@@ -51,6 +51,7 @@ const workspace = Schema.decodeSync(McpWorkspace)({
 function makeFakeRegistry() {
   let installedFingerprint: string | null = null;
   let failInstall = false;
+  let failInspect = false;
   const desiredFingerprint = (input: {
     readonly command: string;
     readonly args: ReadonlyArray<string>;
@@ -93,6 +94,9 @@ function makeFakeRegistry() {
     reloadServers: unused,
     startOauthLogin: unused,
     inspectExternalAgentControl: (input) => {
+      if (failInspect) {
+        return Effect.fail(new McpSettingsError({ message: "injected inspect failure" }));
+      }
       if (installedFingerprint === null) {
         return Effect.succeed({ state: "absent", fingerprint: null });
       }
@@ -124,6 +128,9 @@ function makeFakeRegistry() {
     },
     allowInstall: () => {
       failInstall = false;
+    },
+    failNextInspect: () => {
+      failInspect = true;
     },
     simulateUserEdit: () => {
       installedFingerprint = "f".repeat(64);
@@ -214,6 +221,33 @@ describe("AgentControlExternalInstallation", () => {
       expect(result.failed.state).toBe("repair-needed");
       expect(result.failed.lastError).not.toContain("injected install failure");
       expect(result.repaired.installation.state).toBe("connected");
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("revokes the new integration when the provider config cannot be read", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "ryco-installation-inspect-test-"));
+    const fake = makeFakeRegistry();
+    fake.failNextInspect();
+    try {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const service = yield* makeAgentControlExternalInstallation(
+            fake.registry,
+            successfulProbe,
+          );
+          yield* Effect.flip(service.connect({ workspaceId: workspace.id }));
+          const installations = (yield* service.list()).installations;
+          const integrationService = yield* AgentControlExternalIntegrationService;
+          const integrations = (yield* integrationService.list()).integrations;
+          return { installations, integrations };
+        }).pipe(Effect.provide(testLayer(stateDir)), Effect.scoped),
+      );
+
+      expect(result.installations).toEqual([]);
+      expect(result.integrations).toHaveLength(1);
+      expect(result.integrations[0]?.integration.revokedAt).toEqual(expect.any(String));
     } finally {
       await rm(stateDir, { recursive: true, force: true });
     }

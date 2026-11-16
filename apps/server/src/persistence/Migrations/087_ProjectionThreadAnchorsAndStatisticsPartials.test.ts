@@ -3,7 +3,10 @@ import { Effect } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { inheritedTurnRowSql } from "../../orchestration/forkInheritanceSql.ts";
-import { runMigrations } from "../Migrations.ts";
+import {
+  repairProjectionThreadAnchorsAndStatisticsPartials,
+  runMigrations,
+} from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import { firstUserMessageIdQuery, latestUserMessageIdQuery } from "../userMessageAnchors.ts";
 import { ensureProjectionThreadAnchorsAndStatisticsPartials } from "./087_ProjectionThreadAnchorsAndStatisticsPartials.ts";
@@ -221,6 +224,29 @@ it.layer(NodeSqliteClient.layerMemory())("087 thread anchors and statistics part
         tables.map((table) => table.name),
         ["statistics_partials_state", "statistics_thread_partials"],
       );
+    }),
+  );
+});
+
+it.layer(NodeSqliteClient.layerMemory())("087 repair atomicity", (it) => {
+  it.effect("rolls the columns back when the repair's backfill fails, and backfills on retry", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 86 });
+      yield* insertThread(sql, "t1");
+      yield* insertMessage(sql, "u1", "t1", "user", "2026-10-01T00:00:01.000Z");
+      yield* sql`
+        CREATE TRIGGER test_block_backfill BEFORE UPDATE ON projection_threads
+        BEGIN SELECT RAISE(ABORT, 'blocked backfill'); END
+      `;
+
+      yield* Effect.flip(repairProjectionThreadAnchorsAndStatisticsPartials());
+      const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
+      assert.isFalse(columns.some((column) => column.name === "first_user_message_id"));
+
+      yield* sql`DROP TRIGGER test_block_backfill`;
+      yield* repairProjectionThreadAnchorsAndStatisticsPartials();
+      assert.equal((yield* actual(sql, "t1")).first, "u1");
     }),
   );
 });

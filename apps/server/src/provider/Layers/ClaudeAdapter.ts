@@ -4333,6 +4333,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         } satisfies PermissionResult;
       }
 
+      if (callbackOptions.signal.aborted || context.stopped) {
+        return {
+          behavior: "deny",
+          message: "User cancelled tool execution.",
+        } satisfies PermissionResult;
+      }
+
       const requestId = ApprovalRequestId.make(callbackOptions.requestId);
       const requestType = classifyRequestType(toolName);
       const detail = summarizeToolRequest(toolName, toolInput);
@@ -4349,6 +4356,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
 
       const requestedStamp = yield* makeEventStamp();
+      if (pendingApprovals.has(requestId)) {
+        return {
+          behavior: "deny",
+          message: "An approval with this request ID is already pending.",
+        } satisfies PermissionResult;
+      }
+      // Own the callback before publication can yield to a response or shutdown.
+      pendingApprovals.set(requestId, pendingApproval);
       yield* offerRuntimeEventForContext(context, {
         type: "request.opened",
         eventId: requestedStamp.eventId,
@@ -4380,10 +4395,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         },
       });
 
-      pendingApprovals.set(requestId, pendingApproval);
-
       const onAbort = () => {
-        if (!pendingApprovals.has(requestId)) {
+        if (pendingApprovals.get(requestId) !== pendingApproval) {
           return;
         }
         pendingApprovals.delete(requestId);
@@ -4393,9 +4406,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       callbackOptions.signal.addEventListener("abort", onAbort, {
         once: true,
       });
+      // Abort or a stop can land while the request is being published, before the listener exists.
+      if (callbackOptions.signal.aborted || context.stopped) onAbort();
 
-      const requestedDecision = yield* Deferred.await(decisionDeferred);
-      pendingApprovals.delete(requestId);
+      const requestedDecision = yield* Deferred.await(decisionDeferred).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            callbackOptions.signal.removeEventListener("abort", onAbort);
+            if (pendingApprovals.get(requestId) === pendingApproval) {
+              pendingApprovals.delete(requestId);
+            }
+          }),
+        ),
+      );
       // A request that refused a session-wide grant (a client that predates the flag can still
       // offer it) is answered, and reported, as one approval.
       const decision: ProviderApprovalDecision =
@@ -5079,6 +5102,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const turnId = TurnId.make(promptUuid);
     const startedAt = yield* nowIso;
 
+    // A slash command must lead the prompt; the context waits for the next turn.
+    const hostContextPrefix =
+      isSlashCommandInput(input.input) ||
+      context.agentControlHostContextDelivered ||
+      context.agentControlHostContext.length === 0
+        ? undefined
+        : `<ryco_host_context>${context.agentControlHostContext}</ryco_host_context>`;
+    const message = yield* buildUserMessageEffect(
+      hostContextPrefix
+        ? {
+            ...input,
+            input: [hostContextPrefix, input.input].filter(Boolean).join("\n\n"),
+          }
+        : input,
+      {
+        fileSystem,
+        attachmentsDir: serverConfig.attachmentsDir,
+        boundInstanceId,
+      },
+    );
+
     // Closes a stale provider turn, one opened while the awaits above yielded,
     // or waits for an in-flight completion. Re-checks until no turn is open.
     while (context.turnState !== undefined) {
@@ -5095,44 +5139,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
     context.promptSent = true;
 
-    const turnStartedStamp = yield* makeEventStamp();
-    yield* offerRuntimeEventForContext(context, {
-      type: "turn.started",
-      eventId: turnStartedStamp.eventId,
-      provider: PROVIDER,
-      createdAt: turnStartedStamp.createdAt,
-      threadId: context.session.threadId,
-      turnId,
-      payload: modelSelection?.model ? { model: modelSelection.model } : {},
-      providerRefs: {},
+    const deliverPrompt = Effect.gen(function* () {
+      const turnStartedStamp = yield* makeEventStamp();
+      yield* offerRuntimeEventForContext(context, {
+        type: "turn.started",
+        eventId: turnStartedStamp.eventId,
+        provider: PROVIDER,
+        createdAt: turnStartedStamp.createdAt,
+        threadId: context.session.threadId,
+        turnId,
+        payload: modelSelection?.model ? { model: modelSelection.model } : {},
+        providerRefs: {},
+      });
+
+      const offered = yield* Queue.offer(context.promptQueue, {
+        type: "message",
+        message: { ...message, uuid: promptUuid },
+      }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
+      if (!offered) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/start",
+          detail: "The Claude session closed before the prompt was queued.",
+        });
+      }
+      if (hostContextPrefix) context.agentControlHostContextDelivered = true;
     });
-
-    // A slash command must lead the prompt; the context waits for the next turn.
-    const hostContextPrefix =
-      isSlashCommandInput(input.input) ||
-      context.agentControlHostContextDelivered ||
-      context.agentControlHostContext.length === 0
-        ? undefined
-        : `<ryco_host_context>${context.agentControlHostContext}</ryco_host_context>`;
-    if (hostContextPrefix) context.agentControlHostContextDelivered = true;
-    const message = yield* buildUserMessageEffect(
-      hostContextPrefix
-        ? {
-            ...input,
-            input: [hostContextPrefix, input.input].filter(Boolean).join("\n\n"),
-          }
-        : input,
-      {
-        fileSystem,
-        attachmentsDir: serverConfig.attachmentsDir,
-        boundInstanceId,
-      },
+    // A turn whose prompt never reached the CLI must not stay open; a stop that already closed or
+    // replaced it makes this a no-op.
+    yield* deliverPrompt.pipe(
+      Effect.onError(() =>
+        completeTurn(context, "failed", "Claude did not receive the prompt.", undefined, {
+          expectedTurnState: turnState,
+        }),
+      ),
     );
-
-    yield* Queue.offer(context.promptQueue, {
-      type: "message",
-      message: { ...message, uuid: promptUuid },
-    }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
 
     if (context.agentControl) {
       yield* context.agentControl.bindTurn(turnId).pipe(

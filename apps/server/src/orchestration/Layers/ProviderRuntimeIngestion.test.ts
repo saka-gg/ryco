@@ -3222,6 +3222,99 @@ describe("ProviderRuntimeIngestion", () => {
     expect(payload?.streaming).toBe(true);
   });
 
+  it("forgets subagent provider threads when the session exits", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-collab-started-for-exit"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-child-exit"),
+      itemId: asItemId("collab-exit"),
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        receiverThreadIds: ["child-thread-exit"],
+        data: {
+          item: {
+            type: "collabAgentToolCall",
+            id: "collab-exit",
+            tool: "spawnAgent",
+            prompt: "You are a researcher. Inspect session exit.",
+            receiverThreadIds: ["child-thread-exit"],
+            senderThreadId: "parent-thread",
+            status: "inProgress",
+            agentsStates: {
+              "child-thread-exit": {
+                status: "running",
+              },
+            },
+          },
+        },
+      },
+    });
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-subagent"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      payload: { reason: "subagent cleanup" },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-child-assistant-delta-exit"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-child-exit"),
+      itemId: asItemId("child-message-exit"),
+      raw: {
+        source: "codex.app-server.notification",
+        method: "item/agentMessage/delta",
+        payload: {
+          threadId: "child-thread-exit",
+        },
+      },
+      payload: {
+        streamKind: "assistant_text",
+        delta: "text after the session ended",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-child-assistant-completed-exit"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-child-exit"),
+      itemId: asItemId("child-message-exit"),
+      raw: {
+        source: "codex.app-server.notification",
+        method: "item/completed",
+        payload: {
+          threadId: "child-thread-exit",
+        },
+      },
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+    await harness.drain();
+
+    // Everything is drained: the thread only needs reading.
+    const thread = await waitForThread(harness.readModel, () => true);
+    expect(
+      thread.activities.some((activity: ProviderRuntimeTestActivity) =>
+        String(activity.id).startsWith("agent-message:thread-1:child-thread-exit:"),
+      ),
+    ).toBe(false);
+  });
+
   it("preserves completed tool metadata on projected tool activities", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

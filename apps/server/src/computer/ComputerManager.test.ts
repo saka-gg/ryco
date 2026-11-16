@@ -3179,6 +3179,34 @@ describe("ComputerManager and FakeComputerBackend", () => {
     await manager.dispose();
   });
 
+  it("a second viewer joining during the attach does not flap the stream", async () => {
+    const backend = new FakeComputerBackend();
+    const attachStarted = deferred();
+    const allowAttach = deferred();
+    const attach = backend.attachStream.bind(backend);
+    backend.attachStream = async (...args) => {
+      attachStarted.resolve();
+      await allowAttach.promise;
+      return attach(...args);
+    };
+    const manager = new ComputerManager({ backend });
+    const a = manager.subscribeFrames(new RecordingSink());
+    await attachStarted.promise;
+    const b = manager.subscribeFrames(new RecordingSink());
+    allowAttach.resolve();
+    await manager.flushStreamTransitions();
+
+    expect(backend.callsFor("attachStream")).toHaveLength(1);
+    expect(backend.callsFor("detachStream")).toHaveLength(0);
+
+    a();
+    b();
+    await manager.flushStreamTransitions();
+    expect(backend.callsFor("detachStream")).toHaveLength(1);
+
+    await manager.dispose();
+  });
+
   it("drops late frames and state updates after a thread is removed", async () => {
     const backend = new FakeComputerBackend();
     const manager = new ComputerManager({ backend });

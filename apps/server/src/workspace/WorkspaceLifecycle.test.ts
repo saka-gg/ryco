@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
+import { Effect, Fiber, Layer, ManagedRuntime, Option, Schema } from "effect";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
   DEFAULT_LIFECYCLE_SUGGESTION_POLICY,
@@ -164,6 +164,8 @@ function fixture() {
     failCommand: new Set<OrchestrationCommand["type"]>(),
     failStop: false,
     failRemoval: false,
+    /** Set: the next removal signals it started and never finishes. */
+    hangRemoval: null as PromiseWithResolvers<void> | null,
     gitCalls: [] as string[],
     /** Replaces the fake Git workflow's worktree creation (the real driver, for instance). */
     createWorktree: null as WorkspaceLifecycleDeps["git"]["createWorktree"] | null,
@@ -330,6 +332,10 @@ function fixture() {
       removeWorktree: (input) =>
         Effect.suspend(() => {
           state.removals++;
+          if (state.hangRemoval) {
+            state.hangRemoval.resolve();
+            return Effect.never;
+          }
           if (state.failRemoval) return Effect.fail({ message: "git refused" } as never);
           return Effect.try({
             try: () => {
@@ -730,6 +736,24 @@ describe("workspace lifecycle service", () => {
     expect(f.state.fence).toEqual([`claim:${f.checkout}`, "release"]);
     expect(f.commandTypes()).not.toContain("worktree.checkout.remove");
     expect(f.commandTypes()).not.toContain("thread.archive");
+  });
+
+  it("releases the fence when the removal is interrupted", async () => {
+    const f = fixture();
+    const started = Promise.withResolvers<void>();
+    f.state.hangRemoval = started;
+    await f.run((service) =>
+      Effect.gen(function* () {
+        const preview = yield* service.preview({ worktreeId: topicId, action: "remove-checkout" });
+        const fiber = yield* service
+          .apply({ ...preview.request, expectedFingerprint: preview.fingerprint })
+          .pipe(Effect.forkChild);
+        yield* Effect.promise(() => started.promise);
+        yield* Fiber.interrupt(fiber);
+      }),
+    );
+    expect(f.state.fence).toEqual([`claim:${f.checkout}`, "release"]);
+    expect(existsSync(f.checkout)).toBe(true);
   });
 
   it("reports a partial failure truthfully and resumes safely on retry", async () => {

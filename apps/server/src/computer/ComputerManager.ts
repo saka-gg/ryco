@@ -4297,8 +4297,11 @@ export class ComputerManager {
     // the stream cannot exist without a connected backend anyway.
     this.engageBackend();
     const unsubscribe = this.transport.subscribe(this.computerId, sink);
-    this.streamDesired = true;
-    this.streamEpoch += 1;
+    // Only the first viewer changes what is wanted; a later one joins the stream (or the attach in flight).
+    if (!this.streamDesired) {
+      this.streamDesired = true;
+      this.streamEpoch += 1;
+    }
     void this.reconcileStream().catch((error) => this.recordError(error));
     return () => {
       unsubscribe();

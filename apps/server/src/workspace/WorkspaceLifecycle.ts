@@ -1196,72 +1196,87 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
               }
               step("fence-checkout", "done", "New work in this checkout is refused.");
 
-              // 3. Revalidate immediately before removal.
-              const fresh = yield* Effect.exit(loadState(worktreeId, reviewReadsFor(request)));
-              const freshBlockers =
-                fresh._tag === "Success"
-                  ? workspaceActionBlockers(fresh.value, request)
-                  : ["The workspace could not be revalidated."];
-              // A discard throws away exactly what was reviewed: any new or
-              // changed file since the review cancels it.
-              const unchanged =
-                fresh._tag === "Success" &&
-                fresh.value.facts?.head === state.facts?.head &&
-                fresh.value.facts?.checkoutIdentity === state.facts?.checkoutIdentity &&
-                statusKey(fresh.value.facts?.status) === statusKey(state.facts?.status);
-              if (freshBlockers.length > 0 || !unchanged) {
-                yield* deps.fence.release(claim.value);
-                step("revalidate", "failed", freshBlockers.join(" ") || "The checkout changed.");
-                return result(
-                  "blocked",
-                  `Nothing was removed: the checkout changed right before removal. ${freshBlockers.join(" ")}`.trim(),
-                );
-              }
-              step("revalidate", "done", "Checkout unchanged since review.");
+              const removeFenced = Effect.gen(function* () {
+                // 3. Revalidate immediately before removal.
+                const fresh = yield* Effect.exit(loadState(worktreeId, reviewReadsFor(request)));
+                const freshBlockers =
+                  fresh._tag === "Success"
+                    ? workspaceActionBlockers(fresh.value, request)
+                    : ["The workspace could not be revalidated."];
+                // A discard throws away exactly what was reviewed: any new or
+                // changed file since the review cancels it.
+                const unchanged =
+                  fresh._tag === "Success" &&
+                  fresh.value.facts?.head === state.facts?.head &&
+                  fresh.value.facts?.checkoutIdentity === state.facts?.checkoutIdentity &&
+                  statusKey(fresh.value.facts?.status) === statusKey(state.facts?.status);
+                if (freshBlockers.length > 0 || !unchanged) {
+                  yield* deps.fence.release(claim.value);
+                  step("revalidate", "failed", freshBlockers.join(" ") || "The checkout changed.");
+                  return result(
+                    "blocked",
+                    `Nothing was removed: the checkout changed right before removal. ${freshBlockers.join(" ")}`.trim(),
+                  );
+                }
+                step("revalidate", "done", "Checkout unchanged since review.");
 
-              // 4. Remove without force: Git itself refuses modified or untracked
-              // content. Only a reviewed discard forces it.
-              const removed = yield* Effect.exit(
-                deps.git.removeWorktree({
-                  cwd: projectRoot,
-                  path,
-                  force: effects.discard === true,
-                }),
+                // 4. Remove without force: Git itself refuses modified or untracked
+                // content. Only a reviewed discard forces it.
+                const removed = yield* Effect.exit(
+                  deps.git.removeWorktree({
+                    cwd: projectRoot,
+                    path,
+                    force: effects.discard === true,
+                  }),
+                );
+                const registered = yield* deps.git
+                  .listWorktreePaths(projectRoot)
+                  .pipe(Effect.orElseSucceed(() => null));
+                const gone =
+                  removed._tag === "Success" &&
+                  !existsSync(path) &&
+                  registered !== null &&
+                  !registered.some((entry) => samePath(entry, path));
+                if (!gone) {
+                  const directoryGone = !existsSync(path);
+                  // Directory still present: nothing was removed, so admission is restored.
+                  // Directory gone (only Git's registration is left): nothing is in flight
+                  // any more, so the path stays refused like any removed checkout.
+                  yield* directoryGone
+                    ? deps.fence.complete(claim.value)
+                    : deps.fence.release(claim.value);
+                  step(
+                    "remove-checkout",
+                    "failed",
+                    directoryGone
+                      ? "The directory is gone but Git still registers it."
+                      : removed._tag === "Failure"
+                        ? "Git refused to remove the checkout."
+                        : "The checkout could not be verified as removed.",
+                  );
+                  return result(
+                    directoryGone ? "partial" : "failed",
+                    directoryGone
+                      ? "The checkout directory was removed, but Git still registers it. Run `git worktree prune` in the project, then retry to record the removal; history and the branch are unchanged."
+                      : "The checkout was not removed. Conversations, history and the branch are unchanged.",
+                  );
+                }
+                yield* deps.fence.complete(claim.value);
+                step("remove-checkout", "done", `Removed ${path}.`);
+                return null;
+              });
+              // An interrupted removal settles its fence like a failed one: a checkout still there
+              // is admitted again, and a removed directory stays refused.
+              const fencedFailure = yield* removeFenced.pipe(
+                Effect.onInterrupt(() =>
+                  Effect.suspend(() =>
+                    existsSync(path)
+                      ? deps.fence.release(claim.value)
+                      : deps.fence.complete(claim.value),
+                  ),
+                ),
               );
-              const registered = yield* deps.git
-                .listWorktreePaths(projectRoot)
-                .pipe(Effect.orElseSucceed(() => null));
-              const gone =
-                removed._tag === "Success" &&
-                !existsSync(path) &&
-                registered !== null &&
-                !registered.some((entry) => samePath(entry, path));
-              if (!gone) {
-                const directoryGone = !existsSync(path);
-                // Directory still present: nothing was removed, so admission is restored.
-                // Directory gone (only Git's registration is left): nothing is in flight
-                // any more, so the path stays refused like any removed checkout.
-                yield* directoryGone
-                  ? deps.fence.complete(claim.value)
-                  : deps.fence.release(claim.value);
-                step(
-                  "remove-checkout",
-                  "failed",
-                  directoryGone
-                    ? "The directory is gone but Git still registers it."
-                    : removed._tag === "Failure"
-                      ? "Git refused to remove the checkout."
-                      : "The checkout could not be verified as removed.",
-                );
-                return result(
-                  directoryGone ? "partial" : "failed",
-                  directoryGone
-                    ? "The checkout directory was removed, but Git still registers it. Run `git worktree prune` in the project, then retry to record the removal; history and the branch are unchanged."
-                    : "The checkout was not removed. Conversations, history and the branch are unchanged.",
-                );
-              }
-              yield* deps.fence.complete(claim.value);
-              step("remove-checkout", "done", `Removed ${path}.`);
+              if (fencedFailure !== null) return fencedFailure;
               yield* deps.git.invalidateStatus(projectRoot);
             }
 

@@ -68,14 +68,10 @@ import { ServerConfig } from "../config.ts";
 import { Diagnostics } from "../diagnostics/Services/Diagnostics.ts";
 import { Keybindings } from "../keybindings.ts";
 import { ignoreCauseLogOnceEvery, logOnceEvery } from "../logOnceEvery.ts";
-import { makeCodexMcpService } from "../mcp/CodexMcpService.ts";
-import { makeCodexMcpAdapter } from "../mcp/adapters/CodexMcpAdapter.ts";
-import { makeClaudeMcpAdapter } from "../mcp/adapters/ClaudeMcpAdapter.ts";
-import { makeCopilotMcpAdapter } from "../mcp/adapters/CopilotMcpAdapter.ts";
-import { makeCursorMcpAdapter } from "../mcp/adapters/CursorMcpAdapter.ts";
-import { makeGrokMcpAdapter } from "../mcp/adapters/GrokMcpAdapter.ts";
-import { makeOpenCodeMcpAdapter } from "../mcp/adapters/OpenCodeMcpAdapter.ts";
-import { makeProviderMcpRegistry } from "../mcp/ProviderMcpRegistry.ts";
+import {
+  ProviderMcpRegistryService,
+  makeDefaultProviderMcpRegistry,
+} from "../mcp/ProviderMcpRegistryService.ts";
 import { Open, resolveAvailableEditors } from "../open.ts";
 import { serverCommandId } from "../orchestration/commandOrigin.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -314,20 +310,11 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
     const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
-    const codexMcp = yield* makeCodexMcpService;
-    const claudeMcp = yield* makeClaudeMcpAdapter();
-    const copilotMcp = yield* makeCopilotMcpAdapter();
-    const cursorMcp = yield* makeCursorMcpAdapter();
-    const grokMcp = yield* makeGrokMcpAdapter();
-    const openCodeMcp = yield* makeOpenCodeMcpAdapter();
-    const mcpRegistry = yield* makeProviderMcpRegistry([
-      makeCodexMcpAdapter(codexMcp),
-      claudeMcp,
-      copilotMcp,
-      cursorMcp,
-      grokMcp,
-      openCodeMcp,
-    ]);
+    const sharedMcpRegistry = yield* Effect.serviceOption(ProviderMcpRegistryService);
+    // Route tests build the context without the node's registry; they get a private one.
+    const mcpRegistry = Option.isSome(sharedMcpRegistry)
+      ? sharedMcpRegistry.value
+      : yield* makeDefaultProviderMcpRegistry;
     const startup = yield* ServerRuntimeStartup;
     const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
     const projectionThreads = yield* Effect.serviceOption(ProjectionThreadRepository);

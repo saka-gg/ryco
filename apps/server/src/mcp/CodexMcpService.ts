@@ -47,6 +47,7 @@ import {
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { loadCodexAppServerModule } from "../provider/codexAppServerModule.ts";
+import { makeServerListCache } from "./serverListCache.ts";
 import {
   applyProviderMcpSecretMutations,
   providerMcpSecretPresence,
@@ -750,40 +751,20 @@ export const makeCodexMcpService = Effect.gen(function* () {
   // Each listing starts a `codex app-server` (and its MCP servers): reopening
   // or re-rendering Settings within a few seconds reuses the last answer.
   // Every mutation and reload replaces it.
-  const recentServerLists = new Map<
-    string,
-    { readonly expiresAtMs: number; readonly result: McpListServersResult }
-  >();
-  const serverListKey = (workspaceId: McpWorkspaceId, detail: McpListServersInput["detail"]) =>
-    `${workspaceId}\u0000${detail ?? "full"}`;
-  const forgetServerLists = (workspaceId: McpWorkspaceId) => {
-    for (const key of recentServerLists.keys()) {
-      if (key.startsWith(`${workspaceId}\u0000`)) recentServerLists.delete(key);
-    }
-  };
-  const rememberServerList = (
-    workspaceId: McpWorkspaceId,
-    detail: McpListServersInput["detail"],
-    result: McpListServersResult,
-  ) =>
-    Effect.sync(() => {
-      forgetServerLists(workspaceId);
-      recentServerLists.set(serverListKey(workspaceId, detail), {
-        expiresAtMs: Date.now() + MCP_SERVER_LIST_REUSE_MS,
-        result,
-      });
-      return result;
-    });
+  const serverLists = makeServerListCache<McpListServersResult>({
+    ttlMs: MCP_SERVER_LIST_REUSE_MS,
+  });
 
   const listServersForWorkspace = (input: McpListServersInput) =>
     Effect.gen(function* () {
-      const recent = recentServerLists.get(serverListKey(input.workspaceId, input.detail));
-      if (recent && recent.expiresAtMs > Date.now()) return recent.result;
+      const recent = serverLists.get(input.workspaceId, input.detail);
+      if (recent) return recent;
+      const generation = serverLists.generation(input.workspaceId);
       const workspace = yield* findWorkspace(input.workspaceId);
       const result = yield* withClient(workspace, (client) =>
         readServerList(workspace, client, input.detail),
       );
-      return yield* rememberServerList(input.workspaceId, input.detail, result);
+      return serverLists.remember(input.workspaceId, input.detail, result, generation);
     }).pipe(
       Effect.mapError((cause) => normalizeUnknownError(cause, "Failed to list MCP servers.")),
     );
@@ -798,7 +779,10 @@ export const makeCodexMcpService = Effect.gen(function* () {
     Effect.gen(function* () {
       const workspace = yield* findWorkspace(workspaceId);
       // Whatever happens next, an earlier listing no longer describes the workspace.
-      yield* Effect.sync(() => forgetServerLists(workspaceId));
+      const generation = yield* Effect.sync(() => {
+        serverLists.invalidate(workspaceId);
+        return serverLists.generation(workspaceId);
+      });
       const result = yield* withClient(
         workspace,
         Effect.fn(function* (client) {
@@ -807,7 +791,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
           return yield* readServerList(workspace, client, "full");
         }),
       );
-      return yield* rememberServerList(workspaceId, "full", result);
+      return serverLists.remember(workspaceId, "full", result, generation);
     });
 
   const reloadServers = (input: McpServersReloadInput) => reloadAndList(input.workspaceId);
@@ -889,7 +873,7 @@ export const makeCodexMcpService = Effect.gen(function* () {
       Effect.gen(function* () {
         const workspace = yield* findWorkspace(input.workspaceId);
         // The server's auth state is about to change; do not answer from before it.
-        yield* Effect.sync(() => forgetServerLists(input.workspaceId));
+        yield* Effect.sync(() => serverLists.invalidate(input.workspaceId));
         return yield* withClient(
           workspace,
           Effect.fn(function* (client) {

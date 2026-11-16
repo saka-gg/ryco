@@ -10,6 +10,10 @@ import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
+import {
+  LocalDiagnosticsMetrics,
+  LocalDiagnosticsMetricsLive,
+} from "../../observability/Services/LocalDiagnosticsMetrics.ts";
 import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
 import {
   SessionCredentialService,
@@ -117,6 +121,37 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       Effect.provide(Layer.merge(makeFaultySessionCredentialLayer(store), TestClock.layer())),
     );
   });
+
+  it.effect("counts every reconnect of a session once", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const metrics = yield* LocalDiagnosticsMetrics;
+      const issued = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+      const reconnects = metrics.snapshot.pipe(Effect.map((snapshot) => snapshot.wsReconnectCount));
+
+      // The first connect is not a reconnect.
+      yield* sessions.markConnected(issued.sessionId);
+      expect(yield* reconnects).toBe(0);
+      yield* sessions.markDisconnected(issued.sessionId);
+      yield* sessions.markConnected(issued.sessionId);
+      expect(yield* reconnects).toBe(1);
+      yield* sessions.markDisconnected(issued.sessionId);
+      yield* sessions.markConnected(issued.sessionId);
+      expect(yield* reconnects).toBe(2);
+      // A second socket on a connected session is neither a disconnect nor a reconnect.
+      yield* sessions.markConnected(issued.sessionId);
+      expect(yield* reconnects).toBe(2);
+    }).pipe(
+      Effect.provide(
+        SessionCredentialServiceLive.pipe(
+          Layer.provide(SqlitePersistenceMemory),
+          Layer.provide(ServerSecretStoreLive),
+          Layer.provide(makeServerConfigLayer()),
+          Layer.provideMerge(LocalDiagnosticsMetricsLive),
+        ),
+      ),
+    ),
+  );
 
   it.effect("issues and verifies signed browser session tokens", () =>
     Effect.gen(function* () {

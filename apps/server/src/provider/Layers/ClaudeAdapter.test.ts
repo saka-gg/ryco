@@ -1547,6 +1547,50 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("a turn whose attachment cannot be read is never opened", () => {
+    const baseDir = mkdtempSync(path.join(os.tmpdir(), "claude-attachments-missing-"));
+    const harness = makeHarness({
+      cwd: "/tmp/project-claude-attachments-missing",
+      baseDir,
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-missing-attachment"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* Effect.flip(
+        adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "What's in this image?",
+          attachments: [
+            {
+              type: "image",
+              id: "thread-claude-attachment-12345678-1234-1234-1234-123456789abc",
+              name: "missing.png",
+              mimeType: "image/png",
+              sizeBytes: 4,
+            },
+          ],
+        }),
+      );
+      assert.isDefined(error);
+
+      const [session] = yield* adapter.listSessions();
+      assert.notEqual(session?.status, "running");
+      assert.equal(session?.activeTurnId, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("sends PDF file attachments as Anthropic document blocks", () => {
     const baseDir = mkdtempSync(path.join(os.tmpdir(), "claude-attachments-pdf-"));
     const harness = makeHarness({
@@ -6767,6 +6811,79 @@ describe("ClaudeAdapterLive", () => {
         }),
       );
       assert.equal(response._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("denies an already-aborted tool approval without registering it", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("approval-pre-abort"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+      const controller = new AbortController();
+      controller.abort();
+      const result = yield* Effect.promise(() =>
+        canUseTool(
+          "Bash",
+          { command: "pwd" },
+          {
+            signal: controller.signal,
+            requestId: "approval-pre-abort",
+            toolUseID: "tool-pre-abort",
+          },
+        ),
+      );
+      assert.deepEqual(result, { behavior: "deny", message: "User cancelled tool execution." });
+      const response = yield* Effect.result(
+        adapter.respondToRequest(THREAD_ID, ApprovalRequestId.make("approval-pre-abort"), "accept"),
+      );
+      assert.equal(response._tag, "Failure");
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("refuses a second approval with a pending request id", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("approval-duplicate"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+      const first = canUseTool(
+        "Bash",
+        { command: "pwd" },
+        { signal: new AbortController().signal, requestId: "dup-approval", toolUseID: "t1" },
+      );
+      const opened = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(opened._tag, "Some");
+      if (opened._tag !== "Some" || opened.value.type !== "request.opened") {
+        assert.fail("Expected request.opened event");
+        return;
+      }
+      const second = yield* Effect.promise(() =>
+        canUseTool(
+          "Bash",
+          { command: "pwd" },
+          { signal: new AbortController().signal, requestId: "dup-approval", toolUseID: "t2" },
+        ),
+      );
+      assert.deepEqual(second, {
+        behavior: "deny",
+        message: "An approval with this request ID is already pending.",
+      });
+      yield* adapter.respondToRequest(THREAD_ID, ApprovalRequestId.make("dup-approval"), "accept");
+      const firstResult = yield* Effect.promise(() => first);
+      assert.equal((firstResult as PermissionResult).behavior, "allow");
     }).pipe(Effect.provide(harness.layer));
   });
 
