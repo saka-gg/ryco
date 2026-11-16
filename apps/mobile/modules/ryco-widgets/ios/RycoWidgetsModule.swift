@@ -196,9 +196,15 @@ public final class RycoWidgetsModule: Module {
             break
           }
         }
-        // The card's end finishes the state stream; the token stream goes with it.
+        // Either stream finishing ends the observation.
         await group.next()
         group.cancelAll()
+      }
+      // The state child may have been cancelled before it saw the end (the token stream
+      // finished first): a card that has ended reports its worthless token here as well.
+      // JavaScript drops a token it no longer has, so a second empty one changes nothing.
+      if activity.activityState == .ended || activity.activityState == .dismissed {
+        self?.sendEvent("onAgentActivityPushToken", ["id": id, "token": ""])
       }
       await MainActor.run { self?.tokenObservers[id] = nil }
     }
