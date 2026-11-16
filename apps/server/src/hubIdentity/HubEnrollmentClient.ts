@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { canonicalizeHubOrigin } from "@ryco/shared/nodeIdentity";
+import { E2EE_MAX_CLOCK_SKEW } from "@ryco/shared/relayE2eeConstants";
 
 import type {
   ActiveHubNodeState,
@@ -132,6 +133,15 @@ function validateMetadata(metadata: HubEnrollmentMetadata): HubEnrollmentMetadat
   return { ...metadata };
 }
 
+/**
+ * A ceremony's `expiresAt` is stamped by the Hub's clock and compared with this machine's, so
+ * both comparisons allow the same clock skew the relay protocol tolerates between node and Hub.
+ * Without it a node whose clock runs ahead would refuse a fresh ceremony, or drop a live one
+ * (and its pending key) before the Hub does. The Hub stays the authority on expiry: a poll after
+ * the real end is answered `expired`.
+ */
+const ENROLLMENT_CLOCK_SKEW_ALLOWANCE_MS = E2EE_MAX_CLOCK_SKEW;
+
 function validateStartResponse(
   response: HubEnrollmentStartResponse,
   now: number,
@@ -141,8 +151,8 @@ function validateStartResponse(
     !(response.pollingSecret instanceof Uint8Array) ||
     response.pollingSecret.byteLength !== 32 ||
     !Number.isSafeInteger(response.expiresAt) ||
-    response.expiresAt <= now ||
-    response.expiresAt > now + 15 * 60_000 ||
+    response.expiresAt <= now - ENROLLMENT_CLOCK_SKEW_ALLOWANCE_MS ||
+    response.expiresAt > now + 15 * 60_000 + ENROLLMENT_CLOCK_SKEW_ALLOWANCE_MS ||
     !Number.isSafeInteger(response.pollIntervalMs) ||
     response.pollIntervalMs < 1_000 ||
     response.pollIntervalMs > 60_000
@@ -382,7 +392,7 @@ export function makeHubEnrollmentClient(
       await clearPending(pending).catch(() => clientError("enrollment_local_state_failed"));
       return { status: "unavailable", reason: "rejected" };
     }
-    if (now() >= pending.expiresAt) {
+    if (now() >= pending.expiresAt + ENROLLMENT_CLOCK_SKEW_ALLOWANCE_MS) {
       await clearPending(pending).catch(() => clientError("enrollment_local_state_failed"));
       return { status: "unavailable", reason: "expired" };
     }

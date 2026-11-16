@@ -110,6 +110,67 @@ describe("Hub node proof client", () => {
     expect(persisted).not.toContain(Buffer.from(frame.signature).toString("base64url"));
   });
 
+  it("signs a challenge whatever the skew between this clock and the Hub's", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ryco-node-proof-skew-"));
+    const stateStore = await makeLocalHubIdentityStateStore(join(root, "identity.json"));
+    const signingIdentity = makeNodeSigningIdentity(memoryStore());
+    await signingIdentity.generate("node-key.active");
+    await stateStore.readOrCreate();
+    await stateStore.update((state) => ({
+      ...state,
+      revision: state.revision + 1,
+      activeNode: {
+        hubOrigin,
+        nodeId,
+        activeKeyId: keyId,
+        activeKeySecretName: "node-key.active",
+        cleanupPollingSecretName: null,
+        enrolledAt: now,
+      },
+    }));
+    // The Hub stamps challengeExpiresAt on its own clock: 90 s in this node's past when the
+    // node runs ahead, 10 min in its future when the node runs behind.
+    for (const challengeExpiresAt of [now - 60_000, now + 600_000]) {
+      const client = makeHubNodeProofClient({
+        transport: {
+          request: async () => ({
+            protocolMajor: 1,
+            protocolMinor: 1,
+            challenge: new Uint8Array(32).fill(0x33),
+            challengeExpiresAt,
+          }),
+        },
+        stateStore,
+        signingIdentity,
+        keySelector: { authenticationKey: async () => ({ keyId, secretName: "node-key.active" }) },
+        now: () => now,
+      });
+      await expect(
+        client.createRelayAuthenticationFrame(hubOrigin, { protocolMajor: 1, protocolMinor: 1 }),
+      ).resolves.toMatchObject({ type: "auth", peer: "node", nodeId });
+    }
+
+    for (const challengeExpiresAt of [0, 1.5, Number.NaN]) {
+      const client = makeHubNodeProofClient({
+        transport: {
+          request: async () => ({
+            protocolMajor: 1,
+            protocolMinor: 1,
+            challenge: new Uint8Array(32).fill(0x33),
+            challengeExpiresAt,
+          }),
+        },
+        stateStore,
+        signingIdentity,
+        keySelector: { authenticationKey: async () => ({ keyId, secretName: "node-key.active" }) },
+        now: () => now,
+      });
+      await expect(
+        client.createRelayAuthenticationFrame(hubOrigin, { protocolMajor: 1, protocolMinor: 1 }),
+      ).rejects.toMatchObject({ code: "node_proof_failed", failure: "protocol_invalid" });
+    }
+  });
+
   it("rejects protocol substitution before signing", async () => {
     const root = await mkdtemp(join(tmpdir(), "ryco-node-proof-version-"));
     const stateStore = await makeLocalHubIdentityStateStore(join(root, "identity.json"));
