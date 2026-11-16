@@ -3208,6 +3208,68 @@ it.live("ProviderServiceLive queues and retries bounded stale binding cleanup", 
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+// Own layer: before the fix, the bad event ended the codex subscription for
+// every later test sharing the layer.
+const badEvent = makeProviderServiceLayer();
+badEvent.layer("ProviderServiceLive runtime event defects", (it) => {
+  it.effect("drops an event whose processing dies and keeps delivering the next ones", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const session = yield* provider.startSession(asThreadId("thread-healthy"), {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-healthy"),
+        runtimeMode: "full-access",
+      });
+      const consumer = yield* Stream.take(provider.streamEvents, 1).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* sleep(50);
+
+      // No session for this thread, so the event carries no runtime session
+      // id: an invariant breach that processRuntimeEvent turns into a defect.
+      badEvent.codex.emit({
+        type: "tool.started",
+        eventId: asEventId("evt-no-runtime-session"),
+        provider: CODEX_DRIVER,
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-without-session"),
+        turnId: asTurnId("turn-1"),
+        toolKind: "command",
+        title: "Ran command",
+      });
+      badEvent.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-after-defect"),
+        provider: CODEX_DRIVER,
+        createdAt: new Date().toISOString(),
+        threadId: session.threadId,
+        turnId: asTurnId("turn-1"),
+        status: "completed",
+      });
+
+      const received = Array.from(
+        yield* Fiber.join(consumer).pipe(
+          Effect.timeoutOption("2 seconds"),
+          Effect.map(Option.getOrElse(() => [])),
+        ),
+      );
+      assert.deepEqual(
+        received.map((event) => event.eventId),
+        [asEventId("evt-after-defect")],
+      );
+      assert.equal(
+        hasMetricSnapshot(yield* Metric.snapshot, metricNames.providerRuntimeEventsDroppedTotal, {
+          provider: CODEX_DRIVER,
+          eventType: "tool.started",
+        }),
+        true,
+      );
+    }),
+  );
+});
+
 const validation = makeProviderServiceLayer();
 validation.layer("ProviderServiceLive validation", (it) => {
   it.effect("rejects session starts without an explicit provider instance id", () =>
