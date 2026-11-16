@@ -233,6 +233,13 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   // receive the same successor instead of two.
   const rotationLock = yield* Semaphore.make(1);
   const wsReconnectEligibleSessionsRef = yield* Ref.make(new Set<string>());
+  const forgetReconnectEligible = (sessionIds: ReadonlyArray<string>) =>
+    Ref.update(wsReconnectEligibleSessionsRef, (current) => {
+      if (!sessionIds.some((id) => current.has(id))) return current;
+      const next = new Set(current);
+      for (const id of sessionIds) next.delete(id);
+      return next;
+    });
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
   const cookieScope = resolveSessionCookieScope(serverConfig);
   const cookieName = resolveSessionCookieName(cookieScope);
@@ -323,10 +330,16 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         return [entry === undefined, next] as const;
       });
       if (wasDisconnected) {
-        const reconnectEligible = yield* Ref.get(wsReconnectEligibleSessionsRef);
+        // The mark is consumed by the reconnect it announces; the next full disconnect sets it again.
+        const reconnected = yield* Ref.modify(wsReconnectEligibleSessionsRef, (current) => {
+          if (!current.has(sessionId)) return [false, current] as const;
+          const next = new Set(current);
+          next.delete(sessionId);
+          return [true, next] as const;
+        });
         const lastConnectedAt = yield* DateTime.now;
         yield* authSessions.setLastConnectedAt({ sessionId, lastConnectedAt });
-        if (reconnectEligible.has(sessionId) && Option.isSome(localDiagnosticsMetrics)) {
+        if (reconnected && Option.isSome(localDiagnosticsMetrics)) {
           yield* localDiagnosticsMetrics.value.recordWsReconnect();
         }
       }
@@ -387,6 +400,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         for (const session of revoked) next.delete(session.sessionId);
         return next;
       });
+      yield* forgetReconnectEligible(revoked.map((session) => session.sessionId));
       yield* Effect.forEach(revoked, (session) => emitRemoved(session, "revoked"), {
         concurrency: "unbounded",
         discard: true,
@@ -414,6 +428,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         supersededAt,
       });
       if (!superseded) return;
+      yield* forgetReconnectEligible([predecessorId]);
       yield* emitRemoved({ sessionId: predecessorId, chainId: record.chainId }, "superseded");
       yield* publishChainHead(record.chainId);
     });

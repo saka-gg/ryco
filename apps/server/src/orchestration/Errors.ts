@@ -58,6 +58,30 @@ export class OrchestrationCommandPreviouslyRejectedError extends Schema.TaggedEr
   }
 }
 
+/**
+ * A rejection the engine repeats for the same command, so retrying is pointless. Matches the
+ * engine error bare (engine.dispatch) or wrapped as the `cause` of a dispatch error (command
+ * application).
+ */
+export function isSettledDispatchRejection(error: unknown): boolean {
+  const tagOf = (value: unknown) =>
+    value !== null && typeof value === "object" && "_tag" in value
+      ? (value as { readonly _tag?: unknown })._tag
+      : undefined;
+  const settled = (value: unknown) => {
+    const tag = tagOf(value);
+    return (
+      tag === "OrchestrationCommandInvariantError" ||
+      tag === "OrchestrationCommandPreviouslyRejectedError"
+    );
+  };
+  const cause =
+    error !== null && typeof error === "object" && "cause" in error
+      ? (error as { readonly cause?: unknown }).cause
+      : undefined;
+  return settled(error) || settled(cause);
+}
+
 export class OrchestrationProjectorDecodeError extends Schema.TaggedError<OrchestrationProjectorDecodeError>()(
   "OrchestrationProjectorDecodeError",
   {

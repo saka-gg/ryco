@@ -1,5 +1,5 @@
 /**
- * The node's side of `ryco_request_secret` (docs/secret-requests.md): opening a request,
+ * The node's side of `ryco_request_secret` (docs/agent-control.md, "Secret requests"): opening a request,
  * answering it from the owner's card, and expiring it after a day.
  *
  * A request is two thread activities: `secret.requested` (key, purpose, file, expiry) and one

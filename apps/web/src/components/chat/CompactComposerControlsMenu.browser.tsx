@@ -137,10 +137,7 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
   ];
   const screen = await render(
     <CompactComposerControlsMenu
-      activePlan={false}
       interactionMode="default"
-      planSidebarLabel="Plan"
-      planSidebarOpen={false}
       runtimeMode="approval-required"
       showInteractionModeToggle
       askModeSupported
@@ -157,7 +154,6 @@ async function mountMenu(props?: { modelSelection?: ModelSelection; prompt?: str
         />
       }
       onInteractionModeChange={vi.fn()}
-      onTogglePlanSidebar={vi.fn()}
       onRuntimeModeChange={vi.fn()}
     />,
     { container: host },
@@ -301,15 +297,11 @@ describe("CompactComposerControlsMenu", () => {
     document.body.append(host);
     const screen = await render(
       <CompactComposerControlsMenu
-        activePlan={false}
         interactionMode="default"
-        planSidebarLabel="Plan"
-        planSidebarOpen={false}
         runtimeMode="approval-required"
         showInteractionModeToggle={false}
         askModeSupported={false}
         onInteractionModeChange={vi.fn()}
-        onTogglePlanSidebar={vi.fn()}
         onRuntimeModeChange={vi.fn()}
       />,
       { container: host },
@@ -336,15 +328,11 @@ describe("CompactComposerControlsMenu", () => {
     document.body.append(host);
     const screen = await render(
       <CompactComposerControlsMenu
-        activePlan={false}
         interactionMode="default"
-        planSidebarLabel="Plan"
-        planSidebarOpen={false}
         runtimeMode="approval-required"
         showInteractionModeToggle
         askModeSupported={false}
         onInteractionModeChange={vi.fn()}
-        onTogglePlanSidebar={vi.fn()}
         onRuntimeModeChange={vi.fn()}
       />,
       { container: host },
@@ -371,16 +359,12 @@ describe("CompactComposerControlsMenu", () => {
     document.body.append(host);
     const screen = await render(
       <CompactComposerControlsMenu
-        activePlan={false}
         interactionMode="default"
-        planSidebarLabel="Plan"
-        planSidebarOpen={false}
         runtimeMode="approval-required"
         showInteractionModeToggle={false}
         askModeSupported
         autoModeUnavailableReason={reason}
         onInteractionModeChange={vi.fn()}
-        onTogglePlanSidebar={vi.fn()}
         onRuntimeModeChange={vi.fn()}
       />,
       { container: host },

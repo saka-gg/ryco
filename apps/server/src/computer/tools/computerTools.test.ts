@@ -822,7 +822,7 @@ describe("agent gateway computer tools", () => {
     const { byName } = await setup();
     // Probing showed pid-routed synthetic mouseMoved posts only reach an AppKit
     // window while the user's real cursor is inside it, so move_cursor cannot
-    // become a hover delivery path (docs/computer-use-cua/hover-verdict-2026-09-17.md).
+    // become a hover delivery path.
     // The description must keep denying that effect plainly.
     const description = byName.get("computer_move_cursor")?.definition.description ?? "";
     expect(description).toContain("does not deliver hover events");

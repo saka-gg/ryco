@@ -266,12 +266,10 @@ mod tests {
 
     #[test]
     fn excludes_only_the_exact_computer_use_overlay_title() {
-        assert!(is_computer_use_overlay_title(
-            "Poracode Computer Use Overlay"
-        ));
+        assert!(is_computer_use_overlay_title("Ryco Computer Use Overlay"));
         assert!(!is_computer_use_overlay_title("Computer Use Overlay"));
         assert!(!is_computer_use_overlay_title(
-            "Poracode Computer Use Overlay - Document"
+            "Ryco Computer Use Overlay - Document"
         ));
     }
 }

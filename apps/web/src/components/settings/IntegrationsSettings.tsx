@@ -1,5 +1,7 @@
 import {
   AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX,
+  AGENT_CONTROL_EXTERNAL_RATE_LIMIT_MAX,
   type AgentControlCapability,
   type AgentControlExternalClientKind,
   type AgentControlExternalIntegrationCreateInput,
@@ -45,6 +47,7 @@ import { SettingsSelect } from "./SettingsSelect";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { retryAgentControlStartup } from "./agentControlStartupRetry";
 import { errorMessage } from "~/lib/errorMessage";
+import { fromDateTimeLocalInputValue, toDateTimeLocalInputValue } from "~/lib/dateTimeLocal";
 
 export const AGENT_CONTROL_CLIENT_LABELS: Record<AgentControlExternalClientKind, string> = {
   codex: "Codex",
@@ -212,9 +215,7 @@ function formFromDetail(
         : "",
     capabilities: integration.capabilities,
     expiresAt:
-      integration.expiresAt === null
-        ? ""
-        : new Date(integration.expiresAt).toISOString().slice(0, 16),
+      integration.expiresAt === null ? "" : toDateTimeLocalInputValue(integration.expiresAt),
     rateLimitPerMinute: String(integration.rateLimitPerMinute),
     activeTaskLimit: String(integration.activeTaskLimit),
   };
@@ -239,15 +240,25 @@ export function parseAgentControlIntegrationForm(
   if (!Number.isInteger(rateLimitPerMinute) || rateLimitPerMinute < 1) {
     throw new Error("Rate limit must be a positive whole number.");
   }
+  if (rateLimitPerMinute > AGENT_CONTROL_EXTERNAL_RATE_LIMIT_MAX) {
+    throw new Error(
+      `Rate limit can be at most ${AGENT_CONTROL_EXTERNAL_RATE_LIMIT_MAX} requests per minute.`,
+    );
+  }
   if (!Number.isInteger(activeTaskLimit) || activeTaskLimit < 1) {
     throw new Error("Active-task limit must be a positive whole number.");
+  }
+  if (activeTaskLimit > AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX) {
+    throw new Error(
+      `Active-task limit can be at most ${AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX}.`,
+    );
   }
   return {
     displayName: form.displayName.trim(),
     clientKind: form.clientKind,
     projectScope,
     capabilities: form.capabilities,
-    expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : null,
+    expiresAt: form.expiresAt ? fromDateTimeLocalInputValue(form.expiresAt) : null,
     rateLimitPerMinute,
     activeTaskLimit,
   };
@@ -370,7 +381,7 @@ export function AgentControlIntegrationFormFields({
           <Input
             type="number"
             min={1}
-            max={600}
+            max={AGENT_CONTROL_EXTERNAL_RATE_LIMIT_MAX}
             value={form.rateLimitPerMinute}
             onChange={(event) => onChange({ ...form, rateLimitPerMinute: event.target.value })}
           />
@@ -380,7 +391,7 @@ export function AgentControlIntegrationFormFields({
           <Input
             type="number"
             min={1}
-            max={32}
+            max={AGENT_CONTROL_EXTERNAL_ACTIVE_TASK_LIMIT_MAX}
             value={form.activeTaskLimit}
             onChange={(event) => onChange({ ...form, activeTaskLimit: event.target.value })}
           />

@@ -44,10 +44,3 @@ export const useAgentControlStore = create<AgentControlStoreState>((set) => ({
       return { queueByEnvironmentId: next };
     }),
 }));
-
-export function selectAgentControlQueueState(
-  state: Pick<AgentControlStoreState, "queueByEnvironmentId">,
-  environmentId: EnvironmentId,
-): AgentControlQueueState {
-  return state.queueByEnvironmentId[environmentId] ?? EMPTY_AGENT_CONTROL_QUEUE_STATE;
-}

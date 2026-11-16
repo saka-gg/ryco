@@ -14,7 +14,8 @@
  * a corrupt or missing file must degrade to "own nothing" rather than fail a
  * boot. Recovery is deliberately conservative: a device is only reclaimed when
  * it is still booted AND still listed as ours, so a udid the user has since
- * booted themselves is never shut down out from under them.
+ * booted themselves is never shut down out from under them. The recovery itself
+ * lives in `DeviceManager.recoverBoots`.
  *
  * @module device/bootOwnership
  */
@@ -46,6 +47,7 @@ export function makeBootOwnershipStore(
   filePath: string,
   processId: number = process.pid,
 ): BootOwnershipStore {
+  // Writes share one temporary path, so `enqueue` runs them one at a time.
   const writeFileAtomically = async (contents: string): Promise<void> => {
     await mkdir(path.dirname(filePath), { recursive: true });
     const temporaryPath = `${filePath}.${processId}.tmp`;
@@ -54,6 +56,15 @@ export function makeBootOwnershipStore(
     // the new one, never a half-written one. Not `replaceFileAtomically`: this module is on
     // the boot path and that helper is not (`serverBundleBoundaries.test.ts` boot budget).
     await rename(temporaryPath, filePath);
+  };
+
+  // Runs writes in call order. A failed step resolves, so it never blocks later writes and
+  // `write`/`clear` keep their never-rejects contract.
+  let tail: Promise<void> = Promise.resolve();
+  const enqueue = (contents: string): Promise<void> => {
+    const step = tail.then(() => writeFileAtomically(contents)).catch(() => undefined);
+    tail = step;
+    return step;
   };
 
   return {
@@ -72,35 +83,17 @@ export function makeBootOwnershipStore(
       }
     },
 
-    async write(udids) {
+    // The contents are serialized at call time: the caller's snapshot is the state right now.
+    write(udids) {
       const file: BootOwnershipFile = { version: 1, pid: processId, udids: [...udids] };
-      await writeFileAtomically(JSON.stringify(file)).catch(() => undefined);
+      return enqueue(JSON.stringify(file));
     },
 
-    async clear() {
-      await writeFileAtomically(
-        JSON.stringify({ version: 1, pid: processId, udids: [] } satisfies BootOwnershipFile),
-      ).catch(() => undefined);
+    clear() {
+      const file: BootOwnershipFile = { version: 1, pid: processId, udids: [] };
+      return enqueue(JSON.stringify(file));
     },
   };
-}
-
-/**
- * Which recorded udids should be shut down at startup.
- *
- * Only devices that are still booted and were recorded by a process that is no
- * longer running: a record left by a live sibling server belongs to it, and a
- * device that is already shut down needs nothing.
- */
-export function orphanedBootUdids(
-  recorded: { readonly pid: number; readonly udids: readonly string[] } | null,
-  bootedUdids: readonly string[],
-  isProcessAlive: (pid: number) => boolean,
-): readonly string[] {
-  if (recorded === null || recorded.udids.length === 0) return [];
-  if (recorded.pid > 0 && isProcessAlive(recorded.pid)) return [];
-  const booted = new Set(bootedUdids);
-  return recorded.udids.filter((udid) => booted.has(udid));
 }
 
 /** True when a pid is still running, used to spare a live sibling's devices. */

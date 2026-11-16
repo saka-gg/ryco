@@ -920,8 +920,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [listRef, onIsAtEndChange, readingPositionHoldRef, rows.length]);
 
+  // The target last brought into view (thread, message, request) and its
+  // highlight timer. Rows change with every streamed delta; a target already
+  // shown is never pulled back into view by them, and its highlight timer is
+  // not tied to the effect, so the highlight still expires.
+  const targetRevealRef = useRef<{ readonly key: string; readonly timeoutId: number } | null>(null);
   useEffect(() => {
+    const revealed = targetRevealRef.current;
     if (targetMessageId === null) {
+      targetRevealRef.current = null;
       setHighlightedMessageId(null);
       return;
     }
@@ -933,6 +940,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
+    // A deep link's request id is always 0: the thread key tells two threads' links apart,
+    // and the target turning null in between lets the same link reveal again.
+    const revealKey = `${routeThreadKey}\n${targetMessageId}\n${targetMessageRequestId}`;
+    if (revealed?.key === revealKey) return;
+    window.clearTimeout(revealed?.timeoutId);
+
     setHighlightedMessageId(targetMessageRowHighlight ? targetMessageId : null);
     cancelReadingRestore();
     onManualNavigation?.();
@@ -942,7 +955,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       viewPosition: 0.45,
     });
 
-    const frameId = window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       if (!targetMessageRowHighlight) {
         const activeSearchHit = document.querySelector<HTMLElement>(
           '[data-thread-message-search-active="true"]',
@@ -965,15 +978,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const timeoutId = window.setTimeout(() => {
       setHighlightedMessageId((current) => (current === targetMessageId ? null : current));
     }, MESSAGE_SEARCH_HIGHLIGHT_DURATION_MS);
-
-    return () => {
-      window.cancelAnimationFrame(frameId);
-      window.clearTimeout(timeoutId);
-    };
+    targetRevealRef.current = { key: revealKey, timeoutId };
   }, [
     cancelReadingRestore,
     listRef,
     onManualNavigation,
+    routeThreadKey,
     rows,
     targetMessageId,
     targetMessageRequestId,

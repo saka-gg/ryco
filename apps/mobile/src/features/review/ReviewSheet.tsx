@@ -31,11 +31,8 @@ type ReviewSheetProps = StaticScreenProps<{
 }>;
 
 // Review/diff. §3-18: the turn diffs come from thread.turnDiffSummaries; the full
-// content is fetched through the §6 checkpoint-diff cache. NOTE (owner-Simulator):
-// the native review-diff CANVAS (RycoReviewDiffSurface, rows/tokens JSON) is a
-// follow-up — this renders the unified diff in a JS text surface (graceful
-// degradation, §3-19), which is what the JS path falls back to when the native
-// view can't resolve.
+// content is fetched through the §6 checkpoint-diff cache, and the unified diff renders
+// in a JS text surface. (Upstream's native review-diff canvas is not vendored.)
 export function ReviewSheet(props: ReviewSheetProps) {
   const navigation = useNavigation();
   const environmentIdRaw = firstParam(props.route.params.environmentId);

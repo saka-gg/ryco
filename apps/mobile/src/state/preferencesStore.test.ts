@@ -2,9 +2,16 @@ import { describe, expect, it, vi, beforeEach } from "vite-plus/test";
 
 // In-memory KV so the prefs store round-trips through a fake mobileKV (§3-2, R6).
 const kvStore = new Map<string, string>();
+const kvControl = vi.hoisted(() => ({ failNextRead: false }));
 vi.mock("expo-sqlite/kv-store", () => ({
   default: {
-    getItem: async (key: string) => kvStore.get(key) ?? null,
+    getItem: async (key: string) => {
+      if (kvControl.failNextRead) {
+        kvControl.failNextRead = false;
+        throw new Error("read failed");
+      }
+      return kvStore.get(key) ?? null;
+    },
     setItem: async (key: string, value: string) => void kvStore.set(key, value),
     removeItem: async (key: string) => void kvStore.delete(key),
   },
@@ -29,6 +36,7 @@ async function flush() {
 
 beforeEach(() => {
   kvStore.clear();
+  kvControl.failNextRead = false;
   resetPreferencesStoreForTests();
 });
 
@@ -47,6 +55,68 @@ describe("preferencesStore persistence", () => {
     await flush();
     expect(isPreferencesHydrated()).toBe(true);
     expect(getPreferencesSnapshot().baseFontSize).toBe(18);
+  });
+
+  it("keeps the stored preferences when a change lands before they load", async () => {
+    const original = JSON.stringify({
+      baseFontSize: 18,
+      favorites: [{ provider: "codex", model: "gpt-5" }],
+    });
+    kvStore.set("ryco.preferences", original);
+    updatePreferences({ claudeResumeReview: false });
+    expect(isClaudeResumeReviewEnabled()).toBe(false);
+    expect(isPreferencesHydrated()).toBe(false);
+    expect(kvStore.get("ryco.preferences")).toBe(original);
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({
+      baseFontSize: 18,
+      claudeResumeReview: false,
+      favorites: [{ provider: "codex", model: "gpt-5" }],
+    });
+    expect(isPreferencesHydrated()).toBe(true);
+    expect(JSON.parse(kvStore.get("ryco.preferences") ?? "{}")).toMatchObject({
+      baseFontSize: 18,
+      claudeResumeReview: false,
+      favorites: [{ provider: "codex", model: "gpt-5" }],
+    });
+    resetPreferencesStoreForTests();
+    hydratePreferences();
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({
+      baseFontSize: 18,
+      claudeResumeReview: false,
+      favorites: [{ provider: "codex", model: "gpt-5" }],
+    });
+  });
+
+  it("merges a change made while the load is reading", async () => {
+    kvStore.set("ryco.preferences", JSON.stringify({ codeWordBreak: true }));
+    hydratePreferences();
+    updatePreferences({ baseFontSize: 16 });
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({ codeWordBreak: true, baseFontSize: 16 });
+    expect(JSON.parse(kvStore.get("ryco.preferences") ?? "{}")).toMatchObject({
+      codeWordBreak: true,
+      baseFontSize: 16,
+    });
+  });
+
+  it("after a failed read keeps the change in memory without overwriting what is stored", async () => {
+    const original = JSON.stringify({ baseFontSize: 18 });
+    kvStore.set("ryco.preferences", original);
+    kvControl.failNextRead = true;
+    updatePreferences({ codeWordBreak: true });
+    await flush();
+    expect(getPreferencesSnapshot().codeWordBreak).toBe(true);
+    expect(isPreferencesHydrated()).toBe(true);
+    expect(kvStore.get("ryco.preferences")).toBe(original);
+  });
+
+  it("a load still in flight does not land after a reset", async () => {
+    hydratePreferences();
+    resetPreferencesStoreForTests();
+    await flush();
+    expect(isPreferencesHydrated()).toBe(false);
   });
 
   it("shallow-merges successive patches", async () => {

@@ -659,6 +659,37 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }),
   );
 
+  it.effect("answers a resize the exited PTY refuses with TerminalNotRunningError", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      yield* manager.open(openInput({ cols: 100, rows: 24 }));
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      process.resizeError = new Error("ioctl(2) failed, EBADF");
+      const error = yield* Effect.flip(
+        manager.resize({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          cols: 120,
+          rows: 30,
+        }),
+      );
+      expect(error._tag).toBe("TerminalNotRunningError");
+
+      // A reattach with another size ignores the refusal instead of dying.
+      const reopened = yield* manager.open(openInput({ cols: 120, rows: 30 }));
+      expect(reopened.status).toBe("running");
+      expect(process.resizeCalls).toEqual([]);
+
+      // Neither failed attempt committed the size, so a working PTY still gets it.
+      process.resizeError = null;
+      yield* manager.open(openInput({ cols: 120, rows: 30 }));
+      expect(process.resizeCalls).toEqual([{ cols: 120, rows: 30 }]);
+    }),
+  );
+
   it.effect(
     "guards exact bracketed insertion against stale sessions, output, workspace and existing input",
     () =>

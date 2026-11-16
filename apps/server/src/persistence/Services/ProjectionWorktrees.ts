@@ -72,13 +72,6 @@ export const MarkProjectionWorktreeRestoredInput = Schema.Struct({
 });
 export type MarkProjectionWorktreeRestoredInput = typeof MarkProjectionWorktreeRestoredInput.Type;
 
-export const UpdateProjectionWorktreeMetaInput = Schema.Struct({
-  worktreeId: WorktreeId,
-  title: Schema.NullOr(Schema.String),
-  updatedAt: IsoDateTime,
-});
-export type UpdateProjectionWorktreeMetaInput = typeof UpdateProjectionWorktreeMetaInput.Type;
-
 export const SetProjectionWorktreeManualPositionInput = Schema.Struct({
   worktreeId: WorktreeId,
   position: Schema.Number,
@@ -120,10 +113,6 @@ export interface ProjectionWorktreeRepositoryShape {
 
   readonly markRestored: (
     input: MarkProjectionWorktreeRestoredInput,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
-
-  readonly updateMeta: (
-    input: UpdateProjectionWorktreeMetaInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   readonly deleteById: (

@@ -32,7 +32,7 @@ import { usageLimitStateFromServerRateLimits } from "../../provider/usageLimitRe
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import type { OrchestrationDispatchError } from "../Errors.ts";
+import { isSettledDispatchRejection, type OrchestrationDispatchError } from "../Errors.ts";
 import { OrchestrationCommandApplication } from "../Services/OrchestrationCommandApplication.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -234,22 +234,6 @@ export interface UsageLimitRecoveryDeps<E> {
   ) => Effect.Effect<{ readonly sequence: number }, E>;
 }
 
-/** A rejection the engine will repeat for the same command: never retry it. */
-function isSettledRejection(error: unknown): boolean {
-  const cause =
-    error !== null && typeof error === "object" && "cause" in error
-      ? (error as { readonly cause?: unknown }).cause
-      : undefined;
-  const tag =
-    cause !== null && typeof cause === "object" && "_tag" in cause
-      ? (cause as { readonly _tag?: unknown })._tag
-      : undefined;
-  return (
-    tag === "OrchestrationCommandInvariantError" ||
-    tag === "OrchestrationCommandPreviouslyRejectedError"
-  );
-}
-
 export const makeUsageLimitRecovery = <E>(deps: UsageLimitRecoveryDeps<E>) =>
   Effect.sync((): UsageLimitRecoveryShape => {
     const attempted = new Set<string>();
@@ -268,7 +252,7 @@ export const makeUsageLimitRecovery = <E>(deps: UsageLimitRecoveryDeps<E>) =>
         }
         if (Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.interrupt;
         const error = Cause.findErrorOption(exit.cause);
-        if (Option.isSome(error) && isSettledRejection(error.value)) {
+        if (Option.isSome(error) && isSettledDispatchRejection(error.value)) {
           attempted.add(commandId);
           transientFailures.delete(commandId);
           yield* Effect.logInfo("usage-limit recovery action rejected", {

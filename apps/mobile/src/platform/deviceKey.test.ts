@@ -1,15 +1,14 @@
 import { decodeBase64Url } from "@ryco/client-runtime/relay/base64url";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const { ensureKey, sign, hasKey, deleteKey } = vi.hoisted(() => ({
+const { ensureKey, sign, deleteKey } = vi.hoisted(() => ({
   ensureKey: vi.fn(),
   sign: vi.fn(),
-  hasKey: vi.fn(),
   deleteKey: vi.fn(),
 }));
 
 vi.mock("@ryco/mobile-device-key", () => ({
-  default: { ensureKey, sign, hasKey, deleteKey },
+  default: { ensureKey, sign, deleteKey },
 }));
 
 import {

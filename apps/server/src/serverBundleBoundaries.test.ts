@@ -839,6 +839,13 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // atomic-write helpers, the pending and disabled provider snapshot builder and the adapter
     // capability flags orchestration asks. The shared guards, logged ignores and MCP tool
     // helpers in the same set made boot smaller (about -1.7 KB).
+    // Unchanged on 2026-11-16, measured 7.318130 MB: twelve bug fixes merged together had taken
+    // boot to 7.340189 MB (+9.2 KB over 7.330984 MB: the external Agent Control repository's
+    // narrow updates, the git driver's `-z` parsing and safe pull request branches, the avatar
+    // upload's role check and multipart limits, the secret store's atomic create). The `ryco e2ee`
+    // subcommands' requests and output, with their view schemas, now load through import() when
+    // one runs (e2eeRun.ts, -22.1 KB); e2eeCommand.ts keeps the flags and subcommands and hands
+    // the shared CLI helpers in, since importing them would split boot modules into extra chunks.
     expect(bytes).toBeLessThan(7_335_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
@@ -921,6 +928,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(
         /^\/\/#region src\/sourceControl\/forgejo(?:DiffLines|PullRequestReadiness|PullRequestMutations)\.ts$/mu,
       );
+      // Loaded when a `ryco e2ee` subcommand runs.
+      expect(source).not.toMatch(/^\/\/#region src\/cli\/e2eeRun\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/e2eeOperatorContract\.ts$/mu);
       // Loaded when a command opens the setup guide.
       expect(source).not.toMatch(/^\/\/#region src\/cliSetup\/setupFlow\.ts$/mu);
       // Loaded with the first turn diff summary.

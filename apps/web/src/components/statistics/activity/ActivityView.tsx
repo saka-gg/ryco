@@ -54,7 +54,6 @@ import {
   filterBuckets,
   sumTotals,
   type StatFilter,
-  type DayPoint,
   type TokenCost,
   type TokenCostByOrigin,
   type TokenCostDimension,
@@ -62,6 +61,7 @@ import {
 } from "../../settings/statistics/selectors";
 import { useStatistics } from "../../settings/statistics/useStatistics";
 import type { ActivityScope, StatisticsSearch } from "../statisticsSearch";
+import { summarizeActivity } from "./activitySummary.logic";
 
 /** Ryco's usage (its threads and their subagents) and usage outside Ryco, in every chart of the split. */
 const ORIGIN_COLORS = { ryco: chartColor(0), outside: chartColor(1) } as const;
@@ -353,43 +353,6 @@ export function ActivityView({
       )}
     </div>
   );
-}
-
-function activityValue(point: DayPoint, metric: StatisticsSearch["activityMetric"]): number {
-  return metric === "turns"
-    ? point.turns
-    : metric === "activeMs"
-      ? point.activeMs
-      : point.filesChanged;
-}
-
-function summarizeActivity(
-  days: readonly DayPoint[],
-  metric: StatisticsSearch["activityMetric"],
-): { readonly activeDays: number; readonly currentStreak: number; readonly busiestLabel: string } {
-  let activeDays = 0;
-  let currentStreak = 0;
-  let busiest: DayPoint | null = null;
-  for (const day of days) {
-    const value = activityValue(day, metric);
-    if (value > 0) activeDays += 1;
-    if (busiest === null || value > activityValue(busiest, metric)) busiest = day;
-  }
-  for (let index = days.length - 1; index >= 0; index -= 1) {
-    const day = days[index];
-    if (day === undefined || activityValue(day, metric) <= 0) break;
-    currentStreak += 1;
-  }
-  if (busiest === null || activityValue(busiest, metric) <= 0) {
-    return { activeDays, currentStreak, busiestLabel: "—" };
-  }
-  const value = activityValue(busiest, metric);
-  const formattedValue = metric === "activeMs" ? formatDuration(value) : formatInteger(value);
-  return {
-    activeDays,
-    currentStreak,
-    busiestLabel: `${busiest.date.slice(5)} · ${formattedValue}`,
-  };
 }
 
 function ActivityMetricControl({

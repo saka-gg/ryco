@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 
-import { usePullRequestReaderStore } from "../pullRequestsLayoutStore";
+import { readPullRequestScrollTop, usePullRequestReaderStore } from "../pullRequestsLayoutStore";
 import { usePullRequestsShortcut } from "../pullRequestsShortcuts";
 
 /**
@@ -98,8 +98,7 @@ export function useConversationScrollMemory(input: {
     if (!initializedRef.current) {
       initializedRef.current = true;
       if (readerKey && !skip) {
-        const stored =
-          usePullRequestReaderStore.getState().scrollTop[`${readerKey}\0conversation`] ?? 0;
+        const stored = readPullRequestScrollTop(readerKey, "conversation") ?? 0;
         if (stored > 0) pendingRef.current = stored;
       }
     }

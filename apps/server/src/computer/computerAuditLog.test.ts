@@ -39,6 +39,16 @@ describe("summarizeComputerAuditArgs", () => {
     expect(JSON.stringify(summary)).not.toContain("hunter2");
   });
 
+  it("records a dialog's prompt answer as a character count", () => {
+    const summary = summarizeComputerAuditArgs({
+      action: "accept",
+      dialog_id: "dlg-1",
+      prompt_text: "hunter2",
+    });
+    expect(summary).toEqual({ action: "accept", dialog_id: "dlg-1", prompt_text: { chars: 7 } });
+    expect(JSON.stringify(summary)).not.toContain("hunter2");
+  });
+
   it("records clipboard and file payloads as counts only", () => {
     const summary = summarizeComputerAuditArgs({
       contents: "clipboard payload with a token",

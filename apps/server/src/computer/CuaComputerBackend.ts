@@ -357,7 +357,7 @@ export class CuaComputerBackend implements ComputerBackend {
   private permissions: ComputerPermission[] = [];
   private currentAvailability: ComputerAvailability = {
     kind: "backend-unavailable",
-    message: "Computer has not connected to the Synara desktop app.",
+    message: "Computer has not connected to the Ryco desktop app.",
   };
   private currentHealth: ComputerHealth = {
     status: "unavailable",
@@ -512,7 +512,7 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<CuaReply> {
     if (this.disposed || !this.endpoint)
       throw new CuaActionError(
-        "Open this session in a supported Synara desktop app to use Computer.",
+        "Open this session in a supported Ryco desktop app to use Computer.",
         "not-dispatched",
         "gui_host_required",
       );
@@ -720,7 +720,7 @@ export class CuaComputerBackend implements ComputerBackend {
       return {
         kind: "backend-unavailable",
         message:
-          "Computer requires a connected Synara desktop host, which owns native access on that computer.",
+          "Computer requires a connected Ryco desktop host, which owns native access on that computer.",
       };
     try {
       await this.host({ method: "probe" });
@@ -803,7 +803,7 @@ export class CuaComputerBackend implements ComputerBackend {
     // driver's own probe, and the guidance names what the platform uses
     // rather than a settings pane that does not exist there.
     return (this.hostPlatform ?? process.platform) === "darwin"
-      ? `Allow ${missing} for this copy of Synara in System Settings. Return here to check again; if macOS asks you to quit and reopen the app, do so.`
+      ? `Allow ${missing} for this copy of Ryco in System Settings. Return here to check again; if macOS asks you to quit and reopen the app, do so.`
       : `The driver host reports missing ${missing} access. Grant it at the OS level the platform uses (display-server access on Linux, integrity/UIAccess on Windows), then check again; no action is retried automatically.`;
   }
   private refresh(force = false, includeKeyboardFocus = false): Promise<void> {
@@ -1137,7 +1137,7 @@ export class CuaComputerBackend implements ComputerBackend {
     const data = result.structuredContent ?? {};
     if (data.screenshot_frame_freshness === "unverified_off_space")
       throw new CuaActionError(
-        "The exact window is on another macOS Space. Cua returned pixels, but their freshness cannot be proven without switching Spaces, so Synara will not present them as a live observation.",
+        "The exact window is on another macOS Space. Cua returned pixels, but their freshness cannot be proven without switching Spaces, so Ryco will not present them as a live observation.",
         "not-dispatched",
         "off_space_capture_unverified",
       );
@@ -3042,7 +3042,7 @@ export class CuaComputerBackend implements ComputerBackend {
   async engageShield(target: ComputerShieldTarget): Promise<string> {
     if (this.disposed || !this.endpoint)
       throw new CuaActionError(
-        "Open this session in the Synara macOS desktop app to use Computer.",
+        "Open this session in the Ryco macOS desktop app to use Computer.",
         "not-dispatched",
         "gui_host_required",
       );
@@ -3153,7 +3153,7 @@ export class CuaComputerBackend implements ComputerBackend {
   private async browserCall(call: ComputerBrowserCall): Promise<ComputerBrowserCallResult> {
     if (this.disposed || !this.endpoint)
       throw new CuaActionError(
-        "Open this session in a supported Synara desktop app to use Computer.",
+        "Open this session in a supported Ryco desktop app to use Computer.",
         "not-dispatched",
         "gui_host_required",
       );

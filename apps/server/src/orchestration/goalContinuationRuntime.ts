@@ -25,7 +25,7 @@ import { Cause, Clock, Effect, Exit, Option, Stream } from "effect";
 
 import { agentControlSupportForDriver } from "../agentControl/ProviderInjection.ts";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
-import type { OrchestrationDispatchError } from "./Errors.ts";
+import { isSettledDispatchRejection, type OrchestrationDispatchError } from "./Errors.ts";
 import type { ServerWakeFenceShape } from "./Services/ServerWakeFence.ts";
 import {
   GOAL_CHAIN_PAUSE_NOTICE,
@@ -90,22 +90,6 @@ interface SentContinuation {
   readonly sourceTurnId: TurnId;
   readonly messageId: MessageId;
 }
-
-/** A decider rejection settles the attempt; anything else may be retried. */
-const isSettledRejection = (error: unknown): boolean => {
-  const cause =
-    error !== null && typeof error === "object" && "cause" in error
-      ? (error as { readonly cause?: unknown }).cause
-      : undefined;
-  const tag = (value: unknown) =>
-    value !== null && typeof value === "object" && "_tag" in value
-      ? (value as { readonly _tag?: unknown })._tag
-      : undefined;
-  const settled = (value: unknown) =>
-    tag(value) === "OrchestrationCommandInvariantError" ||
-    tag(value) === "OrchestrationCommandPreviouslyRejectedError";
-  return settled(error) || settled(cause);
-};
 
 export const makeGoalContinuation = (deps: GoalContinuationDeps) => {
   const candidates = new Map<ThreadId, Candidate>();
@@ -237,7 +221,8 @@ export const makeGoalContinuation = (deps: GoalContinuationDeps) => {
         }
         if (Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.interrupt;
         const error = Cause.findErrorOption(exit.cause);
-        if (Option.isSome(error) && isSettledRejection(error.value)) return "rejected" as Attempt;
+        if (Option.isSome(error) && isSettledDispatchRejection(error.value))
+          return "rejected" as Attempt;
         yield* Effect.logWarning("goal continuation dispatch failed", {
           threadId,
           cause: Cause.pretty(exit.cause),

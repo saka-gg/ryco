@@ -17,7 +17,8 @@ import { Effect, Fiber, Stream } from "effect";
 import { assert, describe } from "vite-plus/test";
 
 import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
-import { makeCodexSessionRuntime, readStoredCodexThread } from "./CodexSessionRuntime.ts";
+import { makeCodexSessionRuntime, requestStoredCodexThread } from "./CodexSessionRuntime.ts";
+import { makeCodexStoredThreadReader } from "./CodexStoredThreadReader.ts";
 
 const ROOT = wireFixture.rootThreadId;
 const [CHILD_A, CHILD_B] = wireFixture.childThreadIds as [string, string];
@@ -96,12 +97,12 @@ describe("CodexSessionRuntime collab integration", () => {
           NodeFS.rmSync(`${scriptPath}.requests`, { force: true });
         }),
       );
-      const snapshot = yield* readStoredCodexThread({
+      const reader = yield* makeCodexStoredThreadReader({
         binaryPath: peerPath,
         cwd: "/tmp",
-        providerThreadId: ROOT,
         environment: { ...process.env, RYCO_CODEX_COLLAB_SCRIPT: scriptPath },
       });
+      const snapshot = yield* reader.withClient((client) => requestStoredCodexThread(client, ROOT));
       assert.equal(snapshot.turns[0]?.status, "completed");
       assert.deepEqual(snapshot.turns[0]?.items, [
         { id: "stored-item", type: "agentMessage", text: "Recovered result" },

@@ -107,11 +107,9 @@ export interface ChatComposerProps {
 
   // Thread context
   activeThreadId: ThreadId | null;
-  activeThreadEnvironmentId: EnvironmentId | undefined;
   activeThreadSessionProviderInstanceId: ProviderInstanceId | null | undefined;
   activeThreadStarted: boolean;
   isServerThread: boolean;
-  isLocalDraftThread: boolean;
   activeThreadGoal: Thread["goal"];
 
   // Session phase
@@ -173,10 +171,6 @@ export interface ChatComposerProps {
   // Plan
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: Thread["proposedPlans"][number] | null;
-  activePlan: { turnId?: TurnId } | null;
-  sidebarProposedPlan: { turnId?: TurnId } | null;
-  planSidebarLabel: string;
-  planSidebarOpen: boolean;
 
   // Mode
   runtimeMode: RuntimeMode;
@@ -284,7 +278,6 @@ export interface ChatComposerProps {
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
   handleTokenModeChange: (mode: AgentTokenMode) => void;
-  togglePlanSidebar: () => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;

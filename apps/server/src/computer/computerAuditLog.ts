@@ -100,6 +100,7 @@ const COMPUTER_AUDIT_SENSITIVE_ARGS: ReadonlySet<string> = new Set([
   "contents",
   "data",
   "payload",
+  "prompt_text", // a JavaScript prompt() answer (computer_browser_dialog)
 ]);
 
 /** Longest logged string field; a label or path longer than this is cut. */

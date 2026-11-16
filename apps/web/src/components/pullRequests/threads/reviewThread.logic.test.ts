@@ -3,7 +3,6 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   commentSnippet,
   diffHunkExcerpt,
-  hasSuggestion,
   parseDiffHunk,
   splitSuggestionBlocks,
   suggestionBaseLines,
@@ -35,7 +34,9 @@ describe("suggestion blocks", () => {
     expect(splitSuggestionBlocks("~~~ suggestion\nx\ny")).toEqual([
       { kind: "suggestion", lines: ["x", "y"] },
     ]);
-    expect(hasSuggestion("```ts\nnot one\n```")).toBe(false);
+    expect(
+      splitSuggestionBlocks("```ts\nnot one\n```").some((segment) => segment.kind === "suggestion"),
+    ).toBe(false);
   });
 
   it("keeps an empty suggestion (a deletion)", () => {

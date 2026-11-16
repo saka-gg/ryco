@@ -1,7 +1,7 @@
 {
   "apps/desktop": 137,
   "apps/mobile": 499,
-  "apps/server": 1194,
+  "apps/server": 1198,
   "apps/web": 709,
   "packages/client-runtime": 545,
   "packages/contracts": 20,

@@ -105,7 +105,7 @@ impl LinuxBackend {
             Refusal::new(
                 code,
                 error.message.clone(),
-                "Grant Poracode's Remote Desktop portal request and retry. The portal controls the real pointer and keyboard.",
+                "Grant Ryco's Remote Desktop portal request and retry. The portal controls the real pointer and keyboard.",
             ),
         )
     }
@@ -769,18 +769,13 @@ mod tests {
         let mut windows = Vec::new();
         merge_discovered_window(
             &mut windows,
-            window(
-                -10,
-                "Poracode Computer Use Overlay",
-                10,
-                WindowSource::Atspi,
-            ),
+            window(-10, "Ryco Computer Use Overlay", 10, WindowSource::Atspi),
         );
         merge_discovered_window(
             &mut windows,
             window(
                 -11,
-                "Poracode Computer Use Overlay - Document",
+                "Ryco Computer Use Overlay - Document",
                 20,
                 WindowSource::Atspi,
             ),

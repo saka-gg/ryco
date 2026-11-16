@@ -80,12 +80,6 @@ export class ComputerTurnTimings {
 }
 
 const timings = new ComputerTurnTimings();
-export function startComputerTurnTiming(threadId: string, turnId: string) {
-  if (cuaTimingLogEnabled()) timings.start(threadId, turnId);
-}
-export function endComputerTurnTiming(threadId: string, turnId?: string) {
-  timings.end(threadId, turnId);
-}
 export function beginComputerTurnCall(
   threadId: string,
   turnId: string | undefined,

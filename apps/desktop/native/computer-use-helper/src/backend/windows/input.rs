@@ -36,7 +36,7 @@ fn post_refusal(error: windows::core::Error) -> Refusal {
         return Refusal::new(
             RefusalCode::ElevatedTarget,
             "Windows blocked background messages at the target's integrity boundary.",
-            "Run Poracode at the same integrity level as the target, or retry with mode:\"foreground\".",
+            "Run Ryco at the same integrity level as the target, or retry with mode:\"foreground\".",
         );
     }
     Refusal::background_unavailable(format!("Windows rejected the background message: {error}"))

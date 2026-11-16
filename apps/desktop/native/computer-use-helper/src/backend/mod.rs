@@ -26,7 +26,7 @@ pub mod macos;
 #[cfg(windows)]
 pub mod windows;
 
-pub(crate) const COMPUTER_USE_OVERLAY_TITLE: &str = "Poracode Computer Use Overlay";
+pub(crate) const COMPUTER_USE_OVERLAY_TITLE: &str = "Ryco Computer Use Overlay";
 const INSTALLED_APP_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_INSTALLED_APP_RESULTS: usize = 50;
 #[cfg(any(target_os = "windows", target_os = "macos", test))]

@@ -252,6 +252,37 @@ describe("LimitsView", () => {
     );
   });
 
+  it("names a several-environment filter and clears it", async () => {
+    serve(
+      [
+        {
+          environmentId: desktop,
+          label: "This machine",
+          status: "ok",
+          hubs: [loopbackHub([account()])],
+        },
+      ],
+      [
+        { environmentId: desktop, label: "This machine" },
+        { environmentId: ssh, label: "Build box" },
+      ],
+    );
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits", environmentIds: [desktop, ssh] })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    const filter = page.getByRole("combobox", { name: "Limits environment" });
+    await expect.element(filter).toHaveTextContent("2 environments");
+    await filter.click();
+    await page.getByRole("option", { name: "All environments" }).click();
+    expect(onSearchChange).toHaveBeenCalledWith(
+      expect.objectContaining({ view: "limits", environmentIds: undefined }),
+    );
+  });
+
   it("asks to update a node that predates hubs", async () => {
     serve([
       {

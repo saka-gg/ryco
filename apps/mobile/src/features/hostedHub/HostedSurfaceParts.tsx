@@ -47,21 +47,6 @@ export function HostedPrimaryButton(props: { readonly action: HostedAuthAction }
   );
 }
 
-/** The quiet alternative beneath the CTA. */
-export function HostedSecondaryButton(props: { readonly action: HostedAuthAction }) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ disabled: props.action.disabled }}
-      disabled={props.action.disabled}
-      onPress={props.action.run}
-      className="mx-5 mt-2.5 items-center rounded-full border border-border px-5 py-3 active:opacity-70"
-    >
-      <Text className="text-sm font-ryco-bold text-foreground">{props.action.label}</Text>
-    </Pressable>
-  );
-}
-
 /** The Hub connection status, rendered from the runtime's own indicator. */
 export function HostedStatusRow(props: {
   readonly indicator: HostedConnectionStatusIndicator;

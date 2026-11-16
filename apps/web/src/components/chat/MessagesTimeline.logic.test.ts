@@ -2198,6 +2198,41 @@ describe("computeStableMessagesTimelineRows", () => {
     expect(repeated.result).toBe(initial.result);
   });
 
+  it("rebuilds a message row whose dispatch mode changes", () => {
+    const message = {
+      id: MessageId.make("user-1"),
+      role: "user" as const,
+      text: "Steer",
+      turnId: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      streaming: false,
+    };
+    const derive = (current: typeof message & { dispatchMode?: "steer" }) =>
+      deriveMessagesTimelineRows({
+        timelineEntries: [
+          { id: "entry-user-1", kind: "message", createdAt: current.createdAt, message: current },
+        ],
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaryByAssistantMessageId: new Map(),
+        revertTurnCountByUserMessageId: new Map(),
+      });
+
+    const initial = computeStableMessagesTimelineRows(derive(message), {
+      byId: new Map(),
+      result: [],
+    });
+    const next = computeStableMessagesTimelineRows(
+      derive({ ...message, dispatchMode: "steer" }),
+      initial,
+    );
+
+    expect(next).not.toBe(initial);
+    expect(next.result[0]).not.toBe(initial.result[0]);
+    const row = next.result[0];
+    expect(row?.kind === "message" ? row.message.dispatchMode : undefined).toBe("steer");
+  });
+
   it("returns a new result when row order changes without content changes", () => {
     const firstUserMessage = {
       id: "user-1" as never,

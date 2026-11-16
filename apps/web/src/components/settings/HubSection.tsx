@@ -51,7 +51,8 @@ import { Button } from "../ui/button";
 import { DataList, DataListItem } from "../ui/data-list";
 import { Input } from "../ui/input";
 import { HubAdvancedOptions } from "./HubAdvancedOptions";
-import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import {
   hubLaunchChange,
   relaunchIfHubRestartRequired,

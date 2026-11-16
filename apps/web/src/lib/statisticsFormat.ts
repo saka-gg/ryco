@@ -29,6 +29,26 @@ export function formatUsd(value: number): string {
   return usd.format(value);
 }
 
+/** The most decimals a dollar axis shows. */
+const USD_AXIS_MAX_DECIMALS = 4;
+
+function isWholeAtDecimals(value: number, decimals: number): boolean {
+  const scaled = Math.abs(value) * 10 ** decimals;
+  return Math.abs(scaled - Math.round(scaled)) < 1e-6;
+}
+
+/**
+ * A dollar axis tick with the decimals its axis's ticks need, the same on every
+ * tick: a $0.01 step reads "$0.01", a $0.25 step "$0.25", a $25 step "$25".
+ */
+export function formatUsdAxisTick(value: number, ticks: readonly number[]): string {
+  let decimals = 0;
+  for (const tick of ticks) {
+    while (decimals < USD_AXIS_MAX_DECIMALS && !isWholeAtDecimals(tick, decimals)) decimals += 1;
+  }
+  return `$${value.toFixed(decimals)}`;
+}
+
 /** An estimate in US dollars: "<$0.01" for a fraction of a cent, whole dollars from $1,000. */
 export function formatEstimatedUsd(amount: number): string {
   if (amount <= 0) return "$0.00";

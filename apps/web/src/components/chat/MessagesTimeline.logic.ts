@@ -1805,7 +1805,8 @@ function areMessagesUnchanged(previous: ChatMessage, next: ChatMessage): boolean
       previous.turnId === next.turnId &&
       previous.createdAt === next.createdAt &&
       previous.completedAt === next.completedAt &&
-      previous.streaming === next.streaming)
+      previous.streaming === next.streaming &&
+      previous.dispatchMode === next.dispatchMode)
   );
 }
 

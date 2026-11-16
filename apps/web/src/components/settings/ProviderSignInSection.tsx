@@ -41,7 +41,7 @@ import { Button } from "../ui/button";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { RedactedEmail } from "./RedactedSensitiveText";
-import { useRelativeTimeTick } from "./settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 
 export interface ProviderSignInSectionProps {
   /** The node the instance runs on; `null` is this app's primary node. */

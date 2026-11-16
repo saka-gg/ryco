@@ -115,7 +115,8 @@ import {
   settingsStorageReachable,
   type SettingsReach,
 } from "./settingsSections.logic";
-import { SettingsCard, SettingsChip, SettingsEmpty, useRelativeLabelTick } from "./settingsLayout";
+import { SettingsCard, SettingsChip, SettingsEmpty } from "./settingsLayout";
+import { useRelativeLabelTick } from "../../hooks/useRelativeTimeTick";
 import { splitDeviceBarChoices, type SettingsNodeStatus } from "./settingsDevices.logic";
 import {
   SETTINGS_NODE_STATUS_LABELS,

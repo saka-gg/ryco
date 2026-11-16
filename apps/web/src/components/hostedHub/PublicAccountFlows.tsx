@@ -145,17 +145,25 @@ export function PublicSignupFlow({
         operation.signal,
       )
       .then((verified) => {
+        if (operation.signal.aborted) return;
         signup.current = verified;
         setStage("credential");
       })
-      .catch((cause) =>
-        setError(identityError(cause, "This verification link could not be confirmed.")),
-      )
+      .catch((cause) => {
+        if (!operation.signal.aborted) {
+          setError(identityError(cause, "This verification link could not be confirmed."));
+        }
+      })
       .finally(() => {
+        // An aborted run must not consume the link: the re-run needs it.
+        if (operation.signal.aborted) return;
         onConsumeLink();
-        if (!operation.signal.aborted) setPending(false);
+        setPending(false);
       });
-    return () => operation.abort();
+    return () => {
+      operation.abort();
+      linkStarted.current = false;
+    };
   }, [initialLink, onConsumeLink]);
 
   const start = async (event: FormEvent) => {
@@ -713,12 +721,21 @@ export function PasswordResetFlow({
     const operation = new AbortController();
     setPending(true);
     void verifyToken(initialLink.token, operation.signal)
-      .catch((cause) => setError(identityError(cause, "This reset link could not be verified.")))
+      .catch((cause) => {
+        if (!operation.signal.aborted) {
+          setError(identityError(cause, "This reset link could not be verified."));
+        }
+      })
       .finally(() => {
+        // An aborted run must not consume the link: the re-run needs it.
+        if (operation.signal.aborted) return;
         onConsumeLink();
-        if (!operation.signal.aborted) setPending(false);
+        setPending(false);
       });
-    return () => operation.abort();
+    return () => {
+      operation.abort();
+      linkStarted.current = false;
+    };
   }, [initialLink, onConsumeLink]);
 
   const submit = async (event: FormEvent) => {

@@ -54,7 +54,7 @@ import { Input, TOUCH_INPUT_CLASS_NAME } from "../ui/input";
 import { Label } from "../ui/label";
 import { Skeleton } from "../ui/skeleton";
 import { formatRecoveryCodesForClipboard } from "../settings/AccountSettings.logic";
-import { useRelativeTimeTick } from "../settings/settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import {
   HOSTED_SESSION_SYNC_FAILURE_MESSAGE,

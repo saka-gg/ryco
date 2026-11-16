@@ -109,7 +109,11 @@ export class ScrcpySession {
   private closing = false;
   /** Set once `open()` succeeds; `onEnded` is only for sessions callers hold. */
   private opened = false;
-  private readonly acks = new Map<bigint, () => void>();
+  /** Clipboard requests waiting for the device's `ack-clipboard`, by sequence. */
+  private readonly acks = new Map<
+    bigint,
+    { readonly resolve: () => void; readonly reject: (error: Error) => void }
+  >();
   private nextSequence = 1n;
   private readonly diagnostics: string[] = [];
 
@@ -206,11 +210,11 @@ export class ScrcpySession {
     let first: { socket: net.Socket; rest: Buffer } | null = null;
     while (first === null) {
       if (status.exited !== null || this.closing) throw failure();
-      if (Date.now() > deadline)
+      if (Date.now() >= deadline)
         throw new ScrcpySessionError(
           `scrcpy-server did not accept a connection${this.serverOutput ? `: ${this.serverOutput}` : ""}`,
         );
-      first = await this.tryFirstSocket();
+      first = await this.tryFirstSocket(deadline);
       if (first === null) await delay(100);
     }
     // The server can die while a socket is being accepted; teardown has
@@ -224,7 +228,7 @@ export class ScrcpySession {
     if (this.options.video) {
       this.videoSocket = first.socket;
       control = await this.connectSocket();
-      if (this.ended) {
+      if (this.ended || first.socket.destroyed) {
         control.destroy();
         throw failure();
       }
@@ -239,7 +243,7 @@ export class ScrcpySession {
       try {
         for (const message of parser.push(chunk)) {
           if (message.kind === "ack-clipboard") {
-            this.acks.get(message.sequence)?.();
+            this.acks.get(message.sequence)?.resolve();
             this.acks.delete(message.sequence);
           }
         }
@@ -269,18 +273,29 @@ export class ScrcpySession {
     });
   }
 
-  private tryFirstSocket(): Promise<{ socket: net.Socket; rest: Buffer } | null> {
+  private tryFirstSocket(deadline: number): Promise<{ socket: net.Socket; rest: Buffer } | null> {
     return new Promise((resolve) => {
       const socket = this.host.connect?.(this.port) ?? net.connect(this.port, "127.0.0.1");
+      let settled = false;
       const settle = (value: { socket: net.Socket; rest: Buffer } | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         socket.removeAllListeners("data");
         socket.removeAllListeners("end");
         socket.removeAllListeners("close");
         socket.removeAllListeners("error");
-        if (value === null) socket.destroy();
-        else socket.pause();
+        if (value === null) {
+          socket.destroy();
+        } else {
+          // Kept until the video or control path takes over: an error in between must not be uncaught.
+          socket.on("error", () => undefined);
+          socket.pause();
+        }
         resolve(value);
       };
+      // A tunnel that accepts and never sends the dummy byte must not outlive the deadline.
+      const timer = setTimeout(() => settle(null), Math.max(0, deadline - Date.now()));
       socket.once("data", (chunk: Buffer) => settle({ socket, rest: chunk.subarray(1) }));
       socket.once("end", () => settle(null));
       socket.once("close", () => settle(null));
@@ -309,8 +324,16 @@ export class ScrcpySession {
   private end(reason: string): void {
     if (this.ended) return;
     this.ended = true;
-    for (const resolve of this.acks.values()) resolve();
+    // Only the device's acknowledgement confirms a clipboard request. The
+    // message may still have been delivered, so the outcome is unknown.
+    const pending = [...this.acks.values()];
     this.acks.clear();
+    for (const ack of pending)
+      ack.reject(
+        new ScrcpySessionError(
+          `The Android input channel closed before the emulator confirmed the clipboard, so it is unknown whether the text arrived (${reason}).`,
+        ),
+      );
     if (this.opened && !this.closing) this.options.onEnded?.(reason);
     void this.teardown();
   }
@@ -332,9 +355,15 @@ export class ScrcpySession {
         reject(new ScrcpySessionError("The emulator did not confirm the clipboard."));
       }, CLIPBOARD_ACK_TIMEOUT_MS);
       timer.unref?.();
-      this.acks.set(sequence, () => {
-        clearTimeout(timer);
-        resolve();
+      this.acks.set(sequence, {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       try {
         this.send(encodeSetClipboard(text, paste, sequence));

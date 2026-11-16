@@ -447,12 +447,14 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
+      // A publish in flight owns the dialog: closing would reset state its result still writes.
+      if (!open && publishRepositoryMutation.isPending) return;
       props.onOpenChange(open);
       if (!open) {
         resetState();
       }
     },
-    [props, resetState],
+    [props, publishRepositoryMutation.isPending, resetState],
   );
 
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
@@ -462,8 +464,15 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   }, [handleOpenChange, openSettings]);
 
   return (
-    <Dialog open={props.open} onOpenChange={handleOpenChange}>
-      <DialogPopup className="max-w-xl overflow-hidden">
+    <Dialog
+      open={props.open}
+      onOpenChange={handleOpenChange}
+      disablePointerDismissal={publishRepositoryMutation.isPending}
+    >
+      <DialogPopup
+        className="max-w-xl overflow-hidden"
+        showCloseButton={!publishRepositoryMutation.isPending}
+      >
         <div className="flex min-h-0 flex-col overflow-hidden border-foreground/10 bg-background shadow-2xl">
           <DialogHeader className="border-b border-border/70 bg-background">
             <DialogTitle>Publish repository</DialogTitle>

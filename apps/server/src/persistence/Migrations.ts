@@ -590,7 +590,10 @@ export const repairProjectionProjectRepositoryIdentityColumns = Effect.fn(
 export const repairProjectionThreadAnchorsAndStatisticsPartials = Effect.fn(
   "repairProjectionThreadAnchorsAndStatisticsPartials",
 )(function* () {
-  if (yield* ensureProjectionThreadAnchorsAndStatisticsPartials) {
+  const sql = yield* SqlClient.SqlClient;
+  // Column adds, triggers and the one-time backfill commit together: the backfill only runs while
+  // the columns are missing.
+  if (yield* sql.withTransaction(ensureProjectionThreadAnchorsAndStatisticsPartials)) {
     yield* Effect.log("Repaired projection thread anchor summaries and statistics partials");
   }
 });

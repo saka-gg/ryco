@@ -61,6 +61,8 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { webAttachmentCodec } from "../../platform/attachmentCodec";
 import {
+  composerFileUploadEngine,
+  composerFileUploadPersistKey,
   deriveComposerFileUploadSendState,
   releaseUnusedComposerFileUploads,
   useComposerFileUploadRecords,
@@ -199,11 +201,9 @@ export const ChatComposer = memo(
       routeThreadRef,
       draftId,
       activeThreadId,
-      activeThreadEnvironmentId: _activeThreadEnvironmentId,
       activeThreadSessionProviderInstanceId,
       activeThreadStarted,
       isServerThread,
-      isLocalDraftThread: _isLocalDraftThread,
       activeThreadGoal,
       phase,
       isConnecting,
@@ -228,8 +228,6 @@ export const ChatComposer = memo(
       approvalRedirectedTurnId,
       showPlanFollowUpPrompt,
       activeProposedPlan,
-      planSidebarLabel,
-      planSidebarOpen,
       runtimeMode,
       interactionMode,
       tokenMode,
@@ -270,7 +268,6 @@ export const ChatComposer = memo(
       handleRuntimeModeChange,
       handleInteractionModeChange,
       handleTokenModeChange,
-      togglePlanSidebar,
       focusComposer,
       scheduleComposerFocus,
       setThreadError,
@@ -796,6 +793,8 @@ export const ChatComposer = memo(
     // File upload state (streamed attachments)
     // ------------------------------------------------------------------
     const fileUploadRecords = useComposerFileUploadRecords();
+    // The image persist effect re-runs when what it writes changes, not on every progress tick.
+    const fileUploadPersistKey = composerFileUploadPersistKey(composerImages, fileUploadRecords);
     // Recomputed on every upload-record change: the engine subscription in
     // useComposerFileUploadRecords re-renders the composer as uploads progress,
     // and passing that snapshot makes it a visible input of the compiled
@@ -967,7 +966,6 @@ export const ChatComposer = memo(
       draftText: composerSendState.trimmedPrompt,
       fileReferenceCount: composerFileReferences.length,
     });
-    const showPlanSidebarToggle = false;
     const composerFooterActionLayoutKey = useMemo(
       () =>
         deriveComposerFooterActionLayoutKey({
@@ -1304,7 +1302,7 @@ export const ChatComposer = memo(
               // Streamed file attachments persist token metadata only; the
               // bytes stay out of localStorage by design.
               if (image.type === "file") {
-                const status = fileUploadRecords.get(image.id)?.status;
+                const status = composerFileUploadEngine.get(image.id)?.status;
                 if (status?.kind === "uploaded") {
                   stagedAttachmentById.set(image.id, {
                     type: "file",
@@ -1388,7 +1386,8 @@ export const ChatComposer = memo(
       composerDraftTarget,
       clearComposerDraftPersistedAttachments,
       composerImages,
-      fileUploadRecords,
+      // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new upload persist key re-reads the engine's records
+      fileUploadPersistKey,
       getComposerDraft,
       syncComposerDraftPersistedAttachments,
     ]);
@@ -3148,19 +3147,15 @@ export const ChatComposer = memo(
                 showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                 askModeSupported={composerProviderControls.askModeSupported}
                 autoModeUnavailableReason={composerProviderControls.autoModeUnavailableReason}
-                showPlanSidebarToggle={showPlanSidebarToggle}
                 interactionMode={interactionMode}
                 runtimeMode={runtimeMode}
                 tokenMode={tokenMode}
-                planSidebarLabel={planSidebarLabel}
-                planSidebarOpen={planSidebarOpen}
                 providerTraitsMenuContent={providerTraitsMenuContent}
                 providerExtraTraitsMenuContent={providerExtraTraitsMenuContent}
                 providerTraitsChips={providerTraitsChips}
                 providerModelTuning={providerModelTuning}
                 providerModelTuningSummary={providerModelTuningSummary}
                 onInteractionModeChange={handleInteractionModeChange}
-                onTogglePlanSidebar={togglePlanSidebar}
                 onRuntimeModeChange={handleRuntimeModeChange}
                 onTokenModeChange={handleTokenModeChange}
                 contextWindowUsage={contextWindowUsage}

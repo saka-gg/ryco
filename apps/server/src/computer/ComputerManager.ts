@@ -587,8 +587,8 @@ export class ComputerManager {
   }
 
   private revokeControl(threadId: string): Promise<void> {
-    // Settle pending approval prompts synchronously: a mid-turn Off must not
-    // leave a prompt hanging until the gate's five-minute timeout.
+    // Cancel this thread's open app dialogs synchronously: an answer that arrives after a
+    // mid-turn Off must grant nothing.
     computerApprovalGate.cancelThread(threadId);
     const revokeReason = new ComputerBackendError(
       "Computer control was revoked for this conversation; no new input may be dispatched.",
@@ -2297,7 +2297,7 @@ export class ComputerManager {
       );
     }
     const appName = target.title?.trim() || target.appName || "this window";
-    const label = `Synara is activating ${appName}`;
+    const label = `Ryco is activating ${appName}`;
     const shieldId = `shield-${randomUUID().slice(0, 8)}`;
     try {
       return await timedComputerLeg("shield", () =>
@@ -4297,8 +4297,11 @@ export class ComputerManager {
     // the stream cannot exist without a connected backend anyway.
     this.engageBackend();
     const unsubscribe = this.transport.subscribe(this.computerId, sink);
-    this.streamDesired = true;
-    this.streamEpoch += 1;
+    // Only the first viewer changes what is wanted; a later one joins the stream (or the attach in flight).
+    if (!this.streamDesired) {
+      this.streamDesired = true;
+      this.streamEpoch += 1;
+    }
     void this.reconcileStream().catch((error) => this.recordError(error));
     return () => {
       unsubscribe();

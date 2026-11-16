@@ -75,7 +75,6 @@ const LAZY_FROM_MAIN = [
   "./desktopWorkspaceWarmSet.ts",
   "./sshEnvironment.ts",
   "./tailscaleEndpointProvider.ts",
-  "./bundledGuide.ts",
   "./desktopCliCommand.ts",
   "./nightlyHandoff.ts",
   // Computer use: started during bootstrap, after Electron is ready.

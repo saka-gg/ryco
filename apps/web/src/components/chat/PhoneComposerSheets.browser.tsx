@@ -346,19 +346,15 @@ function footerProps(overrides: Partial<ComposerFooterProps> = {}): ComposerFoot
     onProviderModelSelect: () => {},
     showInteractionModeToggle: true,
     askModeSupported: true,
-    showPlanSidebarToggle: false,
     interactionMode: "default",
     runtimeMode: "approval-required",
     tokenMode: "balanced",
-    planSidebarLabel: "Plan",
-    planSidebarOpen: false,
     providerTraitsMenuContent: null,
     providerExtraTraitsMenuContent: null,
     providerTraitsChips: null,
     providerModelTuning: null,
     providerModelTuningSummary: null,
     onInteractionModeChange: () => {},
-    onTogglePlanSidebar: () => {},
     onRuntimeModeChange: () => {},
     onTokenModeChange: () => {},
     contextWindowUsage: createInitialContextWindowUsage(null),
@@ -775,7 +771,6 @@ describe("phone model and session-policy sheets", () => {
     const onRuntimeModeChange = vi.fn();
     const onTokenModeChange = vi.fn();
     const onInteractionModeChange = vi.fn();
-    const onTogglePlanSidebar = vi.fn();
     mounted = await render(
       <PhoneSessionPolicySheet
         open
@@ -785,15 +780,11 @@ describe("phone model and session-policy sheets", () => {
         tokenMode="balanced"
         showInteractionModeToggle
         askModeSupported
-        showPlanToggle
-        planSidebarLabel="Plan"
-        planSidebarOpen={false}
         disabled
         disabledReason={LONG_CAPABILITY_REASON}
         onInteractionModeChange={onInteractionModeChange}
         onRuntimeModeChange={onRuntimeModeChange}
         onTokenModeChange={onTokenModeChange}
-        onTogglePlanSidebar={onTogglePlanSidebar}
       />,
     );
     await waitForSettledSheet();
@@ -809,18 +800,9 @@ describe("phone model and session-policy sheets", () => {
       segment.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     }
 
-    // The plan-sidebar row is gated with them. It is a `MobileListRow`, not a
-    // segment, so it is the one control that could be left live by accident.
-    const planRow = sheetRows().find((row) => (row.textContent ?? "").includes("sidebar"));
-    expect(planRow, "the plan sidebar row should be rendered").toBeTruthy();
-    expect(planRow!.disabled).toBe(true);
-    planRow!.click();
-    planRow!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
     expect(onRuntimeModeChange).not.toHaveBeenCalled();
     expect(onTokenModeChange).not.toHaveBeenCalled();
     expect(onInteractionModeChange).not.toHaveBeenCalled();
-    expect(onTogglePlanSidebar).not.toHaveBeenCalled();
 
     // One bounded reason per segmented group, each describing its group rather
     // than renaming it.

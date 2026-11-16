@@ -81,7 +81,15 @@ export function makeCodexMcpAdapter(service: CodexMcpServiceShape): ProviderMcpA
           if (externalAgentControlConfigFingerprint(server.config) !== input.expectedFingerprint) {
             return { removed: false, preservedUserChanges: true };
           }
-          yield* service.removeServer({ workspaceId: input.workspaceId, name: input.name });
+          const after = yield* service.removeServer({
+            workspaceId: input.workspaceId,
+            name: input.name,
+          });
+          if (after.servers.some((entry) => entry.name === input.name)) {
+            return yield* Effect.fail(
+              new McpSettingsError({ message: "Codex did not remove the MCP entry." }),
+            );
+          }
           return { removed: true, preservedUserChanges: false };
         }),
     },

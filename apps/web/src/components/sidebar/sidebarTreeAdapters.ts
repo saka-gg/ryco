@@ -153,27 +153,6 @@ function sameStatusPill(
   );
 }
 
-export function adaptDraftThreadsForSidebarProject(input: {
-  draftThreadsByThreadKey: Readonly<Record<string, DraftThreadState>>;
-  project: SidebarProjectSnapshot;
-}): ReadonlyArray<SidebarTreeThread> {
-  const memberProjectKeys = getSidebarProjectMemberKeys(input.project);
-
-  return Object.entries(input.draftThreadsByThreadKey).flatMap(([draftId, draftThread]) => {
-    if (!draftThreadBelongsToSidebarProject(draftThread, memberProjectKeys)) {
-      return [];
-    }
-    return [
-      adaptDraftThreadForSidebarTree({
-        draftId: draftId as DraftId,
-        logicalProjectId: input.project.projectKey as ProjectId,
-        sourceProjectCwd: resolveSourceProjectCwd(input.project, draftThread),
-        draftThread,
-      }),
-    ];
-  });
-}
-
 export function createSidebarProjectDraftThreadsSelector(
   project: SidebarProjectSnapshot,
 ): (state: {

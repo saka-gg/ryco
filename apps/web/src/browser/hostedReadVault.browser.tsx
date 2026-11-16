@@ -27,6 +27,21 @@ describe("remembered browser encrypted storage", () => {
     expect(await foreignOrigin.read(remembered, "env-a")).toBeNull();
     await vault.purge(owner.id);
   });
+  it("keeps working after its database is deleted elsewhere", async () => {
+    const name = `read-cache-test-${crypto.randomUUID()}`;
+    const vault = create(name);
+    const owner = (await vault.account("account-a", true))!;
+    await vault.write(owner, "t", { text: "before" });
+    await new Promise<void>((resolve, reject) => {
+      const operation = indexedDB.deleteDatabase(name);
+      operation.addEventListener("success", () => resolve(), { once: true });
+      operation.addEventListener("error", () => reject(operation.error), { once: true });
+    });
+    const again = (await vault.account("account-a", true))!;
+    await vault.write(again, "t", { text: "again" });
+    expect(await vault.read(again, "t")).toEqual({ text: "again" });
+    await vault.purge(again.id);
+  });
   it("fences late writes after logout, including when the same account signs in again", async () => {
     const vault = create();
     const old = (await vault.account("same-account", true))!;

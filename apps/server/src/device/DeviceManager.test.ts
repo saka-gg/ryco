@@ -857,6 +857,8 @@ describe("surviving a crash", () => {
     });
     await owner.store.write([DEVICE_A]);
     backend.bootExternally(DEVICE_A);
+    // A device the user booted themselves is not in the record, so it must stay running.
+    backend.bootExternally(DEVICE_B);
 
     const reclaimed = await manager.reclaimOrphanedBoots(() => false);
 

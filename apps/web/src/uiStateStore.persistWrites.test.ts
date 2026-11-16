@@ -81,4 +81,45 @@ describe("uiStateStore persistence writes", () => {
     const saved = JSON.parse(setItem.mock.calls[0]![1]) as Record<string, unknown>;
     expect(saved.wideComposerControlsAutoCollapse).toBe(false);
   });
+
+  describe("when the page is hidden", () => {
+    const windowListeners = new Map<string, () => void>();
+    const documentListeners = new Map<string, () => void>();
+
+    beforeEach(() => {
+      windowListeners.clear();
+      documentListeners.clear();
+      const counting = createCountingStorage();
+      setItem = counting.setItem;
+      vi.stubGlobal("window", {
+        localStorage: counting.storage,
+        addEventListener: (type: string, listener: () => void) =>
+          windowListeners.set(type, listener),
+      });
+      vi.stubGlobal("document", {
+        visibilityState: "hidden",
+        addEventListener: (type: string, listener: () => void) =>
+          documentListeners.set(type, listener),
+      });
+      vi.stubGlobal("localStorage", counting.storage);
+    });
+
+    it("writes a pending change on pagehide", async () => {
+      const { useUiStateStore } = await import("./uiStateStore");
+      useUiStateStore.getState().setThreadPinned(ThreadId.make("thread-1"), true);
+      expect(setItem).not.toHaveBeenCalled();
+      windowListeners.get("pagehide")!();
+      expect(setItem).toHaveBeenCalledOnce();
+      const saved = JSON.parse(setItem.mock.calls[0]![1]) as Record<string, unknown>;
+      expect(saved.pinnedThreadKeys).toEqual(["thread-1"]);
+    });
+
+    it("writes a pending change when the document becomes hidden", async () => {
+      const { useUiStateStore } = await import("./uiStateStore");
+      useUiStateStore.getState().setThreadPinned(ThreadId.make("thread-1"), true);
+      expect(setItem).not.toHaveBeenCalled();
+      documentListeners.get("visibilitychange")!();
+      expect(setItem).toHaveBeenCalledOnce();
+    });
+  });
 });

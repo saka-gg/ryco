@@ -41,7 +41,6 @@ import {
   getClaudeCatalogModelCapabilities,
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
-  resolveClaudeCatalogContextWindow,
   resolveClaudeModelCatalog,
   resolveClaudeModelsForVersion,
   setActiveClaudeModelCatalog,
@@ -120,12 +119,6 @@ export function normalizeClaudeCliEffort(
 
 export function isClaudeUltracodeEffort(effort: string | null | undefined): boolean {
   return effort === "ultracode";
-}
-
-export function resolveClaudeContextWindow(
-  modelSelection: ModelSelection | undefined,
-): string | undefined {
-  return resolveClaudeCatalogContextWindow(getActiveClaudeModelCatalog(), modelSelection);
 }
 
 export function resolveClaudeApiModelId(modelSelection: ModelSelection): string {

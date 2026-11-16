@@ -7,6 +7,7 @@ import {
 } from "@ryco/client-runtime/state/threads/threadPins";
 
 import { isHostedHubMode } from "./env";
+import { subscribePageHidden } from "~/lib/pageHidden";
 
 export const PERSISTED_STATE_KEY = "ryco:ui-state:v1";
 const LEGACY_PERSISTED_STATE_KEYS = [
@@ -1695,7 +1696,8 @@ useUiStateStore.subscribe((state, previous) => {
 });
 
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-  window.addEventListener("beforeunload", () => {
-    debouncedPersistState.flush();
-  });
+  const flush = () => debouncedPersistState.flush();
+  // beforeunload covers desktop reloads; a hidden page covers a phone browser backgrounding it.
+  window.addEventListener("beforeunload", flush);
+  subscribePageHidden(flush);
 }

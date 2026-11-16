@@ -11,6 +11,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   acquireStoragePathUseLease,
   acquireStoragePathUseLeaseHandle,
+  acquireWorktreeCreationLease,
   checkoutLifecycleOwner,
   hasWorktreeCreationLease,
   isStoragePathBlocked,
@@ -217,6 +218,26 @@ it.layer(SqlitePersistenceMemory)("storage admission for chat moves", (it) => {
         assert.isTrue(Result.isFailure(refused));
         assert.isFalse(hasWorktreeCreationLease(root));
       }).pipe(Effect.scoped),
+  );
+
+  it.effect("counts each worktree creation lease once, however often it is released", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM project_relocations`;
+      const root = yield* Effect.promise(async () =>
+        fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ryco-creation-lease-"))),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => fs.rm(root, { recursive: true, force: true })),
+      );
+      const first = yield* acquireWorktreeCreationLease(sql, root);
+      const second = yield* acquireWorktreeCreationLease(sql, root);
+      yield* first;
+      yield* first;
+      assert.isTrue(hasWorktreeCreationLease(root));
+      yield* second;
+      assert.isFalse(hasWorktreeCreationLease(root));
+    }).pipe(Effect.scoped),
   );
 
   it.effect("tells a checkout its own removal is still recording from one left behind", () =>

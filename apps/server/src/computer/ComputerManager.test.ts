@@ -2229,7 +2229,7 @@ describe("ComputerManager and FakeComputerBackend", () => {
     // Two ordinary apps dispatch back to back with no prompt surface involved.
     const backend = new FakeComputerBackend();
     const manager = new ComputerManager({ backend });
-    const request = vi.spyOn(computerApprovalGate, "request");
+    const request = vi.spyOn(computerApprovalGate, "requestApp");
     try {
       await manager.launchApp("thread-1", "kcalc");
       await manager.launchApp("thread-1", "firefox");
@@ -3175,6 +3175,34 @@ describe("ComputerManager and FakeComputerBackend", () => {
     // carry a `computer.frame` header beside every one of them, which its only
     // consumer read and dropped.
     expect(eventTypes).not.toContain("computer.frame");
+
+    await manager.dispose();
+  });
+
+  it("a second viewer joining during the attach does not flap the stream", async () => {
+    const backend = new FakeComputerBackend();
+    const attachStarted = deferred();
+    const allowAttach = deferred();
+    const attach = backend.attachStream.bind(backend);
+    backend.attachStream = async (...args) => {
+      attachStarted.resolve();
+      await allowAttach.promise;
+      return attach(...args);
+    };
+    const manager = new ComputerManager({ backend });
+    const a = manager.subscribeFrames(new RecordingSink());
+    await attachStarted.promise;
+    const b = manager.subscribeFrames(new RecordingSink());
+    allowAttach.resolve();
+    await manager.flushStreamTransitions();
+
+    expect(backend.callsFor("attachStream")).toHaveLength(1);
+    expect(backend.callsFor("detachStream")).toHaveLength(0);
+
+    a();
+    b();
+    await manager.flushStreamTransitions();
+    expect(backend.callsFor("detachStream")).toHaveLength(1);
 
     await manager.dispose();
   });
@@ -4368,22 +4396,37 @@ it("never re-admits a detached tool continuation after revocation and re-enable"
   await manager.dispose();
 });
 
-it("settles a pending approval prompt when control is switched off mid-turn", async () => {
+it("cancels an open app dialog when control is switched off mid-turn", async () => {
   const backend = new FakeComputerBackend();
   const manager = new ComputerManager({ backend });
   try {
-    const prompt = computerApprovalGate.request({
+    let answer!: (value: "chat") => void;
+    const present = vi.fn(
+      () =>
+        new Promise<"chat">((resolve) => {
+          answer = resolve;
+        }),
+    );
+    const app = { key: "calculator", name: "Calculator", canAlwaysAllow: true };
+    const alwaysAllowed = { has: async () => false, add: async () => undefined };
+    const request = {
       threadId: "owner",
       turnId: "turn-1",
+      app,
       signal: new AbortController().signal,
-      publish: async () => undefined,
-    });
-    const settled = expect(prompt).resolves.toBe(false);
+      alwaysAllowed,
+    };
+    const prompt = computerApprovalGate.requestApp({ ...request, present });
+    await vi.waitFor(() => expect(present).toHaveBeenCalledTimes(1));
     await manager.setControlEnabled("owner", false);
-    // Without the synchronous cancel, this hangs until the gate's timeout.
-    await settled;
-    computerApprovalGate.cancelThread("owner");
+    answer("chat");
+    await expect(prompt).resolves.toBe(false);
+    // The late answer was not remembered: the next call asks again.
+    const again = vi.fn(async () => "deny" as const);
+    expect(await computerApprovalGate.requestApp({ ...request, present: again })).toBe(false);
+    expect(again).toHaveBeenCalledTimes(1);
   } finally {
+    computerApprovalGate.forgetThread("owner");
     await manager.dispose();
   }
 });
@@ -4755,7 +4798,7 @@ describe("ComputerManager foregroundWithRestore", () => {
   it("runs the approved input between raise and restore without a second approval", async () => {
     const backend = new FakeComputerBackend();
     const manager = new ComputerManager({ backend, actionSettleMs: 0 });
-    const request = vi.spyOn(computerApprovalGate, "request").mockResolvedValue(true);
+    const request = vi.spyOn(computerApprovalGate, "requestApp").mockResolvedValue(true);
     const order: string[] = [];
     const raise = backend.raiseWindow.bind(backend);
     backend.raiseWindow = async (windowId: string) => {
@@ -5059,7 +5102,7 @@ describe("ComputerManager masked activation", () => {
       expect(engage.args[0]).toMatchObject({
         windowId: "fake-calculator",
         frame: { x: 1_050, y: 120, width: 420, height: 620 },
-        label: "Synara is activating Calculator",
+        label: "Ryco is activating Calculator",
       });
       const shieldId = (engage.args[0] as { shieldId: string }).shieldId;
       expect(shieldId).toMatch(/^shield-[0-9a-f]{8}$/);

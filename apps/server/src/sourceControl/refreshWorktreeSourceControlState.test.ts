@@ -81,7 +81,6 @@ function makeWorktreeRepo(row: ProjectionWorktree | null): ProjectionWorktreeRep
     findActiveByWorktreePath: () => Effect.die("not used"),
     markArchived: () => Effect.die("not used"),
     markRestored: () => Effect.die("not used"),
-    updateMeta: () => Effect.die("not used"),
     deleteById: () => Effect.die("not used"),
     setManualPosition: () => Effect.die("not used"),
   };

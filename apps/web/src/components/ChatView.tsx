@@ -96,7 +96,6 @@ import {
   ProviderInstanceId,
   type ScopedThreadRef,
   type ThreadId,
-  type TurnId,
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
@@ -7908,11 +7907,9 @@ export default function ChatView(props: ChatViewProps) {
                     routeThreadRef={routeThreadRef}
                     draftId={draftId}
                     activeThreadId={activeThreadId}
-                    activeThreadEnvironmentId={activeThread?.environmentId}
                     activeThreadSessionProviderInstanceId={activeThreadSessionProviderInstanceId}
                     activeThreadStarted={activeThreadStarted}
                     isServerThread={isServerThread}
-                    isLocalDraftThread={isLocalDraftThread}
                     activeThreadGoal={serverThread?.goal ?? null}
                     phase={phase}
                     isConnecting={isConnecting}
@@ -7948,10 +7945,6 @@ export default function ChatView(props: ChatViewProps) {
                     }
                     showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                     activeProposedPlan={activeProposedPlan}
-                    activePlan={activePlan as { turnId?: TurnId } | null}
-                    sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
-                    planSidebarLabel={planSidebarLabel}
-                    planSidebarOpen={overviewControlOpen}
                     runtimeMode={runtimeMode}
                     interactionMode={interactionMode}
                     tokenMode={tokenMode}
@@ -8000,7 +7993,6 @@ export default function ChatView(props: ChatViewProps) {
                     handleRuntimeModeChange={handleRuntimeModeChange}
                     handleInteractionModeChange={handleInteractionModeChange}
                     handleTokenModeChange={handleTokenModeChange}
-                    togglePlanSidebar={toggleOverviewSidebar}
                     focusComposer={focusComposer}
                     scheduleComposerFocus={scheduleComposerFocus}
                     setThreadError={setThreadError}

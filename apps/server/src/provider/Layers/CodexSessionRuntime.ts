@@ -53,7 +53,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { readTurnCompletedStructurally } from "./CodexAdapter.mapEvent.ts";
 
-import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { buildCodexInitializeParams } from "../codexInitializeParams.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
   CODEX_ASK_MODE_DEVELOPER_INSTRUCTIONS,
@@ -64,7 +64,6 @@ import { appendProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
 import { DEVICE_ROUTING_INSTRUCTIONS } from "../../providerTools/deviceToolRouting.ts";
 import { isSlashCommandInput } from "../attachmentInstructionDelivery.ts";
-import { isMissingConversationError } from "../resumeFailure.ts";
 import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   createProcessDeviceToolBinding,
@@ -715,14 +714,6 @@ export function buildTurnSteerParams(input: {
   );
 }
 
-/** A Codex thread's history is its rollout: "no rollout found for thread id …". */
-const CODEX_CONVERSATION_NOUNS = ["thread", "rollout"] as const;
-
-/** A `thread/resume` failure that means the Codex thread itself is gone. */
-export function isRecoverableThreadResumeError(error: unknown): boolean {
-  return isMissingConversationError(error, CODEX_CONVERSATION_NOUNS);
-}
-
 type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
   | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
@@ -1360,37 +1351,6 @@ function parseThreadSnapshot(
     })),
   };
 }
-
-export const readStoredCodexThread = (input: {
-  readonly binaryPath: string;
-  readonly homePath?: string;
-  readonly environment?: NodeJS.ProcessEnv;
-  readonly cwd: string;
-  readonly providerThreadId: string;
-}) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const context = yield* Layer.build(
-        CodexClient.layerCommand({
-          command: input.binaryPath,
-          args: ["app-server"],
-          cwd: input.cwd,
-          env: {
-            ...(input.environment ?? process.env),
-            ...(input.homePath ? { CODEX_HOME: expandHomePath(input.homePath) } : {}),
-          },
-          requestTimeoutMs: 20_000,
-          timeoutOrElse: timeoutWhileResponsiveOrElse,
-        }),
-      );
-      const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-        Effect.provide(context),
-      );
-      yield* client.request("initialize", buildCodexInitializeParams());
-      yield* client.notify("initialized", undefined);
-      return yield* requestStoredCodexThread(client, input.providerThreadId);
-    }),
-  );
 
 /** Reads a stored thread, with every turn, over an initialized app-server client. */
 export const requestStoredCodexThread = (

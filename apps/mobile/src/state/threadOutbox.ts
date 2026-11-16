@@ -398,14 +398,15 @@ function commitMessages(next: QueuedThreadMessage[]): void {
   notifyListeners();
 }
 
-/** Idempotently load the persisted queue once. */
+/** Idempotently load the persisted queue once, keeping what was queued or recorded while it loaded. */
 export async function hydrateThreadOutbox(): Promise<void> {
   if (hydrationStarted) return;
   hydrationStarted = true;
+  let persisted: QueuedThreadMessage[] = [];
   try {
     const raw = await mobileKV.getItem(OUTBOX_STORAGE_KEY);
     const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-    messages = Array.isArray(parsed)
+    persisted = Array.isArray(parsed)
       ? parsed.flatMap((message) => {
           if (!message || typeof message !== "object") return [];
           const candidate = message as Record<string, unknown>;
@@ -426,11 +427,22 @@ export async function hydrateThreadOutbox(): Promise<void> {
         })
       : [];
   } catch {
-    messages = [];
+    persisted = [];
   }
+  // Messages queued while the read was pending are newer than their stored copies and
+  // follow the stored queue.
+  const queuedBeforeHydration = messages;
+  const queuedIds = new Set(queuedBeforeHydration.map((message) => message.messageId));
+  messages = [
+    ...persisted.filter((message) => !queuedIds.has(message.messageId)),
+    ...queuedBeforeHydration,
+  ];
+  if (queuedBeforeHydration.length > 0) persist();
   // Causes recorded live while the KV read was pending are newer than the
   // persisted ones and win.
   const recordedBeforeHydration = seenLive;
+  const holdsBeforeHydration = holds;
+  const acknowledgedBeforeHydration = acknowledged;
   try {
     const raw = await mobileKV.getItem(HOLDS_STORAGE_KEY);
     let persistedSeenLive: Record<string, readonly string[]>;
@@ -440,15 +452,22 @@ export async function hydrateThreadOutbox(): Promise<void> {
       seenLive: persistedSeenLive,
     } = sanitizeHoldState(raw ? (JSON.parse(raw) as unknown) : null));
     seenLive = persistedSeenLive;
+    holds = { ...holds, ...holdsBeforeHydration };
+    acknowledged = { ...acknowledged, ...acknowledgedBeforeHydration };
   } catch {
-    holds = {};
-    acknowledged = {};
+    holds = { ...holdsBeforeHydration };
+    acknowledged = { ...acknowledgedBeforeHydration };
     seenLive = {};
   }
   for (const [key, keys] of Object.entries(recordedBeforeHydration)) recordSeenLive(key, keys);
   pruneEmptyThreads();
   hydrated = true;
-  if (Object.keys(recordedBeforeHydration).length > 0) persistHolds();
+  if (
+    Object.keys(recordedBeforeHydration).length > 0 ||
+    Object.keys(holdsBeforeHydration).length > 0 ||
+    Object.keys(acknowledgedBeforeHydration).length > 0
+  )
+    persistHolds();
   mirrorToQueueStore();
   notifyListeners();
 }
@@ -478,7 +497,9 @@ export function enqueueThreadOutboxMessage(message: QueuedThreadMessage): void {
       ...seenBeforeOffline,
       ...currentCauseKeys(view, key),
     ]);
-    persistHolds();
+    // Before hydration a write would replace the persisted holds; hydration merges this
+    // baseline in and persists it.
+    if (hydrated) persistHolds();
   }
   commitMessages([...messages.filter((m) => m.messageId !== message.messageId), message]);
 }

@@ -61,11 +61,10 @@ interface BranchToolbarBranchSelectorProps {
   className?: string;
   /**
    * "default" renders the compact ghost trigger used in the top toolbar.
-   * "pill" renders the legacy inset branch pill.
    * "panelRow" renders the full-width overview-panel row (branch icon + mono
    * name + ahead/behind + chevron) — see {@link OverviewLayoutProps}.
    */
-  appearance?: "default" | "pill" | "panelRow";
+  appearance?: "default" | "panelRow";
   environmentId: EnvironmentId;
   threadId: ThreadId;
   draftId?: DraftId;
@@ -271,7 +270,7 @@ export function BranchToolbarBranchSelector({
   const hasKnownProvider = providerKind !== null && providerKind !== "unknown";
   // Brand icon for a known remote host, otherwise the (colored) git mark for a
   // local-only repository.
-  const PillIcon = hasKnownProvider ? SourceControlIcon : GitIcon;
+  const RepositoryIcon = hasKnownProvider ? SourceControlIcon : GitIcon;
   const repositoryWebUrl = useMemo(
     () => deriveRepositoryWebUrl(activeProject?.repositoryIdentity),
     [activeProject?.repositoryIdentity],
@@ -711,14 +710,11 @@ export function BranchToolbarBranchSelector({
       open={isBranchMenuOpen}
       value={resolvedActiveBranch}
     >
-      {appearance === "pill" || appearance === "panelRow" ? (
+      {appearance === "panelRow" ? (
         <div
           data-appearance={appearance}
           className={cn(
-            "min-w-0 items-center overflow-hidden",
-            appearance === "pill"
-              ? "inline-flex h-[30px] rounded-[9px] border border-input bg-popover shadow-xs"
-              : "flex h-9 w-full bg-transparent",
+            "flex h-9 w-full min-w-0 items-center overflow-hidden bg-transparent",
             className,
           )}
         >
@@ -732,64 +728,31 @@ export function BranchToolbarBranchSelector({
                   : "Open repository remote"
               }
               aria-label="Open repository remote"
-              className={cn(
-                "grid h-full shrink-0 place-items-center text-foreground/80 transition-colors hover:bg-accent",
-                appearance === "pill" ? "pr-1 pl-2.5" : "w-[37px]",
-              )}
+              className="grid h-full w-[37px] shrink-0 place-items-center text-foreground/80 transition-colors hover:bg-accent"
             >
-              {appearance === "pill" ? (
-                <PillIcon className="size-3.5" />
-              ) : (
-                <span className="grid size-5 place-items-center rounded-md bg-secondary text-muted-foreground [&_svg]:size-3">
-                  <PillIcon />
-                </span>
-              )}
+              <span className="grid size-5 place-items-center rounded-md bg-secondary text-muted-foreground [&_svg]:size-3">
+                <RepositoryIcon />
+              </span>
             </button>
           ) : (
-            <span
-              className={cn(
-                "grid h-full shrink-0 place-items-center text-foreground/80",
-                appearance === "pill" ? "pr-1 pl-2.5" : "w-[37px]",
-              )}
-            >
-              {appearance === "pill" ? (
-                <PillIcon className="size-3.5" />
-              ) : (
-                <span className="grid size-5 place-items-center rounded-md bg-secondary text-muted-foreground [&_svg]:size-3">
-                  <PillIcon />
-                </span>
-              )}
+            <span className="grid h-full w-[37px] shrink-0 place-items-center text-foreground/80">
+              <span className="grid size-5 place-items-center rounded-md bg-secondary text-muted-foreground [&_svg]:size-3">
+                <RepositoryIcon />
+              </span>
             </span>
           )}
           <ComboboxTrigger
             render={<Button variant="ghost" size="sm" />}
-            className={cn(
-              "h-full min-w-0 gap-1.5 rounded-none border-0 bg-transparent text-foreground shadow-none before:shadow-none",
-              appearance === "pill"
-                ? "pr-2.5 pl-1 text-[13px] font-medium"
-                : "flex-1 justify-start pr-2.5 pl-0 text-[11.5px] font-semibold hover:bg-accent",
-            )}
+            className="h-full min-w-0 flex-1 justify-start gap-1.5 rounded-none border-0 bg-transparent pr-2.5 pl-0 text-[11.5px] font-semibold text-foreground shadow-none before:shadow-none hover:bg-accent"
             disabled={(isBranchesSearchPending && refs.length === 0) || isBranchActionPending}
           >
-            <span
-              className={cn(
-                "min-w-0 truncate font-mono",
-                appearance === "pill" ? "max-w-[170px]" : "flex-1 text-left",
-              )}
-            >
-              {triggerLabel}
-            </span>
+            <span className="min-w-0 flex-1 truncate text-left font-mono">{triggerLabel}</span>
             {/* Ahead/behind come from the current checkout, so only show them when
                 the displayed label matches that checkout (not an override/optimistic ref). */}
             {resolvedActiveBranch === currentGitBranch &&
             ((branchStatusQuery.data?.aheadCount ?? 0) > 0 ||
               (branchStatusQuery.data?.behindCount ?? 0) > 0) ? (
-              <span
-                className={cn(
-                  "flex shrink-0 items-center gap-1 font-mono font-semibold text-muted-foreground tabular-nums",
-                  appearance === "pill" ? "text-[11px]" : "text-[10px]",
-                )}
-              >
+              <span className="flex shrink-0 items-center gap-1 font-mono text-[10px] font-semibold text-muted-foreground tabular-nums">
                 {(branchStatusQuery.data?.aheadCount ?? 0) > 0 ? (
                   <span className="flex items-center gap-0.5">
                     <ArrowUpIcon className="size-[11px]" />
@@ -804,12 +767,7 @@ export function BranchToolbarBranchSelector({
                 ) : null}
               </span>
             ) : null}
-            <ChevronDownIcon
-              className={cn(
-                "shrink-0 text-muted-foreground",
-                appearance === "pill" ? "size-3.5" : "size-3",
-              )}
-            />
+            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
           </ComboboxTrigger>
         </div>
       ) : (

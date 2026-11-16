@@ -12,6 +12,7 @@ import {
   setAppearancePreference,
 } from "../../themes/appearancePreferences";
 import { TaskNotes } from "./TaskNotes";
+import { TaskTitleField } from "./TaskRow";
 import { TaskStartButton } from "./TaskStartButton";
 import { TasksView } from "./TasksView";
 import { dueAtForDay } from "@ryco/client-runtime/state/tasks";
@@ -549,6 +550,28 @@ describe("TasksView", () => {
     (field.element() as HTMLTextAreaElement).blur();
     await vi.waitFor(() => expect(field.element()).toHaveValue("Theirs"));
     expect(onNotesChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a title changed elsewhere while the field is focused", async () => {
+    const onTitleChange = vi.fn();
+    const fieldOf = (title: string) => (
+      <TaskTitleField taskId="t1" title={title} onTitleChange={onTitleChange} />
+    );
+    mounted = await render(fieldOf("A"));
+    const input = page.getByRole("textbox", { name: "Title" });
+    (input.element() as HTMLInputElement).focus();
+    await mounted.rerender(fieldOf("B"));
+    (input.element() as HTMLInputElement).blur();
+    await vi.waitFor(() => expect(input.element()).toHaveValue("B"));
+    expect(onTitleChange).not.toHaveBeenCalled();
+
+    // The user's own edit still wins over a title that changes meanwhile.
+    (input.element() as HTMLInputElement).focus();
+    await userEvent.fill(input, "C");
+    await mounted.rerender(fieldOf("D"));
+    await userEvent.keyboard("{Enter}");
+    expect(onTitleChange).toHaveBeenCalledWith("t1", "C");
+    expect(onTitleChange).toHaveBeenCalledTimes(1);
   });
 
   it("holds Delete while a start is in flight", async () => {

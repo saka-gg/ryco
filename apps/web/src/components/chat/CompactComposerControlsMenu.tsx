@@ -5,12 +5,11 @@ import {
   type RuntimeMode,
 } from "@ryco/contracts";
 import { memo, type ReactNode } from "react";
-import { EllipsisIcon, ListTodoIcon } from "lucide-react";
+import { EllipsisIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import {
   Menu,
-  MenuItem,
   MenuPopup,
   MenuRadioGroup,
   MenuRadioItem,
@@ -21,10 +20,7 @@ import {
 export const ASK_MODE_UNSUPPORTED_DESCRIPTION = "Not supported by this provider.";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
-  activePlan: boolean;
   interactionMode: ProviderInteractionMode;
-  planSidebarLabel: string;
-  planSidebarOpen: boolean;
   runtimeMode: RuntimeMode;
   tokenMode?: AgentTokenMode;
   showInteractionModeToggle: boolean;
@@ -32,7 +28,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   /** Why the selected model cannot run Auto mode; the Auto item is disabled with it. */
   autoModeUnavailableReason?: string | null | undefined;
   /**
-   * Renders the mode, access, token, and plan sections. The phone tier passes
+   * Renders the mode, access, and token sections. The phone tier passes
    * `false`: those axes move to the session-policy sheet there, and the
    * overflow is left carrying provider traits alone. Defaults to `true`, so
    * the compact desktop menu is unchanged.
@@ -40,7 +36,6 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   showSessionPolicy?: boolean;
   traitsMenuContent?: ReactNode;
   onInteractionModeChange: (mode: ProviderInteractionMode) => void;
-  onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTokenModeChange?: (mode: AgentTokenMode) => void;
 }) {
@@ -139,17 +134,6 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               <MenuRadioItem value="balanced">Balanced</MenuRadioItem>
               <MenuRadioItem value="aggressive">Aggressive</MenuRadioItem>
             </MenuRadioGroup>
-            {props.activePlan ? (
-              <>
-                <MenuDivider />
-                <MenuItem onClick={props.onTogglePlanSidebar}>
-                  <ListTodoIcon className="size-4 shrink-0" />
-                  {props.planSidebarOpen
-                    ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`
-                    : `Show ${props.planSidebarLabel.toLowerCase()} sidebar`}
-                </MenuItem>
-              </>
-            ) : null}
           </>
         ) : null}
       </MenuPopup>

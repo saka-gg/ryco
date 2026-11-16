@@ -282,7 +282,8 @@ function YAxisTicks({
   readonly scale: (value: number) => number;
   readonly left: number;
   readonly right: number;
-  readonly format: (value: number) => string;
+  /** Gets every tick too, so one tick's label can match the others' precision. */
+  readonly format: (value: number, ticks: readonly number[]) => string;
   readonly dashed?: boolean;
 }) {
   return (
@@ -298,7 +299,7 @@ function YAxisTicks({
             strokeDasharray={dashed ? "3 5" : undefined}
           />
           <text x={left - 6} y={scale(tick)} dy="0.355em" textAnchor="end" className={AXIS_TEXT}>
-            {format(tick)}
+            {format(tick, ticks)}
           </text>
         </g>
       ))}
@@ -368,7 +369,7 @@ export function SeriesAreaChart({
   readonly series: readonly AreaSeries[];
   readonly className: string;
   readonly yAxisWidth?: number;
-  readonly formatYTick: (value: number) => string;
+  readonly formatYTick: (value: number, ticks: readonly number[]) => string;
   readonly formatValue: (value: number) => string;
   readonly dashedGrid?: boolean;
   readonly label: string;
@@ -533,7 +534,12 @@ export function ProjectBars({
   const rows = [...data]
     .toSorted((left, right) => valueOf(right) - valueOf(left))
     .slice(0, 6)
-    .map((entry, index) => ({ name: entry.title, value: valueOf(entry), fill: chartColor(index) }));
+    .map((entry, index) => ({
+      id: entry.projectId,
+      name: entry.title,
+      value: valueOf(entry),
+      fill: chartColor(index),
+    }));
 
   if (rows.length === 0) {
     return (
@@ -584,7 +590,7 @@ export function ProjectBars({
               };
               return (
                 <g
-                  key={row.name}
+                  key={row.id}
                   onPointerMove={onPointer}
                   onPointerDown={onPointer}
                   onPointerLeave={() => setHover(null)}
@@ -655,7 +661,7 @@ export function CodeChangesChart({ data }: { data: ReadonlyArray<DayPoint> }) {
   const labels = useMemo(() => data.map((point) => formatDayLabel(point.date)), [data]);
   const maxAdded = data.reduce((max, point) => Math.max(max, point.additions), 0);
   const maxRemoved = data.reduce((max, point) => Math.max(max, point.deletions), 0);
-  const ticks = niceTicks(-maxRemoved, maxAdded);
+  const ticks = niceTicks(-maxRemoved, maxAdded, { allowDecimals: false });
   const low = ticks[0] ?? 0;
   const high = ticks.at(-1) ?? 1;
   const hoveredPoint = hover === null ? undefined : data[hover.index];

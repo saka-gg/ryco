@@ -156,10 +156,6 @@
         "react-native-nitro-markdown": "*",
       },
     },
-    "apps/mobile/modules/ryco-review-diff": {
-      "name": "@ryco/mobile-review-diff-native",
-      "version": "0.0.0",
-    },
     "apps/server": {
       "name": "ryco-cli",
       "version": "0.1.49",
@@ -1340,8 +1336,6 @@
     "@ryco/mobile-device-key": ["@ryco/mobile-device-key@workspace:apps/mobile/modules/ryco-device-key"],
 
     "@ryco/mobile-markdown-text": ["@ryco/mobile-markdown-text@workspace:apps/mobile/modules/ryco-markdown-text"],
-
-    "@ryco/mobile-review-diff-native": ["@ryco/mobile-review-diff-native@workspace:apps/mobile/modules/ryco-review-diff"],
 
     "@ryco/scripts": ["@ryco/scripts@workspace:scripts"],
 

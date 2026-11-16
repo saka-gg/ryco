@@ -22,6 +22,8 @@ export class FakePtyProcess implements PtyProcess {
   private readonly dataListeners = new Set<(data: string) => void>();
   private readonly exitListeners = new Set<(event: PtyExitEvent) => void>();
   killed = false;
+  /** Set to make resize throw, as a PTY whose exit is still queued does. */
+  resizeError: Error | null = null;
   /** Whether a kill ends the process at once, reporting the signal, as a process that obeys it. */
   exitOnKill = false;
   /** Present only on PTYs that can name their foreground process. */
@@ -36,6 +38,7 @@ export class FakePtyProcess implements PtyProcess {
   }
 
   resize(cols: number, rows: number): void {
+    if (this.resizeError) throw this.resizeError;
     this.resizeCalls.push({ cols, rows });
   }
 

@@ -19,7 +19,7 @@ import nodePath from "node:path";
 import { Duration, Effect } from "effect";
 import { isPathInside } from "../pathContainment.ts";
 
-export const WORKTREE_INCLUDE_FILE_NAME = ".worktreeinclude";
+const WORKTREE_INCLUDE_FILE_NAME = ".worktreeinclude";
 
 /** Synara's cap on a listing (`WORKTREE_TRANSFER_MAX_OUTPUT_BYTES`). */
 export const WORKTREE_INCLUDE_MAX_LIST_BYTES = 64 * 1024 * 1024;

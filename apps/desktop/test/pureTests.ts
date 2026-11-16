@@ -18,7 +18,6 @@ export const DESKTOP_PURE_TEST_FILES = [
   "src/backendRestartBackoff.test.ts",
   "src/backendStartup.test.ts",
   "src/browser/discovery.test.ts",
-  "src/bundledGuide.test.ts",
   "src/clientPersistence.test.ts",
   "src/compileCacheDirectory.test.ts",
   "src/computerDesktopLifecycle.test.ts",

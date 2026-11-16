@@ -883,7 +883,7 @@ describe("deriveStatusBucket", () => {
   });
 
   it("maps review-needed statuses to review", () => {
-    for (const label of ["Plan Ready", "Pending Approval", "Awaiting Input"] as const) {
+    for (const label of ["Plan Ready", "Pending Approval", "Awaiting Input", "Limited"] as const) {
       expect(
         deriveStatusBucket({
           manualBucket: null,

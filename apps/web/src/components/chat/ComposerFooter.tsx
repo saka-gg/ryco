@@ -13,7 +13,6 @@ import {
 } from "@ryco/contracts";
 import type { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
 import { memo, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { ListTodoIcon } from "lucide-react";
 import { ComposerExpandableLabelControl } from "./ComposerExpandableLabelControl";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import {
@@ -64,13 +63,9 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   tokenMode: AgentTokenMode;
-  showPlanToggle: boolean;
-  planSidebarLabel: string;
-  planSidebarOpen: boolean;
   onInteractionModeChange: (mode: ProviderInteractionMode) => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTokenModeChange: (mode: AgentTokenMode) => void;
-  onTogglePlanSidebar: () => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
@@ -382,33 +377,6 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
           })}
         </SelectPopup>
       </Select>
-
-      {props.showPlanToggle ? (
-        <Button
-          variant="ghost"
-          className={cn(
-            "group/composer-label-control shrink-0 whitespace-nowrap px-1.5 sm:px-2",
-            props.planSidebarOpen
-              ? "text-blue-400 hover:text-blue-300"
-              : "text-muted-foreground/70 hover:text-foreground/80",
-          )}
-          size="xs"
-          type="button"
-          onClick={props.onTogglePlanSidebar}
-          aria-label={props.planSidebarLabel}
-          title={
-            props.planSidebarOpen
-              ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`
-              : `Show ${props.planSidebarLabel.toLowerCase()} sidebar`
-          }
-        >
-          <ComposerExpandableLabelControl
-            collapsed={wideComposerControlsAutoCollapse}
-            icon={<ListTodoIcon className="size-4 sm:size-3.5" />}
-            label={props.planSidebarLabel}
-          />
-        </Button>
-      ) : null}
     </>
   );
 });
@@ -532,12 +500,9 @@ export interface ComposerFooterProps {
   askModeSupported: boolean;
   /** Why the selected model cannot run Auto mode (desktop pickers only). */
   autoModeUnavailableReason?: string | null | undefined;
-  showPlanSidebarToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   tokenMode: AgentTokenMode;
-  planSidebarLabel: string;
-  planSidebarOpen: boolean;
   /** Every provider option, as menu rows: the phone tier's traits overflow. */
   providerTraitsMenuContent: ReactNode;
   /** Only the options the tuning dial does not own: the desktop compact overflow. */
@@ -549,7 +514,6 @@ export interface ComposerFooterProps {
   /** The model pill's readout of the same options. */
   providerModelTuningSummary: ModelTuningSummary | null;
   onInteractionModeChange: (mode: ProviderInteractionMode) => void;
-  onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTokenModeChange: (mode: AgentTokenMode) => void;
 
@@ -690,25 +654,18 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
                 tokenMode={props.tokenMode}
                 showInteractionModeToggle={props.showInteractionModeToggle}
                 askModeSupported={props.askModeSupported}
-                showPlanToggle={props.showPlanSidebarToggle}
-                planSidebarLabel={props.planSidebarLabel}
-                planSidebarOpen={props.planSidebarOpen}
                 disabled={mutationsBlocked}
                 {...(mutationsBlockedReason ? { disabledReason: mutationsBlockedReason } : {})}
                 onInteractionModeChange={props.onInteractionModeChange}
                 onRuntimeModeChange={props.onRuntimeModeChange}
                 onTokenModeChange={props.onTokenModeChange}
-                onTogglePlanSidebar={props.onTogglePlanSidebar}
               />
             ) : null}
             {/* The overflow survives only to carry provider traits, which the
                 policy sheet does not own. Without traits it would be empty. */}
             {props.providerTraitsMenuContent ? (
               <CompactComposerControlsMenu
-                activePlan={props.showPlanSidebarToggle}
                 interactionMode={props.interactionMode}
-                planSidebarLabel={props.planSidebarLabel}
-                planSidebarOpen={props.planSidebarOpen}
                 runtimeMode={props.runtimeMode}
                 tokenMode={props.tokenMode}
                 showInteractionModeToggle={props.showInteractionModeToggle}
@@ -716,7 +673,6 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
                 showSessionPolicy={false}
                 traitsMenuContent={props.providerTraitsMenuContent}
                 onInteractionModeChange={props.onInteractionModeChange}
-                onTogglePlanSidebar={props.onTogglePlanSidebar}
                 onRuntimeModeChange={props.onRuntimeModeChange}
                 onTokenModeChange={props.onTokenModeChange}
               />
@@ -724,10 +680,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           </>
         ) : props.isFooterCompact ? (
           <CompactComposerControlsMenu
-            activePlan={props.showPlanSidebarToggle}
             interactionMode={props.interactionMode}
-            planSidebarLabel={props.planSidebarLabel}
-            planSidebarOpen={props.planSidebarOpen}
             runtimeMode={props.runtimeMode}
             tokenMode={props.tokenMode}
             showInteractionModeToggle={props.showInteractionModeToggle}
@@ -735,7 +688,6 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             autoModeUnavailableReason={props.autoModeUnavailableReason}
             traitsMenuContent={props.providerExtraTraitsMenuContent}
             onInteractionModeChange={props.onInteractionModeChange}
-            onTogglePlanSidebar={props.onTogglePlanSidebar}
             onRuntimeModeChange={props.onRuntimeModeChange}
             onTokenModeChange={props.onTokenModeChange}
           />
@@ -749,13 +701,9 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
               interactionMode={props.interactionMode}
               runtimeMode={props.runtimeMode}
               tokenMode={props.tokenMode}
-              showPlanToggle={props.showPlanSidebarToggle}
-              planSidebarLabel={props.planSidebarLabel}
-              planSidebarOpen={props.planSidebarOpen}
               onInteractionModeChange={props.onInteractionModeChange}
               onRuntimeModeChange={props.onRuntimeModeChange}
               onTokenModeChange={props.onTokenModeChange}
-              onTogglePlanSidebar={props.onTogglePlanSidebar}
             />
           </>
         )}

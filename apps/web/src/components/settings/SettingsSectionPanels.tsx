@@ -87,8 +87,8 @@ import {
   SHARED_ROWS_ONLY_CHILDREN_CLASS,
   SharedRowsOnlyProvider,
   DeviceBound,
-  useRelativeLabelTick,
 } from "./settingsLayout";
+import { useRelativeLabelTick } from "../../hooks/useRelativeTimeTick";
 
 /**
  * What every part of the shown section needs to know: who may open which

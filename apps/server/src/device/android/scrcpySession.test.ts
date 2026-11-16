@@ -55,6 +55,29 @@ describe("ScrcpySession", () => {
     await server.close();
   });
 
+  it("rejects a clipboard request whose session ends before the device acknowledges", async () => {
+    const server = await startFakeScrcpyServer({ video: false, ackClipboard: false });
+    const fake = host(server.port);
+    const session = await ScrcpySession.start(fake.host, { transportId: "1", video: null });
+    const clipboard = session.setClipboard("hé", true);
+    await vi.waitFor(() => expect(server.control().byteLength).toBe(14 + 3));
+    await server.close();
+    await expect(clipboard).rejects.toThrow(
+      "closed before the emulator confirmed the clipboard, so it is unknown whether the text arrived",
+    );
+    expect(session.isOpen).toBe(false);
+  });
+
+  it("rejects a pending clipboard request when the session is closed", async () => {
+    const server = await startFakeScrcpyServer({ video: false, ackClipboard: false });
+    const fake = host(server.port);
+    const session = await ScrcpySession.start(fake.host, { transportId: "1", video: null });
+    const clipboard = session.setClipboard("hé", true);
+    await session.close();
+    await expect(clipboard).rejects.toThrow("before the emulator confirmed the clipboard");
+    await server.close();
+  });
+
   it("streams video events in order and ends once when the socket closes", async () => {
     const server = await startFakeScrcpyServer({
       video: true,
@@ -139,4 +162,41 @@ describe("ScrcpySession", () => {
     expect(opened.map((socket) => socket.destroyed)).toEqual([true, true]);
     await server.close();
   });
+  it("fails the start when the video socket resets while control connects", async () => {
+    const server = await startFakeScrcpyServer({ video: true });
+    const fake = host(server.port);
+    const opened: net.Socket[] = [];
+    const start = ScrcpySession.start(
+      {
+        ...fake.host,
+        connect: (port) => {
+          // The video socket resets while the control socket is being opened.
+          if (opened.length === 1) opened[0]!.destroy(new Error("read ECONNRESET"));
+          const socket = net.connect(port, "127.0.0.1");
+          opened.push(socket);
+          return socket;
+        },
+      },
+      { transportId: "1", video: { maxSize: 1600, maxFps: 60, bitRate: 8_000_000 } },
+    );
+    await expect(start).rejects.toThrow();
+    expect(opened.every((socket) => socket.destroyed)).toBe(true);
+    await server.close();
+  });
+
+  it("gives up on a tunnel that accepts but never sends the dummy byte", async () => {
+    const accepted: net.Socket[] = [];
+    const silent = net.createServer((socket) => accepted.push(socket));
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const port = (silent.address() as net.AddressInfo).port;
+    try {
+      const fake = host(port);
+      await expect(
+        ScrcpySession.start(fake.host, { transportId: "1", video: null, connectTimeoutMs: 300 }),
+      ).rejects.toThrow("did not accept a connection");
+    } finally {
+      for (const socket of accepted) socket.destroy();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  }, 5_000);
 });
