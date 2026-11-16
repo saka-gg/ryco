@@ -849,7 +849,7 @@ export type DesktopHubOriginValidation =
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
 /**
- * Which Ryco app icon this device shows (`@ryco/shared/appIcon`). `light` is the app's own icon;
+ * Which Ryco app icon this device shows (`@ryco/shared/appIcon`). `ember` is the app's own icon;
  * the others are generated alternates.
  */
 export type AppIconVariant = "light" | "dark" | "ember" | "ignition";

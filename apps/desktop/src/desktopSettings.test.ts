@@ -67,7 +67,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 
@@ -86,7 +86,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
 
     expect(readDesktopSettings(settingsPath, "0.0.17")).toEqual({
@@ -101,7 +101,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 
@@ -120,7 +120,7 @@ describe("desktopSettings", () => {
           hubNodeName: null,
           hubAllowFileSecretStore: false,
           backendPort: null,
-          appIconVariant: "light",
+          appIconVariant: "ember",
         },
         "network-accessible",
       ),
@@ -136,7 +136,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 
@@ -155,7 +155,7 @@ describe("desktopSettings", () => {
           hubNodeName: null,
           hubAllowFileSecretStore: false,
           backendPort: null,
-          appIconVariant: "light",
+          appIconVariant: "ember",
         },
         { enabled: true, port: 8443 },
       ),
@@ -171,7 +171,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 
@@ -190,7 +190,7 @@ describe("desktopSettings", () => {
           hubNodeName: null,
           hubAllowFileSecretStore: false,
           backendPort: null,
-          appIconVariant: "light",
+          appIconVariant: "ember",
         },
         { enabled: true },
       ),
@@ -206,7 +206,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 
@@ -350,7 +350,7 @@ describe("desktopSettings", () => {
       hubNodeName: "Build node",
       hubAllowFileSecretStore: true,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
     expect(readDesktopSettings(settingsPath, "0.0.17")).toMatchObject({
       hubConnectorEnabled: true,
@@ -685,7 +685,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 
@@ -712,7 +712,7 @@ describe("desktopSettings", () => {
       hubNodeName: null,
       hubAllowFileSecretStore: false,
       backendPort: null,
-      appIconVariant: "light",
+      appIconVariant: "ember",
     });
   });
 });
@@ -751,10 +751,27 @@ describe("desktop app icon persistence", () => {
     writeDesktopSettings(settingsPath, { ...DEFAULT_DESKTOP_SETTINGS, appIconVariant: "ember" });
     expect(readDesktopSettings(settingsPath, "0.1.46").appIconVariant).toBe("ember");
 
-    for (const value of [{}, { appIconVariant: "neon" }, { appIconVariant: 3 }]) {
+    writeDesktopSettings(settingsPath, { ...DEFAULT_DESKTOP_SETTINGS, appIconVariant: "light" });
+    expect(readDesktopSettings(settingsPath, "0.1.48").appIconVariant).toBe("light");
+
+    for (const value of [
+      {},
+      { appIcon: "neon" },
+      { appIconVariant: "neon" },
+      { appIconVariant: 3 },
+    ]) {
       fs.writeFileSync(settingsPath, JSON.stringify(value), "utf8");
-      expect(readDesktopSettings(settingsPath, "0.1.46").appIconVariant).toBe("light");
+      expect(readDesktopSettings(settingsPath, "0.1.46").appIconVariant).toBe("ember");
     }
+  });
+
+  it("reads an earlier build's stored Light, its old default, as today's default", () => {
+    const settingsPath = makeSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ appIconVariant: "light" }), "utf8");
+    expect(readDesktopSettings(settingsPath, "0.1.48").appIconVariant).toBe("ember");
+
+    fs.writeFileSync(settingsPath, JSON.stringify({ appIconVariant: "dark" }), "utf8");
+    expect(readDesktopSettings(settingsPath, "0.1.48").appIconVariant).toBe("dark");
   });
 });
 

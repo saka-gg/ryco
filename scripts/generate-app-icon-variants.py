@@ -12,16 +12,19 @@ Apple platforms get Liquid Glass: each variant is an Icon Composer document (a s
 R as one glass layer, with Dark and Tinted appearances), so the system lights it like any other
 app icon of macOS 26 and iOS 26.
 
-- macOS: the default (Light) compiles with `actool` into the stable app's asset catalog
+- macOS: the default (Ember) compiles with `actool` into the stable app's asset catalog
   (`assets/prod/ryco-macos-Assets.car`, named `AppIcon`), and its `ictool` rendering becomes the
   `.icns` fallback for older macOS (`assets/prod/ryco-macos.iconset`). The other variants are
   rendered once with `ictool` for the Dock at run time (`apps/desktop/resources/app-icons`): the
   Dock can only be given a picture, so those keep the light appearance.
 - iPhone: the documents themselves (`apps/mobile/assets/app-icons/AppIcon*.icon`) go into the
   Xcode project, the default as the primary icon and the others as alternate icons.
-- Windows and Linux stay flat: each variant recolors the stable artwork pixel by pixel (the mix
-  between the white tile and the black R is kept and repainted), so the R's shape, placement and
-  edge smoothing match the default icon exactly at every size.
+- Windows and Linux stay flat: each variant recolors the Light source artwork
+  (`assets/app-icons/source`) pixel by pixel (the mix between the white tile and the black R is
+  kept and repainted), so the R's shape, placement and edge smoothing are the same in every
+  variant at every size. The default's go to `assets/prod`.
+- The default also becomes the desktop's own `resources/icon.{png,icns,ico}`, the phone app's flat
+  `icon.png`, and the R of the Android adaptive icon (`adaptive-icon.png`).
 """
 
 from __future__ import annotations
@@ -42,10 +45,23 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC_FILE = ROOT / "packages/shared/src/appIcon.ts"
 WEBSITE_CSS = ROOT / "marketing/src/index.css"
 
+# The Light artwork every flat icon is recolored from.
+SOURCE_DIR = ROOT / "assets/app-icons/source"
 FLAT_SOURCES = {
+    "windows": SOURCE_DIR / "light-windows.ico",
+    "linux": SOURCE_DIR / "light-linux-1024.png",
+    "mobile": SOURCE_DIR / "light-mobile-1024.png",
+}
+# The default's flat icons: the stable desktop app's, and the phone app's.
+DEFAULT_FLAT = {
     "windows": ROOT / "assets/prod/ryco-windows.ico",
     "linux": ROOT / "assets/prod/ryco-linux-1024.png",
+    "mobile": ROOT / "apps/mobile/assets/icon.png",
 }
+# The desktop's own icons, used where no build staged the flavor's (development runs).
+DESKTOP_RESOURCES = ROOT / "apps/desktop/resources"
+# The Android adaptive icon's R: one color over transparency.
+ANDROID_FOREGROUND = ROOT / "apps/mobile/assets/adaptive-icon.png"
 DESKTOP_DIR = ROOT / "apps/desktop/resources/app-icons"
 MAC_DOCUMENTS = ROOT / "assets/app-icons/macos"
 MAC_ASSET_CATALOG = ROOT / "assets/prod/ryco-macos-Assets.car"
@@ -297,6 +313,43 @@ def ico_frames(path: Path) -> list[Image.Image]:
     return [ico.ico.getimage(size).convert("RGBA") for size in sorted(ico.info["sizes"])]
 
 
+def write_flat_ico(path: Path, tile: str, mark: str) -> None:
+    frames = [recolor(frame, tile, mark) for frame in ico_frames(FLAT_SOURCES["windows"])]
+    frames[-1].save(
+        path, format="ICO", sizes=[frame.size for frame in frames], append_images=frames[:-1]
+    )
+
+
+def paint_foreground(path: Path, mark: str) -> None:
+    """A one-color layer (its shape is its transparency) repainted in the R's color."""
+    rgba = np.array(Image.open(path).convert("RGBA"))
+    rgba[..., :3] = np.round(hex_rgb(mark)).astype(np.uint8)
+    Image.fromarray(rgba).save(path, optimize=True)
+
+
+def write_default(mac_document: Path, variant: dict) -> None:
+    """The app's own icon on every platform."""
+    compile_asset_catalog(mac_document)
+    icon = mac_icon(mac_document)
+    write_iconset(icon)
+    icon.resize((DESKTOP_PNG_SIZE, DESKTOP_PNG_SIZE), Image.Resampling.LANCZOS).save(
+        DESKTOP_RESOURCES / "icon.png", optimize=True
+    )
+    subprocess.run(
+        ["iconutil", "-c", "icns", str(MAC_ICONSET), "-o", str(DESKTOP_RESOURCES / "icon.icns")],
+        check=True,
+        capture_output=True,
+    )
+    tile, mark = variant["tile"], variant["mark"]
+    write_flat_ico(DEFAULT_FLAT["windows"], tile, mark)
+    shutil.copyfile(DEFAULT_FLAT["windows"], DESKTOP_RESOURCES / "icon.ico")
+    recolor(Image.open(FLAT_SOURCES["linux"]), tile, mark).save(DEFAULT_FLAT["linux"], optimize=True)
+    recolor(Image.open(FLAT_SOURCES["mobile"]), tile, mark).convert("RGB").save(
+        DEFAULT_FLAT["mobile"], optimize=True
+    )
+    paint_foreground(ANDROID_FOREGROUND, mark)
+
+
 def desktop_outputs(asset: str) -> dict[str, Path]:
     return {
         "macos": DESKTOP_DIR / f"{asset}-macos.png",
@@ -320,8 +373,7 @@ def generate(variants: dict[str, dict]) -> None:
         write_document(IOS_DIR / f"{ios_icon_name(variant)}.icon", variant, "iOS")
         asset = variant["asset"]
         if asset is None:
-            compile_asset_catalog(mac_document)
-            write_iconset(mac_icon(mac_document))
+            write_default(mac_document, variant)
             print(f"generated {name} (app icon)")
             continue
         paths = desktop_outputs(asset)
@@ -334,13 +386,7 @@ def generate(variants: dict[str, dict]) -> None:
         linux.resize((DESKTOP_PNG_SIZE, DESKTOP_PNG_SIZE), Image.Resampling.LANCZOS).convert(
             "RGB"
         ).save(paths["linux"], optimize=True)
-        frames = [recolor(frame, tile, mark) for frame in ico_frames(FLAT_SOURCES["windows"])]
-        frames[-1].save(
-            paths["windows"],
-            format="ICO",
-            sizes=[frame.size for frame in frames],
-            append_images=frames[:-1],
-        )
+        write_flat_ico(paths["windows"], tile, mark)
         print(f"generated {name}")
 
 
@@ -423,6 +469,23 @@ def verify_glass(label, body: Image.Image, platform, tile, mark):
     return problems, measured
 
 
+def verify_ico(name, path: Path, tile, mark, rows) -> list[str]:
+    """Every frame of the source `.ico`, recolored exactly."""
+    problems: list[str] = []
+    ico = Image.open(path)
+    sizes = sorted(ico.info["sizes"])
+    for frame in ico_frames(FLAT_SOURCES["windows"]):
+        if frame.size not in sizes:
+            problems.append(f"{name} windows: missing {frame.size[0]}px")
+            continue
+        found, measured = verify_flat(
+            f"{name} windows {frame.size[0]}px", frame, ico.ico.getimage(frame.size), tile, mark
+        )
+        problems.extend(found)
+        rows.append((name, f"windows {frame.size[0]}px", tile, mark, measured or {}))
+    return problems
+
+
 def verify(variants: dict[str, dict]) -> bool:
     problems: list[str] = []
     rows: list[tuple[str, str, str, str, dict]] = []
@@ -462,6 +525,26 @@ def verify(variants: dict[str, dict]) -> bool:
             found, measured = verify_glass(f"{name} .icns", body, "macOS", tile, mark)
             problems.extend(found)
             rows.append((name, "macOS .icns", tile, mark, measured))
+            for where in ("linux", "mobile"):
+                found, measured = verify_flat(
+                    f"{name} {where}",
+                    Image.open(FLAT_SOURCES[where]),
+                    Image.open(DEFAULT_FLAT[where]),
+                    tile,
+                    mark,
+                )
+                problems.extend(found)
+                rows.append((name, where, tile, mark, measured or {}))
+            problems.extend(verify_ico(name, DEFAULT_FLAT["windows"], tile, mark, rows))
+            for resource in ("icon.png", "icon.icns", "icon.ico"):
+                if not (DESKTOP_RESOURCES / resource).exists():
+                    problems.append(f"{name}: desktop resources/{resource} is missing")
+            if (DESKTOP_RESOURCES / "icon.ico").read_bytes() != DEFAULT_FLAT["windows"].read_bytes():
+                problems.append(f"{name}: desktop resources/icon.ico is not the default's")
+            foreground = np.array(Image.open(ANDROID_FOREGROUND).convert("RGBA")).astype(np.int64)
+            painted = foreground[foreground[..., 3] > 0][:, :3]
+            if len(painted) == 0 or int(np.abs(painted - hex_rgb(mark)).max()) > 0:
+                problems.append(f"{name}: {ANDROID_FOREGROUND.relative_to(ROOT)} is not {mark}")
             continue
         paths = desktop_outputs(asset)
         dock = Image.open(paths["macos"]).convert("RGBA")
@@ -484,17 +567,7 @@ def verify(variants: dict[str, dict]) -> bool:
         )
         problems.extend(found)
         rows.append((name, "linux", tile, mark, measured or {}))
-        ico = Image.open(paths["windows"])
-        sizes = sorted(ico.info["sizes"])
-        for frame in ico_frames(FLAT_SOURCES["windows"]):
-            if frame.size not in sizes:
-                problems.append(f"{name} windows: missing {frame.size[0]}px")
-                continue
-            found, measured = verify_flat(
-                f"{name} windows {frame.size[0]}px", frame, ico.ico.getimage(frame.size), tile, mark
-            )
-            problems.extend(found)
-            rows.append((name, f"windows {frame.size[0]}px", tile, mark, measured or {}))
+        problems.extend(verify_ico(name, paths["windows"], tile, mark, rows))
 
     print(f"\n{'variant':<10}{'where':<16}{'tile want/got':<22}{'R want/got':<22}")
     for name, where, tile, mark, measured in rows:
