@@ -657,7 +657,12 @@ export interface TerminalStateStoreState {
   ensureTerminal: (
     threadRef: ScopedThreadRef,
     terminalId: string,
-    options?: { open?: boolean; active?: boolean },
+    options?: {
+      /** Opens the drawer; otherwise it stays as it was. */
+      open?: boolean;
+      /** Focuses the terminal (default true). */
+      active?: boolean;
+    },
   ) => void;
   setActiveTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
   closeTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
@@ -752,6 +757,9 @@ export function createTerminalStateStore(options?: {
               }
               if (options?.open) {
                 nextState = setThreadTerminalOpen(nextState, true);
+              } else if (nextState.terminalOpen !== state.terminalOpen) {
+                // Adding a terminal opens the drawer; only `open: true` may do that here.
+                nextState = { ...nextState, terminalOpen: state.terminalOpen };
               }
               return normalizeThreadTerminalState(nextState);
             }),
