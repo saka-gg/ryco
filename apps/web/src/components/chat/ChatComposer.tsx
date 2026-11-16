@@ -61,6 +61,8 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { webAttachmentCodec } from "../../platform/attachmentCodec";
 import {
+  composerFileUploadEngine,
+  composerFileUploadPersistKey,
   deriveComposerFileUploadSendState,
   releaseUnusedComposerFileUploads,
   useComposerFileUploadRecords,
@@ -791,6 +793,8 @@ export const ChatComposer = memo(
     // File upload state (streamed attachments)
     // ------------------------------------------------------------------
     const fileUploadRecords = useComposerFileUploadRecords();
+    // The image persist effect re-runs when what it writes changes, not on every progress tick.
+    const fileUploadPersistKey = composerFileUploadPersistKey(composerImages, fileUploadRecords);
     // Recomputed on every upload-record change: the engine subscription in
     // useComposerFileUploadRecords re-renders the composer as uploads progress,
     // and passing that snapshot makes it a visible input of the compiled
@@ -1298,7 +1302,7 @@ export const ChatComposer = memo(
               // Streamed file attachments persist token metadata only; the
               // bytes stay out of localStorage by design.
               if (image.type === "file") {
-                const status = fileUploadRecords.get(image.id)?.status;
+                const status = composerFileUploadEngine.get(image.id)?.status;
                 if (status?.kind === "uploaded") {
                   stagedAttachmentById.set(image.id, {
                     type: "file",
@@ -1378,11 +1382,12 @@ export const ChatComposer = memo(
       return () => {
         cancelled = true;
       };
+      // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new upload persist key re-reads the engine's records
     }, [
       composerDraftTarget,
       clearComposerDraftPersistedAttachments,
       composerImages,
-      fileUploadRecords,
+      fileUploadPersistKey,
       getComposerDraft,
       syncComposerDraftPersistedAttachments,
     ]);

@@ -47,6 +47,8 @@ export const composerAttachmentBytes: ComposerAttachmentBytesStore | null =
 
 /** Attachment ids whose bytes are known to be in IndexedDB, so persisting them again is free. */
 const storedAttachmentIds = new Set<string>();
+/** Byte writes still running, so overlapping persists of one image share a single put. */
+const pendingAttachmentPuts = new Map<string, Promise<void>>();
 
 export const composerDraftStorage: ComposerDraftStorage = {
   getItem: (name) => draftKeyValueStorage.getItem(name),
@@ -123,12 +125,23 @@ export async function persistComposerImageBytes(
 ): Promise<PersistedComposerImageAttachment | null> {
   if (composerAttachmentBytes === null) return null;
   if (!storedAttachmentIds.has(image.id)) {
+    let pending = pendingAttachmentPuts.get(image.id);
+    if (pending === undefined) {
+      pending = composerAttachmentBytes
+        .put(image.id, image.file)
+        .then(() => {
+          storedAttachmentIds.add(image.id);
+        })
+        .finally(() => {
+          pendingAttachmentPuts.delete(image.id);
+        });
+      pendingAttachmentPuts.set(image.id, pending);
+    }
     try {
-      await composerAttachmentBytes.put(image.id, image.file);
+      await pending;
     } catch {
       return null;
     }
-    storedAttachmentIds.add(image.id);
   }
   return {
     type: image.type,

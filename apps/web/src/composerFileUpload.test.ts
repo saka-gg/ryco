@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   composerFileUploadEngine,
+  composerFileUploadPersistKey,
+  type ChatFileUploadStatus,
   deriveComposerFileUploadSendBlock,
   deriveComposerFileUploadSendState,
   releaseUnusedComposerFileUploads,
@@ -210,5 +212,40 @@ describe("deriveComposerFileUploadSendState", () => {
         ]),
       }),
     ).toEqual({ kind: "ready" });
+  });
+});
+
+describe("composerFileUploadPersistKey", () => {
+  const fileAttachment = [{ type: "file", id: "f" }];
+  const key = (status: ChatFileUploadStatus | null, attachments = fileAttachment) =>
+    composerFileUploadPersistKey(attachments, new Map(status === null ? [] : [["f", { status }]]));
+  const uploaded = (uploadToken: string, expiresAt: string): ChatFileUploadStatus => ({
+    kind: "uploaded",
+    uploadToken,
+    expiresAt,
+  });
+
+  it("ignores upload progress ticks", () => {
+    expect(key({ kind: "uploading", progress: 0.1 })).toBe(
+      key({ kind: "uploading", progress: 0.7 }),
+    );
+  });
+
+  it("changes when the upload finishes", () => {
+    expect(key({ kind: "uploading", progress: 0.9 })).not.toBe(key(uploaded("t1", "E")));
+  });
+
+  it("changes with the uploaded token or its expiry", () => {
+    expect(key(uploaded("t1", "E"))).not.toBe(key(uploaded("t2", "E")));
+    expect(key(uploaded("t1", "E"))).not.toBe(key(uploaded("t1", "E2")));
+    expect(key(uploaded("t1", "E"))).toBe(key(uploaded("t1", "E")));
+  });
+
+  it("tells a missing record from an existing one", () => {
+    expect(key(null)).not.toBe(key({ kind: "uploading", progress: 0.1 }));
+  });
+
+  it("leaves image attachments out", () => {
+    expect(key(null, [...fileAttachment, { type: "image", id: "img" }])).toBe(key(null));
   });
 });
