@@ -40,7 +40,6 @@ import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
 import { type WsRpcProtocolClient } from "./protocol.ts";
-import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { readClientVisibility, subscribeClientVisibility } from "./clientVisibility.ts";
 import { createTerminalOutputScope } from "./terminalOutputScope.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
@@ -907,7 +906,6 @@ export function createWsRpcClient(
       await Promise.all([transport.dispose(), device?.dispose()]);
     },
     reconnect: async () => {
-      resetWsReconnectBackoff();
       await Promise.all([transport.reconnect(), device?.reconnect()]);
     },
     isHeartbeatFresh: (maxAgeMs) => transport.isHeartbeatFresh(maxAgeMs),
