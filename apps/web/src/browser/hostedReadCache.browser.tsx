@@ -964,4 +964,53 @@ describe("hosted conversation cold start", () => {
     hostedHubController.resetForTests();
     getHostedEnvironmentSessions().clear();
   });
+  it("keeps a tab's live state when another tab only turns remembering on or off", async () => {
+    hostedHubController.resetForTests();
+    await setHostedReadCacheEnabled(false);
+    const threadId = ThreadId.make("thread-live");
+    const workspace = seedCachedWorkspace("d", [
+      { id: threadId, messages: [fixtureMessage("live-1", "Live answer")] },
+    ]);
+    const { environmentId } = workspace;
+    const key = scopedThreadKey({ environmentId, threadId });
+    useComposerDraftStore.getState().setPrompt({ environmentId, threadId }, "Unsent text");
+    await bootstrapAuthenticatedFixture("other-tab-account", workspace.node);
+    await settleHostedReadCacheSavesForTests();
+    expect(readHostedReadCache().accountId).toBeNull();
+    const fromAnotherTab = (storageKey: string, newValue: string) => {
+      localStorage.setItem(storageKey, newValue);
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: storageKey, newValue, storageArea: localStorage }),
+      );
+    };
+    const liveStateKept = () => {
+      expect(useStore.getState().environmentStateById[environmentId]).toBeDefined();
+      expect(useComposerDraftStore.getState().draftsByThreadKey[key]?.prompt).toBe("Unsent text");
+    };
+
+    // Another tab turns "Remember this browser" on: this tab keeps its state and remembers too.
+    fromAnotherTab("ryco:remember-hosted-browser:v1", "true");
+    expect(readHostedReadCache().enabled).toBe(true);
+    liveStateKept();
+    await vi.waitFor(() => expect(readHostedReadCache().accountId).toBe("other-tab-account"));
+    liveStateKept();
+
+    // Turning it off there purges the cache here, not the live state.
+    fromAnotherTab("ryco:remember-hosted-browser:v1", "false");
+    fromAnotherTab(
+      "ryco:hosted-read-reset:v1",
+      JSON.stringify({ id: "reset-preference", clearUi: false }),
+    );
+    expect(readHostedReadCache()).toMatchObject({ enabled: false, accountId: null });
+    liveStateKept();
+
+    // A sign-out there (a reset that clears, or an older tab's bare id) still clears this tab.
+    fromAnotherTab("ryco:hosted-read-reset:v1", "reset-from-an-older-tab");
+    expect(useStore.getState().environmentStateById[environmentId]).toBeUndefined();
+    expect(useComposerDraftStore.getState().draftsByThreadKey[key]).toBeUndefined();
+
+    await setHostedReadCacheEnabled(true);
+    await setHostedReadCacheEnabled(false);
+    hostedHubController.resetForTests();
+  });
 });

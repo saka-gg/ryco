@@ -1025,6 +1025,83 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("brings a linked message into view once and lets a streaming reply update freely", async () => {
+    scrollToIndexSpy.mockReset();
+    const onManualNavigation = vi.fn();
+    const targetId = MessageId.make("linked-target");
+    const entriesWithReply = (text: string) => [
+      {
+        id: "linked-target-entry",
+        kind: "message" as const,
+        createdAt: "2026-09-02T12:00:00.000Z",
+        message: {
+          id: targetId,
+          role: "assistant" as const,
+          text: "The linked answer",
+          createdAt: "2026-09-02T12:00:00.000Z",
+          completedAt: "2026-09-02T12:00:01.000Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "streaming-entry",
+        kind: "message" as const,
+        createdAt: "2026-09-02T12:01:00.000Z",
+        message: {
+          id: MessageId.make("streaming-reply"),
+          role: "assistant" as const,
+          text,
+          createdAt: "2026-09-02T12:01:00.000Z",
+          streaming: true,
+        },
+      },
+    ];
+    const props = { ...buildProps(), onManualNavigation, targetMessageId: targetId };
+    const screen = await render(
+      <MessagesTimeline {...props} isWorking timelineEntries={entriesWithReply("Stream")} />,
+    );
+    const targetRow = () =>
+      document
+        .querySelector<HTMLElement>('[data-message-id="linked-target"]')!
+        .closest("[data-timeline-row-kind]")!;
+
+    try {
+      await vi.waitFor(() => expect(scrollToIndexSpy).toHaveBeenCalledTimes(1));
+      expect(onManualNavigation).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(targetRow().getAttribute("data-message-highlighted")).toBe("true"),
+      );
+
+      // Streamed deltas past the highlight's lifetime: no pull back, and the highlight ends.
+      let text = "Stream";
+      const streamUntil = Date.now() + 2_400;
+      while (Date.now() < streamUntil) {
+        text += " more";
+        await screen.rerender(
+          <MessagesTimeline {...props} isWorking timelineEntries={entriesWithReply(text)} />,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      await expect.element(page.getByText(text)).toBeVisible();
+      expect(scrollToIndexSpy).toHaveBeenCalledTimes(1);
+      expect(onManualNavigation).toHaveBeenCalledTimes(1);
+      expect(targetRow().hasAttribute("data-message-highlighted")).toBe(false);
+
+      // A new request for the same message (search's next press) is revealed again.
+      await screen.rerender(
+        <MessagesTimeline
+          {...props}
+          isWorking
+          targetMessageRequestId={1}
+          timelineEntries={entriesWithReply(text)}
+        />,
+      );
+      await vi.waitFor(() => expect(scrollToIndexSpy).toHaveBeenCalledTimes(2));
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("re-checks the bottom when the measured content size settles", async () => {
     // Estimated row sizes overflow the viewport on the first pass...
     setScrollMetrics({ scrollTop: 0, scrollHeight: 2000, clientHeight: 800 });

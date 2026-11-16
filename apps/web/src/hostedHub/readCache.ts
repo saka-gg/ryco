@@ -190,6 +190,22 @@ function forgetInMemory(clearUi: boolean) {
   if (clearUi) clearWebHostedAccountScopedState();
 }
 
+/** Whether another tab's reset clears account UI: a sign-out does, turning the cache off does not. */
+function resetClearsUi(value: string): boolean {
+  try {
+    const signal: unknown = JSON.parse(value);
+    if (
+      signal !== null &&
+      typeof signal === "object" &&
+      typeof (signal as { clearUi?: unknown }).clearUi === "boolean"
+    )
+      return (signal as { clearUi: boolean }).clearUi;
+  } catch {
+    /* A bare id from an older tab. */
+  }
+  return true;
+}
+
 async function purge(clearUi: boolean) {
   let id = account?.id ?? rememberedAccountId ?? snapshot.accountId;
   if (!id) {
@@ -203,7 +219,8 @@ async function purge(clearUi: boolean) {
   forgetInMemory(clearUi);
   try {
     window.localStorage.removeItem(ACCOUNT_KEY);
-    window.localStorage.setItem(RESET_KEY, crypto.randomUUID());
+    // Other tabs forget the cache too, and clear their account UI only when this tab does.
+    window.localStorage.setItem(RESET_KEY, JSON.stringify({ id: crypto.randomUUID(), clearUi }));
   } catch {
     /* Storage can be disabled independently of IndexedDB. */
   }
@@ -727,10 +744,18 @@ export async function bootstrapWithHostedReadCache(bootstrap: () => Promise<void
       if (document.visibilityState === "hidden") void queue(save);
     });
     window.addEventListener("storage", (event) => {
-      if (event.key !== RESET_KEY && event.key !== PREFERENCE_KEY) return;
-      invalidatedByAnotherTab = true;
-      forgetInMemory(true);
-      publish({ enabled: readPreference() });
+      if (event.key === PREFERENCE_KEY) {
+        // A plain preference change keeps this tab's live state. Turning it off
+        // purges, and that purge's reset reaches this tab on its own.
+        const enabled = readPreference();
+        publish({ enabled });
+        if (enabled) void queue(reconcile);
+        return;
+      }
+      if (event.key !== RESET_KEY || event.newValue === null) return;
+      const clearUi = resetClearsUi(event.newValue);
+      if (clearUi) invalidatedByAnotherTab = true;
+      forgetInMemory(clearUi);
     });
   }
   const network = bootstrap().finally(() => {

@@ -199,11 +199,9 @@ export const ChatComposer = memo(
       routeThreadRef,
       draftId,
       activeThreadId,
-      activeThreadEnvironmentId: _activeThreadEnvironmentId,
       activeThreadSessionProviderInstanceId,
       activeThreadStarted,
       isServerThread,
-      isLocalDraftThread: _isLocalDraftThread,
       activeThreadGoal,
       phase,
       isConnecting,
@@ -228,8 +226,6 @@ export const ChatComposer = memo(
       approvalRedirectedTurnId,
       showPlanFollowUpPrompt,
       activeProposedPlan,
-      planSidebarLabel,
-      planSidebarOpen,
       runtimeMode,
       interactionMode,
       tokenMode,
@@ -270,7 +266,6 @@ export const ChatComposer = memo(
       handleRuntimeModeChange,
       handleInteractionModeChange,
       handleTokenModeChange,
-      togglePlanSidebar,
       focusComposer,
       scheduleComposerFocus,
       setThreadError,
@@ -967,7 +962,6 @@ export const ChatComposer = memo(
       draftText: composerSendState.trimmedPrompt,
       fileReferenceCount: composerFileReferences.length,
     });
-    const showPlanSidebarToggle = false;
     const composerFooterActionLayoutKey = useMemo(
       () =>
         deriveComposerFooterActionLayoutKey({
@@ -3148,19 +3142,15 @@ export const ChatComposer = memo(
                 showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                 askModeSupported={composerProviderControls.askModeSupported}
                 autoModeUnavailableReason={composerProviderControls.autoModeUnavailableReason}
-                showPlanSidebarToggle={showPlanSidebarToggle}
                 interactionMode={interactionMode}
                 runtimeMode={runtimeMode}
                 tokenMode={tokenMode}
-                planSidebarLabel={planSidebarLabel}
-                planSidebarOpen={planSidebarOpen}
                 providerTraitsMenuContent={providerTraitsMenuContent}
                 providerExtraTraitsMenuContent={providerExtraTraitsMenuContent}
                 providerTraitsChips={providerTraitsChips}
                 providerModelTuning={providerModelTuning}
                 providerModelTuningSummary={providerModelTuningSummary}
                 onInteractionModeChange={handleInteractionModeChange}
-                onTogglePlanSidebar={togglePlanSidebar}
                 onRuntimeModeChange={handleRuntimeModeChange}
                 onTokenModeChange={handleTokenModeChange}
                 contextWindowUsage={contextWindowUsage}

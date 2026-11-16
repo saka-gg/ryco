@@ -282,7 +282,8 @@ function YAxisTicks({
   readonly scale: (value: number) => number;
   readonly left: number;
   readonly right: number;
-  readonly format: (value: number) => string;
+  /** Gets every tick too, so one tick's label can match the others' precision. */
+  readonly format: (value: number, ticks: readonly number[]) => string;
   readonly dashed?: boolean;
 }) {
   return (
@@ -298,7 +299,7 @@ function YAxisTicks({
             strokeDasharray={dashed ? "3 5" : undefined}
           />
           <text x={left - 6} y={scale(tick)} dy="0.355em" textAnchor="end" className={AXIS_TEXT}>
-            {format(tick)}
+            {format(tick, ticks)}
           </text>
         </g>
       ))}
@@ -368,7 +369,7 @@ export function SeriesAreaChart({
   readonly series: readonly AreaSeries[];
   readonly className: string;
   readonly yAxisWidth?: number;
-  readonly formatYTick: (value: number) => string;
+  readonly formatYTick: (value: number, ticks: readonly number[]) => string;
   readonly formatValue: (value: number) => string;
   readonly dashedGrid?: boolean;
   readonly label: string;
