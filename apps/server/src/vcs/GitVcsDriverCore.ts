@@ -2981,27 +2981,46 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       );
       if (!declared) return;
       const include = yield* Effect.promise(() => import("./worktreeInclude.ts"));
-      const list = (args: ReadonlyArray<string>) =>
-        executeGit("GitVcsDriver.createWorktree.listIncluded", cwd, ["ls-files", ...args, "-z"], {
-          maxOutputBytes: include.WORKTREE_INCLUDE_MAX_LIST_BYTES,
-        });
-      const [included, ignored] = yield* Effect.all(
-        [
-          list(["--others", "--ignored", `--exclude-from=${includeFile}`]),
-          list(["--others", "--ignored", "--exclude-standard"]),
-        ],
-        { concurrency: 2 },
+      const included = yield* executeGit(
+        "GitVcsDriver.createWorktree.listIncluded",
+        cwd,
+        ["ls-files", "--others", "--ignored", `--exclude-from=${includeFile}`, "-z"],
+        { maxOutputBytes: include.WORKTREE_INCLUDE_MAX_LIST_BYTES },
       );
-      if (included.exitCode !== 0 || ignored.exitCode !== 0) {
+      if (included.exitCode !== 0) {
         return yield* Effect.logWarning(
           "The worktree was created without the files .worktreeinclude names: git could not list them.",
-          { detail: `${included.stderr.trim()} ${ignored.stderr.trim()}`.trim() },
+          { detail: included.stderr.trim() },
         );
+      }
+      // Of the few candidates, keep those Git's standard rules ignore. Asking about the
+      // candidates alone avoids listing every file inside ignored folders (`node_modules`).
+      const candidates = include.parseWorktreeIncludeCandidates(included.stdout);
+      const ignored: string[] = [];
+      for (const chunk of GitVcsDriver.chunkPathsForGitCheckIgnore(candidates)) {
+        const checked = yield* executeGit(
+          "GitVcsDriver.createWorktree.checkIncludedIgnored",
+          cwd,
+          ["check-ignore", "--stdin", "-z"],
+          {
+            stdin: `${chunk.join("\0")}\0`,
+            allowNonZeroExit: true,
+            maxOutputBytes: include.WORKTREE_INCLUDE_MAX_LIST_BYTES,
+          },
+        );
+        // Exit 1: none of this chunk is ignored.
+        if (checked.exitCode !== 0 && checked.exitCode !== 1) {
+          return yield* Effect.logWarning(
+            "The worktree was created without the files .worktreeinclude names: git could not check them.",
+            { detail: checked.stderr.trim() },
+          );
+        }
+        ignored.push(checked.stdout);
       }
       const result = yield* include.copyWorktreeIncludedFiles({
         sourceRoot: cwd,
         worktreePath,
-        paths: include.parseWorktreeIncludePaths(included.stdout, ignored.stdout),
+        paths: include.parseWorktreeIncludePaths(included.stdout, ignored.join("")),
       });
       if (result.failed.length > 0) {
         yield* Effect.logWarning(

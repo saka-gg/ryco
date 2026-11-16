@@ -4,8 +4,9 @@
  * agent's first run there does not fail on a missing `.env`. Ported from Synara's GitCore
  * (`listWorktreeTransferPaths`): the candidates are what
  * `git ls-files --others --ignored --exclude-from=.worktreeinclude` lists in the source
- * checkout. Ryco keeps only those Git also ignores by its standard rules, so a copy never turns
- * into an untracked change that a commit could pick up.
+ * checkout. Ryco keeps only those Git also ignores by its standard rules (`git check-ignore` on
+ * the candidates alone, never a listing of every ignored file such as all of `node_modules`), so
+ * a copy never turns into an untracked change that a commit could pick up.
  *
  * Loaded through `import()` when a worktree is created, never at boot; it imports no boot
  * module (the git runner stays in the driver).
@@ -46,13 +47,18 @@ const toPathList = (stdout: string) =>
         !entry.split(/[\\/]/u).some((segment) => segment === ".." || segment === ""),
     );
 
+/** The NUL-separated paths `.worktreeinclude` matched, inside the checkout, sorted, once each. */
+export function parseWorktreeIncludeCandidates(included: string): string[] {
+  return [...new Set(toPathList(included))].toSorted();
+}
+
 /**
  * The files to copy: the NUL-separated paths `.worktreeinclude` matched (`included`) that Git
  * also ignores by its standard rules (`ignored`), inside the checkout, sorted, once each.
  */
 export function parseWorktreeIncludePaths(included: string, ignored: string): string[] {
   const ignoredPaths = new Set(toPathList(ignored));
-  return [...new Set(toPathList(included))].filter((entry) => ignoredPaths.has(entry)).toSorted();
+  return parseWorktreeIncludeCandidates(included).filter((entry) => ignoredPaths.has(entry));
 }
 
 const errorDetail = (cause: unknown) =>

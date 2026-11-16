@@ -2995,6 +2995,54 @@ setInterval(() => {}, 1000);
       }),
     );
 
+    it.effect("checks only the .worktreeinclude candidates, not every ignored file", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDriver = yield* GitVcsDriver.GitVcsDriver;
+        const outputs: string[] = [];
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            baseDriver
+              .execute(input)
+              .pipe(
+                Effect.tap((result) =>
+                  Effect.sync(() => outputs.push(`${input.args.join(" ")}\n${result.stdout}`)),
+                ),
+              ),
+        });
+
+        yield* writeTextFile(cwd, ".gitignore", "node_modules/\n.env\n");
+        yield* git(cwd, ["add", ".gitignore"]);
+        yield* git(cwd, ["commit", "-m", "ignore dependencies"]);
+        yield* writeTextFile(cwd, ".env", "SECRET=1\n");
+        yield* writeTextFile(cwd, "node_modules/pkg/index.js", "module.exports = 1;\n");
+        yield* writeTextFile(cwd, "node_modules/.cache/keep.json", "{}\n");
+        yield* writeTextFile(cwd, ".worktreeinclude", ".env\nnode_modules/.cache/keep.json\n");
+
+        const worktree = pathService.join(yield* makeTmpDir("git-worktrees-"), "included");
+        yield* driver.createWorktree({
+          cwd,
+          path: worktree,
+          refName: initialBranch,
+          newRefName: "feature/included",
+        });
+
+        const read = (relative: string) =>
+          fileSystem.readFileString(pathService.join(worktree, relative));
+        assert.equal(yield* read(".env"), "SECRET=1\n");
+        // A candidate inside an ignored folder counts as ignored.
+        assert.equal(yield* read("node_modules/.cache/keep.json"), "{}\n");
+        assert.isFalse(
+          yield* fileSystem.exists(pathService.join(worktree, "node_modules/pkg/index.js")),
+        );
+        // No git output enumerated the ignored dependency files.
+        assert.isFalse(outputs.some((output) => output.includes("node_modules/pkg/index.js")));
+      }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
     it.effect("copies dependency install directories when deprecated hydration is requested", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

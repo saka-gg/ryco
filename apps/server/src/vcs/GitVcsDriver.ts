@@ -525,7 +525,8 @@ function splitNullSeparatedPaths(input: string, truncated: boolean): string[] {
   return parts.filter((value) => value.length > 0);
 }
 
-function chunkPathsForGitCheckIgnore(relativePaths: ReadonlyArray<string>): string[][] {
+/** Splits paths into `git check-ignore --stdin -z` inputs of bounded size. */
+export function chunkPathsForGitCheckIgnore(relativePaths: ReadonlyArray<string>): string[][] {
   const chunks: string[][] = [];
   let chunk: string[] = [];
   let chunkBytes = 0;
