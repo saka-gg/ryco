@@ -1,3 +1,8 @@
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { decodeDeviceFrame, encodeDeviceFrame } from "@ryco/shared/deviceFrame";
@@ -343,4 +348,60 @@ describe("device point bounds", () => {
     expect(() => attachedClient().normalize(1019, 400)).toThrow(/402x874 points at 3x/u);
     expect(() => attachedClient().normalize(1019, 400)).toThrow(/not frame pixels/u);
   });
+});
+
+/** A helper that attaches, records the frame socket path it is given, then crashes. */
+const FAKE_HELPER = `
+const readline = require("node:readline");
+const fs = require("node:fs");
+const rl = readline.createInterface({ input: process.stdin });
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+rl.on("line", (line) => {
+  const { id, method, params } = JSON.parse(line);
+  if (method === "attach") {
+    reply(id, { pixelWidth: 1206, pixelHeight: 2622, pointWidth: 402, pointHeight: 874, scale: 3, capabilities: { input: true, accessibility: true } });
+  } else if (method === "stream.start") {
+    fs.writeFileSync(process.env.RYCO_FAKE_HELPER_OUT, params.socketPath);
+    reply(id, {});
+    setTimeout(() => process.exit(3), 20);
+  } else {
+    reply(id, {});
+  }
+});
+`;
+
+describe("process lifecycle", () => {
+  it("marks a helper that could not spawn as gone, once", async () => {
+    const onExit = vi.fn();
+    const client = new HelperClient({ binaryPath: "/nonexistent/ryco-device-helper", onExit });
+    await expect(client.request("ping")).rejects.toBeInstanceOf(DeviceHelperError);
+    await vi.waitFor(() => expect(client.running).toBe(false));
+    expect(onExit).toHaveBeenCalledTimes(1);
+    await expect(client.request("ping")).rejects.toMatchObject({ code: "helper_unavailable" });
+    await client.dispose();
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "closes the frame socket and its directory when the helper exits while streaming",
+    async () => {
+      const outDir = await mkdtemp(path.join(tmpdir(), "ryco-fake-helper-out-"));
+      const outFile = path.join(outDir, "socket-path");
+      const client = new HelperClient({
+        binaryPath: process.execPath,
+        args: ["-e", FAKE_HELPER],
+        env: { ...process.env, RYCO_FAKE_HELPER_OUT: outFile },
+      });
+      try {
+        await client.startStream(DEVICE, () => {});
+        const socketPath = await readFile(outFile, "utf8");
+        await vi.waitFor(() => expect(client.running).toBe(false));
+        await vi.waitFor(() => expect(existsSync(path.dirname(socketPath))).toBe(false));
+        expect(client.attachedDevice).toBeNull();
+      } finally {
+        await client.dispose();
+        await rm(outDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

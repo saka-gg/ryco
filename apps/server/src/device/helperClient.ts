@@ -228,6 +228,7 @@ export class HelperClient {
   private readonly requestTimeoutMs: number;
   private stderrTail = "";
   private exited = false;
+  private exitReported = false;
 
   private attachment: DeviceHelperAttachment | null = null;
   private frameServer: Server | null = null;
@@ -260,6 +261,7 @@ export class HelperClient {
     });
     this.process = child;
     this.exited = false;
+    this.exitReported = false;
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => this.consumeStdout(chunk));
@@ -269,17 +271,16 @@ export class HelperClient {
       // must never grow without bound over a long-lived session.
       this.stderrTail = `${this.stderrTail}${chunk}`.slice(-4_096);
     });
-    child.on("error", (error) =>
-      this.fail(new DeviceHelperError("helper_spawn_failed", error.message)),
-    );
+    child.on("error", (error) => {
+      // `pid` is unset only when the spawn itself failed: no 'exit' follows, so this is the end.
+      if (child.pid === undefined) this.markGone("helper_spawn_failed", error.message);
+      else this.fail(new DeviceHelperError("helper_spawn_failed", error.message));
+    });
     child.on("exit", (code, signal) => {
-      this.exited = true;
-      this.attachment = null;
       const reason = `device helper exited (code=${code ?? "null"}, signal=${signal ?? "null"})${
         this.stderrTail.trim() ? `: ${this.stderrTail.trim()}` : ""
       }`;
-      this.fail(new DeviceHelperError("helper_exited", reason));
-      this.options.onExit?.(reason);
+      this.markGone("helper_exited", reason);
     });
   }
 
@@ -541,6 +542,17 @@ export class HelperClient {
       return;
     }
     request.resolve(record.result ?? null);
+  }
+
+  /** The process is gone (it exited, or never spawned): reject what waits, drop the attachment and the frame socket, and report it once. */
+  private markGone(code: string, reason: string): void {
+    this.exited = true;
+    this.attachment = null;
+    this.fail(new DeviceHelperError(code, reason));
+    void this.closeFrameSocket();
+    if (this.exitReported) return;
+    this.exitReported = true;
+    this.options.onExit?.(reason);
   }
 
   /** Reject everything in flight; used on exit, spawn failure, and disposal. */
