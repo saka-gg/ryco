@@ -5074,7 +5074,7 @@ describe("ComputerManager masked activation", () => {
       expect(engage.args[0]).toMatchObject({
         windowId: "fake-calculator",
         frame: { x: 1_050, y: 120, width: 420, height: 620 },
-        label: "Synara is activating Calculator",
+        label: "Ryco is activating Calculator",
       });
       const shieldId = (engage.args[0] as { shieldId: string }).shieldId;
       expect(shieldId).toMatch(/^shield-[0-9a-f]{8}$/);

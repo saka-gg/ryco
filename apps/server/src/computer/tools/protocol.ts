@@ -172,7 +172,7 @@ export function buildMcpInitializeResult(input: {
     },
     serverInfo: {
       name: "synara",
-      title: "Synara App Control",
+      title: "Ryco App Control",
       version: input.serverVersion,
     },
     instructions: input.instructions,
