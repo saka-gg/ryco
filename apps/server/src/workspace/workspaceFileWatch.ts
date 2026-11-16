@@ -25,11 +25,7 @@ import {
   ProjectWatchFileError,
   type ProjectWatchFileInput,
 } from "@ryco/contracts";
-import {
-  NotRegularFileError,
-  type OpenedRegularFile,
-  openRegularFile,
-} from "@ryco/shared/regularFile";
+import { type OpenedRegularFile, openRegularFile } from "@ryco/shared/regularFile";
 import { Cause, Clock, Duration, Effect, Option, Queue, Schema, Stream } from "effect";
 
 import type { WorkspaceFileSystemShape } from "./Services/WorkspaceFileSystem.ts";
@@ -217,6 +213,10 @@ function isMissingPathError(cause: unknown): boolean {
 /**
  * The state of the file at `realPath`, a real path containment just approved.
  * "retry" when the file changed while it was read: its own event follows.
+ * A file that cannot be opened or read (no permission, an I/O error) has an
+ * unknown version instead: no event follows such an error, so a retry would
+ * re-read it on every evaluation for as long as the watch lasts, and a later
+ * change that makes it readable (a chmod) still raises one.
  */
 async function readWatchedFileState(
   realPath: string,
@@ -248,10 +248,7 @@ async function readWatchedFileState(
     // Never follows a final link and never waits on a FIFO.
     opened = await openRegularFile(realPath, { bigint: true });
   } catch (cause) {
-    if (isMissingPathError(cause)) return DELETED;
-    return cause instanceof NotRegularFileError
-      ? { kind: "file", realPath, version: null, stat }
-      : "retry";
+    return isMissingPathError(cause) ? DELETED : { kind: "file", realPath, version: null, stat };
   }
   try {
     if (!sameFileState(stat, opened.stat)) return "retry";
@@ -262,7 +259,7 @@ async function readWatchedFileState(
     }
     return { kind: "file", realPath, version: fileVersion(bytes), stat: after };
   } catch {
-    return "retry";
+    return { kind: "file", realPath, version: null, stat };
   } finally {
     await opened.handle.close().catch(() => undefined);
   }

@@ -200,6 +200,31 @@ describe("watchWorkspaceFile", () => {
     expect(watching.events.at(-1)).toEqual({ type: "deleted" });
   });
 
+  // An open error no event follows used to be answered with a retry: the watch re-read the
+  // file every evaluation interval for as long as it lasted and never reported a state.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a file it may not read with an unknown version, then its version once readable",
+    async () => {
+      const cwd = await makeDirectory();
+      const filePath = NodePath.join(cwd, "private.txt");
+      await NodeFs.writeFile(filePath, "private\n");
+      await NodeFs.chmod(filePath, 0o000);
+
+      const watching = watch(cwd, "private.txt");
+      await waitFor(() => expect(watching.events).toEqual([{ type: "current", version: null }]));
+
+      await NodeFs.chmod(filePath, 0o644);
+      await NodeFs.writeFile(filePath, "readable\n");
+      await waitFor(() =>
+        expect(watching.events.at(-1)).toEqual({
+          type: "changed",
+          version: version("readable\n"),
+        }),
+      );
+      expect(watching.failure()).toBeNull();
+    },
+  );
+
   it.each([
     ["a parent path", "../outside.ts"],
     ["an absolute path", "/etc/hosts"],
