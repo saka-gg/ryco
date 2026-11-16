@@ -260,6 +260,17 @@ describe("renderer origin record", () => {
     });
   });
 
+  it("leaves no temp file behind when the record cannot be replaced", () => {
+    withUserData((directory) => {
+      // A non-empty directory at the record path makes the rename fail on every OS.
+      const recordPath = Path.join(directory, DESKTOP_RENDERER_ORIGIN_RECORD_FILE);
+      FS.mkdirSync(recordPath);
+      FS.writeFileSync(Path.join(recordPath, "occupied"), "x");
+      expect(() => writeDesktopRendererOriginPort(directory, 7_926)).toThrow();
+      expect(FS.readdirSync(directory).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    });
+  });
+
   it("ignores a damaged or foreign record", () => {
     withUserData((directory) => {
       const recordPath = Path.join(directory, DESKTOP_RENDERER_ORIGIN_RECORD_FILE);
