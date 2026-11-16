@@ -560,6 +560,11 @@ const make = Effect.gen(function* () {
       subagentProviderThreadIdsByThread.set(key, existing);
     });
 
+  const forgetSubagentProviderThreadIds = (threadId: ThreadId) =>
+    Effect.sync(() => {
+      subagentProviderThreadIdsByThread.delete(String(threadId));
+    });
+
   const isKnownSubagentProviderThread = (
     threadId: ThreadId,
     providerThreadId: string | undefined,
@@ -2323,6 +2328,7 @@ const make = Effect.gen(function* () {
       if (event.type === "session.exited") {
         yield* clearTurnStateForSession(thread.id);
         yield* clearSubagentMessageBuffersForThread(thread.id);
+        yield* forgetSubagentProviderThreadIds(thread.id);
         yield* settleCoalescedActivitiesForThread(thread.id, "task-progress");
       }
 
