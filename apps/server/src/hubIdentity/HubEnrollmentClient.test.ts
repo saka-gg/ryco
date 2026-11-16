@@ -143,6 +143,43 @@ describe("Hub enrollment client", () => {
     });
   });
 
+  it("allows clock skew against the Hub's ceremony expiry, and still expires locally", async () => {
+    // The Hub stamps expiresAt on its own clock; this node's clock runs a minute ahead.
+    const hubExpiresAt = now + 600_000;
+    let clock = now;
+    let polls = 0;
+    const transport: HubEnrollmentTransport = {
+      start: async () => ({
+        deviceCode: "ABCD-EFGH",
+        pollingSecret,
+        expiresAt: hubExpiresAt,
+        pollIntervalMs: 5_000,
+      }),
+      poll: async () => {
+        polls += 1;
+        return { status: "pending", retryAfterMs: 5_000 };
+      },
+    };
+    const test = await harness(transport, { now: () => clock });
+    await test.makeClient().start("https://hub.example.com", metadata);
+
+    clock = hubExpiresAt + 60_000;
+    expect(await test.makeClient().poll("https://hub.example.com")).toEqual({
+      status: "pending",
+      retryAfterMs: 5_000,
+    });
+    expect(polls).toBe(1);
+    expect((await test.stateStore.readOrCreate()).pendingEnrollment).not.toBeNull();
+
+    clock = hubExpiresAt + 60 * 60_000;
+    expect(await test.makeClient().poll("https://hub.example.com")).toEqual({
+      status: "unavailable",
+      reason: "expired",
+    });
+    expect(polls).toBe(1);
+    expect((await test.stateStore.readOrCreate()).pendingEnrollment).toBeNull();
+  });
+
   it("recovers when the first approved poll response is lost", async () => {
     let environmentId = "";
     let pollAttempts = 0;

@@ -1172,6 +1172,10 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       // Registrations are Hub-scoped, like the approved-client records: leaving erases them.
       leave: async () => {
         const status = await connector.leave();
+        // Every link the Hub vouched for ends with the identity, as when the Hub revokes this
+        // node: nothing can check them against the Hub any more, so they would otherwise stand
+        // until they expire. Pairings the owner made by hand and the owner's own sessions stay.
+        await revokeLinkedSessions({ allLinks: true }, { resweep: true });
         await runPromise(pushRegistry.clear);
         return status;
       },
