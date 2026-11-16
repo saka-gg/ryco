@@ -54,10 +54,6 @@ export const sourceControlDiscoveryStateAtom = Atom.family((key: string) => {
   );
 });
 
-export const EMPTY_SOURCE_CONTROL_DISCOVERY_ATOM = Atom.make(
-  EMPTY_SOURCE_CONTROL_DISCOVERY_STATE,
-).pipe(Atom.keepAlive, Atom.withLabel("source-control-discovery:null"));
-
 /* --- Helpers -------------------------------------------------------- */
 
 export function getSourceControlDiscoveryTargetKey(

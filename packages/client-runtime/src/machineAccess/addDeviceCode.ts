@@ -131,11 +131,6 @@ export function observeAccess(
 
 const nowMsOf = (access: { readonly nowMs?: number }) => access.nowMs ?? Date.now();
 
-/** Whether the shown code can still pair a device. */
-export function isCodeLive(shown: ShownCode, nowMs: number): boolean {
-  return !shown.removed && nowMs < parseMs(shown.code.expiresAt);
-}
-
 /**
  * The only code "New code" may revoke: the one on screen, unless the node already removed it.
  * Not judged by this device's clock: a clock running ahead would call a code expired that the
