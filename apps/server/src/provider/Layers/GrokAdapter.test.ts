@@ -764,6 +764,48 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }).pipe(Effect.ensuring(Effect.sync(() => installProcessDeviceToolGateway(null)))),
   );
 
+  for (const [ending, reason] of [
+    ["3", "The agent process exited with code 3."],
+    ["SIGKILL", "The agent process was killed."],
+  ] as const) {
+    it.effect(`retires a session whose agent process dies between turns (${ending})`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`grok-dead-agent-${ending}`);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockGrokWrapper({ RYCO_ACP_EXIT_AFTER_PROMPT: ending }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        const exited = yield* Deferred.make<ProviderRuntimeEvent>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.type === "session.exited" ? Deferred.succeed(exited, event) : Effect.void,
+        ).pipe(Effect.forkChild);
+
+        const session = yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make(`test-grokadapter-dead-agent-${ending}`),
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId, input: "hello grok", attachments: [] });
+
+        const event = yield* Deferred.await(exited);
+        assert.equal(event.type, "session.exited");
+        assert.equal(event.runtimeSessionId, session.runtimeSessionId);
+        if (event.type === "session.exited") {
+          assert.deepStrictEqual(event.payload, {
+            reason,
+            recoverable: true,
+            exitKind: "error",
+          });
+        }
+        // The next turn recovers the thread instead of routing to the dead runtime.
+        assert.isFalse(yield* adapter.hasSession(threadId));
+        assert.deepStrictEqual(yield* adapter.listSessions(), []);
+      }),
+    );
+  }
+
   it.effect("retention: keeps no prompts, image attachments or results of completed turns", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-retention-thread");

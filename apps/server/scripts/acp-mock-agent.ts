@@ -38,6 +38,8 @@ const promptResponseText = readEnv("RYCO_ACP_PROMPT_RESPONSE_TEXT");
 const promptExtraContentChunks = Number(readEnv("RYCO_ACP_PROMPT_EXTRA_CONTENT_CHUNKS") ?? "0");
 // Bytes each prompt writes to stderr, waiting until they are flushed, before it answers.
 const promptStderrBytes = Number(readEnv("RYCO_ACP_PROMPT_STDERR_BYTES") ?? "0");
+// After answering the first prompt, the agent exits with this code, or dies of this signal.
+const exitAfterPrompt = readEnv("RYCO_ACP_EXIT_AFTER_PROMPT");
 // Number of assistant history chunks `session/load` replays before it answers.
 const replayHistoryChunks = Number(readEnv("RYCO_ACP_REPLAY_HISTORY_CHUNKS") ?? "0");
 // JSON arrays of commands: advertised while `session/new` runs, and during each prompt.
@@ -833,6 +835,17 @@ const program = Effect.gen(function* () {
               process.stderr.write("x".repeat(promptStderrBytes), () => resolve());
             }),
         );
+      }
+
+      if (exitAfterPrompt !== undefined && promptCount === 1) {
+        // Late enough for the answer to reach the client first.
+        setTimeout(() => {
+          if (exitAfterPrompt.startsWith("SIG")) {
+            process.kill(process.pid, exitAfterPrompt as NodeJS.Signals);
+          } else {
+            process.exit(Number(exitAfterPrompt));
+          }
+        }, 100);
       }
 
       if (emitUsageUpdate) {

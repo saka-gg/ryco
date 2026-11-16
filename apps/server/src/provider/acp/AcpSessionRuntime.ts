@@ -141,7 +141,11 @@ export interface AcpSessionRuntimeOptions {
   readonly resolveMcpServers?: (
     initializeResult: EffectAcpSchema.InitializeResponse,
   ) => Effect.Effect<ReadonlyArray<EffectAcpSchema.McpServer>>;
-  readonly onProcessExit?: () => Effect.Effect<void>;
+  /**
+   * Runs once the agent process ends on its own: with its exit code, or undefined when a signal
+   * killed it (an OOM kill, for one). Not called when the runtime's scope closes first.
+   */
+  readonly onProcessExit?: (exitCode: number | undefined) => Effect.Effect<void>;
   readonly onMcpSetupFailure?: () => Effect.Effect<void>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
@@ -390,8 +394,13 @@ const makeAcpSessionRuntime = (
     yield* child.stderr.pipe(Stream.runDrain, Effect.ignore, Effect.forkScoped);
 
     if (options.onProcessExit) {
+      const onProcessExit = options.onProcessExit;
+      // A signal kill fails `exitCode`; it is an exit all the same.
       yield* child.exitCode.pipe(
-        Effect.flatMap(() => options.onProcessExit!()),
+        Effect.exit,
+        Effect.flatMap((exit) =>
+          onProcessExit(Exit.isSuccess(exit) ? Number(exit.value) : undefined),
+        ),
         Effect.ignore,
         Effect.forkScoped,
       );
