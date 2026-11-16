@@ -40,6 +40,8 @@ export function ColorSwatchPicker({
 }) {
   const [draft, setDraft] = useState(value);
   const timer = useRef<number | null>(null);
+  // The latest custom colour that has not been reported yet.
+  const pendingRef = useRef<string | null>(null);
   const onChangeRef = useRef(onChange);
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -47,9 +49,15 @@ export function ColorSwatchPicker({
   useEffect(() => {
     if (timer.current === null) setDraft(value);
   }, [value]);
+  // Closing the picker mid-drag must not drop the colour the user just picked.
   useEffect(
     () => () => {
-      if (timer.current !== null) window.clearTimeout(timer.current);
+      if (timer.current === null) return;
+      window.clearTimeout(timer.current);
+      timer.current = null;
+      const pending = pendingRef.current;
+      pendingRef.current = null;
+      if (pending !== null) onChangeRef.current(pending);
     },
     [],
   );
@@ -58,14 +66,17 @@ export function ColorSwatchPicker({
       window.clearTimeout(timer.current);
       timer.current = null;
     }
+    pendingRef.current = null;
     setDraft(next);
     onChangeRef.current(next);
   };
   const commitSoon = (next: string) => {
     setDraft(next);
+    pendingRef.current = next;
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
       timer.current = null;
+      pendingRef.current = null;
       onChangeRef.current(next);
     }, commitDelayMs);
   };
