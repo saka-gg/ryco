@@ -3,50 +3,6 @@ import * as Schema from "effect/Schema";
 
 import { IsoDateTime, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-// ── WebSocket surface ────────────────────────────────────────────────
-
-export const COMPUTER_WS_METHODS = {
-  // Thread-independent backend status for surfaces outside any conversation,
-  // such as the settings screen. Everything else on this surface either acts on
-  // the desktop or answers for one thread.
-  getStatus: "computer.getStatus",
-  getAuditHistory: "computer.getAuditHistory",
-  // Installs or compiles whatever this desktop is missing, on the user's
-  // explicit request from the settings panel. Separate from `getStatus`
-  // because reading status must never be the thing that compiles a helper.
-  provision: "computer.provision",
-  listWindows: "computer.listWindows",
-  getState: "computer.getState",
-  getScreenSize: "computer.getScreenSize",
-  launchApp: "computer.launchApp",
-  click: "computer.click",
-  doubleClick: "computer.doubleClick",
-  rightClick: "computer.rightClick",
-  moveCursor: "computer.moveCursor",
-  drag: "computer.drag",
-  scroll: "computer.scroll",
-  typeText: "computer.typeText",
-  pressKey: "computer.pressKey",
-  hotkey: "computer.hotkey",
-  setValue: "computer.setValue",
-  performAction: "computer.performAction",
-  selectText: "computer.selectText",
-  getThreadState: "computer.getThreadState",
-  setControlEnabled: "computer.setControlEnabled",
-  subscribeEvents: "computer.subscribeEvents",
-  // User-driven input from the computer dock pane. Separate from the tool
-  // surface above because it must work with no agent turn in flight, and
-  // because a pane only ever sends resolved desktop coordinates — never the
-  // semantic (label/role) targets the agent tools resolve through AT-SPI.
-  inputClick: "computer.input.click",
-  inputScroll: "computer.input.scroll",
-  inputKey: "computer.input.key",
-} as const;
-
-export const COMPUTER_WS_CHANNELS = {
-  event: "computer.event",
-} as const;
-
 /**
  * Caps a window or computer identifier, which a compositor-side enumerator
  * copies off the desktop and must clamp to this.
@@ -139,64 +95,6 @@ export const COMPUTER_SELECT_TEXT_RANGE_MAX = 4 * 1024 * 1024;
 export const COMPUTER_CONTROL_DENIED_ACTIVITY_KIND = "computer.control-denied";
 
 export const COMPUTER_SETUP_REQUIRED_ACTIVITY_KIND = "computer.setup-required";
-
-/**
- * The backend name reported in `ComputerAvailability.backend` by the KWin
- * plugin backend. Shared because the hotkey below exists only there, so every
- * surface that advertises it has to recognise that one backend by name.
- */
-export const COMPUTER_KWIN_BACKEND = "kwin";
-
-/**
- * The backend name reported by the nested-KWin backend: the same plugin and
- * capability set as `COMPUTER_KWIN_BACKEND`, but loaded into a private
- * compositor this server owns rather than the desktop the human is sitting at.
- * Its own name because the release hotkey above does not apply — the nested
- * compositor never hears the human's keys — and because the settings panel
- * names the two integrations differently.
- */
-export const COMPUTER_NESTED_KWIN_BACKEND = "nested-kwin";
-
-/**
- * The backend name reported by the Hyprland plugin backend: the KWin plugin's
- * twin, driving the human's real desktop on a Hyprland session with the same
- * dedicated agent seat, ghost cursor, and release hotkey.
- */
-export const COMPUTER_HYPRLAND_BACKEND = "hyprland";
-
-/**
- * The backend name reported by the macOS backend: a native helper that drives
- * the human's real Mac desktop the way Codex's computer use does — a
- * "Software Cursor" overlay drawn by the helper, input posted to the target
- * process (never the shared HID stream, so the real pointer never warps), and
- * AX-first perception. Its own name because the Linux release hotkey does not
- * apply — the macOS release affordance is not a compositor global — and because
- * the settings panel names the integration differently. `visibleDesktop` is
- * true: like the KWin plugin, the agent drives the display the human is already
- * looking at, only through a picture of a cursor rather than a second seat.
- */
-export const COMPUTER_MAC_BACKEND = "mac";
-
-/**
- * The human's emergency release: it takes the desktop back from the agent and
- * latches until it is pressed again, which hands control back.
- *
- * Must match `releaseShortcut()` in the KWin plugin
- * (`apps/server/native/computer-use-kwin/synaracomputeruseplugin.cpp`), which
- * registers it with KGlobalAccel, and the same chord the Hyprland plugin
- * (`apps/server/native/computer-use-hyprland/synarahyprlandplugin.cpp`) binds
- * through its keybind hook. It is a compositor shortcut and exists only where
- * a plugin binds it: no surface may advertise it unless
- * `ComputerAvailability.backend` is a backend in
- * `COMPUTER_RELEASE_HOTKEY_BACKENDS`.
- */
-export const COMPUTER_RELEASE_CONTROL_HOTKEY = "Meta+Shift+Esc";
-
-/** The backends whose compositor plugin binds the release hotkey above. */
-export const COMPUTER_RELEASE_HOTKEY_BACKENDS: readonly string[] = [
-  COMPUTER_KWIN_BACKEND,
-  COMPUTER_HYPRLAND_BACKEND,
-];
 
 export const ComputerId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(COMPUTER_ID_MAX_LENGTH),
