@@ -1382,11 +1382,11 @@ export const ChatComposer = memo(
       return () => {
         cancelled = true;
       };
-      // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new upload persist key re-reads the engine's records
     }, [
       composerDraftTarget,
       clearComposerDraftPersistedAttachments,
       composerImages,
+      // oxlint-disable-next-line react/exhaustive-effect-dependencies -- a new upload persist key re-reads the engine's records
       fileUploadPersistKey,
       getComposerDraft,
       syncComposerDraftPersistedAttachments,
