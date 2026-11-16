@@ -4,6 +4,13 @@ import { COMPUTER_CURSOR_HTML } from "./cursor.ts";
 import type { ComputerActivityIndicator } from "./activityIndicator.ts";
 
 const SHORTCUT = "CommandOrControl+Shift+Escape";
+/**
+ * The overlay windows' title. The native computer-use helper leaves windows
+ * with exactly this title out of its window lists
+ * (`COMPUTER_USE_OVERLAY_TITLE` in native/computer-use-helper/src/backend/mod.rs);
+ * overlay.test.ts keeps the two equal.
+ */
+export const COMPUTER_USE_OVERLAY_TITLE = "Ryco Computer Use Overlay";
 /** How long the on-screen badge stays readable after the status changes. */
 const BADGE_MS = 5_000;
 const HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -83,7 +90,7 @@ export class ComputerUseOverlay {
           hasShadow: false,
           skipTaskbar: true,
           resizable: false,
-          title: "Ryco Computer Use Overlay",
+          title: COMPUTER_USE_OVERLAY_TITLE,
           webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
         });
         window.setIgnoreMouseEvents(true);

@@ -1,3 +1,6 @@
+import * as FS from "node:fs";
+import * as Path from "node:path";
+
 import { ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -58,7 +61,7 @@ vi.mock("electron", () => ({
     getDisplayNearestPoint: () => ({ id: 1, bounds: { x: 0, y: 0, width: 1000, height: 800 } }),
   },
 }));
-import { ComputerUseOverlay } from "./overlay.ts";
+import { COMPUTER_USE_OVERLAY_TITLE, ComputerUseOverlay } from "./overlay.ts";
 import { ComputerActivityIndicator } from "./activityIndicator.ts";
 
 const activity = {
@@ -187,5 +190,20 @@ it("still announces when a newer update supersedes one waiting for its window", 
   expect(announced).toHaveLength(1);
   expect(announced[0]).toContain("Ryco is using Device Hub");
   expect(mocks.windows[0]!.showInactive).toHaveBeenCalledOnce();
+  overlay.dispose();
+});
+
+it("titles the overlay with the title the native helper leaves out of window lists", async () => {
+  const helperSource = FS.readFileSync(
+    Path.join(import.meta.dirname, "../../native/computer-use-helper/src/backend/mod.rs"),
+    "utf8",
+  );
+  const helperTitle = /const COMPUTER_USE_OVERLAY_TITLE: &str = "([^"]*)";/u.exec(
+    helperSource,
+  )?.[1];
+  expect(helperTitle).toBe(COMPUTER_USE_OVERLAY_TITLE);
+  const overlay = new ComputerUseOverlay(vi.fn(), vi.fn(), indicator());
+  await overlay.show(activity);
+  expect(mocks.windows[0]!.options.title).toBe(COMPUTER_USE_OVERLAY_TITLE);
   overlay.dispose();
 });

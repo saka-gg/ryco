@@ -395,12 +395,10 @@ mod tests {
 
     #[test]
     fn overlay_exclusion_uses_the_exact_title_marker() {
-        assert!(is_computer_use_overlay_title(
-            "Poracode Computer Use Overlay"
-        ));
+        assert!(is_computer_use_overlay_title("Ryco Computer Use Overlay"));
         assert!(!is_computer_use_overlay_title("Computer Use Overlay"));
         assert!(!is_computer_use_overlay_title(
-            "Poracode Computer Use Overlay - app"
+            "Ryco Computer Use Overlay - app"
         ));
     }
 }

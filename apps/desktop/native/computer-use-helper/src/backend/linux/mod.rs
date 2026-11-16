@@ -769,18 +769,13 @@ mod tests {
         let mut windows = Vec::new();
         merge_discovered_window(
             &mut windows,
-            window(
-                -10,
-                "Poracode Computer Use Overlay",
-                10,
-                WindowSource::Atspi,
-            ),
+            window(-10, "Ryco Computer Use Overlay", 10, WindowSource::Atspi),
         );
         merge_discovered_window(
             &mut windows,
             window(
                 -11,
-                "Poracode Computer Use Overlay - Document",
+                "Ryco Computer Use Overlay - Document",
                 20,
                 WindowSource::Atspi,
             ),
