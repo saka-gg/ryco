@@ -11,6 +11,7 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 
 import * as CodexError from "./errors.ts";
+import type * as CodexRpc from "./rpc.ts";
 import { JsonRpcId, JsonRpcResponseEnvelope } from "./_internal/shared.ts";
 
 export interface CodexAppServerProtocolLogEvent {
@@ -83,6 +84,21 @@ const PROTOCOL_ENQUEUE_DEADLINE_MS = 2_000;
 const PROTOCOL_MAX_FRAME_BYTES = 64 * 1024 * 1024;
 const PROTOCOL_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_ACTIVE_REQUEST_HANDLERS = 32;
+/**
+ * Requests that wait for a person (approvals, questions, elicitations) hold their handler until
+ * the user answers, at no cost meanwhile. They get their own, larger bound so a multi-agent run
+ * that raises more than MAX_ACTIVE_REQUEST_HANDLERS of them at once is not refused as overloaded.
+ */
+const MAX_ACTIVE_USER_INPUT_HANDLERS = 1_024;
+const USER_INPUT_REQUEST_METHODS: ReadonlySet<string> = new Set<CodexRpc.ServerRequestMethod>([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/tool/requestUserInput",
+  "mcpServer/elicitation/request",
+  "item/permissions/requestApproval",
+  "applyPatchApproval",
+  "execCommandApproval",
+]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -142,6 +158,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const protocolScope = yield* Scope.Scope;
     const requestHandlerScope = yield* Scope.fork(protocolScope, "parallel");
     const activeRequestHandlers = yield* Ref.make(0);
+    const activeUserInputHandlers = yield* Ref.make(0);
     const terminationFailure = yield* Ref.make(Option.none<CodexError.CodexAppServerError>());
     const terminationSignal = yield* Deferred.make<void>();
     const maxFrameBytes = options.maxFrameBytes ?? PROTOCOL_MAX_FRAME_BYTES;
@@ -325,10 +342,17 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         const handler = options.onRequest;
         // A handler is the only reader once installed: no copy of the request is queued.
         if (!handler) return yield* offerBounded(incomingRequests, request, "incoming-requests");
-        const accepted = yield* Ref.modify(activeRequestHandlers, (count) =>
-          count < MAX_ACTIVE_REQUEST_HANDLERS ? [true, count + 1] : [false, count],
+        const userInput = USER_INPUT_REQUEST_METHODS.has(request.method);
+        const active = userInput ? activeUserInputHandlers : activeRequestHandlers;
+        const limit = userInput ? MAX_ACTIVE_USER_INPUT_HANDLERS : MAX_ACTIVE_REQUEST_HANDLERS;
+        const accepted = yield* Ref.modify(active, (count) =>
+          count < limit ? [true, count + 1] : [false, count],
         );
         if (!accepted) {
+          yield* Effect.logWarning("Codex app-server request refused: too many handlers active", {
+            method: request.method,
+            limit,
+          });
           return yield* respondError(
             request.id,
             CodexError.CodexAppServerRequestError.overloaded(),
@@ -347,7 +371,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                   ),
             onSuccess: (result) => respond(request.id, result),
           }),
-          Effect.ensuring(Ref.update(activeRequestHandlers, (count) => count - 1)),
+          Effect.ensuring(Ref.update(active, (count) => count - 1)),
           Effect.catch((error) => handleTermination(() => Effect.succeed(error))),
           Effect.forkIn(requestHandlerScope, { startImmediately: true }),
         );
