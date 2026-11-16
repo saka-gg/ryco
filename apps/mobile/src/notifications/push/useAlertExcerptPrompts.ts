@@ -12,7 +12,7 @@ import { readMobileRycoPush } from "./pushKeyCustody";
  * The waiting approval or question a background alert described for this thread
  * (`alertExcerpts.ts`), while the thread's live detail has not loaded. Reads the extension's
  * saved record once per thread opened (one small file lookup; there is a file only when an alert
- * left one); once the live detail is there, a record it found is removed and nothing provisional
+ * left one); once the live detail is there, the thread's record is removed and nothing provisional
  * shows again.
  */
 export function useAlertExcerptPrompts(input: {
@@ -46,12 +46,14 @@ export function useAlertExcerptPrompts(input: {
     };
   }, [environmentId, liveLoaded, threadId]);
 
+  // Live detail shows the thread's own cards: an excerpt saved for it is stale from here on,
+  // whether or not its read answered first (removing a missing record does nothing).
   useEffect(() => {
-    if (!liveLoaded || !found) return;
+    if (!liveLoaded) return;
     void readMobileRycoPush()
       ?.removeAlertExcerpt?.(environmentId, threadId)
       .catch(() => undefined);
-  }, [environmentId, found, liveLoaded, threadId]);
+  }, [environmentId, liveLoaded, threadId]);
 
   return !liveLoaded && found ? read.prompts : NO_ALERT_EXCERPT_PROMPTS;
 }
