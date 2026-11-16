@@ -13,6 +13,7 @@ import {
 
 import { selectEnvironmentState, useStore, type AppState } from "../store";
 import { useUiStateStore } from "../uiStateStore";
+import { subscribePageHidden } from "~/lib/pageHidden";
 import {
   capturePrimaryShellSnapshot,
   dropPrimaryShellCacheConversations,
@@ -95,18 +96,6 @@ function desktopKeepsConversations(
     })
     .catch(() => undefined);
   return () => current?.() ?? answered;
-}
-
-function subscribePageHidden(flush: () => void): () => void {
-  const onVisibilityChange = () => {
-    if (globalThis.document?.visibilityState === "hidden") flush();
-  };
-  globalThis.window?.addEventListener?.("pagehide", flush);
-  globalThis.document?.addEventListener?.("visibilitychange", onVisibilityChange);
-  return () => {
-    globalThis.window?.removeEventListener?.("pagehide", flush);
-    globalThis.document?.removeEventListener?.("visibilitychange", onVisibilityChange);
-  };
 }
 
 /** The thread open in this page when it is one of `environmentId`'s (`/<environmentId>/<threadId>`). */
