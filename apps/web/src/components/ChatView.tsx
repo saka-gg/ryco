@@ -96,7 +96,6 @@ import {
   ProviderInstanceId,
   type ScopedThreadRef,
   type ThreadId,
-  type TurnId,
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
