@@ -345,7 +345,8 @@ export function createSnapshotDb(
   };
   // The connection is shared and its calls are asynchronous: every write runs
   // in one queue, so no write lands inside another machine's transaction
-  // (where its rollback would undo it) and no BEGIN nests in another.
+  // (where its rollback would undo it) and no BEGIN nests in another; the size
+  // read that plans eviction takes the same queue.
   let writeQueue: Promise<unknown> = Promise.resolve();
   const write = <T>(work: (handle: SnapshotDbHandle) => Promise<T>): Promise<T> => {
     const run = writeQueue.then(async () => work(await acquire()));
@@ -546,8 +547,10 @@ export function createSnapshotDb(
           await handle.runAsync(`DELETE FROM ${table} WHERE environment_id = ?`, [environmentId]);
         }
       }),
-    listEnvironmentCacheStats: async () => {
-      const handle = await acquire();
+    // Sizes plan eviction: read them between transactions, never inside another machine's
+    // (whose rows may still roll back).
+    listEnvironmentCacheStats: () =>
+      write(async (handle) => {
       const rows = await handle.getAllAsync<{
         environment_id: string;
         updated_at: number;
@@ -571,7 +574,7 @@ export function createSnapshotDb(
         threadCount: row.thread_count,
         projectCount: row.project_count,
       }));
-    },
+      }),
     removeThreadBodies: (environmentId) =>
       write(async (handle) => {
         if (environmentId === undefined) {

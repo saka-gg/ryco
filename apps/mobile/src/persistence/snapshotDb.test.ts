@@ -283,6 +283,34 @@ describe("snapshotDb", () => {
     expect(await test.db.loadEnvironmentThreads("env-2")).toEqual([]);
   });
 
+  it("reads machine sizes only between transactions, never from rows that then roll back", async () => {
+    const test = await createTestSnapshotDb();
+    await test.db.listEnvironmentCacheStats();
+    let statsDuring: ReturnType<typeof test.db.listEnvironmentCacheStats> | undefined;
+    const slow = {
+      ...test.handle,
+      runAsync: async (source: string, params: Array<string | number | null>) => {
+        if (statsDuring === undefined && source.includes("INSERT INTO environment_threads")) {
+          statsDuring = db.listEnvironmentCacheStats();
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+        return test.handle.runAsync(source, params);
+      },
+    };
+    const db = createSnapshotDb(async () => slow);
+    const failing = db.writeEnvironmentRows(
+      rowsWrite("env-2", {
+        upsertThreads: [
+          threadRow("t1", "{}"),
+          { ...threadRow("t2", "{}"), threadId: null as never },
+        ],
+      }),
+    );
+    await expect(failing).rejects.toThrow();
+    expect(statsDuring).toBeDefined();
+    expect((await statsDuring!).map((stat) => stat.environmentId)).not.toContain("env-2");
+  });
+
   it("reads and removes single-row snapshots of older builds", async () => {
     const test = await createTestSnapshotDb();
     await test.insertLegacyRow({
