@@ -39,7 +39,7 @@ import {
 
 import { useEvent } from "../../../../hooks/useEvent";
 import { cn, isMacPlatform, randomUUID } from "../../../../lib/utils";
-import { selectSidebarWorktreesForProjectRef, useStore } from "../../../../store";
+import { selectSidebarWorktreesForProjectRef, useStore, type AppState } from "../../../../store";
 import { displayProjectPath } from "../../../projects/projectsModel.logic";
 import { Switch } from "../../../ui/switch";
 import { Textarea } from "../../../ui/textarea";
@@ -66,7 +66,12 @@ import {
   withStart,
   type EditorFocusField,
 } from "@ryco/client-runtime/state/automations/editor";
-import { editorHint, editorOpening, type EditorTokenKind } from "./editorModel.logic";
+import {
+  baseRefAfterDeviceSwitch,
+  editorHint,
+  editorOpening,
+  type EditorTokenKind,
+} from "./editorModel.logic";
 import { animateEditorIn } from "./editorMotion";
 import {
   SentenceEditor,
@@ -107,17 +112,24 @@ const WEBHOOK_KIND_OPTION = {
 const KIND_OPTIONS_WITH_WEBHOOK = [...KIND_OPTIONS, WEBHOOK_KIND_OPTION] as const;
 
 /** The branch a new worktree run starts off: the checkout's own branch, else "main". */
+function mainBranchIn(
+  state: AppState,
+  checkout: Pick<ProjectAutomationsCheckout, "environmentId" | "projectId"> | undefined,
+): string {
+  if (!checkout?.environmentId || !checkout.projectId) return "main";
+  const worktrees = selectSidebarWorktreesForProjectRef(
+    state,
+    scopeProjectRef(checkout.environmentId, checkout.projectId),
+  );
+  return worktrees.find((worktree) => worktree.origin === "main")?.branch ?? "main";
+}
+
 function useMainBranch(checkout: ProjectAutomationsCheckout | undefined): string {
   const environmentId = checkout?.environmentId ?? null;
   const projectId = checkout?.projectId ?? null;
-  return useStore((state) => {
-    if (!environmentId || !projectId) return "main";
-    const worktrees = selectSidebarWorktreesForProjectRef(
-      state,
-      scopeProjectRef(environmentId, projectId),
-    );
-    return worktrees.find((worktree) => worktree.origin === "main")?.branch ?? "main";
-  });
+  return useStore((state) =>
+    mainBranchIn(state, environmentId && projectId ? { environmentId, projectId } : undefined),
+  );
 }
 
 function blankFor(
@@ -535,6 +547,14 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
             onDevice={(key) => {
               const next = checkouts.find((candidate) => candidate.key === key);
               if (!next || key === checkoutKey) return;
+              // A new draft's untouched default branch follows the device.
+              const storeState = useStore.getState();
+              const baseRef = baseRefAfterDeviceSwitch({
+                isNew,
+                baseRef: draft.baseRef,
+                fromMainBranch: mainBranchIn(storeState, checkout),
+                toMainBranch: mainBranchIn(storeState, next),
+              });
               setCheckoutKey(key);
               // A chat lives on its own device: a heartbeat there runs in a new chat here.
               setChoosingChat(false);
@@ -543,7 +563,7 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
                 draft.kind === "webhook" && next.snapshot?.webhooks !== true
                   ? "fixed-interval"
                   : draft.kind;
-              update({ ...draft, kind, projectId: next.projectId, target: null }, key);
+              update({ ...draft, kind, baseRef, projectId: next.projectId, target: null }, key);
             }}
             heartbeat={heartbeat}
             withoutProject={withoutProject}
