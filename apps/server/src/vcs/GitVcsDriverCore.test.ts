@@ -999,6 +999,40 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("refuses ref names git would parse as options", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fs = yield* FileSystem.FileSystem;
+        yield* writeTextFile(cwd, "README.md", "# changed\n");
+
+        // Before the guard, `git checkout -f` discarded the change.
+        const switched = yield* driver.switchRef({ cwd, refName: "-f" }).pipe(Effect.flip);
+        assert.instanceOf(switched, GitCommandError);
+        assert.include(switched.detail, "cannot start with");
+        assert.equal(yield* fs.readFileString(`${cwd}/README.md`), "# changed\n");
+
+        const created = yield* driver.createRef({ cwd, refName: "--orphan=x" }).pipe(Effect.flip);
+        assert.instanceOf(created, GitCommandError);
+        const deleted = yield* driver.deleteBranch({ cwd, refName: "-D" }).pipe(Effect.flip);
+        assert.instanceOf(deleted, GitCommandError);
+        const worktree = yield* driver
+          .createWorktree({ cwd, refName: "-f", newRefName: "ok", path: null })
+          .pipe(Effect.flip);
+        assert.instanceOf(worktree, GitCommandError);
+        const range = yield* driver.readRangeContext(cwd, "--all").pipe(Effect.flip);
+        assert.instanceOf(range, GitCommandError);
+        assert.include(range.operation, "GitVcsDriver.readRangeContext.");
+
+        const branches = (yield* git(cwd, ["branch", "--list"]))
+          .split("\n")
+          .map((line) => line.replace("*", "").trim())
+          .filter((line) => line.length > 0);
+        assert.lengthOf(branches, 1);
+      }),
+    );
+
     it.effect("returns the existing refName when rename source and target match", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

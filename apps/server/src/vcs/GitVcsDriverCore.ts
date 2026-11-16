@@ -531,6 +531,25 @@ function createGitCommandError(
   });
 }
 
+/** Git parses an argument that starts with "-" as an option, and no valid ref name starts with one. */
+function rejectOptionLikeRefName(
+  operation: string,
+  cwd: string,
+  args: readonly string[],
+  refName: string,
+): Effect.Effect<void, GitCommandError> {
+  return refName.startsWith("-")
+    ? Effect.fail(
+        createGitCommandError(
+          operation,
+          cwd,
+          args,
+          `Ref name ${JSON.stringify(refName)} is not valid: it cannot start with "-".`,
+        ),
+      )
+    : Effect.void;
+}
+
 function quoteGitCommand(args: ReadonlyArray<string>): string {
   return `git ${args.join(" ")}`;
 }
@@ -2404,6 +2423,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const readRangeContext: GitVcsDriver.GitVcsDriverShape["readRangeContext"] = Effect.fn(
     "readRangeContext",
   )(function* (cwd, baseRef, options) {
+    yield* rejectOptionLikeRefName(
+      "GitVcsDriver.readRangeContext.baseRef",
+      cwd,
+      ["merge-base"],
+      baseRef,
+    );
     const remoteName = options?.remoteName;
     if (
       remoteName &&
@@ -3092,6 +3117,19 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const createWorktree: GitVcsDriver.GitVcsDriverShape["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input) {
+    yield* rejectOptionLikeRefName(
+      "GitVcsDriver.createWorktree",
+      input.cwd,
+      ["worktree", "add"],
+      input.refName,
+    );
+    if (input.newRefName !== undefined)
+      yield* rejectOptionLikeRefName(
+        "GitVcsDriver.createWorktree",
+        input.cwd,
+        ["worktree", "add"],
+        input.newRefName,
+      );
     const settings =
       input.settingsSnapshot ??
       (Option.isSome(settingsService)
@@ -3639,6 +3677,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const switchRef: GitVcsDriver.GitVcsDriverShape["switchRef"] = Effect.fn("switchRef")(
     function* (input) {
+      yield* rejectOptionLikeRefName(
+        "GitVcsDriver.switchRef",
+        input.cwd,
+        ["checkout"],
+        input.refName,
+      );
       const [localInputExists, remoteExists] = yield* Effect.all(
         [
           executeGit(
@@ -3721,6 +3765,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const createRef: GitVcsDriver.GitVcsDriverShape["createRef"] = Effect.fn("createRef")(
     function* (input) {
+      yield* rejectOptionLikeRefName(
+        "GitVcsDriver.createRef",
+        input.cwd,
+        ["branch"],
+        input.refName,
+      );
       yield* executeGit("GitVcsDriver.createRef", input.cwd, ["branch", input.refName], {
         timeoutMs: 10_000,
         fallbackErrorMessage: "git branch create failed",
@@ -3735,6 +3785,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const deleteBranch: GitVcsDriver.GitVcsDriverShape["deleteBranch"] = Effect.fn("deleteBranch")(
     function* (input) {
+      yield* rejectOptionLikeRefName(
+        "GitVcsDriver.deleteBranch",
+        input.cwd,
+        ["branch", "-d"],
+        input.refName,
+      );
       yield* executeGit(
         "GitVcsDriver.deleteBranch",
         input.cwd,
