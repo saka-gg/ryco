@@ -12,6 +12,8 @@
  * Not used in hosted mode: hosted drafts are memory-only by design.
  */
 
+import { createIndexedDbOpener, transactionDone } from "./persistence/indexedDb";
+
 const DATABASE_NAME = "ryco-composer-attachments";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "bytes";
@@ -39,52 +41,20 @@ function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-function transactionDone(transaction: IDBTransaction): Promise<void> {
-  return new Promise((resolve, reject) => {
-    transaction.addEventListener("complete", () => resolve());
-    transaction.addEventListener("abort", () =>
-      reject(transaction.error ?? new Error("IndexedDB transaction aborted.")),
-    );
-    transaction.addEventListener("error", () =>
-      reject(transaction.error ?? new Error("IndexedDB transaction failed.")),
-    );
-  });
-}
-
 export function createComposerAttachmentBytesStore(
   factory: IDBFactory,
   now: () => number = Date.now,
   databaseName: string = DATABASE_NAME,
 ): ComposerAttachmentBytesStore {
-  let database: Promise<IDBDatabase> | null = null;
-  const open = () => {
-    database ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const request = factory.open(databaseName, DATABASE_VERSION);
-      request.addEventListener("upgradeneeded", () => {
-        if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-          request.result.createObjectStore(STORE_NAME);
-        }
-      });
-      request.addEventListener("success", () => {
-        const opened = request.result;
-        // Another tab upgrading the schema: step aside and reopen on next use.
-        opened.addEventListener("versionchange", () => {
-          opened.close();
-          database = null;
-        });
-        resolve(opened);
-      });
-      request.addEventListener("error", () => {
-        database = null;
-        reject(request.error ?? new Error("IndexedDB is unavailable."));
-      });
-      request.addEventListener("blocked", () => {
-        database = null;
-        reject(new Error("IndexedDB open was blocked."));
-      });
-    });
-    return database;
-  };
+  const open = createIndexedDbOpener({
+    factory,
+    name: databaseName,
+    version: DATABASE_VERSION,
+    upgrade: (database) => {
+      if (!database.objectStoreNames.contains(STORE_NAME)) database.createObjectStore(STORE_NAME);
+    },
+    unavailableMessage: "IndexedDB is unavailable.",
+  });
   const run = async <T>(
     mode: IDBTransactionMode,
     body: (store: IDBObjectStore) => Promise<T> | T,

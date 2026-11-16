@@ -1,3 +1,5 @@
+import { createIndexedDbOpener } from "./indexedDb";
+
 /**
  * A single IndexedDB object store of records keyed by one field, opened
  * lazily and reopened after a failed open. Page-owned: the service worker
@@ -21,35 +23,13 @@ export function openIndexedDbRecords<Record>(input: {
   readonly storeName: string;
   readonly keyPath: string;
 }): IndexedDbRecords<Record> {
-  let database: Promise<IDBDatabase> | undefined;
-  const open = () =>
-    (database ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const operation = input.factory.open(input.databaseName, 1);
-      operation.addEventListener(
-        "upgradeneeded",
-        () => operation.result.createObjectStore(input.storeName, { keyPath: input.keyPath }),
-        { once: true },
-      );
-      operation.addEventListener(
-        "success",
-        () => {
-          operation.result.addEventListener("versionchange", () => operation.result.close(), {
-            once: true,
-          });
-          resolve(operation.result);
-        },
-        { once: true },
-      );
-      operation.addEventListener("error", () => reject(operation.error), { once: true });
-      operation.addEventListener(
-        "blocked",
-        () => reject(new Error(`${input.databaseName} is unavailable.`)),
-        { once: true },
-      );
-    }).catch((error: unknown) => {
-      database = undefined;
-      throw error;
-    }));
+  const open = createIndexedDbOpener({
+    factory: input.factory,
+    name: input.databaseName,
+    version: 1,
+    upgrade: (database) => database.createObjectStore(input.storeName, { keyPath: input.keyPath }),
+    unavailableMessage: `${input.databaseName} is unavailable.`,
+  });
   const store = async (mode: IDBTransactionMode) =>
     (await open()).transaction(input.storeName, mode).objectStore(input.storeName);
   return {

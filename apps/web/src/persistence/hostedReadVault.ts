@@ -1,3 +1,5 @@
+import { createIndexedDbOpener, transactionDone } from "./indexedDb";
+
 /** Page-owned encrypted storage. The service worker never sees these records or keys. */
 export interface ReadVaultAccount {
   readonly id: string;
@@ -21,13 +23,6 @@ const request = <T>(operation: IDBRequest<T>): Promise<T> =>
     operation.addEventListener("success", () => resolve(operation.result), { once: true });
     operation.addEventListener("error", () => reject(operation.error), { once: true });
   });
-const complete = (tx: IDBTransaction): Promise<void> =>
-  new Promise((resolve, reject) => {
-    tx.addEventListener("complete", () => resolve(), { once: true });
-    const fail = () => reject(tx.error ?? new Error("Read cache transaction failed."));
-    tx.addEventListener("abort", fail, { once: true });
-    tx.addEventListener("error", fail, { once: true });
-  });
 
 export function createHostedReadVault(
   factory: IDBFactory,
@@ -35,54 +30,19 @@ export function createHostedReadVault(
   origin: string,
   name = "ryco-hosted-read-v1",
 ) {
-  let database: Promise<IDBDatabase> | undefined;
   // A failed or blocked open is forgotten, so the next read or write tries again instead of
   // the vault staying unavailable for the rest of the session.
-  const open = (): Promise<IDBDatabase> => {
-    if (database) return database;
-    let settled = false;
-    const opening = new Promise<IDBDatabase>((resolve, reject) => {
-      const fail = (error: unknown) => {
-        settled = true;
-        reject(error);
-      };
-      const operation = factory.open(name, 1);
-      operation.addEventListener(
-        "upgradeneeded",
-        () => {
-          operation.result.createObjectStore("accounts", { keyPath: "id" });
-          const records = operation.result.createObjectStore("records", { keyPath: "id" });
-          records.createIndex("accountId", "accountId");
-        },
-        { once: true },
-      );
-      operation.addEventListener(
-        "success",
-        () => {
-          // Opened after this attempt was given up as blocked: a retry owns the vault now.
-          if (settled) {
-            operation.result.close();
-            return;
-          }
-          settled = true;
-          operation.result.addEventListener("versionchange", () => operation.result.close(), {
-            once: true,
-          });
-          resolve(operation.result);
-        },
-        { once: true },
-      );
-      operation.addEventListener("error", () => fail(operation.error), { once: true });
-      operation.addEventListener("blocked", () => fail(new Error("Read cache is unavailable.")), {
-        once: true,
-      });
-    });
-    database = opening;
-    opening.catch(() => {
-      if (database === opening) database = undefined;
-    });
-    return opening;
-  };
+  const open = createIndexedDbOpener({
+    factory,
+    name,
+    version: 1,
+    upgrade: (database) => {
+      database.createObjectStore("accounts", { keyPath: "id" });
+      const records = database.createObjectStore("records", { keyPath: "id" });
+      records.createIndex("accountId", "accountId");
+    },
+    unavailableMessage: "Read cache is unavailable.",
+  });
   const idFor = (accountId: string, record: string) => JSON.stringify([accountId, record]);
   const aad = (account: ReadVaultAccount, record: string) =>
     new TextEncoder().encode(JSON.stringify([1, origin, account.id, account.epoch, record]));
@@ -99,7 +59,7 @@ export function createHostedReadVault(
       ]);
       const candidate: ReadVaultAccount = { id, epoch: crypto.randomUUID(), key };
       const tx = db.transaction("accounts", "readwrite");
-      const done = complete(tx);
+      const done = transactionDone(tx, "Read cache transaction failed.");
       const store = tx.objectStore("accounts");
       const winner = (await request(store.get(id))) as ReadVaultAccount | undefined;
       if (!winner) store.put(candidate);
@@ -146,7 +106,7 @@ export function createHostedReadVault(
       );
       const db = await open();
       const tx = db.transaction(["accounts", "records"], "readwrite");
-      const done = complete(tx);
+      const done = transactionDone(tx, "Read cache transaction failed.");
       const current = (await request(tx.objectStore("accounts").get(account.id))) as
         | ReadVaultAccount
         | undefined;
@@ -180,7 +140,7 @@ export function createHostedReadVault(
     async remove(account: ReadVaultAccount, record: string): Promise<void> {
       const db = await open();
       const tx = db.transaction(["accounts", "records"], "readwrite");
-      const done = complete(tx);
+      const done = transactionDone(tx, "Read cache transaction failed.");
       const current = (await request(tx.objectStore("accounts").get(account.id))) as
         | ReadVaultAccount
         | undefined;
@@ -191,7 +151,7 @@ export function createHostedReadVault(
     async purge(accountId: string): Promise<void> {
       const db = await open();
       const tx = db.transaction(["accounts", "records"], "readwrite");
-      const done = complete(tx);
+      const done = transactionDone(tx, "Read cache transaction failed.");
       tx.objectStore("accounts").delete(accountId);
       const store = tx.objectStore("records");
       const ids = await request(store.index("accountId").getAllKeys(accountId));
