@@ -597,6 +597,8 @@ let backendAdvertisedHost: string | null = null;
 let backendReadinessAbortController: AbortController | null = null;
 let backendInitialWindowOpenInFlight: Promise<void> | null = null;
 let developmentInitialWindowOpenInFlight: Promise<void> | null = null;
+// Set by bootstrap once its IPC handlers exist; from then on every dev backend child is waited on (see ensureInitialBackendWindowOpen).
+let developmentReadinessWatchArmed = false;
 let backendReadiness: BackendReadinessTracker | null = null;
 const backendRestartBackoff = createBackendRestartBackoff({
   initialDelayMs: 500,
@@ -1913,9 +1915,13 @@ async function waitForDevelopmentWindowReady(): Promise<BackendReadySource | "ht
   return backendReadySource;
 }
 
+/**
+ * Development: wait for the current backend child and the Vite dev server, run the post-readiness
+ * bookkeeping for that child (ready child, restart backoff, failure policy, Hub identity resume),
+ * then open the app window if none exists. Runs for every child, not only the first.
+ */
 function ensureDevelopmentInitialWindowOpen(): void {
-  const existingWindow = appWindows.pick(mainWindow);
-  if (!isDevelopment || existingWindow !== null || developmentInitialWindowOpenInFlight !== null) {
+  if (!isDevelopment || developmentInitialWindowOpenInFlight !== null) {
     return;
   }
 
@@ -2128,9 +2134,13 @@ function returnEarlyLoadedWindowsToBootPage(child: ChildProcess.ChildProcess): v
 }
 
 function ensureInitialBackendWindowOpen(): void {
-  if (isDevelopment || backendInitialWindowOpenInFlight !== null) {
+  if (isDevelopment) {
+    // Bootstrap starts the first child's wait itself, after its IPC handlers exist. A later
+    // child (a restart) is waited on here so it is recorded as ready like a packaged one.
+    if (developmentReadinessWatchArmed) ensureDevelopmentInitialWindowOpen();
     return;
   }
+  if (backendInitialWindowOpenInFlight !== null) return;
 
   ensurePackagedBootstrapWindowOpen("backend-bootstrap");
   // No live child (it died before this call, or a restart is pending): there
@@ -5706,6 +5716,7 @@ async function bootstrap(): Promise<void> {
   configureDeferredDesktopIntegration();
 
   if (isDevelopment) {
+    developmentReadinessWatchArmed = true;
     ensureDevelopmentInitialWindowOpen();
     return;
   }
