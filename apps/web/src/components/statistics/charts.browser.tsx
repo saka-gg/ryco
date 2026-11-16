@@ -11,6 +11,7 @@ import {
   SeriesAreaChart,
   visibleTickIndexes,
 } from "./charts";
+import { UsageMetricChart } from "./usage/UsageMetricChart";
 
 const dates = Array.from(
   { length: 30 },
@@ -79,6 +80,34 @@ describe("statistics charts", () => {
     });
     await expect.element(page.getByText("2900 tokens")).toBeVisible();
     await expect.element(page.getByText("50 tokens")).toBeVisible();
+  });
+
+  it("labels a small cost axis with distinct, exact dollar ticks", async () => {
+    const screen = await render(
+      <div style={{ width: 600 }}>
+        <UsageMetricChart
+          className="h-[300px]"
+          label="Cost over time"
+          metric="cost"
+          dates={dates.slice(0, 7)}
+          series={[
+            {
+              key: "claude",
+              label: "Claude",
+              color: "#d97757",
+              values: [0.01, 0.04, 0.02, 0, 0.03, 0.01, 0.02],
+            },
+          ]}
+        />
+      </div>,
+    );
+    const chart = page.getByRole("img", { name: "Cost over time" });
+    await expect.element(chart).toBeVisible();
+    const yLabels = [...chart.element().querySelectorAll("text")]
+      .map((text) => text.textContent ?? "")
+      .filter((text) => text.startsWith("$"));
+    expect(yLabels).toEqual(["$0.00", "$0.01", "$0.02", "$0.03", "$0.04"]);
+    await screen.unmount();
   });
 
   it("draws one bar per project and day-grouped code changes", async () => {

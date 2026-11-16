@@ -1,4 +1,4 @@
-import { formatInteger, formatTokens, formatUsd } from "~/lib/statisticsFormat";
+import { formatInteger, formatTokens, formatUsd, formatUsdAxisTick } from "~/lib/statisticsFormat";
 
 import { SeriesAreaChart, type AreaSeries } from "../charts";
 
@@ -26,8 +26,8 @@ export function UsageMetricChart({
       series={series}
       yAxisWidth={44}
       dashedGrid
-      formatYTick={(value) =>
-        metric === "cost" ? `$${value.toFixed(value < 10 ? 1 : 0)}` : formatTokens(value)
+      formatYTick={(value, ticks) =>
+        metric === "cost" ? formatUsdAxisTick(value, ticks) : formatTokens(value)
       }
       formatValue={(value) => (metric === "cost" ? formatUsd(value) : formatInteger(value))}
     />
