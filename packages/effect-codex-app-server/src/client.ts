@@ -25,7 +25,6 @@ export interface CodexAppServerClientOptions {
   readonly onTermination?: CodexProtocol.CodexAppServerPatchedProtocolOptions["onTermination"];
   readonly requestTimeoutMs?: number;
   readonly timeoutOrElse?: CodexProtocol.CodexAppServerPatchedProtocolOptions["timeoutOrElse"];
-  readonly onNotificationError?: (method: string) => Effect.Effect<void>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (
@@ -75,6 +74,18 @@ export interface CodexAppServerClientShape {
       params: unknown,
     ) => Effect.Effect<void, CodexError.CodexAppServerError>,
   ) => Effect.Effect<void>;
+  /**
+   * Receives a notification of a known method whose params the pinned schema rejects (a CLI
+   * newer than the schema: a new enum value, a new error kind), with its params undecoded. Its
+   * typed handlers do not run, so a caller that must not miss a method (`turn/completed`) reads
+   * the raw params here.
+   */
+  readonly handleUndecodableServerNotification: (
+    handler: (
+      method: CodexRpc.ServerNotificationMethod,
+      params: unknown,
+    ) => Effect.Effect<void, CodexError.CodexAppServerError>,
+  ) => Effect.Effect<void>;
 }
 
 export class CodexAppServerClient extends Context.Service<
@@ -102,6 +113,12 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     | undefined;
   let unknownNotificationHandler:
     | ((method: string, params: unknown) => Effect.Effect<void, CodexError.CodexAppServerError>)
+    | undefined;
+  let undecodableNotificationHandler:
+    | ((
+        method: CodexRpc.ServerNotificationMethod,
+        params: unknown,
+      ) => Effect.Effect<void, CodexError.CodexAppServerError>)
     | undefined;
 
   const getServerRequestParamSchema = <M extends CodexRpc.ServerRequestMethod>(
@@ -154,26 +171,34 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
           ]
         : undefined;
     const handlers = notificationHandlers.get(notification.method) ?? [];
+    const logUnprocessed = Effect.catch(() =>
+      Effect.logWarning("Codex notification could not be processed", {
+        method: notification.method,
+      }),
+    );
 
     if (schema) {
-      return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
-        Effect.flatMap((decoded) =>
-          Effect.forEach(
-            handlers,
-            (handler) =>
-              handler(
-                preserveAgentMessageExtensions(notification.method, notification.params, decoded),
+      const method = notification.method as CodexRpc.ServerNotificationMethod;
+      return decodeNotificationPayload(method, schema, notification.params).pipe(
+        Effect.matchEffect({
+          onFailure: () =>
+            Effect.logWarning("Codex notification does not match the pinned schema", {
+              method,
+            }).pipe(
+              Effect.andThen(
+                undecodableNotificationHandler?.(method, notification.params).pipe(
+                  logUnprocessed,
+                ) ?? Effect.void,
               ),
-            { discard: true },
-          ),
-        ),
-        Effect.catch(() =>
-          Effect.logWarning("Codex notification could not be processed", {
-            method: notification.method,
-          }).pipe(
-            Effect.andThen(options.onNotificationError?.(notification.method) ?? Effect.void),
-          ),
-        ),
+            ),
+          onSuccess: (decoded) =>
+            Effect.forEach(
+              handlers,
+              (handler) =>
+                handler(preserveAgentMessageExtensions(method, notification.params, decoded)),
+              { discard: true },
+            ).pipe(logUnprocessed),
+        }),
       );
     }
 
@@ -271,6 +296,10 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     handleUnknownServerNotification: (handler) =>
       Effect.sync(() => {
         unknownNotificationHandler = handler;
+      }),
+    handleUndecodableServerNotification: (handler) =>
+      Effect.sync(() => {
+        undecodableNotificationHandler = handler;
       }),
   });
 });
