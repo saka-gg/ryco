@@ -349,6 +349,64 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("reports non-ASCII and special file names verbatim, renames included", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "old name.txt", "one\ntwo\nthree\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "Add old name"]);
+        yield* git(cwd, ["checkout", "-b", "feature/names"]);
+        yield* writeTextFile(cwd, "committed ü.txt", "committed\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "Add committed file"]);
+        yield* git(cwd, ["mv", "old name.txt", "renamed é.txt"]);
+        yield* writeTextFile(cwd, "für.md", "neu\n");
+        yield* writeTextFile(cwd, 'tab\there "quoted".txt', "x\n");
+        yield* git(cwd, ["add", "für.md"]);
+        yield* writeTextFile(cwd, "README.md", "# test\nchanged\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const status = yield* driver.statusDetailsLocal(cwd);
+
+        assert.notEqual(status.branch, initialBranch);
+        assert.deepStrictEqual(status.workingTree.files, [
+          { path: "für.md", insertions: 1, deletions: 0 },
+          { path: "README.md", insertions: 1, deletions: 0 },
+          { path: "renamed é.txt", insertions: 0, deletions: 0 },
+          { path: 'tab\there "quoted".txt', insertions: 0, deletions: 0 },
+        ]);
+        assert.deepStrictEqual(status.committed?.files, [
+          { path: "committed ü.txt", insertions: 1, deletions: 0 },
+        ]);
+
+        // The reported paths stage exactly the files they name.
+        const context = yield* driver.prepareCommitContext(cwd, ["für.md", "renamed é.txt"]);
+        assert.isNotNull(context);
+        const staged = yield* git(cwd, ["diff", "--cached", "--name-only", "-z"]);
+        assert.deepStrictEqual(staged.split("\0").filter(Boolean).toSorted(), [
+          "für.md",
+          "renamed é.txt",
+        ]);
+      }),
+    );
+
+    it.effect("stages selected file names literally, not as pathspec patterns", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "[ab].txt", "selected\n");
+        yield* writeTextFile(cwd, "a.txt", "not selected\n");
+        yield* writeTextFile(cwd, "b.txt", "not selected\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.prepareCommitContext(cwd, ["[ab].txt"]);
+
+        const staged = yield* git(cwd, ["diff", "--cached", "--name-only", "-z"]);
+        assert.deepStrictEqual(staged.split("\0").filter(Boolean), ["[ab].txt"]);
+      }),
+    );
+
     it.effect("uses non-interactive env when refreshing upstream status", () =>
       Effect.gen(function* () {
         const calls: GitVcsDriver.ExecuteGitInput[] = [];
@@ -434,7 +492,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           calls
             .filter((call) => call.args.includes("diff") && call.args.includes("--numstat"))
             .map((call) => call.args),
-          [["-c", "diff.autoRefreshIndex=false", "diff", "HEAD", "--numstat"]],
+          [["-c", "diff.autoRefreshIndex=false", "diff", "HEAD", "--numstat", "-z"]],
         );
       }).pipe(Effect.provide(OverrideTestLayer)),
     );
@@ -457,10 +515,10 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
             Effect.sync(() => {
               calls.push(input);
               const args = input.args.join(" ");
-              if (args === "status --porcelain=2 --branch")
-                return ok("# branch.oid abc\n# branch.head feature/x\n");
-              if (args === "-c diff.autoRefreshIndex=false diff HEAD --numstat")
-                return ok("1\t0\tsrc/a.ts\n");
+              if (args === "status --porcelain=2 --branch -z")
+                return ok("# branch.oid abc\0# branch.head feature/x\0");
+              if (args === "-c diff.autoRefreshIndex=false diff HEAD --numstat -z")
+                return ok("1\t0\tsrc/a.ts\0");
               if (args === "symbolic-ref refs/remotes/origin/HEAD")
                 return ok("refs/remotes/origin/main\n");
               if (args === "config -z --list")
@@ -468,7 +526,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
               if (input.args[0] === "for-each-ref") return ok("refs/remotes/origin/main\n");
               if (input.args[0] === "rev-parse") return ok(`${base}\n${head}\n`);
               if (input.args[0] === "rev-list") return ok("3\n");
-              if (args === `diff --numstat ${base}...${head}`) return ok("4\t1\tsrc/b.ts\n");
+              if (args === `diff --numstat -z ${base}...${head}`) return ok("4\t1\tsrc/b.ts\0");
               throw new Error(`Unexpected git command: ${args}`);
             }),
         });
@@ -631,19 +689,30 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           executeOverride: (input) =>
             Effect.sync(() => {
               const args = input.args.join(" ");
-              if (args === "status --porcelain=2 --branch")
+              if (args === "status --porcelain=2 --branch -z")
                 return ok(
                   [
                     "# branch.oid abc",
                     "# branch.head main",
                     `1 .M N... 100644 100644 100644 ${hash} ${hash} src/my file.ts`,
-                    `2 R. N... 100644 100644 100644 ${hash} ${hash} R100 src/b.ts\tsrc/a.ts`,
+                    // A rename's original path is its own record.
+                    `2 R. N... 100644 100644 100644 ${hash} ${hash} R100 src/b.ts`,
+                    "src/a.ts",
                     "",
-                  ].join("\n"),
+                  ].join("\0"),
                 );
-              if (args === "-c diff.autoRefreshIndex=false diff HEAD --numstat")
+              if (args === "-c diff.autoRefreshIndex=false diff HEAD --numstat -z")
                 // An older Git lists a stat-only change (`touched.ts`) as an unchanged row.
-                return ok("3\t1\tsrc/my file.ts\n0\t0\tsrc/{a.ts => b.ts}\n0\t0\tsrc/touched.ts\n");
+                return ok(
+                  [
+                    "3\t1\tsrc/my file.ts",
+                    "0\t0\t",
+                    "src/a.ts",
+                    "src/b.ts",
+                    "0\t0\tsrc/touched.ts",
+                    "",
+                  ].join("\0"),
+                );
               if (args === "symbolic-ref refs/remotes/origin/HEAD")
                 return ok("refs/remotes/origin/main\n");
               return ok();
