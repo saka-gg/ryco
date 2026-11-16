@@ -44,7 +44,8 @@ import {
   PROJECT_AVATAR_ID_PATTERN,
   ProjectAvatarStore,
 } from "./project/Services/ProjectAvatarStore.ts";
-import type { ProjectId } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS, type ProjectId } from "@ryco/contracts";
+import { rpcAccessFor } from "@ryco/shared/rpcAccessPolicy";
 import {
   hasPrecompressibleAssetExtension,
   PRECOMPRESSED_ASSET_ENCODINGS,
@@ -52,6 +53,8 @@ import {
 } from "@ryco/shared/precompressedAssets";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
+import { authorizeWsRpc } from "./auth/wsAuthorization.ts";
+import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import { isCanonicalPathInside } from "./pathContainment.ts";
 import { isLoopbackHostname } from "@ryco/shared/loopbackHost";
@@ -916,18 +919,40 @@ const AvatarFormSchema = Schema.Struct({
   avatar: Multipart.SingleFileSchema,
 });
 
+/**
+ * The parser's own limits for an avatar upload, enforced while the body streams in: a chunked
+ * request carries no `content-length` to refuse up front. The body may add a little multipart
+ * framing to the file.
+ */
+const PROJECT_AVATAR_UPLOAD_LIMITS = Multipart.limitsServices({
+  maxParts: 4,
+  maxFileSize: PROJECT_AVATAR_MAX_BYTES,
+  maxTotalSize: PROJECT_AVATAR_MAX_BYTES + 64 * 1024,
+});
+
 export const projectAvatarUploadRouteLayer = HttpRouter.add(
   "POST",
   "/api/project-avatar/upload",
   Effect.gen(function* () {
-    yield* requireAuthenticatedRequest;
     const request = yield* HttpServerRequest.HttpServerRequest;
+    const session = yield* (yield* ServerAuth).authenticateHttpRequest(request);
+    // The upload is the first half of `project.avatar.set`, so it needs that command's role: a
+    // session refused the command must not replace the image every client is served.
+    yield* authorizeWsRpc(
+      session,
+      rpcAccessFor(ORCHESTRATION_WS_METHODS.dispatchCommand),
+      ORCHESTRATION_WS_METHODS.dispatchCommand,
+    );
     const url = HttpServerRequest.toURL(request);
     if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
     const projectId = url.value.searchParams.get("projectId");
     if (!projectId || !PROJECT_AVATAR_ID_PATTERN.test(projectId)) {
       return HttpServerResponse.text("Invalid projectId", { status: 400 });
     }
+    const project = yield* (yield* ProjectionSnapshotQuery).getProjectShellById(
+      projectId as ProjectId,
+    );
+    if (Option.isNone(project)) return HttpServerResponse.text("Not Found", { status: 404 });
 
     const contentLength = Number(request.headers["content-length"] ?? "0");
     if (contentLength > PROJECT_AVATAR_MAX_BYTES) {
@@ -935,11 +960,24 @@ export const projectAvatarUploadRouteLayer = HttpRouter.add(
     }
 
     const form = yield* HttpServerRequest.schemaBodyForm(AvatarFormSchema).pipe(
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.provideContext(PROJECT_AVATAR_UPLOAD_LIMITS),
+      Effect.map((value) => ({ ok: true as const, value })),
+      Effect.catch((error) =>
+        Effect.succeed({
+          ok: false as const,
+          tooLarge:
+            error._tag === "MultipartError" &&
+            (error.reason._tag === "FileTooLarge" || error.reason._tag === "BodyTooLarge"),
+        }),
+      ),
     );
-    if (!form) return HttpServerResponse.text("Bad Request", { status: 400 });
+    if (!form.ok) {
+      return form.tooLarge
+        ? HttpServerResponse.text("Payload too large", { status: 413 })
+        : HttpServerResponse.text("Bad Request", { status: 400 });
+    }
 
-    const file = form.avatar;
+    const file = form.value.avatar;
     const fileSystem = yield* FileSystem.FileSystem;
     const fileBytes = yield* fileSystem.readFile(file.path);
     if (fileBytes.length > PROJECT_AVATAR_MAX_BYTES) {
@@ -958,7 +996,12 @@ export const projectAvatarUploadRouteLayer = HttpRouter.add(
       return HttpServerResponse.text(writeResult.failure.message, { status: 400 });
     }
     return HttpServerResponse.jsonUnsafe(writeResult.success);
-  }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("AuthRpcError", (error) =>
+      Effect.succeed(HttpServerResponse.jsonUnsafe({ error: error.message }, { status: 403 })),
+    ),
+  ),
 );
 
 export const projectAvatarServeRouteLayer = HttpRouter.add(
