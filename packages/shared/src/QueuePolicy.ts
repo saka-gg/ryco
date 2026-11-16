@@ -1,3 +1,6 @@
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+
 export interface QueuePolicyMetricsSnapshot {
   readonly component: string;
   readonly strategy: QueuePolicy["strategy"];
@@ -90,3 +93,13 @@ export function boundedRecoverableQueuePolicy(input: {
     recovery: input.recovery,
   };
 }
+
+/** Logs an item a queue worker failed to process; the worker carries on with the next one. */
+export const logQueueItemFailure = (
+  component: string,
+  cause: Cause.Cause<unknown>,
+): Effect.Effect<void> =>
+  Effect.logWarning(`${component} failed to process an item`, {
+    interruptOnly: Cause.hasInterruptsOnly(cause),
+    cause: Cause.pretty(cause),
+  });
