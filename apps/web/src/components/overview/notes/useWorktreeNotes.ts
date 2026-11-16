@@ -139,6 +139,14 @@ interface Draft {
 }
 
 type Drafts = ReadonlyMap<string, Draft>;
+
+/** A save awaiting its reply. */
+interface InFlightSave {
+  /** The text it sent. */
+  readonly body: string;
+  /** The document's revision once the node confirms it; null when it did not. */
+  readonly revision: Promise<number | null>;
+}
 const NO_DRAFTS: Drafts = new Map();
 const NO_KEYS: ReadonlySet<string> = new Set();
 
@@ -186,7 +194,7 @@ export function useWorktreeNotes(target: WorktreeNotesTarget | null): WorktreeNo
     epoch: number;
   } | null>(null);
   const epochRef = useRef(0);
-  const inFlight = useRef(new Set<string>());
+  const inFlight = useRef(new Map<string, InFlightSave>());
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const conflicts = useRef(new Map<string, number>());
 
@@ -255,11 +263,18 @@ export function useWorktreeNotes(target: WorktreeNotesTarget | null): WorktreeNo
       putDraft(draftKey, { ...latest, baseRevision: revision });
       return true;
     };
-    inFlight.current.add(draftKey);
     setSaving((keys) => withKey(keys, draftKey, true));
     let resend: "now" | "later" | null = null;
     try {
-      const snapshot = await current.api.command(command);
+      const reply = current.api.command(command);
+      inFlight.current.set(draftKey, {
+        body: command.body,
+        revision: reply.then(
+          (saved) => selectNotesDocument(saved, draft.scope, draft.worktreeId)?.revision ?? 0,
+          () => null,
+        ),
+      });
+      const snapshot = await reply;
       if (current.epoch !== epochRef.current) return;
       const saved = selectNotesDocument(snapshot, draft.scope, draft.worktreeId);
       const revision = saved?.revision ?? 0;
@@ -371,22 +386,28 @@ export function useWorktreeNotes(target: WorktreeNotesTarget | null): WorktreeNo
     const failedSaves = conflicts.current;
     return () => {
       // Leaving the project: unsaved text goes out once, unconfirmed (the next read shows it).
+      // Text typed during a save follows that save, on the revision it lands as.
       const leaving = binding.current;
       for (const [draftKey, draft] of draftsRef.current) {
         const timer = draftTimers.get(draftKey);
         if (timer !== undefined) clearTimeout(timer);
         draftTimers.delete(draftKey);
-        if (leaving && draft.projectKey === leaving.sync.key && !flying.has(draftKey))
-          void leaving.api
+        if (!leaving || draft.projectKey !== leaving.sync.key) continue;
+        const send = (expectedRevision: number) =>
+          leaving.api
             .command({
               kind: "save",
               projectId: draft.projectId,
               scope: draft.scope,
               worktreeId: draft.worktreeId,
               body: draft.body,
-              expectedRevision: draft.baseRevision,
+              expectedRevision,
             })
             .catch(() => undefined);
+        const flight = flying.get(draftKey);
+        if (!flight) void send(draft.baseRevision);
+        else if (flight.body !== draft.body)
+          void flight.revision.then((revision) => send(revision ?? draft.baseRevision));
       }
       failedSaves.clear();
       setDrafts(() => NO_DRAFTS);
