@@ -35,6 +35,7 @@ import {
   type VcsRef,
 } from "@ryco/contracts";
 import { dedupeRemoteBranchesWithLocalMatches } from "@ryco/shared/git";
+import { makeCheckoutGenerations } from "../git/checkoutGenerations.ts";
 import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
@@ -1420,7 +1421,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   // Successful fetches per (common dir, remote), so a caller can tell whether
   // remote-tracking refs may have moved while it waited.
-  const statusRemoteFetchGenerations = new Map<string, number>();
+  const statusRemoteFetchGenerations = makeCheckoutGenerations(
+    STATUS_UPSTREAM_REFRESH_CACHE_CAPACITY,
+  );
   const statusRemoteFetchGenerationKey = (cacheKey: StatusRemoteRefreshCacheKey) =>
     `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}`;
 
@@ -1433,7 +1436,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const fetched = yield* fetchRemoteForStatus(cacheKey.gitCommonDir, cacheKey.remoteName);
     if (fetched) {
       const key = statusRemoteFetchGenerationKey(cacheKey);
-      statusRemoteFetchGenerations.set(key, (statusRemoteFetchGenerations.get(key) ?? 0) + 1);
+      statusRemoteFetchGenerations.bump(key);
     }
     return fetched;
   });
@@ -1459,9 +1462,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       remoteName: upstream.remoteName,
     });
     const generationKey = statusRemoteFetchGenerationKey(cacheKey);
-    const before = statusRemoteFetchGenerations.get(generationKey) ?? 0;
+    const before = statusRemoteFetchGenerations.get(generationKey);
     yield* Cache.get(statusRemoteRefreshCache, cacheKey);
-    return (statusRemoteFetchGenerations.get(generationKey) ?? 0) !== before;
+    return statusRemoteFetchGenerations.get(generationKey) !== before;
   });
 
   const refreshStatusUpstream: GitVcsDriver.GitVcsDriverShape["refreshStatusUpstream"] = (cwd) =>
