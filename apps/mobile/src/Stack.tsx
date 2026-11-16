@@ -109,7 +109,7 @@ import {
 import { goBackOrHome } from "./navigation/goBackOrHome";
 import { MainTabs } from "./navigation/tabs/MainTabs";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "./native/native-glass";
-import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
+import { nativeHeaderScrollEdgeEffects } from "./native/scrollEdgeEffects";
 import { useThreadOutboxDrain } from "./state/use-thread-outbox-drain";
 import { useNewTaskOutboxDrain } from "./state/use-new-task-outbox-drain";
 
