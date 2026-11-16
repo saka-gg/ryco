@@ -281,6 +281,7 @@ export const makeStartSession =
       let sessionConfig = buildConfig();
 
       const effectiveResumeCursor = input.resumePolicy === "fresh" ? undefined : input.resumeCursor;
+      // This start revokes only the Agent Control it installed (below); a live session already registered on the thread keeps its own.
       // Until the session is registered nothing else can stop this client, and createSession
       // may already have started its CLI: release it when the start fails or is interrupted
       // (a start deadline, a Stop, server shutdown).
@@ -426,15 +427,7 @@ export const makeStartSession =
         createdAt,
         updatedAt: createdAt,
       } satisfies ProviderSession;
-    }).pipe(
-      Effect.onError(() =>
-        Effect.sync(() => deps.sessions.get(input.threadId)?.agentControl).pipe(
-          Effect.flatMap((connection) =>
-            connection ? connection.revoke("runtime-teardown") : Effect.void,
-          ),
-        ),
-      ),
-    );
+    });
 
 export const makeSendTurn =
   (deps: SessionOpsDeps): CopilotAdapterShape["sendTurn"] =>

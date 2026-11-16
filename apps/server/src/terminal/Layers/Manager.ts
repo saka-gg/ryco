@@ -622,6 +622,19 @@ function enforcePendingProcessEventLimits(
   trimPendingOutputBytesToLimit(session, limits.maxPendingProcessOutputBytes);
 }
 
+/**
+ * Resizes a PTY that may have exited since its status was read: the exit is applied later,
+ * under the thread lock, and a gone PTY throws from resize. False when it refused.
+ */
+function resizePty(process: PtyProcess, cols: number, rows: number): boolean {
+  try {
+    process.resize(cols, rows);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isRetryableShellSpawnError(error: PtySpawnError): boolean {
   const queue: unknown[] = [error];
   const seen = new Set<unknown>();
@@ -2833,11 +2846,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           if (!relaunch && liveSession.process) {
             // Reattach: nothing starts, so admission only checks the path.
             yield* withStorageAdmission(input.cwd, Effect.void);
-            if (liveSession.cols !== targetCols || liveSession.rows !== targetRows) {
+            if (
+              (liveSession.cols !== targetCols || liveSession.rows !== targetRows) &&
+              resizePty(liveSession.process, targetCols, targetRows)
+            ) {
               liveSession.cols = targetCols;
               liveSession.rows = targetRows;
               liveSession.updatedAt = new Date().toISOString();
-              liveSession.process.resize(targetCols, targetRows);
             }
             return openSnapshot(liveSession, input.sinceCursor);
           }
@@ -3024,10 +3039,15 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           terminalId,
         });
       }
+      if (!resizePty(process, input.cols, input.rows)) {
+        return yield* new TerminalNotRunningError({
+          threadId: input.threadId,
+          terminalId,
+        });
+      }
       session.cols = input.cols;
       session.rows = input.rows;
       session.updatedAt = new Date().toISOString();
-      yield* Effect.sync(() => process.resize(input.cols, input.rows));
     });
 
     const clear: TerminalManagerShape["clear"] = (input) =>

@@ -113,6 +113,7 @@ const withRoutes = <A, E, R>(
   nativeNodeClaim: NodeNativeClaimService,
   run: (origin: string) => Effect.Effect<A, E, R>,
   onResume?: () => void,
+  hubConnectorOverrides?: Partial<Record<string, unknown>>,
 ) =>
   Effect.gen(function* () {
     const baseDir = mkdtempSync(join(tmpdir(), "ryco-native-node-claim-http-"));
@@ -131,6 +132,7 @@ const withRoutes = <A, E, R>(
         reconnectJitterRatio: 0.2,
         allowFileSecretStore: false,
         configurationIssue: undefined,
+        ...hubConnectorOverrides,
       },
       ...derivedPaths,
     } as unknown as ServerConfigShape;
@@ -305,4 +307,55 @@ it.layer(NodeServices.layer)("Desktop automatic native node-claim HTTP control",
       },
     );
   });
+  const throwing = () =>
+    stubNativeNodeClaimService({
+      prepare: async () => {
+        throw new Error("prepare must not be called");
+      },
+      sign: async () => {
+        throw new Error("sign must not be called");
+      },
+      commit: async () => {
+        throw new Error("commit must not be called");
+      },
+    });
+
+  const assertUnavailable = (response: Response) =>
+    Effect.gen(function* () {
+      assert.equal(response.status, 503);
+      assert.deepEqual(yield* Effect.promise(() => response.json()), {
+        error: "native_node_claim_unavailable",
+      });
+      assert.equal(response.headers.get("cache-control"), "no-store");
+    });
+
+  it.effect("answers 503 unavailable while the Hub connector is disabled", () =>
+    withRoutes(
+      throwing(),
+      (origin) =>
+        Effect.gen(function* () {
+          yield* assertUnavailable(yield* post(origin, DESKTOP_NATIVE_NODE_CLAIM_DESCRIPTOR_PATH));
+          yield* assertUnavailable(
+            yield* post(origin, DESKTOP_NATIVE_NODE_CLAIM_SIGN_PATH, { claim }),
+          );
+          yield* assertUnavailable(
+            yield* post(origin, DESKTOP_NATIVE_NODE_CLAIM_COMMIT_PATH, { claim, result }),
+          );
+        }),
+      undefined,
+      { enabled: false },
+    ),
+  );
+
+  it.effect("answers 503 unavailable when the Hub configuration has an issue", () =>
+    withRoutes(
+      throwing(),
+      (origin) =>
+        Effect.gen(function* () {
+          yield* assertUnavailable(yield* post(origin, DESKTOP_NATIVE_NODE_CLAIM_DESCRIPTOR_PATH));
+        }),
+      undefined,
+      { configurationIssue: "bad origin" },
+    ),
+  );
 });

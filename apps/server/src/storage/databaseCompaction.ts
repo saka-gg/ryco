@@ -212,8 +212,8 @@ export function detachedDoctorCommand(input: {
 }
 
 /**
- * Starts a service run: writes its record, removes an old result, and starts the doctor detached.
- * The doctor stops this server shortly after.
+ * Starts the doctor detached; once it has spawned, removes the old result and writes the run's
+ * record. The doctor stops this server shortly after.
  */
 export const startServiceCompaction = (input: {
   readonly stateDir: string;
@@ -223,21 +223,26 @@ export const startServiceCompaction = (input: {
   readonly spawn?: typeof ChildProcess.spawn;
 }) =>
   Effect.promise(async (): Promise<{ readonly started: boolean; readonly detail: string }> => {
+    const entryScript = process.argv[1];
+    if (entryScript === undefined) {
+      return { started: false, detail: "This server's command could not be found." };
+    }
     const resultFile = NodePath.join(input.stateDir, COMPACTION_RESULT_FILE);
-    await unlink(resultFile).catch(() => undefined);
     const record: CompactionRecord = {
       version: 1,
       runner: "service",
       startedAt: input.now.toISOString(),
     };
-    await writeFile(
-      NodePath.join(input.stateDir, COMPACTION_RECORD_FILE),
-      `${JSON.stringify(record)}\n`,
-    );
-    const entryScript = process.argv[1];
-    if (entryScript === undefined) {
-      return { started: false, detail: "This server's command could not be found." };
-    }
+    // Only once the doctor runs: a start that fails keeps the last run's record and result. The
+    // doctor is a fresh process that boots and stops this service before it writes a result, so
+    // this lands first.
+    const recordStart = async () => {
+      await unlink(resultFile).catch(() => undefined);
+      await writeFile(
+        NodePath.join(input.stateDir, COMPACTION_RECORD_FILE),
+        `${JSON.stringify(record)}\n`,
+      );
+    };
     const { command, args } = detachedDoctorCommand({
       platform: process.platform,
       execPath: process.execPath,
@@ -261,11 +266,16 @@ export const startServiceCompaction = (input: {
         );
         child.once("spawn", () => {
           child.unref();
-          resolve({
-            started: true,
-            detail:
-              "The doctor is stopping this node's service to compact the database. It starts again when it is done.",
-          });
+          // The doctor is running either way, so a failed record write still answers started.
+          void recordStart()
+            .catch(() => undefined)
+            .then(() =>
+              resolve({
+                started: true,
+                detail:
+                  "The doctor is stopping this node's service to compact the database. It starts again when it is done.",
+              }),
+            );
         });
       } catch (error) {
         resolve({ started: false, detail: `The doctor could not start: ${String(error)}` });

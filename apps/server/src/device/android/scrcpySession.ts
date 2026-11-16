@@ -210,11 +210,11 @@ export class ScrcpySession {
     let first: { socket: net.Socket; rest: Buffer } | null = null;
     while (first === null) {
       if (status.exited !== null || this.closing) throw failure();
-      if (Date.now() > deadline)
+      if (Date.now() >= deadline)
         throw new ScrcpySessionError(
           `scrcpy-server did not accept a connection${this.serverOutput ? `: ${this.serverOutput}` : ""}`,
         );
-      first = await this.tryFirstSocket();
+      first = await this.tryFirstSocket(deadline);
       if (first === null) await delay(100);
     }
     // The server can die while a socket is being accepted; teardown has
@@ -228,7 +228,7 @@ export class ScrcpySession {
     if (this.options.video) {
       this.videoSocket = first.socket;
       control = await this.connectSocket();
-      if (this.ended) {
+      if (this.ended || first.socket.destroyed) {
         control.destroy();
         throw failure();
       }
@@ -273,18 +273,29 @@ export class ScrcpySession {
     });
   }
 
-  private tryFirstSocket(): Promise<{ socket: net.Socket; rest: Buffer } | null> {
+  private tryFirstSocket(deadline: number): Promise<{ socket: net.Socket; rest: Buffer } | null> {
     return new Promise((resolve) => {
       const socket = this.host.connect?.(this.port) ?? net.connect(this.port, "127.0.0.1");
+      let settled = false;
       const settle = (value: { socket: net.Socket; rest: Buffer } | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         socket.removeAllListeners("data");
         socket.removeAllListeners("end");
         socket.removeAllListeners("close");
         socket.removeAllListeners("error");
-        if (value === null) socket.destroy();
-        else socket.pause();
+        if (value === null) {
+          socket.destroy();
+        } else {
+          // Kept until the video or control path takes over: an error in between must not be uncaught.
+          socket.on("error", () => undefined);
+          socket.pause();
+        }
         resolve(value);
       };
+      // A tunnel that accepts and never sends the dummy byte must not outlive the deadline.
+      const timer = setTimeout(() => settle(null), Math.max(0, deadline - Date.now()));
       socket.once("data", (chunk: Buffer) => settle({ socket, rest: chunk.subarray(1) }));
       socket.once("end", () => settle(null));
       socket.once("close", () => settle(null));
