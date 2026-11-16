@@ -4,7 +4,6 @@ import { describe, expect, it } from "vite-plus/test";
 import type { DraftThreadState } from "../../composerDraftStore";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import {
-  adaptDraftThreadsForSidebarProject,
   adaptProjectForSidebarTree,
   createSidebarProjectDraftThreadsSelector,
   mergeSidebarThreadsWithDrafts,
@@ -16,11 +15,10 @@ const projectId = ProjectId.make("project-1");
 describe("sidebarTreeAdapters", () => {
   it("adapts active draft sessions into placeholder sidebar tree rows", () => {
     const draftThread = makeDraftThread();
-    const draftRows = adaptDraftThreadsForSidebarProject({
+    const draftRows = createSidebarProjectDraftThreadsSelector(makeSidebarProjectSnapshot())({
       draftThreadsByThreadKey: {
         "draft-1": draftThread,
       },
-      project: makeSidebarProjectSnapshot(),
     });
 
     expect(draftRows).toHaveLength(1);
@@ -48,25 +46,23 @@ describe("sidebarTreeAdapters", () => {
   });
 
   it("omits drafts that have already been promoted", () => {
-    const draftRows = adaptDraftThreadsForSidebarProject({
+    const draftRows = createSidebarProjectDraftThreadsSelector(makeSidebarProjectSnapshot())({
       draftThreadsByThreadKey: {
         "draft-promoted": {
           ...makeDraftThread(),
           promotedTo: scopeThreadRef(environmentId, ThreadId.make("thread-promoted")),
         },
       },
-      project: makeSidebarProjectSnapshot(),
     });
 
     expect(draftRows).toEqual([]);
   });
 
   it("lets a materialized server thread shadow a draft with the same scoped id", () => {
-    const [draftThread] = adaptDraftThreadsForSidebarProject({
+    const [draftThread] = createSidebarProjectDraftThreadsSelector(makeSidebarProjectSnapshot())({
       draftThreadsByThreadKey: {
         "draft-1": makeDraftThread(),
       },
-      project: makeSidebarProjectSnapshot(),
     });
     expect(draftThread).toBeDefined();
     const serverThread = {

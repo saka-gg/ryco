@@ -548,7 +548,6 @@ describe("executeChatSendTurn", () => {
       project: {
         projectId: ProjectId.make("project-1"),
         projectCwd: "/tmp/project",
-        defaultModelSelection: null,
       },
       scroll: { armEndFollowBeforeOptimistic, scrollToEndAfterOptimistic },
       draft: {
@@ -868,7 +867,6 @@ describe("executeChatSendTurn", () => {
       project: {
         projectId: ProjectId.make("project-1"),
         projectCwd: "/tmp/project",
-        defaultModelSelection: null,
       },
       scroll: {
         armEndFollowBeforeOptimistic: vi.fn(() => {}),
@@ -985,7 +983,6 @@ function makeSendInput() {
     project: {
       projectId: ProjectId.make("project-1"),
       projectCwd: "/tmp/project",
-      defaultModelSelection: null,
     },
     scroll: {
       armEndFollowBeforeOptimistic: vi.fn(() => {}),

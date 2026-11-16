@@ -73,12 +73,12 @@ export function SettingsSurfaceMount() {
 }
 
 /**
- * Shell-wide global effects shared by every application shell tier: the
- * shortcut-modifier keydown/keyup/blur sync and the desktop-bridge
- * open-settings, paste-as-text and back/forward menu actions. Mounted once by the active shell
- * (desktop sidebar layout or the phone shell) — never by both.
+ * Shell-wide global effects: the shortcut-modifier keydown/keyup/blur sync and the
+ * desktop-bridge open-settings, paste-as-text and back/forward menu actions. Mounted once, by
+ * AppSidebarLayout (every tier, phone included, renders inside it). A second call would register
+ * every listener twice.
  */
-export function useAppShellGlobalEffects(): void {
+function useAppShellGlobalEffects(): void {
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
   const router = useRouter();
 

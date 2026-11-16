@@ -11,7 +11,7 @@ import {
   describeCreatePullRequestNotice,
   findOpenChangeRequest,
   needsRemoteLookup,
-  pickableBranches,
+  pickableRefs,
   resolveHeadPushState,
   validateCreatePullRequest,
   type CreatePullRequestBranch,
@@ -88,7 +88,10 @@ describe("branchFromRef", () => {
       remote("x"),
       remote("y", "fork"),
     ];
-    expect(pickableBranches(refs).map((entry) => entry.refName)).toEqual(["main", "origin/x"]);
+    const byRefName = pickableRefs(refs);
+    expect([...byRefName.keys()]).toEqual(["main", "origin/x"]);
+    expect(byRefName.get("origin/x")?.branch).toEqual(branch("x", true));
+    expect(byRefName.get("origin/x")?.ref).toBe(refs[1]);
   });
 });
 

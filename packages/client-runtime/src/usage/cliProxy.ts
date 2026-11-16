@@ -92,10 +92,6 @@ export function cliProxyAccountHealth(
   return exhausted ? { kind: "limited" } : { kind: "ready" };
 }
 
-export function cliProxyRequestTotal(counts: CliProxyRequestCounts): number {
-  return counts.success + counts.failed;
-}
-
 /** Requests in the recent buckets (the hub keeps the last 200 minutes). */
 export function cliProxyRecentRequestTotal(counts: CliProxyRequestCounts): number {
   return counts.recent.reduce((total, bucket) => total + bucket.success + bucket.failed, 0);

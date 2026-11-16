@@ -14,21 +14,7 @@ import {
   ComboboxStatus,
   ComboboxTrigger,
 } from "../../ui/combobox";
-import { branchFromRef, type CreatePullRequestBranch } from "./createPullRequest.logic";
-
-interface PickableRef {
-  readonly ref: VcsRef;
-  readonly branch: CreatePullRequestBranch;
-}
-
-function pickableRefs(refs: ReadonlyArray<VcsRef>): Map<string, PickableRef> {
-  const byRefName = new Map<string, PickableRef>();
-  for (const ref of refs) {
-    const branch = branchFromRef(ref);
-    if (branch && !byRefName.has(branch.refName)) byRefName.set(branch.refName, { ref, branch });
-  }
-  return byRefName;
-}
+import { pickableRefs, type CreatePullRequestBranch } from "./createPullRequest.logic";
 
 /**
  * One side of the dialog's branch line: a searchable list of local and

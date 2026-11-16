@@ -150,8 +150,6 @@ export interface SendTurnSettings {
 export interface SendTurnProjectContext {
   projectId: ProjectId;
   projectCwd: string;
-  /** @deprecated Retained for older callers; never used for model resolution. */
-  defaultModelSelection?: ModelSelection | null;
 }
 
 export interface SendTurnScrollDeps {

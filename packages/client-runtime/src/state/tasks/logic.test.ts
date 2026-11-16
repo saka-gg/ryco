@@ -15,6 +15,8 @@ import { extractThreadReferences } from "../composer/threadMentions.ts";
 import type { ThreadSession } from "../threads/types.ts";
 import {
   buildTaskStartPrompt,
+  compareDoneTasks,
+  compareOpenTasks,
   countTasksNeedingUser,
   delegatedThreadStates,
   hasTaskLink,
@@ -22,8 +24,6 @@ import {
   nextTaskBranchName,
   resolveLinkedChatStatus,
   resolveTaskChatStatus,
-  sortDoneTasks,
-  sortOpenTasks,
   taskBranchSlug,
   taskLinkKey,
   taskLiveStatus,
@@ -515,11 +515,14 @@ describe("task sorting", () => {
   const tie = task("c", "2026-10-02T00:00:00.000Z", "2026-10-02T00:00:00.000Z");
 
   it("lists open tasks newest first and completed ones most recently changed first", () => {
-    expect(sortOpenTasks([older, newer, tie]).map((entry) => entry.taskId)).toEqual([
+    expect([older, newer, tie].toSorted(compareOpenTasks).map((entry) => entry.taskId)).toEqual([
       "c",
       "b",
       "a",
     ]);
-    expect(sortDoneTasks([newer, older]).map((entry) => entry.taskId)).toEqual(["a", "b"]);
+    expect([newer, older].toSorted(compareDoneTasks).map((entry) => entry.taskId)).toEqual([
+      "a",
+      "b",
+    ]);
   });
 });

@@ -10,7 +10,7 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createComposerAttachmentBytesStore } from "../composerAttachmentBytes";
 import {
@@ -221,5 +221,21 @@ describe("composer draft attachments", () => {
     await expect
       .poll(async () => (await composerAttachmentBytes!.getMany(["img-removed"])).size)
       .toBe(0);
+  });
+
+  it("writes an image's bytes once when two persists overlap", async () => {
+    const image = imageFile("overlap-1", "x");
+    const put = vi.spyOn(composerAttachmentBytes!, "put");
+    try {
+      const [a, b] = await Promise.all([
+        persistComposerImageBytes({ ...image, file: image.file! }),
+        persistComposerImageBytes({ ...image, file: image.file! }),
+      ]);
+      expect(a).toMatchObject({ id: "overlap-1", bytes: "local" });
+      expect(b).toEqual(a);
+      expect(put).toHaveBeenCalledTimes(1);
+    } finally {
+      put.mockRestore();
+    }
   });
 });

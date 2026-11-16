@@ -39,17 +39,20 @@ export function branchFromRef(ref: VcsRef): CreatePullRequestBranch | null {
   return { name, refName: ref.name, isRemote: true };
 }
 
-/** Pickable branches in the server's order (current, default, recent; then remote). */
-export function pickableBranches(refs: ReadonlyArray<VcsRef>): CreatePullRequestBranch[] {
-  const seen = new Set<string>();
-  const branches: CreatePullRequestBranch[] = [];
+/** A pickable ref and the branch it names on the host. */
+export interface PickableRef {
+  readonly ref: VcsRef;
+  readonly branch: CreatePullRequestBranch;
+}
+
+/** Pickable refs by ref name, once each, in the server's order (current, default, recent; then remote). */
+export function pickableRefs(refs: ReadonlyArray<VcsRef>): Map<string, PickableRef> {
+  const byRefName = new Map<string, PickableRef>();
   for (const ref of refs) {
     const branch = branchFromRef(ref);
-    if (!branch || seen.has(branch.refName)) continue;
-    seen.add(branch.refName);
-    branches.push(branch);
+    if (branch && !byRefName.has(branch.refName)) byRefName.set(branch.refName, { ref, branch });
   }
-  return branches;
+  return byRefName;
 }
 
 /** The checkout's current branch: git status first, else the ref list's `current`. */

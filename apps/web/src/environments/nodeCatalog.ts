@@ -254,11 +254,3 @@ export function subscribeNodeCatalog(listener: () => void): () => void {
 export function useNodeCatalog(): ReadonlyArray<NodeCatalogEntry> {
   return useSyncExternalStore(subscribeNodeCatalog, readNodeCatalog, readNodeCatalog);
 }
-
-/** One node of the catalog, or null when this client does not know it. */
-export function useNodeCatalogEntry(environmentId: EnvironmentId | null): NodeCatalogEntry | null {
-  const nodes = useNodeCatalog();
-  return environmentId === null
-    ? null
-    : (nodes.find((node) => node.environmentId === environmentId) ?? null);
-}

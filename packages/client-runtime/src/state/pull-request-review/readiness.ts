@@ -246,10 +246,6 @@ export function scoreChangeRequestMatch(entry: SearchableChangeRequest, raw: str
   return 20;
 }
 
-export function matchesChangeRequestQuery(entry: SearchableChangeRequest, query: string): boolean {
-  return scoreChangeRequestMatch(entry, query) > 0;
-}
-
 /** Filters by query and orders by relevance, then merge readiness. */
 export function searchChangeRequests<T extends SearchableChangeRequest & RankableChangeRequest>(
   list: ReadonlyArray<T>,

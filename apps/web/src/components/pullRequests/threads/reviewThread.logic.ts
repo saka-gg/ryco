@@ -47,10 +47,6 @@ export function splitSuggestionBlocks(body: string): ReadonlyArray<ReviewComment
   return segments;
 }
 
-export function hasSuggestion(body: string): boolean {
-  return splitSuggestionBlocks(body).some((segment) => segment.kind === "suggestion");
-}
-
 export interface DiffHunkLine {
   readonly kind: "add" | "del" | "ctx";
   readonly text: string;

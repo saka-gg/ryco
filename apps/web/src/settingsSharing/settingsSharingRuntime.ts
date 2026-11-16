@@ -109,8 +109,3 @@ export function runSettingsSharingCommand(
 ): Promise<NodeSettingsApplyResult> {
   return runtime.runCommand(command, extra);
 }
-
-/** Tests only: forget the runner and its starts. */
-export function __resetSettingsSharingRuntimeForTests(): void {
-  runtime.reset();
-}

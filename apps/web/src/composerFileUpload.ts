@@ -242,6 +242,30 @@ export function deriveComposerFileUploadSendState(input: {
 }
 
 /**
+ * What the composer's draft persistence reads from the upload records, as one string: per file
+ * attachment, uploaded (with its token and expiry), another status, or no record. Progress
+ * ticks leave it unchanged, so the persist effect re-runs only when what it writes would change.
+ */
+export function composerFileUploadPersistKey(
+  attachments: ReadonlyArray<{ readonly type: string; readonly id: string }>,
+  records: ReadonlyMap<string, Pick<ChatFileUploadRecord, "status">>,
+): string {
+  let key = "";
+  for (const attachment of attachments) {
+    if (attachment.type !== "file") continue;
+    const status = records.get(attachment.id)?.status;
+    const state =
+      status === undefined
+        ? "none"
+        : status.kind === "uploaded"
+          ? `uploaded:${status.uploadToken}:${status.expiresAt}`
+          : "other";
+    key += `${attachment.id}:${state}\n`;
+  }
+  return key;
+}
+
+/**
  * Send-block reason across the composer's attachments: uploading, failed,
  * needsReattach, or an expired token all hold the send back. A byte-less file
  * with a still-valid token on the attachment itself (e.g. restored from a
