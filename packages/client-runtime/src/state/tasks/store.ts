@@ -385,13 +385,15 @@ export const useLocalTasksStore = create<LocalTasksStoreState>((set) => ({
         ? { ...next, forbidden: { ...state.forbidden, [environmentId]: true } }
         : next;
     }),
-  clear: (environmentId) =>
+  clear: (environmentId) => {
+    forgetTaskSelectorCaches(environmentId);
     set((state) => {
       if (!(environmentId in state.byEnvironment)) return state;
       const byEnvironment = { ...state.byEnvironment };
       delete byEnvironment[environmentId];
       return { byEnvironment };
-    }),
+    });
+  },
 }));
 
 type LocalTasksStoreSlice = Pick<LocalTasksStoreState, "byEnvironment">;
@@ -567,4 +569,11 @@ export function selectOpenTaskViews(
   const stable = stableList(cached?.views, views);
   openViewsCache.set(environmentId, { environment, views: stable });
   return stable;
+}
+
+/** Drops an environment's derived task lists, which hold its task content, once it is cleared. */
+function forgetTaskSelectorCaches(environmentId: EnvironmentId): void {
+  const prefix = `${environmentId}\u0000`;
+  for (const key of taskIdsCache.keys()) if (key.startsWith(prefix)) taskIdsCache.delete(key);
+  openViewsCache.delete(environmentId);
 }

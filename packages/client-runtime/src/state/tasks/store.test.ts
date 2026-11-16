@@ -323,4 +323,17 @@ describe("clear", () => {
     store().clear(ENV);
     expect(environment()).toBe(EMPTY_LOCAL_TASKS_STATE);
   });
+
+  it("drops the derived task lists of the environment", () => {
+    store().applyList(ENV, [task("a"), task("b")], { since: epoch(), readAt: 1 });
+    const ids = selectTaskIds(store(), ENV, { done: false, projectId: null });
+    const views = selectOpenTaskViews(store(), ENV);
+    store().clear(ENV);
+    store().applyList(ENV, [task("a"), task("b")], { since: epoch(), readAt: 2 });
+    // Equal lists, but not the arrays cached from before the clear.
+    const idsAfter = selectTaskIds(store(), ENV, { done: false, projectId: null });
+    expect(idsAfter).toEqual(ids);
+    expect(idsAfter).not.toBe(ids);
+    expect(selectOpenTaskViews(store(), ENV)).not.toBe(views);
+  });
 });

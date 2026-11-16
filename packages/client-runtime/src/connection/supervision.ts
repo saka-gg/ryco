@@ -1862,7 +1862,8 @@ export function createEnvironmentConnectionSupervisor<
    * After the page came back into view, reconnects the connections it already had that have not
    * answered a heartbeat since and did not reconnect by themselves (see
    * {@link VIEW_RESUME_HEARTBEAT_GRACE_MS}); one silent for {@link VIEW_RESUME_SILENT_MS} is
-   * reconnected at once. Connections made meanwhile are left alone: their pinger has not run yet.
+   * reconnected at once. A socket that opened recently and has not answered yet is judged by the
+   * grace window, not as silent for minutes.
    */
   const checkHeartbeatsAfterViewResume = (reason: string) => {
     cancelViewResumeCheck();
@@ -1872,7 +1873,12 @@ export function createEnvironmentConnectionSupervisor<
     );
     const resumed: EnvironmentConnection[] = [];
     for (const connection of stale) {
-      if (connection.client.isHeartbeatFresh(VIEW_RESUME_SILENT_MS)) {
+      // Silence counts from the last pong, or from the socket's opening when it has not answered
+      // yet: a socket a reconnect just opened has no pong, but is not silent for minutes.
+      if (
+        connection.client.isHeartbeatFresh(VIEW_RESUME_SILENT_MS) ||
+        connection.client.hasReopenedSince?.(resumedAt - VIEW_RESUME_SILENT_MS) === true
+      ) {
         resumed.push(connection);
       } else {
         lastBrowserResumeReconnectAt = resumedAt;
@@ -1902,6 +1908,11 @@ export function createEnvironmentConnectionSupervisor<
     cancelViewResumeCheck();
     for (const connection of connections.values()) {
       if (connection.client.isHeartbeatFresh()) continue;
+      // Opened moments ago (wall clock, so a pre-sleep socket never matches); its first ping is
+      // still to come.
+      if (connection.client.hasReopenedSince?.(now - VIEW_RESUME_HEARTBEAT_GRACE_MS) === true) {
+        continue;
+      }
       lastBrowserResumeReconnectAt = now;
       reconnectLogged(connection, reason);
     }

@@ -14,6 +14,7 @@ import {
   recordWsConnectionErrored,
   recordWsConnectionOpened,
   resetWsConnectionStateForTests,
+  resetWsReconnectBackoff,
   setBrowserOnlineStatus,
   WS_RECONNECT_MAX_ATTEMPTS,
   wsConnectionOpenedCountAtom,
@@ -232,6 +233,42 @@ describe("per-environment wsConnectionState", () => {
 
     expect(getWsConnectionStatus().phase).toBe("connected");
     expect(getWsConnectionStatusForEnvironment(environmentId).phase).toBe("disconnected");
+  });
+
+  it("resets a secondary environment's backoff without touching the primary's", () => {
+    const environmentId = "env-b" as EnvironmentId;
+    recordWsConnectionAttempt("ws://a/ws");
+    recordWsConnectionOpened();
+    recordWsConnectionClosed({ code: 1006 });
+    recordWsConnectionAttempt("ws://b/ws", { environmentId, recordGlobal: false });
+    recordWsConnectionClosed({ code: 1006 }, { environmentId, recordGlobal: false });
+    const before = getWsConnectionStatus();
+    expect(before.reconnectPhase).toBe("waiting");
+    expect(getWsConnectionStatusForEnvironment(environmentId).reconnectPhase).toBe("waiting");
+
+    resetWsReconnectBackoff({ environmentId, recordGlobal: false });
+
+    expect(getWsConnectionStatus()).toEqual(before);
+    expect(getWsConnectionStatusForEnvironment(environmentId)).toMatchObject({
+      reconnectPhase: "idle",
+      reconnectAttemptCount: 0,
+      nextRetryAt: null,
+    });
+  });
+
+  it("resets the global backoff when no metadata is given", () => {
+    recordWsConnectionAttempt("ws://a/ws");
+    recordWsConnectionOpened();
+    recordWsConnectionClosed({ code: 1006 });
+    expect(getWsConnectionStatus().reconnectPhase).toBe("waiting");
+
+    resetWsReconnectBackoff();
+
+    expect(getWsConnectionStatus()).toMatchObject({
+      reconnectPhase: "idle",
+      reconnectAttemptCount: 0,
+      nextRetryAt: null,
+    });
   });
 
   it("publishes several environments' slots as one value that follows each slot", () => {

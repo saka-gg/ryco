@@ -19,6 +19,7 @@ import {
   getPersistentWsReconnectDelayMs,
   getWsReconnectDelayMsForRetry,
   recordWsConnectionAttempt,
+  resetWsReconnectBackoff,
   recordWsConnectionClosed,
   recordWsConnectionErrored,
   recordWsConnectionOpened,
@@ -245,6 +246,12 @@ function resolveConnectionMetadata(handlers?: WsProtocolLifecycleHandlers): WsCo
     ...(handlers?.recordGlobalConnectionState === false ? { recordGlobal: false } : {}),
     ...(handlers?.persistentReconnect === true ? { persistentReconnect: true } : {}),
   };
+}
+
+/** Clears the reconnect backoff where this socket records its status (see `onAttempt`). */
+export function resetWsProtocolReconnectBackoff(handlers?: WsProtocolLifecycleHandlers): void {
+  if (handlers?.recordConnectionState === false) return;
+  resetWsReconnectBackoff(resolveConnectionMetadata(handlers));
 }
 
 type ComposedWsProtocolLifecycleHandlers = Required<

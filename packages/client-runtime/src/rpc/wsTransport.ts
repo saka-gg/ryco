@@ -4,7 +4,6 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
-import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as RpcClient from "effect/rpc/RpcClient";
@@ -19,6 +18,7 @@ import {
   isAwaitingAdmission,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
+  resetWsProtocolReconnectBackoff,
   type DeviceRpcProtocolClient,
   type HostedRpcProtocolClient,
   type WsProtocolLifecycleHandlers,
@@ -47,11 +47,11 @@ export interface SubscribeOptions {
 }
 
 export interface RequestOptions {
-  readonly timeout?: Option.Option<Duration.Input>;
   /**
    * Abandons the request: before it is sent it never goes out; once running,
    * its client fiber is interrupted, which tells the server to interrupt the
-   * handler. The promise rejects with an `AbortError`.
+   * handler. The promise rejects with an `AbortError`. Use
+   * `AbortSignal.timeout(ms)` to bound a request.
    */
   readonly signal?: AbortSignal | undefined;
 }
@@ -80,14 +80,16 @@ export const DISCONNECTED_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
  */
 export const AWAITING_SESSION_SUBSCRIPTION_MAX_DELAY_MS = 4_000;
 /**
- * Ceiling for resubscribing after the server failed the terminal event stream
- * with a resync request (a slow-consumer overflow). An overflow the server
+ * Ceiling for resubscribing after the server failed a stream with a resync
+ * request (a slow-consumer overflow of the terminal or an orchestration
+ * stream). An overflow the server
  * reproduces on every bootstrap would otherwise loop at the base retry delay,
  * re-sending the whole bootstrap each time; consecutive resyncs back off
  * exponentially and a quiet period resets the backoff.
  */
 export const RESYNC_SUBSCRIPTION_MAX_DELAY_MS = 8_000;
 const RESYNC_SUBSCRIPTION_BACKOFF_RESET_MS = 30_000;
+const RESYNC_ERROR_MESSAGE_FRAGMENT = "reconnect to resynchronize";
 const NOOP: () => void = () => undefined;
 export const THREAD_NOT_FOUND_ERROR_RE = /^Thread\s.+\swas not found$/u;
 export const SUBSCRIPTION_STREAM_DONE_SCHEMA_ERROR_FRAGMENT = "SchemaError(Expected array";
@@ -136,19 +138,19 @@ function formatErrorMessage(error: unknown): string {
 
 function isRetryableSubscriptionError(message: string): boolean {
   return (
-    isTransportConnectionErrorMessage(message) ||
-    THREAD_NOT_FOUND_ERROR_RE.test(message.trim()) ||
-    message.includes("reconnect to resynchronize")
+    isTransportConnectionErrorMessage(message) || THREAD_NOT_FOUND_ERROR_RE.test(message.trim())
   );
 }
 
-/** The terminal event stream's server-side overflow, decoded from its tagged error. */
-function isTerminalResyncSubscriptionError(error: unknown): boolean {
+/**
+ * A server stream that overflowed for a slow consumer and asks for a resubscribe: the terminal
+ * event stream's tagged error, or an orchestration stream's live-queue overflow, both of which
+ * say "reconnect to resynchronize".
+ */
+function isResyncSubscriptionError(error: unknown, message: string): boolean {
   return (
-    typeof error === "object" &&
-    error !== null &&
-    "_tag" in error &&
-    error._tag === "TerminalSubscriptionResyncError"
+    hasErrorTag(error, "TerminalSubscriptionResyncError") ||
+    message.includes(RESYNC_ERROR_MESSAGE_FRAGMENT)
   );
 }
 
@@ -447,6 +449,16 @@ class RpcTransport<Client> {
           cancelCurrentStream = runningStream.cancel;
           await runningStream.completed;
           cancelCurrentStream = NOOP;
+          // The server ended the stream. Resubscribe after the retry backoff rather than at once: a
+          // stream that ends right away would otherwise cost a request per round trip. A value on a
+          // later attempt resets the backoff (markValueReceived).
+          if (active && !this.disposed && session === this.session) {
+            await waitForRetry(
+              disconnectedSubscriptionRetryDelayMs(retryDelayMs, disconnectedRetries),
+              observedAdmissionRevision,
+            );
+            disconnectedRetries += 1;
+          }
         } catch (error) {
           cancelCurrentStream = NOOP;
           if (!active || this.disposed) {
@@ -475,7 +487,7 @@ class RpcTransport<Client> {
           if (isSubscriptionStreamDoneError(formattedError)) {
             return;
           }
-          if (isTerminalResyncSubscriptionError(error)) {
+          if (isResyncSubscriptionError(error, formattedError)) {
             // The stream delivered values before failing, so readiness alone cannot
             // reset this backoff; only a quiet period between resyncs does.
             const now = Date.now();
@@ -545,6 +557,7 @@ class RpcTransport<Client> {
       throw new RpcTransportDisposedError();
     }
 
+    resetWsProtocolReconnectBackoff(this.lifecycleHandlers);
     if (this.reconnectOperation) return this.reconnectOperation;
     const reconnectOperation = Promise.resolve().then(async () => {
       if (this.disposed) {

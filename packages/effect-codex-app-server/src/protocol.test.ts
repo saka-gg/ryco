@@ -122,6 +122,30 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
+  it.effect("gives requests waiting for the user their own bound", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onRequest: () => Effect.never,
+      });
+      for (let i = 0; i < 40; i++) {
+        yield* Queue.offer(
+          input,
+          encodeJsonl({ id: 100 + i, method: "item/commandExecution/requestApproval" }),
+        );
+      }
+      for (let i = 0; i < 33; i++) {
+        yield* Queue.offer(input, encodeJsonl({ id: 200 + i, method: "x/other" }));
+      }
+      // The first refusal is the 33rd machine request: none of the 40 approvals was refused, and
+      // they did not use the general slots.
+      const rejected = JSON.parse(yield* Queue.take(output));
+      assert.equal(rejected.id, 232);
+      assert.equal(rejected.error.code, -32001);
+    }),
+  );
+
   it.effect("ignores noisy stdout and accepts valid frames larger than 8 MiB", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();

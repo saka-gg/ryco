@@ -13,6 +13,7 @@ import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
 import type { LatestStateQueuePolicy, QueuePolicyMetricsSnapshot } from "./QueuePolicy.ts";
+import { logQueueItemFailure } from "./QueuePolicy.ts";
 
 export interface KeyedCoalescingWorker<K, V> {
   readonly enqueue: (key: K, value: V) => Effect.Effect<void>;
@@ -50,43 +51,34 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
       recoveryCount: 0,
     });
 
-    const processKey = (key: K, value: V): Effect.Effect<void, E, R> =>
-      options.process(key, value).pipe(
-        Effect.flatMap(() =>
-          TxRef.modify(stateRef, (state) => {
-            const nextValue = state.latestByKey.get(key);
-            if (nextValue === undefined) {
-              const activeKeys = new Set(state.activeKeys);
-              activeKeys.delete(key);
-              return [null, { ...state, activeKeys }] as const;
-            }
-
-            const latestByKey = new Map(state.latestByKey);
-            latestByKey.delete(key);
-            return [nextValue, { ...state, latestByKey }] as const;
-          }).pipe(Effect.tx),
-        ),
-        Effect.flatMap((nextValue) =>
-          nextValue === null ? Effect.void : processKey(key, nextValue),
-        ),
-      );
-
-    const recoverFailedKey = (key: K): Effect.Effect<V | null> =>
+    /** Takes the value coalesced for `key` while it was processed, or releases the key. */
+    const takeNextValue = (key: K, failed: boolean): Effect.Effect<V | null> =>
       TxRef.modify(stateRef, (state) => {
+        const recoveryCount = failed ? state.recoveryCount + 1 : state.recoveryCount;
         const nextValue = state.latestByKey.get(key);
         if (nextValue !== undefined) {
           const latestByKey = new Map(state.latestByKey);
           latestByKey.delete(key);
-          return [
-            nextValue,
-            { ...state, latestByKey, recoveryCount: state.recoveryCount + 1 },
-          ] as const;
+          return [nextValue, { ...state, latestByKey, recoveryCount }] as const;
         }
 
         const activeKeys = new Set(state.activeKeys);
         activeKeys.delete(key);
-        return [null, { ...state, activeKeys, recoveryCount: state.recoveryCount + 1 }] as const;
+        return [null, { ...state, activeKeys, recoveryCount }] as const;
       }).pipe(Effect.tx);
+
+    /** Processes `value`, then each value coalesced meanwhile; a failure moves on to the next value too. */
+    const runKey = (key: K, value: V): Effect.Effect<void, never, R> =>
+      options.process(key, value).pipe(
+        Effect.matchCauseEffect({
+          onSuccess: () => takeNextValue(key, false),
+          onFailure: (cause) =>
+            logQueueItemFailure(options.policy.component, cause).pipe(
+              Effect.andThen(takeNextValue(key, true)),
+            ),
+        }),
+        Effect.flatMap((nextValue) => (nextValue === null ? Effect.void : runKey(key, nextValue))),
+      );
 
     yield* TxQueue.take(queue).pipe(
       Effect.flatMap((key) =>
@@ -110,19 +102,7 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
           ] as const;
         }).pipe(Effect.tx),
       ),
-      Effect.flatMap((item) =>
-        item === null
-          ? Effect.void
-          : processKey(item.key, item.value).pipe(
-              Effect.catchCause(() =>
-                recoverFailedKey(item.key).pipe(
-                  Effect.flatMap((nextValue) =>
-                    nextValue === null ? Effect.void : processKey(item.key, nextValue),
-                  ),
-                ),
-              ),
-            ),
-      ),
+      Effect.flatMap((item) => (item === null ? Effect.void : runKey(item.key, item.value))),
       Effect.forever,
       Effect.forkScoped,
     );

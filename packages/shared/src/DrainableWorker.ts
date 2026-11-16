@@ -14,6 +14,7 @@ import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
 import type { LosslessBackpressureQueuePolicy, QueuePolicyMetricsSnapshot } from "./QueuePolicy.ts";
+import { logQueueItemFailure } from "./QueuePolicy.ts";
 
 export interface DrainableWorker<A> {
   /**
@@ -57,9 +58,10 @@ export const makeDrainableWorker = <A, E, R>(options: {
 
     yield* TxQueue.take(queue).pipe(
       Effect.tap((a) =>
-        Effect.ensuring(
-          options.process(a),
-          TxRef.update(outstanding, (n) => n - 1),
+        options.process(a).pipe(
+          // One failed item must not stop the worker: drain() would wait forever.
+          Effect.catchCause((cause) => logQueueItemFailure(options.policy.component, cause)),
+          Effect.ensuring(TxRef.update(outstanding, (n) => n - 1)),
         ),
       ),
       Effect.forever,

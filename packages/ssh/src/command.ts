@@ -64,10 +64,19 @@ export function remoteStateKey(target: DesktopSshEnvironmentTarget): string {
   return Crypto.createHash("sha256").update(targetConnectionKey(target)).digest("hex").slice(0, 16);
 }
 
+/** A part ssh would read as an option (`-oProxyCommand=...`) or that is not one plain word. */
+const UNSAFE_SSH_TARGET_PART = /^-|[\s\p{Cc}]/u;
+
 export function buildSshHostSpec(target: DesktopSshEnvironmentTarget): string {
   const destination = target.alias.trim() || target.hostname.trim();
   if (destination.length === 0) {
     throw new Error("SSH target is missing its alias/hostname.");
+  }
+  if (UNSAFE_SSH_TARGET_PART.test(destination)) {
+    throw new Error("SSH host must not start with '-' or contain spaces or control characters.");
+  }
+  if (target.username && UNSAFE_SSH_TARGET_PART.test(target.username)) {
+    throw new Error("SSH user must not start with '-' or contain spaces or control characters.");
   }
   return target.username ? `${target.username}@${destination}` : destination;
 }
