@@ -12,7 +12,7 @@ import { Cause, Deferred, Effect, Layer, Option, Stream } from "effect";
 import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 
-import { serverCommandId } from "../commandOrigin.ts";
+import { isProviderOriginatedCommandId, serverCommandId } from "../commandOrigin.ts";
 import {
   checkpointRefForThreadTurn,
   resolveThreadWorkspaceCwd,
@@ -106,17 +106,14 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   return left === right;
 }
 
-function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
-  switch (status) {
-    case "failed":
-      return "error";
-    case "cancelled":
-    case "interrupted":
-      return "missing";
-    case "completed":
-    default:
-      return "ready";
-  }
+/**
+ * Status of the checkpoint this reactor captures when a turn ends. A stopped (interrupted or
+ * cancelled) turn still gets a real git snapshot, so its checkpoint is `ready`: its diff shows
+ * and it can be undone. `missing` is reserved for provider-diff placeholders, which name no
+ * snapshot. The turn's own `interrupted` state comes from the session release, not from here.
+ */
+function checkpointStatusFromRuntime(status: string | undefined): "ready" | "error" {
+  return status === "failed" ? "error" : "ready";
 }
 
 export interface CheckpointReactorOptions {
@@ -557,8 +554,9 @@ const make = Effect.fn("makeCheckpointReactor")(function* (options: CheckpointRe
   ) {
     const { threadId, turnId, checkpointTurnCount, status } = event.payload;
 
-    // Only replace placeholders; skip events from our own real captures.
-    if (status !== "missing") {
+    // Only replace provider placeholders. This reactor's own captures (`server:` command ids)
+    // come back through the domain stream too and must not be captured a second time.
+    if (status !== "missing" || !isProviderOriginatedCommandId(event.commandId)) {
       return;
     }
 
