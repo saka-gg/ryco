@@ -662,8 +662,6 @@ export function deriveEffectiveComposerModelState(input: {
    */
   selectedInstanceId?: ProviderInstanceId | null | undefined;
   threadModelSelection: ModelSelection | null | undefined;
-  /** @deprecated Project defaults are ignored; retained for older callers. */
-  projectModelSelection?: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
   const baseModelCandidate = input.threadModelSelection?.model ?? null;

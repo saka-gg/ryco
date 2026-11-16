@@ -17,11 +17,6 @@ import { awaitsUploads } from "./uploadHold.ts";
 
 export type QueuedMessageSteerAttempts = Readonly<Record<string, QueuedMessageSteerAttempt>>;
 
-/** The message ids with a live steer attempt, in start order. */
-export function steeringIdsOf(attempts: QueuedMessageSteerAttempts | undefined): string[] {
-  return attempts ? Object.keys(attempts) : [];
-}
-
 function withDeliveryStatus<Composer, Settings>(
   queue: QueuedMessage<Composer, Settings>[],
   id: string,
@@ -83,7 +78,6 @@ export interface MessageQueueState<Composer = unknown, Settings = unknown> {
   readonly retrySend: (threadKey: string, id: string) => void;
   /** "sending" → no status. A deferred or reviewed send is not a failure. */
   readonly releaseSend: (threadKey: string, id: string) => void;
-  readonly dequeue: (threadKey: string) => void;
   readonly clear: (threadKey: string) => void;
   /**
    * Claims the message for a steer. Refused (false) while it already has a live attempt, while
@@ -249,12 +243,6 @@ export function createMessageQueueStore<Composer = unknown, Settings = unknown>(
             [threadKey]: withDeliveryStatus(queue, id, undefined),
           },
         };
-      }),
-    dequeue: (threadKey) =>
-      set((state) => {
-        const current = state.queuesByThreadKey[threadKey];
-        if (!current || current.length === 0) return state;
-        return withQueue(state, threadKey, current.slice(1));
       }),
     clear: (threadKey) =>
       set((state) => {

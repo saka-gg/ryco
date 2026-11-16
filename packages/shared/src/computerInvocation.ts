@@ -1,8 +1,6 @@
 // Adapted from Synara v0.9.1; see docs/licenses/synara-computer-use.txt.
 import type { ComputerControlMode } from "@ryco/contracts";
 
-export const COMPUTER_USE_SLASH_COMMAND = "computer-use";
-
 /** Only a command at the start of the user's message is an invocation. */
 export function parseComputerInvocation(text: string | undefined): { prompt: string } | null {
   if (!text) return null;

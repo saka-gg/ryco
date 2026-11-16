@@ -102,7 +102,6 @@ export async function sendQueuedThreadMessage(
       composeOutgoingPrompt({ prompt: message.text }) || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     turnAttachments,
     modelSelection: message.modelSelection,
-    hasSelectedModel: true,
     runtimeMode: message.runtimeMode,
     interactionMode: message.interactionMode,
     tokenMode: message.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,

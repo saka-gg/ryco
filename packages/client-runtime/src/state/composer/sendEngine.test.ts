@@ -98,29 +98,17 @@ describe("send engine — model resolution", () => {
     const resolved = resolveThreadCreateModelSelection({
       selectedModelSelection: selection,
       selectedModel: "gpt-5",
-      defaultModel: "project-default",
     });
     expect(resolved.model).toBe("gpt-5");
     expect(resolved.instanceId).toBe(selection.instanceId);
     expect(resolved.options).toEqual(selection.options);
   });
 
-  it("ignores a legacy project default when the composer has no model", () => {
+  it("falls back to the global default when the composer has no model", () => {
     expect(
       resolveThreadCreateModelSelection({
         selectedModelSelection: selection,
         selectedModel: "",
-        defaultModel: "project-default",
-      }).model,
-    ).toBe(DEFAULT_MODEL);
-  });
-
-  it("falls back to the global default when neither composer nor project supply a model", () => {
-    expect(
-      resolveThreadCreateModelSelection({
-        selectedModelSelection: selection,
-        selectedModel: "",
-        defaultModel: null,
       }).model,
     ).toBe(DEFAULT_MODEL);
   });

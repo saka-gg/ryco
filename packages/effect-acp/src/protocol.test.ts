@@ -87,19 +87,13 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     () =>
       Effect.gen(function* () {
         const { stdio, input, output } = yield* makeInMemoryStdio();
+        const notifications = yield* Queue.unbounded<AcpProtocol.AcpIncomingNotification>();
         const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
           stdio,
           serverRequestMethods: new Set(),
+          onNotification: (notification) =>
+            Queue.offer(notifications, notification).pipe(Effect.asVoid),
         });
-
-        const notifications =
-          yield* Deferred.make<ReadonlyArray<AcpProtocol.AcpIncomingNotification>>();
-        yield* transport.incoming.pipe(
-          Stream.take(2),
-          Stream.runCollect,
-          Effect.flatMap((notificationChunk) => Deferred.succeed(notifications, notificationChunk)),
-          Effect.forkScoped,
-        );
 
         yield* transport.notify("session/cancel", { sessionId: "session-1" });
         const outbound = yield* Queue.take(output);
@@ -146,7 +140,8 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
           }),
         );
 
-        const [update, completion] = yield* Deferred.await(notifications);
+        const update = yield* Queue.take(notifications);
+        const completion = yield* Queue.take(notifications);
         assert.equal(update?._tag, "SessionUpdate");
         assert.equal(completion?._tag, "ElicitationComplete");
       }),
@@ -157,6 +152,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const { stdio } = yield* makeInMemoryStdio();
       const events: Array<AcpProtocol.AcpProtocolLogEvent> = [];
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         serverRequestMethods: new Set(),
         logOutgoing: true,
@@ -197,6 +193,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const memory = yield* makeInMemoryStdio();
       const fire = yield* Deferred.make<void>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio: Stdio.make({
           args: Effect.succeed([]),
           stdin: memory.stdio.stdin,
@@ -237,6 +234,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     Effect.gen(function* () {
       const { stdio } = yield* makeInMemoryStdio();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         serverRequestMethods: new Set(),
       });
@@ -257,6 +255,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         serverRequestMethods: new Set(),
       });
@@ -294,6 +293,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         serverRequestMethods: new Set(["session/request_permission"]),
       });
@@ -372,6 +372,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         serverRequestMethods: new Set(),
       });
@@ -426,6 +427,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const firstMessage = yield* Deferred.make<unknown>();
       const termination = yield* Deferred.make<AcpError.AcpError>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio: makeChildStdio(handle),
         terminationError: makeTerminationError(handle),
         serverRequestMethods: new Set(),
@@ -460,6 +462,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const terminationCalls = yield* Ref.make(0);
       const firstMessage = yield* Deferred.make<unknown>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio: makeChildStdio(handle),
         terminationError: makeTerminationError(handle),
         serverRequestMethods: new Set(),
@@ -488,6 +491,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         terminationError: Effect.succeed(new AcpError.AcpProcessExitedError({ code: 0 })),
         serverRequestMethods: new Set(),
@@ -514,6 +518,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const { stdio, input } = yield* makeInMemoryStdio();
       const terminated = yield* Deferred.make<AcpError.AcpError>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         terminationError: Effect.succeed(new AcpError.AcpProcessExitedError({ code: 3 })),
         onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
@@ -545,6 +550,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       });
       const terminated = yield* Deferred.make<AcpError.AcpError>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio,
         onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
         serverRequestMethods: new Set(),
@@ -576,6 +582,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     Effect.gen(function* () {
       const terminated = yield* Deferred.make<AcpError.AcpError>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio: yield* failingStdout,
         terminationError: Effect.succeed(new AcpError.AcpProcessExitedError({ code: 137 })),
         onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
@@ -596,6 +603,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const fire = yield* Deferred.make<void>();
       const terminated = yield* Deferred.make<AcpError.AcpError>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        onNotification: () => Effect.void,
         stdio: yield* failingStdout,
         // The process never exits: its exit status never arrives.
         terminationError: Effect.never,

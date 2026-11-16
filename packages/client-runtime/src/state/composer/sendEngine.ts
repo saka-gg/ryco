@@ -201,9 +201,6 @@ export function retargetChatProjectBootstrap(
 export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more files without additional text. Respond using the conversation context and the attachment(s).]";
 
-/** @deprecated Use `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`. */
-export const IMAGE_ONLY_BOOTSTRAP_PROMPT = ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
-
 export interface OutgoingPromptInput {
   readonly prompt: string;
   /**
@@ -266,8 +263,6 @@ export function outgoingPromptOverflow(
 export function resolveThreadCreateModelSelection(input: {
   readonly selectedModelSelection: ModelSelection;
   readonly selectedModel: string;
-  /** @deprecated Project defaults are ignored. */
-  readonly defaultModel?: string | null;
 }): ModelSelection {
   return createModelSelection(
     input.selectedModelSelection.instanceId,
@@ -391,8 +386,6 @@ export interface CommitSendTurnDispatchInput {
   readonly turnAttachments: readonly SendTurnDispatchAttachment[];
   /** The composer's staged target, committed atomically by `thread.turn.start`. */
   readonly modelSelection: ModelSelection;
-  /** @deprecated Accepted for source compatibility; model persistence is intentionally ignored. */
-  readonly hasSelectedModel?: boolean;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly tokenMode: AgentTokenMode;

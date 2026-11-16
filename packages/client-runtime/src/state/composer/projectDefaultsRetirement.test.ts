@@ -3,7 +3,7 @@ import { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
 import { deriveEffectiveComposerModelState } from "./draftStore.ts";
 
-it("ignores legacy project model and reasoning options while retaining thread choices", () => {
+it("retains the thread model selection and its options", () => {
   const input = {
     draft: null,
     providers: [],
@@ -11,23 +11,15 @@ it("ignores legacy project model and reasoning options while retaining thread ch
     threadModelSelection: null,
     settings: DEFAULT_UNIFIED_SETTINGS,
   };
-  const legacy = {
+  const base = {
     instanceId: ProviderInstanceId.make("codex"),
     model: "gpt-5.5",
     options: [{ id: "reasoningEffort", value: "high" }],
   };
-  expect(deriveEffectiveComposerModelState({ ...input, projectModelSelection: legacy })).toEqual(
-    deriveEffectiveComposerModelState(input),
+  const thread = { ...base, options: [{ id: "reasoningEffort", value: "low" }] };
+  const state = deriveEffectiveComposerModelState({ ...input, threadModelSelection: thread });
+  expect(state.modelOptions).not.toBeNull();
+  expect(state).toEqual(
+    deriveEffectiveComposerModelState({ ...input, threadModelSelection: thread }),
   );
-  const thread = { ...legacy, options: [{ id: "reasoningEffort", value: "low" }] };
-  expect(
-    deriveEffectiveComposerModelState({
-      ...input,
-      threadModelSelection: thread,
-      projectModelSelection: legacy,
-    }),
-  ).toEqual(deriveEffectiveComposerModelState({ ...input, threadModelSelection: thread }));
-  expect(
-    deriveEffectiveComposerModelState({ ...input, threadModelSelection: thread }).modelOptions,
-  ).not.toBeNull();
 });

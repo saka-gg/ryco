@@ -8,10 +8,6 @@ import {
   type ComputerFrameHeader,
 } from "@ryco/contracts/computer";
 
-export const COMPUTER_FRAME_WS_PATH = "/ws/computer-frames";
-export const COMPUTER_FRAME_WS_COMPUTER_ID_PARAM = "computerId";
-export const COMPUTER_FRAME_RESYNC_MESSAGE = "computer.frame.resync";
-
 export interface ComputerFrame {
   readonly header: ComputerFrameHeader;
   readonly payload: Uint8Array;

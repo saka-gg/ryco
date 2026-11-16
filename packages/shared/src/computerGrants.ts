@@ -14,7 +14,6 @@
 import type {
   ComputerBuildSignature,
   ComputerPermission,
-  DesktopAppSnapPermissionKind,
   DesktopAppSnapState,
 } from "@ryco/contracts";
 
@@ -26,19 +25,6 @@ export const COMPUTER_PERMISSIONS: readonly ComputerPermission[] = [
   "screenRecording",
   "inputMonitoring",
 ];
-
-/**
- * The same grant set in the AppSnap helper's vocabulary. One definition keeps
- * the desktop host, the composer's setup entry, and the settings panel asking
- * for exactly these grants. Computer uses Input Monitoring for physical Escape
- * and human takeover; it does not enable AppSnap's picker chord.
- *
- * Kept as an alias, not a second list: the desktop shell and the web settings
- * import this AppSnap vocabulary directly and live outside this slice, so the
- * alias stays until those callers move to COMPUTER_PERMISSIONS.
- */
-export const COMPUTER_PERMISSION_KINDS: readonly DesktopAppSnapPermissionKind[] =
-  COMPUTER_PERMISSIONS;
 
 /** A grant snapshot is evidence; an idle backend's connectivity is not. */
 export function missingComputerAppSnapPermissions(

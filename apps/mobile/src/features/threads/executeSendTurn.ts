@@ -67,7 +67,6 @@ export interface ExecuteSendTurnInput {
     readonly images: ReadonlyArray<DraftComposerAttachment>;
     readonly selectedModelSelection: ModelSelection;
     readonly selectedModel: string;
-    readonly hasSelectedModel: boolean;
   };
   readonly project: {
     readonly projectId: ProjectId;
@@ -195,7 +194,6 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
       outgoingMessageText,
       turnAttachments,
       modelSelection: input.composer.selectedModelSelection,
-      hasSelectedModel: input.composer.hasSelectedModel,
       runtimeMode: input.settings.runtimeMode,
       interactionMode: input.settings.interactionMode,
       tokenMode: input.settings.tokenMode,

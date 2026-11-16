@@ -190,6 +190,12 @@ describe("shell environment cache", () => {
     syncShellEnvironment(env, { platform: "darwin", readEnvironment: () => ({}) });
     expect(env.PATH).toBe("/cached/bin:/usr/bin");
   });
+
+  it("merges a Windows PATH without case- or quote-variant duplicates", () => {
+    const env: NodeJS.ProcessEnv = { PATH: 'c:\\tools;"C:\\Git";C:\\Windows' };
+    applyShellEnvironment(env, { PATH: "C:\\Tools;C:\\Git" }, "win32");
+    expect(env.PATH).toBe("C:\\Tools;C:\\Git;C:\\Windows");
+  });
 });
 
 describe("resolveShellEnvironmentSync", () => {

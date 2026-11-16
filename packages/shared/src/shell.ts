@@ -3,8 +3,6 @@ import { execFileSync } from "node:child_process";
 import { accessSync, constants, promises as fsPromises, statSync } from "node:fs";
 import { extname, join } from "node:path";
 
-const PATH_CAPTURE_START = "__RYCO_PATH_START__";
-const PATH_CAPTURE_END = "__RYCO_PATH_END__";
 const SHELL_ENV_NAME_PATTERN = /^[A-Z0-9_]+$/;
 const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
@@ -59,25 +57,6 @@ export function listLoginShellCandidates(
   return candidates;
 }
 
-export function extractPathFromShellOutput(output: string): string | null {
-  const startIndex = output.indexOf(PATH_CAPTURE_START);
-  if (startIndex === -1) return null;
-
-  const valueStartIndex = startIndex + PATH_CAPTURE_START.length;
-  const endIndex = output.indexOf(PATH_CAPTURE_END, valueStartIndex);
-  if (endIndex === -1) return null;
-
-  const pathValue = output.slice(valueStartIndex, endIndex).trim();
-  return pathValue.length > 0 ? pathValue : null;
-}
-
-export function readPathFromLoginShell(
-  shell: string,
-  execFile: ExecFileSyncLike = execFileSync,
-): string | undefined {
-  return readEnvironmentFromLoginShell(shell, ["PATH"], execFile).PATH;
-}
-
 /** The macOS launchd PATH probe, shared by the sync and async readers. */
 export const LAUNCHCTL_PATH_COMMAND = {
   file: "/bin/launchctl",
@@ -101,30 +80,6 @@ export function readPathFromLaunchctl(
   } catch {
     return undefined;
   }
-}
-
-export function mergePathEntries(
-  preferredPath: string | undefined,
-  inheritedPath: string | undefined,
-  platform: NodeJS.Platform,
-): string | undefined {
-  const delimiter = platform === "win32" ? ";" : ":";
-  const merged: string[] = [];
-  const seen = new Set<string>();
-
-  for (const pathValue of [preferredPath, inheritedPath]) {
-    if (!pathValue) continue;
-    for (const entry of pathValue.split(delimiter)) {
-      const trimmedEntry = entry.trim();
-      if (!trimmedEntry || seen.has(trimmedEntry)) {
-        continue;
-      }
-      seen.add(trimmedEntry);
-      merged.push(trimmedEntry);
-    }
-  }
-
-  return merged.length > 0 ? merged.join(delimiter) : undefined;
 }
 
 function envCaptureStart(name: string): string {
