@@ -157,3 +157,30 @@ it.effect("retries Copilot startup without Agent Control after injected MCP setu
     assert.isAtLeast(state.revokeLease.mock.calls.length, 1);
   }).pipe(Effect.provide(testLayer));
 });
+
+it.effect("a rejected second start leaves the live session's Agent Control alone", () => {
+  const configs: Array<SessionConfig> = [];
+  const state = makeBridge();
+  return Effect.gen(function* () {
+    const adapter = yield* makeCopilotAdapter(
+      { binaryPath: "copilot" },
+      {
+        instanceId,
+        agentControl: state.bridge,
+        clientFactory: () => makeClient(configs) as never,
+      },
+    );
+    yield* adapter.startSession(startInput);
+    const error = yield* Effect.flip(
+      adapter.startSession({
+        ...startInput,
+        runtimeSessionId: RuntimeSessionId.make("runtime-copilot-other"),
+      }),
+    );
+    assert.strictEqual(error._tag, "ProviderAdapterValidationError");
+    assert.include(String((error as { issue?: string }).issue), "stop it before starting");
+    assert.strictEqual(state.revokeLease.mock.calls.length, 0);
+    yield* adapter.stopSession(threadId);
+    assert.isAtLeast(state.revokeLease.mock.calls.length, 1);
+  }).pipe(Effect.provide(testLayer));
+});
