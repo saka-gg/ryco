@@ -329,8 +329,8 @@ const makeReconcile = <R>(input: {
       );
 
       // 1. Close scopes for instances that disappeared or whose config
-      //    changed. Do this BEFORE creating replacements so ids map 1-to-1
-      //    to live scopes at all times.
+      //    changed. Do this BEFORE creating replacements so an id never maps
+      //    to two live scopes at once.
       const removedIds: Array<ProviderInstanceId> = [];
       const replacedIds = new Set<ProviderInstanceId>();
       for (const [instanceId, live] of previousEntries) {
@@ -343,8 +343,22 @@ const makeReconcile = <R>(input: {
           replacedIds.add(instanceId);
         }
       }
+      const closingIds = [...removedIds, ...replacedIds];
+      // Unpublish them first: `getInstance` / `listInstances` read `entries`
+      // without the reconcile semaphore, and replacements may take seconds to
+      // build. A lookup in that window must fail with "instance not found"
+      // (callers retry) instead of handing out an adapter whose scope is
+      // closing or closed. No change is published here: the full result is
+      // published once, at the end.
+      if (closingIds.length > 0) {
+        yield* Ref.update(state.entries, (current) => {
+          const next = new Map(current);
+          for (const id of closingIds) next.delete(id);
+          return next;
+        });
+      }
       yield* Effect.forEach(
-        [...removedIds, ...replacedIds],
+        closingIds,
         (id) => {
           const live = previousEntries.get(id);
           return live ? Scope.close(live.scope, Exit.void).pipe(Effect.ignore) : Effect.void;
