@@ -12,18 +12,9 @@ import { Effect, Layer, Option, Redacted, Schema } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../../config.ts";
-import { makeCodexMcpService } from "../../mcp/CodexMcpService.ts";
-import { makeClaudeMcpAdapter } from "../../mcp/adapters/ClaudeMcpAdapter.ts";
-import { makeCodexMcpAdapter } from "../../mcp/adapters/CodexMcpAdapter.ts";
-import { makeCopilotMcpAdapter } from "../../mcp/adapters/CopilotMcpAdapter.ts";
-import { makeCursorMcpAdapter } from "../../mcp/adapters/CursorMcpAdapter.ts";
-import { makeGrokMcpAdapter } from "../../mcp/adapters/GrokMcpAdapter.ts";
-import { makeOpenCodeMcpAdapter } from "../../mcp/adapters/OpenCodeMcpAdapter.ts";
 import { externalAgentControlConfigFingerprint } from "../../mcp/externalAgentControlEntry.ts";
-import {
-  makeProviderMcpRegistry,
-  type ProviderMcpRegistryShape,
-} from "../../mcp/ProviderMcpRegistry.ts";
+import type { ProviderMcpRegistryShape } from "../../mcp/ProviderMcpRegistry.ts";
+import { ProviderMcpRegistryService } from "../../mcp/ProviderMcpRegistryService.ts";
 import {
   AgentControlMcpInstallationRepository,
   type StoredAgentControlMcpInstallation,
@@ -544,20 +535,7 @@ export const makeAgentControlExternalInstallation = (
   });
 
 const makeLive = Effect.gen(function* () {
-  const codexMcp = yield* makeCodexMcpService;
-  const claudeMcp = yield* makeClaudeMcpAdapter();
-  const copilotMcp = yield* makeCopilotMcpAdapter();
-  const cursorMcp = yield* makeCursorMcpAdapter();
-  const grokMcp = yield* makeGrokMcpAdapter();
-  const openCodeMcp = yield* makeOpenCodeMcpAdapter();
-  const registry = yield* makeProviderMcpRegistry([
-    makeCodexMcpAdapter(codexMcp),
-    claudeMcp,
-    copilotMcp,
-    cursorMcp,
-    grokMcp,
-    openCodeMcp,
-  ]);
+  const registry = yield* ProviderMcpRegistryService;
   return yield* makeAgentControlExternalInstallation(registry);
 });
 

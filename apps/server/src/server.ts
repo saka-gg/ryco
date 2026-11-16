@@ -209,6 +209,7 @@ import { AgentControlExternalMcpServerLive } from "./agentControl/Layers/AgentCo
 import { AgentControlAutomationServiceLive } from "./agentControl/Layers/AgentControlAutomation.ts";
 import { AgentControlDiagnosticsServiceLive } from "./agentControl/Layers/AgentControlDiagnostics.ts";
 import { AgentControlExternalInstallationServiceLive } from "./agentControl/Layers/AgentControlExternalInstallation.ts";
+import { ProviderMcpRegistryServiceLive } from "./mcp/ProviderMcpRegistryService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { OrchestrationCommandApplicationLive } from "./orchestration/Layers/OrchestrationCommandApplication.ts";
 import { UsageLimitRecoveryLive } from "./orchestration/Layers/UsageLimitRecovery.ts";
@@ -422,6 +423,8 @@ const AgentControlAutomationLayerLive = AgentControlAutomationServiceLive.pipe(
 const AgentControlExternalInstallationLayerLive = AgentControlExternalInstallationServiceLive.pipe(
   Layer.provideMerge(AgentControlExternalIntegrationServiceLive),
   Layer.provideMerge(AgentControlMcpInstallationRepositoryLive),
+  // One registry per node: Settings and the installation share its locks and list caches.
+  Layer.provideMerge(ProviderMcpRegistryServiceLive),
 );
 
 const AgentControlLayerLive = Layer.mergeAll(
