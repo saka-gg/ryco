@@ -31,7 +31,6 @@ interface XAiPromptCompletionState {
 }
 
 const defaultXAiPromptCompletionHistoryLimit = 128;
-const xAiStopReasonMissingMetaKey = "xAiStopReasonMissing";
 
 export interface XAiPromptCompletionRuntimeOptions {
   readonly completionHistoryLimit?: number;
@@ -499,7 +498,16 @@ const resolveXAiPromptCompletionFallback = ({
         return [
           shouldDiscard
             ? Effect.void
-            : Deferred.succeed(entry.deferred, promptResponseFromXAi(notification)).pipe(
+            : (isXAiStopReason(notification.stopReason)
+                ? Effect.void
+                : Effect.logWarning("xai.prompt-complete.stop-reason-unrecognized", {
+                    sessionId: notification.sessionId,
+                    stopReason: notification.stopReason ?? "missing",
+                  })
+              ).pipe(
+                Effect.andThen(
+                  Deferred.succeed(entry.deferred, promptResponseFromXAi(notification)),
+                ),
                 Effect.asVoid,
               ),
           {
@@ -540,13 +548,6 @@ function promptIdFromResponse(response: EffectAcpSchema.PromptResponse): string 
   return typeof promptId === "string" && promptId.length > 0 ? promptId : undefined;
 }
 
-export function promptResponseHasMissingXAiStopReason(
-  response: EffectAcpSchema.PromptResponse,
-): boolean {
-  const meta = response._meta;
-  return meta !== null && typeof meta === "object" && meta[xAiStopReasonMissingMetaKey] === true;
-}
-
 function promptResponseFromXAi(
   notification: XAiPromptCompleteNotification,
 ): EffectAcpSchema.PromptResponse {
@@ -554,9 +555,6 @@ function promptResponseFromXAi(
   const meta: Record<string, unknown> = {
     sessionId: notification.sessionId,
   };
-  if (notification.stopReason === undefined) {
-    meta[xAiStopReasonMissingMetaKey] = true;
-  }
   if (notification.promptId !== undefined) {
     meta.promptId = notification.promptId;
     meta.requestId = notification.promptId;
@@ -570,15 +568,16 @@ function promptResponseFromXAi(
   };
 }
 
+function isXAiStopReason(value: string | undefined): value is EffectAcpSchema.StopReason {
+  return (
+    value === "cancelled" ||
+    value === "end_turn" ||
+    value === "max_tokens" ||
+    value === "max_turn_requests" ||
+    value === "refusal"
+  );
+}
+
 function normalizeXAiStopReason(value: string | undefined): EffectAcpSchema.StopReason {
-  switch (value) {
-    case "cancelled":
-    case "end_turn":
-    case "max_tokens":
-    case "max_turn_requests":
-    case "refusal":
-      return value;
-    default:
-      return "end_turn";
-  }
+  return isXAiStopReason(value) ? value : "end_turn";
 }
