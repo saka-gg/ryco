@@ -1,7 +1,7 @@
 import { AccountEmail, CliProxyAccountName } from "../usage/AccountEmail";
 import { useCliProxyHubs } from "../usage/cliProxyHubsQuery";
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
-import { useRelativeLabelTick } from "../settings/settingsLayout";
+import { useRelativeLabelTick } from "../../hooks/useRelativeTimeTick";
 import {
   cliProxyCurrentAccount,
   cliProxyWindowLabel,

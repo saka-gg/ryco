@@ -7,7 +7,8 @@ import {
   staleRateLimitsReason,
 } from "@ryco/client-runtime/usage";
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
-import { SETTINGS_CONTROL_WIDTH, SettingsRow, useRelativeTimeTick } from "./settingsLayout";
+import { SETTINGS_CONTROL_WIDTH, SettingsRow } from "./settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 
 import {
   ArrowUpCircleIcon,

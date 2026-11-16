@@ -44,7 +44,8 @@ import { Button } from "../ui/button";
 import { Input, TOUCH_INPUT_CLASS_NAME } from "../ui/input";
 import { Label } from "../ui/label";
 import { Spinner } from "../ui/spinner";
-import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, { dateStyle: "long" });
 

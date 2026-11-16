@@ -1,9 +1,8 @@
 import type { AgentTokenMode, ProviderInteractionMode, RuntimeMode } from "@ryco/contracts";
 import { memo, useState } from "react";
-import { ListTodoIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
-import { boundedDisabledReason, MobileListRow } from "../mobile/MobileListRow";
+import { boundedDisabledReason } from "../mobile/MobileListRow";
 import { MobileSegmentedControl } from "../mobile/MobileSegmentedControl";
 import {
   MobileSheet,
@@ -42,9 +41,6 @@ export interface PhoneSessionPolicyProps {
   readonly tokenMode: AgentTokenMode;
   readonly showInteractionModeToggle: boolean;
   readonly askModeSupported: boolean;
-  readonly showPlanToggle: boolean;
-  readonly planSidebarLabel: string;
-  readonly planSidebarOpen: boolean;
   /** Renders the disabled presentation and blocks every change. */
   readonly disabled?: boolean | undefined;
   /** Bounded, operator-facing reason. Never a raw error or payload. */
@@ -52,7 +48,6 @@ export interface PhoneSessionPolicyProps {
   readonly onInteractionModeChange: (mode: ProviderInteractionMode) => void;
   readonly onRuntimeModeChange: (mode: RuntimeMode) => void;
   readonly onTokenModeChange: (mode: AgentTokenMode) => void;
-  readonly onTogglePlanSidebar: () => void;
 }
 
 export const PhoneSessionPolicySheet = memo(function PhoneSessionPolicySheet(
@@ -133,28 +128,6 @@ export const PhoneSessionPolicySheet = memo(function PhoneSessionPolicySheet(
             }))}
             onChange={(mode) => props.onTokenModeChange(mode as AgentTokenMode)}
           />
-
-          {props.showPlanToggle ? (
-            <MobileListRow
-              label={
-                props.planSidebarOpen
-                  ? `Hide ${props.planSidebarLabel.toLowerCase()} sidebar`
-                  : `Show ${props.planSidebarLabel.toLowerCase()} sidebar`
-              }
-              icon={<ListTodoIcon aria-hidden className="size-4 shrink-0" />}
-              selected={props.planSidebarOpen}
-              // Gated with the segments above it. Losing the capability while
-              // the sheet is open must not leave one row live in a sheet whose
-              // every other control has gone disabled.
-              disabled={disabled}
-              {...(reason ? { disabledReason: reason } : {})}
-              onClick={() => {
-                if (disabled) return;
-                props.onOpenChange(false);
-                props.onTogglePlanSidebar();
-              }}
-            />
-          ) : null}
         </div>
       </MobileSheetPanel>
     </MobileSheet>

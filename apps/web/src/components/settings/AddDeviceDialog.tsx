@@ -36,7 +36,7 @@ import {
 } from "@ryco/client-runtime/machineAccess/advertisedEndpoints";
 import type { AddDeviceDialogProps } from "./AddDeviceDialog.logic";
 import { resolveAdvertisedEndpointPairingUrl } from "./ConnectionsSettings.logic";
-import { useRelativeTimeTick } from "./settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import { errorMessage } from "~/lib/errorMessage";
 
 type DeviceTab = "phone" | "computer";

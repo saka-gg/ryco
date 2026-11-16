@@ -44,7 +44,8 @@ import { useSettingsDialogStore } from "~/settingsDialogStore";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
 import { formatRateLimitResetText } from "../../settings/codexUsageLimits";
-import { SettingsNotice, useRelativeLabelTick } from "../../settings/settingsLayout";
+import { SettingsNotice } from "../../settings/settingsLayout";
+import { useRelativeLabelTick } from "../../../hooks/useRelativeTimeTick";
 import { Panel, Sparkline, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
 import { AccountEmail, CliProxyAccountName } from "../../usage/AccountEmail";
 import { ProviderLimitWindow } from "../../usage/ProviderLimitWindow";

@@ -25,8 +25,8 @@ import {
   SettingsPageContainer,
   SettingsSection,
   SettingsToolbar,
-  useRelativeLabelTick,
 } from "./settingsLayout";
+import { useRelativeLabelTick } from "../../hooks/useRelativeTimeTick";
 
 const NOTICE_TONE: Readonly<Record<UpdateResultTone, "info" | "warning" | "error">> = {
   success: "info",

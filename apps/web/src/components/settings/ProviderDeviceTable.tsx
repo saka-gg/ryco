@@ -19,7 +19,8 @@ import {
   type ProviderTableRow,
 } from "./providerDeviceTable.logic";
 import { requestProviderEditor } from "./providerEditorRequest";
-import { SettingsCard, SettingsSection, useRelativeLabelTick } from "./settingsLayout";
+import { SettingsCard, SettingsSection } from "./settingsLayout";
+import { useRelativeLabelTick } from "../../hooks/useRelativeTimeTick";
 import { useSharedSettingsMode } from "./sharedSettings/sharedSettingsMode";
 import {
   settingsTargetDevice,

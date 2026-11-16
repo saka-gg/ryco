@@ -85,8 +85,8 @@ import {
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
-  useRelativeTimeTick,
 } from "./settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import { useServerProviders } from "../../rpc/serverState";
 import { errorMessage } from "~/lib/errorMessage";
 

@@ -22,7 +22,7 @@ import {
   MobileSheetPanel,
   MobileSheetTitle,
 } from "../mobile/MobileSheet";
-import { useRelativeTimeTick } from "../settings/settingsLayout";
+import { useRelativeTimeTick } from "../../hooks/useRelativeTimeTick";
 import { Button } from "../ui/button";
 import { DataList, DataListItem } from "../ui/data-list";
 import {
