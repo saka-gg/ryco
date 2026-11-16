@@ -151,7 +151,7 @@ export const TaskRow = memo(function TaskRow(props: TaskRowProps) {
  * the saved one back (and stops there, so the row stays open). It sizes to
  * its text, so the rest of the line still opens and closes the row.
  */
-function TaskTitleField(props: {
+export function TaskTitleField(props: {
   readonly taskId: string;
   readonly title: string;
   readonly onTitleChange: (taskId: string, title: string) => void;
@@ -159,14 +159,19 @@ function TaskTitleField(props: {
   const { taskId, title, onTitleChange } = props;
   const [value, setValue] = useState(title);
   const focusedRef = useRef(false);
+  // Only an actual edit is sent: a title that changed elsewhere meanwhile is not overwritten
+  // by this field's older copy of it.
+  const editedRef = useRef(false);
 
   useEffect(() => {
     if (!focusedRef.current) setValue(title);
   }, [title]);
 
   const commit = () => {
+    const edited = editedRef.current;
+    editedRef.current = false;
     const next = value.replace(/\s+/g, " ").trim();
-    if (next.length === 0 || next === title) {
+    if (!edited || next.length === 0 || next === title) {
       setValue(title);
       return;
     }
@@ -188,7 +193,10 @@ function TaskTitleField(props: {
         focusedRef.current = false;
         commit();
       }}
-      onChange={(event) => setValue(event.currentTarget.value)}
+      onChange={(event) => {
+        editedRef.current = true;
+        setValue(event.currentTarget.value);
+      }}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing) return;
         if (event.key === "Enter") {
@@ -197,6 +205,7 @@ function TaskTitleField(props: {
         } else if (event.key === "Escape" && value !== title) {
           // Only an edit is undone here; with nothing to undo, Escape closes the row.
           event.preventDefault();
+          editedRef.current = false;
           setValue(title);
         }
       }}
