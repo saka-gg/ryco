@@ -8,6 +8,9 @@ import {
 
 import type { StatisticsSearch } from "./statisticsSearch";
 
+/** A link can name several environments; the menu picks one or all. */
+const SEVERAL_ENVIRONMENTS = "__several__";
+
 /** Narrows a statistics view to one connected environment, or widens it to all of them. */
 export function EnvironmentSelect(props: {
   readonly search: StatisticsSearch;
@@ -16,10 +19,8 @@ export function EnvironmentSelect(props: {
   readonly ariaLabel: string;
 }) {
   const { search } = props;
-  const value =
-    search.environmentIds === undefined || search.environmentIds.length !== 1
-      ? "all"
-      : search.environmentIds[0]!;
+  const ids = search.environmentIds ?? [];
+  const value = ids.length === 0 ? "all" : ids.length === 1 ? ids[0]! : SEVERAL_ENVIRONMENTS;
   return (
     <Select
       value={value}
@@ -36,8 +37,10 @@ export function EnvironmentSelect(props: {
         <SelectValue>
           {value === "all"
             ? `All environments (${props.environments.length})`
-            : (props.environments.find((item) => item.environmentId === value)?.label ??
-              "Environment")}
+            : value === SEVERAL_ENVIRONMENTS
+              ? `${ids.length} environments`
+              : (props.environments.find((item) => item.environmentId === value)?.label ??
+                "Environment")}
         </SelectValue>
       </SelectTrigger>
       <SelectPopup alignItemWithTrigger={false}>
