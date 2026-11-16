@@ -54,6 +54,8 @@ interface StoredFile {
 const stored = new Map<string, StoredFile>();
 let storedBytes = 0;
 let rootCleared = false;
+/** Kept files a mounted row shows, by key: eviction skips them until released. */
+const holds = new Map<string, number>();
 
 export function attachmentFileKey(reference: AttachmentFileReference): string {
   return JSON.stringify([
@@ -108,6 +110,7 @@ function forget(key: string) {
 function evictOverBudget() {
   for (const key of stored.keys()) {
     if (stored.size <= MAX_ENTRIES && storedBytes <= MAX_BYTES) return;
+    if (holds.has(key)) continue;
     forget(key);
   }
 }
@@ -129,6 +132,23 @@ export function readStoredAttachmentFile(key: string): string | undefined {
   stored.delete(key);
   stored.set(key, entry);
   return entry.uri;
+}
+
+/**
+ * Keeps an attachment's file while a row shows it: eviction passes it over (the budget can
+ * run over by what is on screen), and the release trims anything over the budget.
+ */
+export function holdAttachmentFile(key: string): () => void {
+  holds.set(key, (holds.get(key) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const count = (holds.get(key) ?? 1) - 1;
+    if (count > 0) holds.set(key, count);
+    else holds.delete(key);
+    evictOverBudget();
+  };
 }
 
 function writeAttachmentFile(reference: AttachmentFileReference, bytes: Uint8Array): StoredFile {
@@ -256,6 +276,7 @@ export function purgeAttachmentFiles(environmentId: EnvironmentId): void {
 /** For tests: forget every kept file and read. */
 export function resetAttachmentFilesForTests(): void {
   stored.clear();
+  holds.clear();
   inflight.clear();
   storedBytes = 0;
   rootCleared = false;

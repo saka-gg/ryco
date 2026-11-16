@@ -5,6 +5,7 @@ import { useWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState
 import {
   acquireAttachmentFile,
   attachmentFileKey,
+  holdAttachmentFile,
   peekStoredAttachmentFile,
   type AttachmentFileReference,
 } from "./attachmentFiles";
@@ -43,6 +44,11 @@ export function useAttachmentFile(input: {
   const [loaded, setLoaded] = useState<{ readonly key: string; readonly uri: string }>();
   const [failure, setFailure] = useState<{ readonly key: string; readonly generation: string }>();
   const kept = loaded?.key === key ? loaded.uri : key ? peekStoredAttachmentFile(key) : undefined;
+  // The file this row shows stays on disk while it does.
+  useEffect(() => {
+    if (kept === undefined || key === "") return;
+    return holdAttachmentFile(key);
+  }, [key, kept]);
 
   const environmentId = reference?.environmentId;
   const threadId = reference?.threadId;
