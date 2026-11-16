@@ -29,7 +29,7 @@ import {
   LAUNCHCTL_PATH_COMMAND,
   listLoginShellCandidates,
   loginShellEnvironmentArgs,
-  mergePathEntries,
+  mergePathValues,
   parseLaunchctlPathOutput,
   parseLoginShellEnvironmentOutput,
   readEnvironmentFromLoginShell,
@@ -101,7 +101,7 @@ export function applyShellEnvironment(
   environment: ShellEnvironment,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  const mergedPath = mergePathEntries(environment.PATH, env.PATH, platform);
+  const mergedPath = mergePathValues(environment.PATH, env.PATH, platform);
   if (mergedPath) {
     env.PATH = mergedPath;
   }
