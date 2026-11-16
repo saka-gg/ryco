@@ -248,7 +248,10 @@ function resolveConnectionMetadata(handlers?: WsProtocolLifecycleHandlers): WsCo
 }
 
 type ComposedWsProtocolLifecycleHandlers = Required<
-  Pick<WsProtocolLifecycleHandlers, "isActive" | "onAttempt" | "onOpen" | "onError" | "onClose">
+  Pick<
+    WsProtocolLifecycleHandlers,
+    "isActive" | "onAttempt" | "onOpen" | "onError" | "onClose" | "onHeartbeatTimeout"
+  >
 >;
 
 function defaultLifecycleHandlers(
@@ -279,6 +282,15 @@ function defaultLifecycleHandlers(
       }
       if (handlers?.recordConnectionState !== false) {
         recordWsConnectionClosed(details, resolveConnectionMetadata(handlers));
+      }
+    },
+    onHeartbeatTimeout: () => {
+      if (handlers?.recordConnectionState !== false) {
+        clearAllTrackedRpcRequests();
+        recordWsConnectionErrored(
+          "WebSocket heartbeat timed out.",
+          resolveConnectionMetadata(handlers),
+        );
       }
     },
   };
@@ -319,6 +331,13 @@ function composeLifecycleHandlers(
       }
       defaults.onClose(details, context);
       handlers?.onClose?.(details, context);
+    },
+    onHeartbeatTimeout: () => {
+      if (!isActive()) {
+        return;
+      }
+      defaults.onHeartbeatTimeout();
+      handlers?.onHeartbeatTimeout?.();
     },
   };
 }
@@ -570,16 +589,7 @@ export function createWsRpcProtocolLayer(
           handlers?.onHeartbeatPong?.();
         }
       }),
-      onPingTimeout: Effect.sync(() => {
-        if (lifecycle.isActive()) {
-          clearAllTrackedRpcRequests();
-          recordWsConnectionErrored(
-            "WebSocket heartbeat timed out.",
-            resolveConnectionMetadata(handlers),
-          );
-          handlers?.onHeartbeatTimeout?.();
-        }
-      }),
+      onPingTimeout: Effect.sync(() => lifecycle.onHeartbeatTimeout()),
     }),
   );
 
