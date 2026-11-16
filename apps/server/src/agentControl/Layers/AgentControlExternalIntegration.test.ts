@@ -5,6 +5,7 @@ import {
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Option, Redacted } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { AgentControlExternalRepositoryLive } from "../../persistence/Layers/AgentControlExternal.ts";
@@ -27,6 +28,38 @@ const layer = it.layer(
   AgentControlExternalIntegrationServiceLive.pipe(
     Layer.provideMerge(AgentControlPolicyLive),
     Layer.provideMerge(AgentControlExternalRepositoryLive),
+    Layer.provideMerge(ServerSettingsService.layerTest({ agentControl: { enabled: true } })),
+    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(AgentControlExternalTopologyLive),
+    Layer.provide(config),
+  ),
+);
+
+/**
+ * Runs `afterRead` once, right after the next integration read returns its row and before the
+ * caller sees it, so a test can land a concurrent write inside a read-modify-write window.
+ */
+const interleave: { afterRead: Effect.Effect<void> | undefined } = { afterRead: undefined };
+const InterleavingRepositoryLive = Layer.effect(
+  AgentControlExternalRepository,
+  Effect.gen(function* () {
+    const live = yield* AgentControlExternalRepository;
+    return {
+      ...live,
+      getIntegration: (integrationId) =>
+        Effect.tap(live.getIntegration(integrationId), () => {
+          const afterRead = interleave.afterRead;
+          interleave.afterRead = undefined;
+          return afterRead ?? Effect.void;
+        }),
+    } satisfies typeof live;
+  }),
+).pipe(Layer.provide(AgentControlExternalRepositoryLive));
+
+const interleavingLayer = it.layer(
+  AgentControlExternalIntegrationServiceLive.pipe(
+    Layer.provideMerge(AgentControlPolicyLive),
+    Layer.provideMerge(InterleavingRepositoryLive),
     Layer.provideMerge(ServerSettingsService.layerTest({ agentControl: { enabled: true } })),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(AgentControlExternalTopologyLive),
@@ -147,14 +180,14 @@ layer("AgentControlExternalIntegrationService", (it) => {
     Effect.gen(function* () {
       const service = yield* AgentControlExternalIntegrationService;
       const repository = yield* AgentControlExternalRepository;
+      const sql = yield* SqlClient.SqlClient;
       const created = yield* service.create(createInput({ displayName: "Expiring client" }));
       const stored = Option.getOrThrow(
         yield* repository.getIntegration(created.detail.integration.integrationId),
       );
-      yield* repository.replaceIntegration({
-        ...stored,
-        pairingCodeExpiresAt: "2020-01-01T00:00:00.000Z",
-      });
+      yield* sql`UPDATE agent_control_external_integrations
+        SET pairing_code_expires_at = '2020-01-01T00:00:00.000Z'
+        WHERE integration_id = ${stored.integrationId}`;
       const expiredCode = yield* Effect.flip(
         service.exchangePairing({
           integrationId: stored.integrationId,
@@ -225,6 +258,95 @@ layer("AgentControlExternalIntegrationService", (it) => {
         (yield* service.list()).integrations.map((detail) => detail.integration.integrationId),
         created.detail.integration.integrationId,
       );
+    }),
+  );
+});
+
+interleavingLayer("AgentControlExternalIntegrationService concurrent writes", (it) => {
+  it.effect("keeps a task reservation made while an owner edit was in flight", () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlExternalIntegrationService;
+      const repository = yield* AgentControlExternalRepository;
+      const created = yield* service.createPaired(
+        createInput({ displayName: "Busy client", activeTaskLimit: 2 }),
+      );
+      const integrationId = created.detail.integration.integrationId;
+      interleave.afterRead = repository.reserveCapacity(integrationId).pipe(Effect.orDie);
+      const updated = yield* service.update({ integrationId, displayName: "Renamed client" });
+      assert.strictEqual(updated.integration.displayName, "Renamed client");
+      assert.strictEqual(updated.integration.activeTaskCount, 1);
+      assert.strictEqual(
+        Option.getOrThrow(yield* repository.getIntegration(integrationId)).activeTaskCount,
+        1,
+      );
+    }),
+  );
+
+  it.effect("refuses a limit below a reservation made while the edit was in flight", () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlExternalIntegrationService;
+      const repository = yield* AgentControlExternalRepository;
+      const created = yield* service.createPaired(
+        createInput({ displayName: "Limited client", activeTaskLimit: 2 }),
+      );
+      const integrationId = created.detail.integration.integrationId;
+      yield* repository.reserveCapacity(integrationId);
+      interleave.afterRead = repository.reserveCapacity(integrationId).pipe(Effect.orDie);
+      const refused = yield* Effect.flip(service.update({ integrationId, activeTaskLimit: 1 }));
+      assert.strictEqual(reasonOf(refused), "capacity-exhausted");
+      const stored = Option.getOrThrow(yield* repository.getIntegration(integrationId));
+      assert.strictEqual(stored.activeTaskLimit, 2);
+      assert.strictEqual(stored.activeTaskCount, 2);
+    }),
+  );
+
+  it.effect("does not undo a revoke that lands during an owner edit", () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlExternalIntegrationService;
+      const created = yield* service.createPaired(createInput({ displayName: "Edited client" }));
+      const integrationId = created.detail.integration.integrationId;
+      interleave.afterRead = service.revoke(integrationId).pipe(Effect.asVoid, Effect.orDie);
+      const updated = yield* service.update({ integrationId, displayName: "Edited again" });
+      assert.isNotNull(updated.integration.revokedAt);
+      assert.strictEqual(
+        reasonOf(yield* Effect.flip(service.revalidate(integrationId))),
+        "revoked",
+      );
+      const credential = Redacted.value(created.credential);
+      assert.strictEqual(
+        reasonOf(yield* Effect.flip(service.authenticate(`Bearer ${credential}`))),
+        "credential-refused",
+      );
+    }),
+  );
+
+  it.effect("does not re-arm an integration revoked during a credential rotation", () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlExternalIntegrationService;
+      const created = yield* service.createPaired(createInput({ displayName: "Rotated client" }));
+      const integrationId = created.detail.integration.integrationId;
+      interleave.afterRead = service.revoke(integrationId).pipe(Effect.asVoid, Effect.orDie);
+      const refused = yield* Effect.flip(service.rotateCredential(integrationId));
+      assert.strictEqual(reasonOf(refused), "revoked");
+      assert.strictEqual(
+        reasonOf(yield* Effect.flip(service.revalidate(integrationId))),
+        "revoked",
+      );
+    }),
+  );
+
+  it.effect("does not re-open pairing for an integration revoked during a resume", () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlExternalIntegrationService;
+      const repository = yield* AgentControlExternalRepository;
+      const created = yield* service.create(createInput({ displayName: "Resumed client" }));
+      const integrationId = created.detail.integration.integrationId;
+      interleave.afterRead = service.revoke(integrationId).pipe(Effect.asVoid, Effect.orDie);
+      const refused = yield* Effect.flip(service.resumePairing(integrationId));
+      assert.strictEqual(reasonOf(refused), "revoked");
+      const stored = Option.getOrThrow(yield* repository.getIntegration(integrationId));
+      assert.strictEqual(stored.pairingState, "unpaired");
+      assert.strictEqual(stored.pairingCodeHash, null);
     }),
   );
 });

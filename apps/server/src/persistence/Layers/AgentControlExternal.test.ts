@@ -9,6 +9,7 @@ import {
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   AgentControlExternalRepository,
@@ -125,10 +126,9 @@ layer("AgentControlExternalRepository", (it) => {
         first.planDigest,
       );
 
-      yield* repository.replaceIntegration({
-        ...Option.getOrThrow(yield* repository.getIntegration(integrationId)),
-        activeTaskCount: 0,
-      });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE agent_control_external_integrations SET active_task_count = 0
+        WHERE integration_id = ${integrationId}`;
       yield* repository.reconcileCapacity();
       assert.strictEqual(
         Option.getOrThrow(yield* repository.getIntegration(integrationId)).activeTaskCount,
@@ -153,6 +153,132 @@ layer("AgentControlExternalRepository", (it) => {
         Option.getOrThrow(yield* repository.getIntegration(integrationId)).activeTaskCount,
         0,
       );
+    }),
+  );
+
+  it.effect("edits settings without writing back revocation, credential or usage state", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlExternalRepository;
+      const id = AgentControlIntegrationId.make("external-repository-settings");
+      assert.isTrue(
+        yield* repository.insertIntegration(
+          integration({
+            integrationId: id,
+            activeTaskLimit: 2,
+            credentialHash: AgentControlExternalSecretHash.make("e".repeat(64)),
+          }),
+        ),
+      );
+      assert.isTrue(yield* repository.reserveCapacity(id));
+      assert.isTrue(yield* repository.reserveCapacity(id));
+      yield* repository.touchLastUsed({ integrationId: id, now: "2026-08-18T00:01:00.000Z" });
+
+      const settings = {
+        integrationId: id,
+        displayName: "Renamed",
+        clientKind: "claude-code",
+        projectScope: { kind: "all" },
+        capabilities: [AGENT_CONTROL_CAPABILITIES.externalReadTask],
+        rateLimitPerMinute: 5,
+        activeTaskLimit: 2,
+        expiresAt: null,
+        updatedAt: "2026-08-18T00:02:00.000Z",
+      } as const;
+      // A limit below the live count is refused in SQL, whatever count the caller read.
+      assert.isFalse(
+        yield* repository.updateIntegrationSettings({ ...settings, activeTaskLimit: 1 }),
+      );
+      assert.isTrue(yield* repository.updateIntegrationSettings(settings));
+      const stored = Option.getOrThrow(yield* repository.getIntegration(id));
+      assert.deepStrictEqual(
+        {
+          displayName: stored.displayName,
+          clientKind: stored.clientKind,
+          projectScope: stored.projectScope,
+          capabilities: stored.capabilities,
+          rateLimitPerMinute: stored.rateLimitPerMinute,
+          activeTaskLimit: stored.activeTaskLimit,
+          updatedAt: stored.updatedAt,
+        },
+        {
+          displayName: "Renamed",
+          clientKind: "claude-code",
+          projectScope: { kind: "all" },
+          capabilities: [AGENT_CONTROL_CAPABILITIES.externalReadTask],
+          rateLimitPerMinute: 5,
+          activeTaskLimit: 2,
+          updatedAt: "2026-08-18T00:02:00.000Z",
+        },
+      );
+      assert.strictEqual(stored.activeTaskCount, 2);
+      assert.strictEqual(stored.lastUsedAt, "2026-08-18T00:01:00.000Z");
+      assert.strictEqual(stored.credentialHash, "e".repeat(64));
+
+      // Settings edits on a revoked integration leave the revocation in place.
+      assert.isTrue(
+        yield* repository.revokeIntegration({ integrationId: id, now: "2026-08-18T00:03:00.000Z" }),
+      );
+      assert.isTrue(yield* repository.updateIntegrationSettings(settings));
+      const revoked = Option.getOrThrow(yield* repository.getIntegration(id));
+      assert.strictEqual(revoked.revokedAt, "2026-08-18T00:03:00.000Z");
+      assert.strictEqual(revoked.credentialHash, null);
+      assert.strictEqual(revoked.activeTaskCount, 2);
+    }),
+  );
+
+  it.effect("never re-arms a revoked or expired integration", () =>
+    Effect.gen(function* () {
+      const repository = yield* AgentControlExternalRepository;
+      const id = AgentControlIntegrationId.make("external-repository-revoked");
+      assert.isTrue(
+        yield* repository.insertIntegration(
+          integration({
+            integrationId: id,
+            credentialHash: AgentControlExternalSecretHash.make("f".repeat(64)),
+          }),
+        ),
+      );
+      const now = "2026-08-18T00:01:00.000Z";
+      assert.isTrue(yield* repository.revokeIntegration({ integrationId: id, now }));
+      assert.isFalse(
+        yield* repository.revokeIntegration({ integrationId: id, now: "2026-08-18T00:02:00.000Z" }),
+      );
+      const freshHash = AgentControlExternalSecretHash.make("d".repeat(64));
+      assert.isFalse(
+        yield* repository.rotateCredential({ integrationId: id, credentialHash: freshHash, now }),
+      );
+      assert.isFalse(
+        yield* repository.restartPairing({
+          integrationId: id,
+          pairingCodeHash: freshHash,
+          pairingCodeExpiresAt: "2026-08-18T00:11:00.000Z",
+          now,
+        }),
+      );
+      const stored = Option.getOrThrow(yield* repository.getIntegration(id));
+      assert.strictEqual(stored.revokedAt, now);
+      assert.strictEqual(stored.pairingState, "unpaired");
+      assert.strictEqual(stored.credentialHash, null);
+      assert.isTrue(Option.isNone(yield* repository.findByCredentialHash(freshHash)));
+
+      const expiredId = AgentControlIntegrationId.make("external-repository-expired");
+      assert.isTrue(
+        yield* repository.insertIntegration(
+          integration({
+            integrationId: expiredId,
+            expiresAt: "2026-08-18T00:00:30.000Z",
+            credentialHash: AgentControlExternalSecretHash.make("9".repeat(64)),
+          }),
+        ),
+      );
+      assert.isFalse(
+        yield* repository.rotateCredential({
+          integrationId: expiredId,
+          credentialHash: freshHash,
+          now,
+        }),
+      );
+      assert.isTrue(Option.isNone(yield* repository.findByCredentialHash(freshHash)));
     }),
   );
 
