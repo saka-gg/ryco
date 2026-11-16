@@ -256,6 +256,7 @@ import {
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
 import { resolveDesktopAppBranding } from "./appBranding.ts";
+import { isAppWindowNavigationAllowed } from "./appWindowNavigation.ts";
 import { createAppMenuActionDispatch, createAppWindowRegistry } from "./appWindows.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
 import {
@@ -5124,6 +5125,29 @@ function createWindow(): BrowserWindow {
       void shell.openExternal(externalUrl);
     }
     return { action: "deny" };
+  });
+
+  // Only the app's own documents may hold this window: a foreign page in its top frame would
+  // inherit the preload bridge. Links that try anyway open in the user's browser.
+  const keepAppWindowOnApp = (event: Electron.Event, url: string) => {
+    if (
+      isAppWindowNavigationAllowed({
+        url,
+        appUrls: isDevelopment ? [backendHttpUrl, resolveDesktopDevServerUrl()] : [backendHttpUrl],
+        isDesktopDocumentUrl: (candidate) =>
+          isDesktopBootUrl(candidate) || isDesktopAppUrl(candidate),
+      })
+    ) {
+      return;
+    }
+    event.preventDefault();
+    writeDesktopLogHeader("app window navigation to a foreign origin blocked");
+    const externalUrl = getSafeExternalUrl(url);
+    if (externalUrl) void shell.openExternal(externalUrl);
+  };
+  window.webContents.on("will-navigate", (event) => keepAppWindowOnApp(event, event.url));
+  window.webContents.on("will-redirect", (event) => {
+    if (event.isMainFrame) keepAppWindowOnApp(event, event.url);
   });
 
   window.on("page-title-updated", (event) => {

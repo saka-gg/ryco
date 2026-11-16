@@ -61,6 +61,13 @@ describe("main.ts app window wiring", () => {
     expect(topLevelFunction("bootstrap")).toContain("developmentReadinessWatchArmed = true;");
   });
 
+  it("guards the app window's top-frame navigation", () => {
+    const create = topLevelFunction("createWindow");
+    expect(create).toContain('"will-navigate"');
+    expect(create).toContain('"will-redirect"');
+    expect(create).toContain("isAppWindowNavigationAllowed(");
+  });
+
   it("delivers a held menu action once an app window's shell reports usable", () => {
     const usable = main.indexOf("appShellUsableContents.add(event.sender);");
     expect(usable).toBeGreaterThanOrEqual(0);
