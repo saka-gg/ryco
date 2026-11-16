@@ -736,12 +736,14 @@ export class AndroidEmulatorBackend implements DeviceBackend {
     }
     const started = (async () => {
       await this.pushScrcpy(runtime);
-      const session = await lib.ScrcpySession.start(this.scrcpyHost(), {
+      // `let`, not `const`: the callback must never read a binding in its TDZ.
+      let session: ScrcpySession | null = null;
+      session = await lib.ScrcpySession.start(this.scrcpyHost(), {
         transportId: runtime.transportId,
         video: null,
         onEnded: () => {
           if (runtime.control === started) runtime.control = null;
-          if (runtime.controlSession === session) runtime.controlSession = null;
+          if (session !== null && runtime.controlSession === session) runtime.controlSession = null;
         },
       });
       runtime.controlSession = session;
@@ -1226,12 +1228,14 @@ export class AndroidEmulatorBackend implements DeviceBackend {
         data: event.data,
       });
     };
-    const session = await lib.ScrcpySession.start(this.scrcpyHost(), {
+    // `let`, not `const`: the callback must never read a binding in its TDZ.
+    let session: ScrcpySession | null = null;
+    session = await lib.ScrcpySession.start(this.scrcpyHost(), {
       transportId: runtime.transportId,
       video: this.options.video ?? lib.SCRCPY_DEFAULT_VIDEO,
       onVideo: handle,
       onEnded: () => {
-        if (runtime.video?.session === session) runtime.video = null;
+        if (session !== null && runtime.video?.session === session) runtime.video = null;
       },
     });
     state = { session, sequence: 0, size: null };

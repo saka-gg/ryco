@@ -59,7 +59,10 @@ export interface ScrcpySessionOptions {
   readonly transportId: string;
   readonly video: ScrcpyVideoOptions | null;
   readonly onVideo?: (event: ScrcpyVideoEvent) => void;
-  /** Once, when the session ends for any reason other than `close()`. */
+  /**
+   * Once, when an opened session ends for any reason other than `close()`.
+   * A session that ends while `start()` runs is reported by `start()` rejecting.
+   */
   readonly onEnded?: (reason: string) => void;
   /** How long to wait for the server to accept its first socket. */
   readonly connectTimeoutMs?: number;
@@ -104,6 +107,8 @@ function serverArguments(scid: string, video: ScrcpyVideoOptions | null): string
 export class ScrcpySession {
   private ended = false;
   private closing = false;
+  /** Set once `open()` succeeds; `onEnded` is only for sessions callers hold. */
+  private opened = false;
   private readonly acks = new Map<bigint, () => void>();
   private nextSequence = 1n;
   private readonly diagnostics: string[] = [];
@@ -189,6 +194,10 @@ export class ScrcpySession {
       this.end(status.exited);
     });
 
+    const failure = () =>
+      new ScrcpySessionError(
+        `${status.exited ?? "scrcpy session closed"}${this.serverOutput ? `: ${this.serverOutput}` : ""}`,
+      );
     const deadline = Date.now() + (this.options.connectTimeoutMs ?? 10_000);
     const delay =
       this.host.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -196,10 +205,7 @@ export class ScrcpySession {
     // the server listens and closes at once, so only that byte proves it.
     let first: { socket: net.Socket; rest: Buffer } | null = null;
     while (first === null) {
-      if (status.exited !== null || this.closing)
-        throw new ScrcpySessionError(
-          `${status.exited ?? "scrcpy session closed"}${this.serverOutput ? `: ${this.serverOutput}` : ""}`,
-        );
+      if (status.exited !== null || this.closing) throw failure();
       if (Date.now() > deadline)
         throw new ScrcpySessionError(
           `scrcpy-server did not accept a connection${this.serverOutput ? `: ${this.serverOutput}` : ""}`,
@@ -207,11 +213,21 @@ export class ScrcpySession {
       first = await this.tryFirstSocket();
       if (first === null) await delay(100);
     }
+    // The server can die while a socket is being accepted; teardown has
+    // already run, so these sockets are this method's to destroy.
+    if (this.ended) {
+      first.socket.destroy();
+      throw failure();
+    }
     let control: net.Socket;
     let controlRest: Buffer = Buffer.alloc(0);
     if (this.options.video) {
       this.videoSocket = first.socket;
       control = await this.connectSocket();
+      if (this.ended) {
+        control.destroy();
+        throw failure();
+      }
       this.watchVideo(first.socket, first.rest);
     } else {
       control = first.socket;
@@ -237,6 +253,9 @@ export class ScrcpySession {
     control.setNoDelay(true);
     if (controlRest.byteLength > 0) handle(controlRest);
     control.resume();
+    // Buffered bytes are handled synchronously above and can end the session.
+    if (this.ended) throw failure();
+    this.opened = true;
   }
 
   private connectSocket(): Promise<net.Socket> {
@@ -292,7 +311,7 @@ export class ScrcpySession {
     this.ended = true;
     for (const resolve of this.acks.values()) resolve();
     this.acks.clear();
-    if (!this.closing) this.options.onEnded?.(reason);
+    if (this.opened && !this.closing) this.options.onEnded?.(reason);
     void this.teardown();
   }
 
