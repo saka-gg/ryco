@@ -78,6 +78,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { ChatBackgroundSetting } from "./ChatBackgroundSetting";
 import { ChatWidthSetting } from "./ChatWidthSetting";
 import { OpenChatTabsSetting } from "./OpenChatTabsSetting";
 import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
@@ -718,6 +719,13 @@ export function AppearanceSettingsPanel({
       </SettingsSection>
       <SettingsSection title="Interface">
         {isHub || isPhoneTier ? null : <ChatWidthSetting />}
+        {isHub || isPhoneTier ? null : (
+          <ChatBackgroundSetting
+            value={appearancePreferences.chatBackground}
+            onChange={handleAppearancePreferenceChange}
+            onReset={handleAppearancePreferenceReset}
+          />
+        )}
         {isHub || isPhoneTier || isSettingsPage ? null : <OpenChatTabsSetting />}
         {isSettingsPage ? <TimeFormatSetting /> : null}
         <SettingsRow
