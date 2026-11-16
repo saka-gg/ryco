@@ -3,7 +3,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { ComputerLaunchAppResult, ComputerWindow } from "@ryco/contracts";
 import { withDesktopOperationSignal } from "./DesktopOperationQueue.ts";
 
-const unavailable = (windowReason: NonNullable<ComputerLaunchAppResult["windowReason"]>) => ({
+type WindowReason = NonNullable<ComputerLaunchAppResult["windowReason"]>;
+
+/** What the probe saw last, for a probe the readiness budget cuts short. */
+interface ProbeProgress {
+  lastReason: WindowReason | undefined;
+}
+
+const unavailable = (windowReason: WindowReason) => ({
   window: null,
   windowStatus: "no_usable_window" as const,
   windowReason,
@@ -36,15 +43,21 @@ export async function waitForWindow(
     );
     timer.unref?.();
   });
+  const progress: ProbeProgress = { lastReason: undefined };
   try {
     return await Promise.race([
       withDesktopOperationSignal(probeSignal, () =>
-        probeWindow(read, app, timeoutMs, probeSignal, target),
+        probeWindow(read, app, timeoutMs, probeSignal, target, progress),
       ),
       timeout,
     ]);
   } catch {
     signal?.throwIfAborted();
+    // The budget ran out (this guard and the probe's deadline share it): report
+    // what the last completed observation saw, such as a window on another
+    // Space, rather than an input failure.
+    if (controller.signal.aborted && progress.lastReason !== undefined)
+      return unavailable(progress.lastReason);
     return unavailable("input_unavailable");
   } finally {
     if (timer !== undefined) clearTimeout(timer);
@@ -60,6 +73,7 @@ async function probeWindow(
   target:
     | { readonly pid?: number; readonly checkInputReady?: (windowId: string) => Promise<void> }
     | undefined,
+  progress: ProbeProgress,
 ): Promise<Pick<ComputerLaunchAppResult, "window" | "windowStatus" | "windowReason">> {
   const name = app
     .split(/[\\/]/)
@@ -86,6 +100,9 @@ async function probeWindow(
         : !candidate.visible || candidate.minimized
           ? "hidden"
           : undefined;
+    // A usable candidate still has to pass the input check, so a probe cut
+    // short there reports input_unavailable.
+    progress.lastReason = reason;
     if (candidate && reason === undefined) {
       try {
         await target?.checkInputReady?.(candidate.id);

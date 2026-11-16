@@ -167,6 +167,31 @@ describe("launch window readiness", () => {
       windowReason: reason,
     });
   });
+  it.each([
+    [[{ ...window, visible: false }], "hidden"],
+    [[{ ...window, onCurrentSpace: false }], "off_space"],
+    [[], "no_window"],
+  ] as const)(
+    "reports why a window stayed unusable for a whole positive wait: %j",
+    async (windows, reason) => {
+      expect(await waitForWindow(async () => windows, "Helium", 300)).toEqual({
+        window: null,
+        windowStatus: "no_usable_window",
+        windowReason: reason,
+      });
+    },
+  );
+  it("reports input_unavailable when the input check outlasts a positive wait", async () => {
+    expect(
+      await waitForWindow(async () => [window], "Helium", 300, undefined, {
+        checkInputReady: () => new Promise(() => {}),
+      }),
+    ).toEqual({
+      window: null,
+      windowStatus: "no_usable_window",
+      windowReason: "input_unavailable",
+    });
+  });
   it("does not mistake a listed window for native input readiness", async () => {
     expect(
       await waitForWindow(async () => [window], "Helium", 0, undefined, {
