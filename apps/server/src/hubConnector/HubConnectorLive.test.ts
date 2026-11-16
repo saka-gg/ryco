@@ -8,6 +8,10 @@ import { Effect, Layer, Option, Tracer } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { HUB_CONNECTED_EXTERNAL_TOPOLOGY } from "../agentControl/externalTopology.ts";
+import {
+  type LinkedSessionSelector,
+  SessionCredentialService,
+} from "../auth/Services/SessionCredentialService.ts";
 import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
 import {
   DEFAULT_HUB_CONNECTOR_CONFIG,
@@ -91,6 +95,7 @@ function recordingRuntime(calls: string[]): HubIdentityRuntimeShape {
 async function withHubConnectorLive(
   lockAnswers: () => HubIdentityProcessLockResult,
   body: (service: HubConnectorServiceShape, calls: string[]) => Promise<void>,
+  services: Layer.Layer<never> = Layer.empty,
 ): Promise<string[]> {
   const calls: string[] = [];
   const layer = makeHubConnectorLive({
@@ -141,6 +146,7 @@ async function withHubConnectorLive(
       }),
     ),
     Layer.provide(NodeServices.layer),
+    Layer.provide(services),
   );
   await Effect.runPromise(
     Effect.gen(function* () {
@@ -233,6 +239,29 @@ describe("HubConnectorLive", () => {
           HubIdentityInUseError,
         );
       },
+    );
+  });
+
+  it("ends every Hub-linked session when the node leaves the Hub", async () => {
+    const revoked: LinkedSessionSelector[] = [];
+    const sessions = Layer.mock(SessionCredentialService)({
+      cookieName: "ryco_session",
+      legacyCookieNames: [],
+      revokeLinked: (selector) =>
+        Effect.sync(() => {
+          revoked.push(selector);
+          return 0;
+        }),
+    });
+    await withHubConnectorLive(
+      () => "acquired",
+      async (service, calls) => {
+        expect(revoked).toEqual([]);
+        await service.leave();
+        expect(calls).toContain("leave");
+        expect(revoked).toEqual([{ allLinks: true }]);
+      },
+      sessions,
     );
   });
 
