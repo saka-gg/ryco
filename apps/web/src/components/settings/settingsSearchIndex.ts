@@ -375,6 +375,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
     section: "appearance",
     storage: "app",
+    title: "Chat background",
+    description: "An animated field behind new, empty chats.",
+    keywords: "animation animated flow field halftone dots vortex empty new chat wallpaper motion",
+  },
+  {
+    section: "appearance",
+    storage: "app",
     title: "Primary color",
     description: "Accent color for links, focus rings, and actions.",
     keywords: "accent custom violet amber",

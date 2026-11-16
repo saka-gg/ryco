@@ -27,6 +27,7 @@ export const APPEARANCE_PREFERENCE_KEYS = [
   "windowTranslucencyOpacity",
   "windowTranslucencyBlurStrength",
   "contrast",
+  "chatBackground",
 ] as const;
 
 export type AppearancePreferenceKey = (typeof APPEARANCE_PREFERENCE_KEYS)[number];
@@ -205,6 +206,19 @@ function blurStrengthForDesktopRadius(radius: number): number {
   return Math.round(((radius - DESKTOP_WINDOW_BLUR_RADIUS_MIN) / span) * 100);
 }
 
+/**
+ * The animated field behind an empty chat (`EmptyChatBackground`): short
+ * strokes along a drifting flow field, or halftone dots. A click on empty space
+ * drops a vortex in the theme's accent color.
+ */
+export const CHAT_BACKGROUND_OPTIONS = [
+  { value: "flow", label: "Flow field", description: "Drifting strokes" },
+  { value: "halftone", label: "Halftone", description: "Pulsing dots" },
+  { value: "off", label: "Off", description: "Plain background" },
+] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
+
+export type ChatBackgroundPreference = (typeof CHAT_BACKGROUND_OPTIONS)[number]["value"];
+
 export const MOTION_OPTIONS = [
   { value: "system", label: "System", description: "Follow OS" },
   { value: "reduce", label: "Reduced", description: "Minimal" },
@@ -305,6 +319,7 @@ export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   windowTranslucencyOpacity: "80",
   windowTranslucencyBlurStrength: String(WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MAX),
   contrast: String(APPEARANCE_CONTRAST_DEFAULT),
+  chatBackground: CHAT_BACKGROUND_OPTIONS[0].value,
 };
 
 /** Integer-valued keys, stored as decimal strings and validated against a range. */
@@ -338,6 +353,7 @@ const OPTION_VALUES: Partial<Record<AppearancePreferenceKey, ReadonlySet<string>
   dockDensity: new Set(DOCK_DENSITY_OPTIONS.map((option) => option.value)),
   diffLayout: new Set(["stacked", "split"]),
   windowTranslucency: new Set(WINDOW_TRANSLUCENCY_OPTIONS.map((option) => option.value)),
+  chatBackground: new Set(CHAT_BACKGROUND_OPTIONS.map((option) => option.value)),
 };
 
 /**

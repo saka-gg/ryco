@@ -51,6 +51,7 @@ import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
+import { readTurnCompletedStructurally } from "./CodexAdapter.mapEvent.ts";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -406,7 +407,6 @@ export class CodexSessionRuntimeCompactionNotStartedError extends Schema.TaggedE
 
 interface PendingApproval {
   readonly requestId: ApprovalRequestId;
-  readonly jsonRpcId: string;
   readonly requestKind: ProviderRequestKind;
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
@@ -2147,7 +2147,9 @@ export const makeCodexSessionRuntime = (
           ...(itemId ? { itemId } : {}),
           ...(requestId ? { requestId } : {}),
           ...(requestKind ? { requestKind } : {}),
-          ...(notification.method === "item/agentMessage/delta"
+          // A raw (undecodable) delta may carry no string.
+          ...(notification.method === "item/agentMessage/delta" &&
+          typeof notification.params.delta === "string"
             ? { textDelta: notification.params.delta }
             : {}),
           ...(payload !== undefined ? { payload } : {}),
@@ -2185,46 +2187,65 @@ export const makeCodexSessionRuntime = (
       ),
     );
 
-    yield* client.handleServerNotification("turn/completed", (payload) =>
+    const applyTurnCompleted = (completed: {
+      readonly threadId: string | undefined;
+      readonly failed: boolean;
+      readonly errorMessage: string | undefined;
+    }) =>
       currentSessionProviderThreadId.pipe(
         Effect.flatMap((providerThreadId) => {
-          if (providerThreadId && payload.threadId !== providerThreadId) {
+          if (providerThreadId && completed.threadId !== providerThreadId) {
             return Effect.void;
           }
           deviceTurnActive = false;
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
+          const lastError = completed.failed ? completed.errorMessage : undefined;
           return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
+            status: completed.failed ? "error" : "ready",
             activeTurnId: undefined,
             ...(lastError ? { lastError } : {}),
           });
         }),
-      ),
+      );
+
+    const applyError = (error: {
+      readonly threadId: string | undefined;
+      readonly message: string | undefined;
+      readonly willRetry: boolean;
+    }) =>
+      currentSessionProviderThreadId.pipe(
+        Effect.flatMap((providerThreadId) => {
+          if (providerThreadId && error.threadId && error.threadId !== providerThreadId) {
+            return Effect.void;
+          }
+          return updateSession(sessionRef, {
+            status: error.willRetry ? "running" : "error",
+            ...(error.message ? { lastError: error.message } : {}),
+          });
+        }),
+      );
+
+    yield* client.handleServerNotification("turn/completed", (payload) =>
+      applyTurnCompleted({
+        threadId: payload.threadId,
+        failed: payload.turn.status === "failed",
+        errorMessage:
+          "error" in payload.turn && payload.turn.error ? payload.turn.error.message : undefined,
+      }),
     );
 
     yield* client.handleServerNotification("error", (payload) =>
-      currentSessionProviderThreadId.pipe(
-        Effect.flatMap((providerThreadId) => {
-          const payloadThreadId = payload.threadId;
-          if (providerThreadId && payloadThreadId && payloadThreadId !== providerThreadId) {
-            return Effect.void;
-          }
-          const errorMessage = payload.error.message;
-          const willRetry = payload.willRetry;
-          return updateSession(sessionRef, {
-            status: willRetry ? "running" : "error",
-            ...(errorMessage ? { lastError: errorMessage } : {}),
-          });
-        }),
-      ),
+      applyError({
+        threadId: payload.threadId,
+        message: payload.error.message,
+        willRetry: payload.willRetry,
+      }),
     );
 
-    yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
+    yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload, context) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* Effect.sync(() => crypto.randomUUID()));
+        // `serverRequest/resolved` names the request by its JSON-RPC id, not by item or approval id.
+        const jsonRpcId = String(context.requestId);
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -2233,7 +2254,6 @@ export const makeCodexSessionRuntime = (
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.approvalId ?? payload.itemId,
             requestKind: "command",
             turnId,
             itemId,
@@ -2243,7 +2263,7 @@ export const makeCodexSessionRuntime = (
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.approvalId ?? payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
             requestKind: "command",
             turnId,
@@ -2278,9 +2298,10 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
-    yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
+    yield* client.handleServerRequest("item/fileChange/requestApproval", (payload, context) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* Effect.sync(() => crypto.randomUUID()));
+        const jsonRpcId = String(context.requestId);
         const turnId = TurnId.make(payload.turnId);
         const itemId = ProviderItemId.make(payload.itemId);
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -2289,7 +2310,6 @@ export const makeCodexSessionRuntime = (
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.itemId,
             requestKind: "file-change",
             turnId,
             itemId,
@@ -2299,7 +2319,7 @@ export const makeCodexSessionRuntime = (
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
             requestKind: "file-change",
             turnId,
@@ -2471,8 +2491,56 @@ export const makeCodexSessionRuntime = (
       { concurrency: 1, discard: true },
     );
 
+    // A CLI newer than the pinned schema (a new `codexErrorInfo` kind, a new enum value) sends
+    // notifications strict decoding rejects. Dropping them would leave a turn running forever, so
+    // the session state reads the ones it depends on structurally, and every one still reaches
+    // the event stream raw: the adapter's mappers decode leniently with structural fallbacks.
+    yield* client.handleUndecodableServerNotification((method, params) =>
+      Effect.gen(function* () {
+        if (params === null || typeof params !== "object") return;
+        const record = params as Readonly<Record<string, unknown>>;
+        const threadId = typeof record.threadId === "string" ? record.threadId : undefined;
+        if (method === "turn/completed") {
+          const completed = readTurnCompletedStructurally(params);
+          if (!completed) return;
+          yield* applyTurnCompleted({
+            threadId,
+            failed: completed.status === "failed",
+            errorMessage: completed.errorMessage,
+          });
+        }
+        if (method === "error") {
+          const error = record.error;
+          const message =
+            error !== null && typeof error === "object"
+              ? (error as { readonly message?: unknown }).message
+              : undefined;
+          yield* applyError({
+            threadId,
+            message: typeof message === "string" ? message : undefined,
+            willRetry: record.willRetry === true,
+          });
+        }
+        yield* Queue.offer(
+          serverNotifications,
+          makeCodexServerNotification(method, params as never),
+        ).pipe(Effect.asVoid);
+      }),
+    );
+
     yield* Stream.fromQueue(serverNotifications).pipe(
-      Stream.runForEach(handleRawNotification),
+      Stream.runForEach((notification) =>
+        handleRawNotification(notification).pipe(
+          // Raw payloads (above) can lack a field the handling reads: lose that one
+          // notification, not every later one.
+          Effect.catchDefect((defect) =>
+            Effect.logWarning("codex.notification.handling-failed", {
+              method: notification.method,
+              defect: defect instanceof Error ? defect.message : String(defect),
+            }),
+          ),
+        ),
+      ),
       Effect.forkIn(runtimeScope),
     );
 

@@ -1778,7 +1778,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         },
       } satisfies ProviderEvent);
 
-      // Today strict decoding drops the whole notification, so the turn never completes.
+      // The client hands a notification strict decoding rejects over raw; the mapper reads it
+      // structurally so the turn still completes.
       const firstEvent = yield* Fiber.join(firstEventFiber).pipe(Effect.timeout("2 seconds"));
       assert.equal(firstEvent._tag, "Some");
       if (firstEvent._tag !== "Some") return;

@@ -11,6 +11,7 @@ import {
   type LocalHubIdentityStateStore,
   type NodeRotationContinuityMode,
 } from "./LocalHubIdentityState.ts";
+import { isWellFormedHubChallenge } from "./HubChallenge.ts";
 import type { NodeIdentityKeyRetirementStore } from "./NodeIdentityKeyRetirementStore.ts";
 import type { NodeSigningIdentity } from "./NodeSigningIdentity.ts";
 
@@ -180,10 +181,7 @@ function validateStatus(status: HubKeyRotationStatus): HubKeyRotationStatus {
   return rotationError("rotation_response_invalid");
 }
 
-function validateChallenge(
-  challenge: HubKeyRotationChallenge,
-  now: number,
-): HubKeyRotationChallenge {
+function validateChallenge(challenge: HubKeyRotationChallenge): HubKeyRotationChallenge {
   if (
     !ROTATION_ID.test(challenge.rotationRequestId) ||
     !NODE_KEY_ID.test(challenge.newKeyId) ||
@@ -193,11 +191,7 @@ function validateChallenge(
     !Number.isSafeInteger(challenge.protocolMinor) ||
     challenge.protocolMinor < 0 ||
     challenge.protocolMinor > 65_535 ||
-    !(challenge.challenge instanceof Uint8Array) ||
-    challenge.challenge.byteLength !== 32 ||
-    !Number.isSafeInteger(challenge.challengeExpiresAt) ||
-    challenge.challengeExpiresAt <= now ||
-    challenge.challengeExpiresAt > now + 60_000
+    !isWellFormedHubChallenge(challenge)
   ) {
     return rotationError("rotation_response_invalid");
   }
@@ -328,7 +322,6 @@ export function makeHubKeyRotationClient(
           oldActiveKeyId: active.activeKeyId,
           newKey,
         }),
-        now(),
       );
     } catch (error: unknown) {
       await dependencies.signingIdentity.delete(newKeySecretName).catch(() => undefined);
@@ -406,7 +399,6 @@ export function makeHubKeyRotationClient(
           newKey,
           existingRotationRequestId: staged.rotationRequestId,
         }),
-        now(),
       );
     } catch (error: unknown) {
       if (error instanceof HubKeyRotationClientError) throw error;

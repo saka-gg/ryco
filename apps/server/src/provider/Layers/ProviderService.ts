@@ -68,6 +68,7 @@ import {
   increment,
   metricAttributes,
   providerMetricAttributes,
+  providerRuntimeEventsDroppedTotal,
   providerRuntimeEventsTotal,
   providerSessionsTotal,
   providerStaleStopTimeoutsTotal,
@@ -1046,6 +1047,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               provider: adapter.provider,
             },
             event,
+          ).pipe(
+            // This fiber is only re-forked when the instance is rebuilt, so a
+            // defect from one bad event (an invariant breach such as a missing
+            // runtime session id) must not end it: that would silently stop
+            // delivery for every thread on the instance. Log, count, skip.
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logError("provider runtime event dropped", {
+                    instanceId: id,
+                    eventType: event.type,
+                    cause: Cause.pretty(cause),
+                  }).pipe(
+                    Effect.andThen(
+                      increment(providerRuntimeEventsDroppedTotal, {
+                        provider: adapter.provider,
+                        eventType: event.type,
+                      }),
+                    ),
+                  ),
+            ),
           ),
         ).pipe(Effect.forkScoped);
       }

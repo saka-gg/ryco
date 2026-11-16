@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import { afterEach, assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NetService } from "@ryco/shared/Net";
-import { Duration, Effect, Fiber, Layer, Result, Sink, Stream } from "effect";
+import { Deferred, Duration, Effect, Exit, Fiber, Layer, Result, Sink, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -376,6 +376,133 @@ describe("ssh tunnel scripts", () => {
       assert.equal(spawnedCommands.filter((args) => args.includes("-N")).length, 2);
       assert.equal(tunnelKillCount, 1);
     }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+
+  /**
+   * A manager whose remote launches can be held at a gate and whose readiness
+   * probes fail while `healthy` is false. `tunnels` records every `ssh -L`
+   * process with whether it was killed.
+   */
+  function gatedManager(launchGate: Deferred.Deferred<void>) {
+    const state = {
+      healthy: true,
+      holdLaunches: false,
+      launches: 0,
+      stops: 0,
+      tunnels: [] as Array<{ killed: boolean }>,
+    };
+    const launchReached = Deferred.makeUnsafe<void>();
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.gen(function* () {
+        const args = commandArgs(command);
+        if (args.includes("-N")) {
+          const tunnel = { killed: false };
+          state.tunnels.push(tunnel);
+          return makeRunningProcess(() => {
+            tunnel.killed = true;
+          });
+        }
+        if (args.includes("sh") && args.includes("--")) {
+          state.launches += 1;
+          if (state.holdLaunches) {
+            yield* Deferred.succeed(launchReached, undefined);
+            yield* Deferred.await(launchGate);
+          }
+          return makeSuccessfulProcess('{"remotePort":3773}\n');
+        }
+        if (args.includes("sh")) {
+          state.stops += 1;
+          return makeSuccessfulProcess('{"stopped":true}\n');
+        }
+        return makeSuccessfulProcess("\n");
+      }),
+    );
+    const httpClient = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response("", { status: state.healthy ? 200 : 503 }),
+        ),
+      ),
+    );
+    const layer = Layer.mergeAll(
+      NodeServices.layer,
+      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Layer.succeed(HttpClient.HttpClient, httpClient),
+      Layer.succeed(NetService, testNetService),
+      SshPasswordPrompt.disabledLayer,
+      SshEnvironmentManager.layer(),
+    );
+    return { state, layer, launchReached };
+  }
+
+  const gatedTarget = {
+    alias: "devbox",
+    hostname: "devbox.example.com",
+    username: "julius",
+    port: 2222,
+  } as const;
+
+  it.effect("stops a connection in progress when disconnected, leaving no tunnel behind", () => {
+    const launchGate = Deferred.makeUnsafe<void>();
+    const { state, layer, launchReached } = gatedManager(launchGate);
+    state.holdLaunches = true;
+
+    return Effect.gen(function* () {
+      const manager = yield* SshEnvironmentManager;
+      const connecting = yield* Effect.forkChild(manager.ensureEnvironment(gatedTarget));
+      yield* Deferred.await(launchReached);
+
+      yield* manager.disconnectEnvironment(gatedTarget);
+      assert.equal(state.stops, 1);
+      yield* Deferred.succeed(launchGate, undefined);
+
+      const exit = yield* Fiber.await(connecting);
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(String(Exit.isFailure(exit) ? exit.cause : ""), "was cancelled");
+      // The cancelled creation never got as far as starting its tunnel.
+      assert.equal(state.tunnels.length, 0);
+    }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+
+  it.effect("kills every tunnel when callers race to replace one stale tunnel", () => {
+    const launchGate = Deferred.makeUnsafe<void>();
+    const { state, layer, launchReached } = gatedManager(launchGate);
+
+    return Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        const manager = yield* SshEnvironmentManager;
+        yield* manager.ensureEnvironment(gatedTarget);
+        assert.equal(state.tunnels.length, 1);
+
+        // The tunnel goes stale. One caller starts probing it, a second one a
+        // second later; the first gives up first and starts a replacement.
+        state.healthy = false;
+        state.holdLaunches = true;
+        const first = yield* Effect.forkChild(manager.ensureEnvironment(gatedTarget));
+        yield* TestClock.adjust(Duration.seconds(1));
+        const second = yield* Effect.forkChild(manager.ensureEnvironment(gatedTarget));
+        yield* TestClock.adjust(Duration.millis(1_500));
+        yield* Deferred.await(launchReached);
+        // The second caller now finds the same tunnel stale as well.
+        yield* TestClock.adjust(Duration.seconds(1));
+
+        state.healthy = true;
+        yield* Deferred.succeed(launchGate, undefined);
+        const firstResult = yield* Fiber.join(first);
+        const secondResult = yield* Fiber.join(second);
+        assert.equal(firstResult.httpBaseUrl, secondResult.httpBaseUrl);
+        // One replacement for both callers.
+        assert.equal(state.launches, 2);
+        assert.equal(state.tunnels.length, 2);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+
+      // Closing the manager kills every tunnel it ever started.
+      assert.deepStrictEqual(
+        state.tunnels.map((tunnel) => tunnel.killed),
+        [true, true],
+      );
+    });
   });
 });
 

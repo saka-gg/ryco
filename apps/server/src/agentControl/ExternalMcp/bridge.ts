@@ -1,6 +1,12 @@
 import { createInterface as createPromptInterface } from "node:readline/promises";
 
 import {
+  JSON_RPC_ERROR_CODES,
+  jsonRpcError,
+  parseJsonRpcMessage,
+  type JsonRpcId,
+} from "../Mcp/jsonRpc.ts";
+import {
   discoverExternalRuntimeWithRetries,
   readExternalCredentialFile,
   writeExternalCredentialFile,
@@ -37,6 +43,42 @@ const readBoundedLines = async function* (
       throw new Error("External MCP stdio request exceeded the payload limit");
     }
     yield pending.replace(/\r$/, "");
+  }
+};
+
+const isJsonResponse = (response: Response) =>
+  response.headers.get("content-type")?.startsWith("application/json") === true;
+
+/** The id of a JSON-RPC request; `undefined` for a notification or a line that is no request. */
+const requestIdOf = (line: string): JsonRpcId | undefined => {
+  const parsed = parseJsonRpcMessage(line);
+  return parsed.kind === "request" ? parsed.request.id : undefined;
+};
+
+/** The JSON-RPC error a request gets when the Ryco endpoint refuses it with a bare status. */
+const refusalFor = (status: number): { readonly code: number; readonly message: string } => {
+  switch (status) {
+    case 401:
+      return {
+        code: JSON_RPC_ERROR_CODES.internalError,
+        message:
+          "Ryco refused this integration's credential. It was revoked, expired or rotated: reconnect the integration in Ryco.",
+      };
+    case 413:
+      return {
+        code: JSON_RPC_ERROR_CODES.invalidRequest,
+        message: "Request too large for Ryco.",
+      };
+    case 429:
+      return {
+        code: JSON_RPC_ERROR_CODES.internalError,
+        message: "Rate limited by Ryco: this integration sent too many requests. Retry shortly.",
+      };
+    default:
+      return {
+        code: JSON_RPC_ERROR_CODES.internalError,
+        message: `Ryco request failed (HTTP ${status}).`,
+      };
   }
 };
 
@@ -92,22 +134,41 @@ export const runExternalMcpBridge = async (deps: ExternalMcpBridgeDeps): Promise
     if (Buffer.byteLength(line, "utf8") > BRIDGE_MAX_STDIO_BYTES) {
       throw new Error("External MCP stdio request exceeded the payload limit");
     }
-    const response = await deps.fetch(runtime.mcpUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${credential.credential}`,
-      },
-      body: line,
-      signal: AbortSignal.timeout(BRIDGE_REQUEST_TIMEOUT_MS),
-    });
-    if (response.status === 202) return;
-    if (!response.ok) throw new Error("External MCP request was refused");
-    const body = await response.text();
-    if (Buffer.byteLength(body, "utf8") > BRIDGE_MAX_STDIO_BYTES * 4) {
-      throw new Error("External MCP response exceeded the payload limit");
+    let refusal: { readonly code: number; readonly message: string };
+    try {
+      const response = await deps.fetch(runtime.mcpUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${credential.credential}`,
+        },
+        body: line,
+        signal: AbortSignal.timeout(BRIDGE_REQUEST_TIMEOUT_MS),
+      });
+      if (response.status === 202) return;
+      // A malformed message is answered by the listener with a JSON-RPC error: relay it.
+      if (response.ok || (response.status === 400 && isJsonResponse(response))) {
+        const body = await response.text();
+        if (Buffer.byteLength(body, "utf8") > BRIDGE_MAX_STDIO_BYTES * 4) {
+          throw new Error("External MCP response exceeded the payload limit");
+        }
+        deps.output.write(`${body}\n`);
+        return;
+      }
+      refusal = refusalFor(response.status);
+    } catch {
+      refusal = {
+        code: JSON_RPC_ERROR_CODES.internalError,
+        message: "Ryco request failed: no usable answer from Ryco. Check that Ryco is running.",
+      };
     }
-    deps.output.write(`${body}\n`);
+    // Never print the caught error: platform errors can contain URLs or headers.
+    deps.errorOutput.write("External Ryco MCP request failed.\n");
+    // Answer the request so the client does not wait on its id until its own timeout.
+    const id = requestIdOf(line);
+    if (id !== undefined) {
+      deps.output.write(`${JSON.stringify(jsonRpcError(id, refusal.code, refusal.message))}\n`);
+    }
   };
 
   for await (const line of readBoundedLines(deps.input)) {
@@ -116,7 +177,6 @@ export const runExternalMcpBridge = async (deps: ExternalMcpBridgeDeps): Promise
     // read, or another request on the same stdio connection.
     const request = forward(line)
       .catch(() => {
-        // Never print fetch errors: platform errors can contain URLs or headers.
         deps.errorOutput.write("External Ryco MCP request failed.\n");
       })
       .finally(() => inFlight.delete(request));

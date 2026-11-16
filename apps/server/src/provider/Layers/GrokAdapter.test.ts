@@ -25,6 +25,7 @@ import {
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { installProcessDeviceToolGateway } from "../../providerTools/deviceToolGateway.ts";
 import { makeGrokAcpRuntime, resolveGrokAcpBaseModelId } from "../acp/GrokAcpSupport.ts";
 import {
   assertTurnIdsOnly,
@@ -697,6 +698,113 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       assert.isFalse(requests.some((entry) => entry.method === "session/prompt"));
     }),
   );
+
+  it.effect("ends the turn when it completes, after every update of the turn went out", () =>
+    Effect.gen(function* () {
+      let isTurnActive: (() => boolean) | undefined;
+      installProcessDeviceToolGateway({
+        createBinding: (input) => {
+          isTurnActive = input.isTurnActive;
+          return {
+            url: "http://127.0.0.1:46000/device",
+            headers: { Authorization: "Bearer device-token" },
+            dispose: () => undefined,
+          };
+        },
+        close: async () => undefined,
+      });
+      const threadId = ThreadId.make("grok-turn-end-thread");
+      // Enough updates that the adapter is still handling them when the prompt answers.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_PROMPT_EXTRA_CONTENT_CHUNKS: "300" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)).pipe(
+          Effect.andThen(
+            event.type === "turn.completed"
+              ? Deferred.succeed(turnCompleted, undefined)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-turn-end"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      assert.isDefined(isTurnActive);
+      assert.isFalse(isTurnActive!());
+
+      const turn = yield* adapter.sendTurn({ threadId, input: "hello grok", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+
+      // Device tools close with the turn, and the session no longer names it.
+      assert.isFalse(isTurnActive!());
+      const [session] = yield* adapter.listSessions();
+      assert.isDefined(session);
+      assert.isUndefined(session?.activeTurnId);
+
+      const completedAt = runtimeEvents.findIndex((event) => event.type === "turn.completed");
+      const deltas = runtimeEvents
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => event.type === "content.delta");
+      assert.equal(deltas.length, 301);
+      for (const { event, index } of deltas) {
+        assert.equal(event.turnId, turn.turnId);
+        assert.isBelow(index, completedAt);
+      }
+
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.ensuring(Effect.sync(() => installProcessDeviceToolGateway(null)))),
+  );
+
+  for (const [ending, reason] of [
+    ["3", "The agent process exited with code 3."],
+    ["SIGKILL", "The agent process was killed."],
+  ] as const) {
+    it.effect(`retires a session whose agent process dies between turns (${ending})`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make(`grok-dead-agent-${ending}`);
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockGrokWrapper({ RYCO_ACP_EXIT_AFTER_PROMPT: ending }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        const exited = yield* Deferred.make<ProviderRuntimeEvent>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.type === "session.exited" ? Deferred.succeed(exited, event) : Effect.void,
+        ).pipe(Effect.forkChild);
+
+        const session = yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make(`test-grokadapter-dead-agent-${ending}`),
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId, input: "hello grok", attachments: [] });
+
+        const event = yield* Deferred.await(exited);
+        assert.equal(event.type, "session.exited");
+        assert.equal(event.runtimeSessionId, session.runtimeSessionId);
+        if (event.type === "session.exited") {
+          assert.deepStrictEqual(event.payload, {
+            reason,
+            recoverable: true,
+            exitKind: "error",
+          });
+        }
+        // The next turn recovers the thread instead of routing to the dead runtime.
+        assert.isFalse(yield* adapter.hasSession(threadId));
+        assert.deepStrictEqual(yield* adapter.listSessions(), []);
+      }),
+    );
+  }
 
   it.effect("retention: keeps no prompts, image attachments or results of completed turns", () =>
     Effect.gen(function* () {

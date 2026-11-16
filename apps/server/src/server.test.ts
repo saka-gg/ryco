@@ -560,6 +560,7 @@ const buildAppUnderTest = (options?: {
     projectSetupScriptRunner?: Partial<ProjectSetupScriptRunnerShape>;
     projectFaviconResolver?: ProjectFaviconResolverShape;
     projectAvatarRead?: ProjectAvatarStoreShape["read"];
+    projectAvatarWrite?: ProjectAvatarStoreShape["write"];
     terminalManager?: Partial<TerminalManagerShape>;
     orchestrationEngine?: Partial<OrchestrationEngineShape>;
     threadDeletionReactor?: Partial<ThreadDeletionReactorShape>;
@@ -1079,7 +1080,9 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(
         Layer.succeed(ProjectAvatarStore, {
-          write: () => Effect.die("ProjectAvatarStore.write not implemented in test"),
+          write:
+            options?.layers?.projectAvatarWrite ??
+            (() => Effect.die("ProjectAvatarStore.write not implemented in test")),
           read: options?.layers?.projectAvatarRead ?? (() => Effect.succeed(null)),
           remove: () => Effect.void,
         }),
@@ -2772,6 +2775,96 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
       assert.equal(revalidated.status, 304);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "lets only sessions allowed to set a project's avatar upload one, for a real project, within its size",
+    () =>
+      Effect.gen(function* () {
+        const project = makeDefaultOrchestrationReadModel().projects[0]!;
+        const writes: string[] = [];
+        yield* buildAppUnderTest({
+          config: { host: "0.0.0.0" },
+          layers: {
+            projectAvatarWrite: (input) =>
+              Effect.sync(() => {
+                writes.push(input.projectId);
+                return { contentHash: "abc123" };
+              }),
+            projectionSnapshotQuery: {
+              getProjectShellById: (id) =>
+                Effect.succeed(id === project.id ? Option.some(project) : Option.none()),
+            },
+          },
+        });
+        const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        const avatarForm = () => {
+          const form = new FormData();
+          form.append("avatar", new Blob([png], { type: "image/png" }), "avatar.png");
+          return HttpBody.formData(form);
+        };
+        const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+
+        // A paired client is a viewer: it may not dispatch `project.avatar.set`, so not upload.
+        const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: ownerCookie },
+        });
+        const { credential } = (yield* pairing.json) as { readonly credential: string };
+        const clientCookie = yield* getAuthenticatedSessionCookieHeader(credential);
+        const refused = yield* HttpClient.post(
+          `/api/project-avatar/upload?projectId=${project.id}`,
+          {
+            headers: { cookie: clientCookie },
+            body: avatarForm(),
+          },
+        );
+        assert.equal(refused.status, 403);
+
+        const unknown = yield* HttpClient.post(
+          "/api/project-avatar/upload?projectId=no-such-project",
+          {
+            headers: { cookie: ownerCookie },
+            body: avatarForm(),
+          },
+        );
+        assert.equal(unknown.status, 404);
+
+        // Chunked, so no content-length to refuse up front: the parser's own limits stop it. The
+        // file itself is small; three megabytes of another field ride along with it.
+        const boundary = "ryco-avatar-boundary";
+        const encoder = new TextEncoder();
+        const oversized = Stream.make(
+          encoder.encode(
+            `--${boundary}\r\nContent-Disposition: form-data; name="avatar"; filename="a.png"\r\n` +
+              "Content-Type: image/png\r\n\r\n",
+          ),
+          png,
+          encoder.encode(
+            `\r\n--${boundary}\r\nContent-Disposition: form-data; name="padding"\r\n\r\n`,
+          ),
+          ...Array.from({ length: 48 }, () => new Uint8Array(64 * 1024).fill(0x61)),
+          encoder.encode(`\r\n--${boundary}--\r\n`),
+        );
+        const tooLarge = yield* HttpClient.post(
+          `/api/project-avatar/upload?projectId=${project.id}`,
+          {
+            headers: { cookie: ownerCookie },
+            body: HttpBody.stream(oversized, `multipart/form-data; boundary=${boundary}`),
+          },
+        );
+        assert.equal(tooLarge.status, 413);
+        assert.deepEqual(writes, []);
+
+        const accepted = yield* HttpClient.post(
+          `/api/project-avatar/upload?projectId=${project.id}`,
+          {
+            headers: { cookie: ownerCookie },
+            body: avatarForm(),
+          },
+        );
+        assert.equal(accepted.status, 200);
+        assert.deepEqual(writes, [project.id]);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   const makeUploadTestContext = Effect.gen(function* () {

@@ -5,6 +5,7 @@ import {
   AgentControlProposal,
   OrchestrationProjectShell,
   OrchestrationThreadShell,
+  ProjectId,
   ServerProvider,
   type AgentControlCapability,
   type AgentControlExternalIntegration,
@@ -43,15 +44,15 @@ const threadShell = (id: string, projectId: string) =>
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
   });
-const projectShell = (id: string) =>
+const projectShell = (id: string, createdAt = now) =>
   Schema.decodeUnknownSync(OrchestrationProjectShell)({
     id,
     title: id,
     workspaceRoot: `/workspaces/${id}`,
     defaultModelSelection: null,
     scripts: [],
-    createdAt: now,
-    updatedAt: now,
+    createdAt,
+    updatedAt: createdAt,
   });
 
 const allowedThread = threadShell("allowed-thread", "allowed");
@@ -62,11 +63,15 @@ const page = { oldestCursor: null, newestCursor: null, hasMoreBefore: false };
 
 const makeIntegration = (
   capabilities: ReadonlyArray<AgentControlCapability>,
+  projectScope: AgentControlExternalIntegration["projectScope"] = {
+    kind: "selected",
+    projectIds: [projects[0]!.id],
+  },
 ): AgentControlExternalIntegration => ({
   integrationId,
   displayName: "External",
   clientKind: "codex",
-  projectScope: { kind: "selected", projectIds: [projects[0]!.id] },
+  projectScope,
   capabilities,
   rateLimitPerMinute: 60,
   activeTaskLimit: 1,
@@ -88,9 +93,12 @@ const fixture = (
   options?: {
     readonly providers?: ReadonlyArray<ServerProvider>;
     readonly hubs?: ReadonlyArray<CliProxyCachedHub>;
+    readonly projects?: ReadonlyArray<OrchestrationProjectShell>;
+    readonly projectScope?: AgentControlExternalIntegration["projectScope"];
   },
 ) => {
-  let current = makeIntegration(capabilities);
+  let current = makeIntegration(capabilities, options?.projectScope);
+  const shellProjects = options?.projects ?? projects;
   const changes = Effect.runSync(PubSub.unbounded<AgentControlIntegrationId>());
   const domainEvents = Effect.runSync(PubSub.unbounded<OrchestrationEvent>());
   const integrations = {
@@ -106,9 +114,9 @@ const fixture = (
   const byId = <A extends { readonly id: string }>(rows: ReadonlyArray<A>, id: string) =>
     Effect.succeed(Option.fromNullishOr(rows.find((row) => row.id === id)));
   const projections = {
-    getShellSnapshot: vi.fn(() => Effect.succeed({ projects, threads })),
+    getShellSnapshot: vi.fn(() => Effect.succeed({ projects: shellProjects, threads })),
     getThreadShellById: vi.fn((id: string) => byId(threads, id)),
-    getProjectShellById: vi.fn((id: string) => byId(projects, id)),
+    getProjectShellById: vi.fn((id: string) => byId(shellProjects, id)),
     searchThreadMessages: vi.fn((input: { readonly projectId?: string }) =>
       Effect.succeed(
         threads
@@ -666,5 +674,46 @@ describe("external Agent Control read catalog", () => {
     });
     const filtered = await reader.call(T.usageLimits, { instanceId: "claude-hub" });
     expect(filtered.structuredContent).toMatchObject({ instances: [{ instanceId: "claude-hub" }] });
+  });
+});
+
+describe("external allowed project listing", () => {
+  it("pages through every allowed project with a cursor, in creation order", async () => {
+    // Shell order is not creation order, and hidden projects sit between allowed ones.
+    const shells = Array.from({ length: 7 }, (_, index) =>
+      projectShell(`project-${index}`, `2026-10-0${index + 1}T00:00:00.000Z`),
+    ).toReversed();
+    const allowedIds = ["project-0", "project-2", "project-3", "project-5", "project-6"].map((id) =>
+      ProjectId.make(id),
+    );
+    const { call } = fixture([C.externalListProjects], {
+      projects: shells,
+      projectScope: { kind: "selected", projectIds: allowedIds },
+    });
+
+    const seen: Array<string> = [];
+    let cursor: string | undefined;
+    for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
+      const result = await call(T.listAllowedProjects, {
+        limit: 2,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      expect(result.isError).toBeUndefined();
+      const content = result.structuredContent as {
+        readonly projects: ReadonlyArray<{ readonly projectId: string }>;
+        readonly nextCursor: string | null;
+      };
+      seen.push(...content.projects.map((project) => project.projectId));
+      if (content.nextCursor === null) break;
+      cursor = content.nextCursor;
+    }
+    expect(seen).toEqual(allowedIds);
+  });
+
+  it("rejects a cursor it did not issue", async () => {
+    const { call } = fixture([C.externalListProjects]);
+    const result = await call(T.listAllowedProjects, { cursor: "not-a-cursor" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toBe("Invalid cursor.");
   });
 });
