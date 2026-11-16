@@ -158,13 +158,13 @@ describe("one-click compaction", () => {
         const child = Object.assign(new EventEmitter(), { unref: () => undefined });
         queueMicrotask(() => child.emit("error", new Error("spawn systemd-run ENOENT")));
         return child;
-      }) as never,
+      }) as () => unknown,
     ],
     [
       "throws synchronously",
       (() => {
         throw new Error("spawn systemd-run ENOENT");
-      }) as never,
+      }) as () => unknown,
     ],
   ])("when the doctor cannot start (spawn %s)", (_label, fakeSpawn) => {
     it("keeps the last run's record and result", async () => {
@@ -182,7 +182,7 @@ describe("one-click compaction", () => {
           baseDir: "/b",
           devUrl: null,
           now: new Date("2026-11-10T12:00:00.000Z"),
-          spawn: fakeSpawn,
+          spawn: fakeSpawn as never,
         }),
       );
       expect(started.started).toBe(false);

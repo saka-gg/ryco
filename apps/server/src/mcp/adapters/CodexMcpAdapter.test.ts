@@ -42,9 +42,7 @@ describe("CodexMcpAdapter external agent control remove", () => {
   it("fails when the entry is still listed after the removal", async () => {
     const { adapter } = makeAdapter({ listed: [installed], afterRemove: [installed] });
     const error = await Effect.runPromise(
-      Effect.flip(
-        adapter.externalAgentControl!.remove({ workspaceId, name, expectedFingerprint }),
-      ),
+      Effect.flip(adapter.externalAgentControl!.remove({ workspaceId, name, expectedFingerprint })),
     );
     expect(error).toBeInstanceOf(McpSettingsError);
     expect(error.message).toBe("Codex did not remove the MCP entry.");
