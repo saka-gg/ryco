@@ -24,8 +24,7 @@ from upstream — the device-preferences `Preferences` shape + `sanitizePreferen
 (`src/state/preferencesStore.ts`) and the outbox delivery/retry model
 (`src/state/threadOutboxModel.ts`). All were copied and stripped the same way —
 re-namespaced from T3 to Ryco identifiers (including the native view names
-`RycoComposerEditor` / `RycoNativeControls` / `RycoKeyboardCommands` /
-`RycoReviewDiffSurface`), re-themed to the `font-ryco-*` utilities, and with the
+`RycoComposerEditor` / `RycoNativeControls` / `RycoKeyboardCommands`), re-themed to the `font-ryco-*` utilities, and with the
 brand marks, cloud plane, showcase rig, and asset-runtime dependencies removed.
 Attribution is kept here (not as in-file headers) so the T3 identifiers do not
 re-enter `src`.
@@ -129,7 +128,7 @@ re-themed for Ryco: the manifest generated before Metro starts into the ignored
 `SettingsOpenSourceLicensesRouteScreen.tsx`).
 
 `pingdotgg/t3code` is Copyright (c) 2026 T3 Tools Inc. and licensed under the MIT
-License; that notice is retained below as required. The four vendored native
+License; that notice is retained below as required. The three vendored native
 modules under `modules/*` carry their own `LICENSE` / `UPSTREAM.md` notices
 (including the react-native-uitextview / Bluesky PBC origin of the markdown
 module and the Expo template origin of the composer module).
