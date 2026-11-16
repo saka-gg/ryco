@@ -48,7 +48,7 @@ export interface AcpPatchedProtocolOptions {
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: AcpProtocolLogEvent) => Effect.Effect<void, never>;
-  readonly onNotification?: (
+  readonly onNotification: (
     notification: AcpIncomingNotification,
   ) => Effect.Effect<void, AcpError.AcpError, never>;
   readonly onExtRequest?: (
@@ -67,7 +67,6 @@ export interface AcpPatchedProtocolOptions {
 export interface AcpPatchedProtocol {
   readonly clientProtocol: RpcClient.Protocol["Service"];
   readonly serverProtocol: RpcServer.Protocol["Service"];
-  readonly incoming: Stream.Stream<AcpIncomingNotification>;
   readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
 }
@@ -112,8 +111,6 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const timeoutOrElse = options.timeoutOrElse ?? Effect.timeoutOrElse;
   const serverQueue = yield* Queue.bounded<RpcMessage.FromClientEncoded>(PROTOCOL_QUEUE_CAPACITY);
   const clientQueue = yield* Queue.bounded<RpcMessage.FromServerEncoded>(PROTOCOL_QUEUE_CAPACITY);
-  // Read only while no `onNotification` handler is installed (`incoming`).
-  const notificationQueue = yield* Queue.bounded<AcpIncomingNotification>(PROTOCOL_QUEUE_CAPACITY);
   const disconnects = yield* Queue.sliding<number>(1);
   const outgoing = yield* Queue.bounded<string | Uint8Array, Cause.Done<void>>(
     PROTOCOL_QUEUE_CAPACITY,
@@ -240,16 +237,14 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     );
 
   const dispatchNotification = (notification: AcpIncomingNotification) =>
-    options.onNotification
-      ? options.onNotification(notification).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("ACP notification handler failed", {
-              method: notification.method,
-              error: error.message,
-            }),
-          ),
-        )
-      : offerBounded(notificationQueue, notification, "incoming-notifications");
+    options.onNotification(notification).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("ACP notification handler failed", {
+          method: notification.method,
+          error: error.message,
+        }),
+      ),
+    );
 
   const emitClientProtocolError = (error: AcpError.AcpError) =>
     offerBounded(
@@ -645,10 +640,6 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   return {
     clientProtocol,
     serverProtocol,
-    /** Incoming notifications, while no `onNotification` handler is installed. */
-    get incoming() {
-      return Stream.fromQueue(notificationQueue);
-    },
     request: sendRequest,
     notify: sendNotification,
   } satisfies AcpPatchedProtocol;
