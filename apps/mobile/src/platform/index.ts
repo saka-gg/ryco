@@ -17,12 +17,6 @@ export {
 } from "./nativeAuthorization";
 export { mobileObservability } from "./observability";
 export {
-  createMobilePairingCredentialSource,
-  extractPairingToken,
-  mobilePairingCredentialSource,
-  type MobilePairingCredentialSource,
-} from "./pairingCredentialSource";
-export {
   isMobilePasskeySupported,
   mobilePasskeyCeremony,
   resetPasskeyModuleForTests,
