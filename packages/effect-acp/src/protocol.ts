@@ -84,6 +84,22 @@ const decodeElicitationComplete = Schema.decodeUnknownEffect(
 );
 const parserFactory = RpcSerialization.ndJsonRpc();
 
+/**
+ * The `sessionUpdate` kind of a `session/update` payload, for logs only: it tells a kind
+ * newer than the schema from a known kind with an unexpected shape, and carries no content.
+ */
+const readSessionUpdateKind = (payload: unknown): { readonly sessionUpdate?: string } => {
+  const update =
+    payload !== null && typeof payload === "object"
+      ? (payload as { readonly update?: unknown }).update
+      : undefined;
+  const kind =
+    update !== null && typeof update === "object"
+      ? (update as { readonly sessionUpdate?: unknown }).sessionUpdate
+      : undefined;
+  return typeof kind === "string" ? { sessionUpdate: kind.slice(0, 100) } : {};
+};
+
 const normalizeProtocolError = (error: unknown, detail: string): AcpError.AcpError =>
   Schema.is(AcpError.AcpError)(error)
     ? error
@@ -321,47 +337,52 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     );
   };
 
+  /**
+   * A notification the pinned schema rejects (a newer agent's update kind or enum value) is
+   * logged and dropped: nobody waits for a reply to it, so it must not end the transport.
+   */
+  const dispatchDecodedNotification = <A>(
+    message: RpcMessage.RequestEncoded,
+    decode: (payload: unknown) => Effect.Effect<A, Schema.SchemaError>,
+    toNotification: (params: A) => AcpIncomingNotification,
+  ) =>
+    decode(message.payload).pipe(
+      Effect.matchEffect({
+        onFailure: (cause) =>
+          logProtocol({
+            direction: "incoming",
+            stage: "decode_failed",
+            payload: {
+              detail: `Invalid ${message.tag} notification payload`,
+              cause,
+            },
+          }).pipe(
+            Effect.andThen(
+              Effect.logWarning("ACP notification does not match the schema; skipped", {
+                method: message.tag,
+                ...readSessionUpdateKind(message.payload),
+              }),
+            ),
+          ),
+        onSuccess: (params) => dispatchNotification(toNotification(params)),
+      }),
+    );
+
   const handleRequestEncoded = (message: RpcMessage.RequestEncoded) => {
     if (message.id === "") {
       if (message.tag === CLIENT_METHODS.session_update) {
-        return decodeSessionUpdate(message.payload).pipe(
-          Effect.map(
-            (params) =>
-              ({
-                _tag: "SessionUpdate",
-                method: CLIENT_METHODS.session_update,
-                params,
-              }) satisfies AcpIncomingNotification,
-          ),
-          Effect.mapError(
-            (cause) =>
-              new AcpError.AcpProtocolParseError({
-                detail: `Invalid ${CLIENT_METHODS.session_update} notification payload`,
-                cause,
-              }),
-          ),
-          Effect.flatMap(dispatchNotification),
-        );
+        return dispatchDecodedNotification(message, decodeSessionUpdate, (params) => ({
+          _tag: "SessionUpdate",
+          method: CLIENT_METHODS.session_update,
+          params,
+        }));
       }
       if (message.tag === CLIENT_METHODS.session_elicitation_complete) {
-        return decodeElicitationComplete(message.payload).pipe(
-          Effect.map(
-            (params) =>
-              ({
-                _tag: "ElicitationComplete",
-                method: CLIENT_METHODS.session_elicitation_complete,
-                params,
-              }) satisfies AcpIncomingNotification,
-          ),
-          Effect.mapError(
-            (cause) =>
-              new AcpError.AcpProtocolParseError({
-                detail: `Invalid ${CLIENT_METHODS.session_elicitation_complete} notification payload`,
-                cause,
-              }),
-          ),
-          Effect.flatMap(dispatchNotification),
-        );
+        return dispatchDecodedNotification(message, decodeElicitationComplete, (params) => ({
+          _tag: "ElicitationComplete",
+          method: CLIENT_METHODS.session_elicitation_complete,
+          params,
+        }));
       }
       return dispatchNotification({
         _tag: "ExtNotification",
