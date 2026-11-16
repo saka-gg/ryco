@@ -4,7 +4,7 @@ import { Effect, FileSystem, Path } from "effect";
 
 import {
   discoverSshHosts,
-  parseKnownHostsHostnames,
+  parseKnownHostsEntries,
   resolveSshConfigIncludePattern,
 } from "./config.ts";
 
@@ -59,7 +59,7 @@ describe("ssh config", () => {
           alias: "bastion.example.com",
           hostname: "bastion.example.com",
           username: null,
-          port: null,
+          port: 2222,
           source: "known-hosts",
         },
         {
@@ -97,7 +97,7 @@ describe("ssh config", () => {
   it.effect("parses known_hosts entries without returning hashed hosts", () =>
     Effect.sync(() => {
       assert.deepEqual(
-        parseKnownHostsHostnames(
+        parseKnownHostsEntries(
           [
             "github.com ssh-ed25519 AAAA",
             "gitlab.com,gitlab-alias ssh-ed25519 BBBB",
@@ -111,16 +111,57 @@ describe("ssh config", () => {
           ].join("\n"),
         ),
         [
-          "::1",
-          "2001:db8::1",
-          "github.com",
-          "gitlab-alias",
-          "gitlab.com",
-          "port.example.com",
-          "ssh.example.com",
+          { host: "::1", port: null },
+          { host: "2001:db8::1", port: null },
+          { host: "github.com", port: null },
+          { host: "gitlab-alias", port: null },
+          { host: "gitlab.com", port: null },
+          { host: "port.example.com", port: null },
+          { host: "ssh.example.com", port: 2200 },
         ],
       );
     }),
+  );
+
+  it.effect("keeps the port of a known_hosts entry, except the default one", () =>
+    Effect.sync(() => {
+      assert.deepEqual(
+        parseKnownHostsEntries(
+          ["[h.example.com]:22 ssh-ed25519 AAAA", "h.example.com ssh-ed25519 BBBB", ""].join("\n"),
+        ),
+        [{ host: "h.example.com", port: null }],
+      );
+      assert.deepEqual(
+        parseKnownHostsEntries(
+          ["[b.example.com]:2222 ssh-ed25519 AAAA", "b.example.com ssh-ed25519 BBBB", ""].join(
+            "\n",
+          ),
+        ),
+        [
+          { host: "b.example.com", port: null },
+          { host: "b.example.com", port: 2222 },
+        ],
+      );
+    }),
+  );
+
+  it.effect("lets an ssh config alias win over a known_hosts entry on another port", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const homeDir = yield* makeTempHomeDir();
+      const sshDir = path.join(homeDir, ".ssh");
+      yield* fs.makeDirectory(sshDir, { recursive: true });
+      yield* fs.writeFileString(path.join(sshDir, "config"), "Host devbox\n  HostName devbox.example.com\n");
+      yield* fs.writeFileString(
+        path.join(sshDir, "known_hosts"),
+        "[devbox]:2222 ssh-ed25519 AAAA\n",
+      );
+
+      assert.deepEqual(yield* discoverSshHosts({ homeDir }), [
+        { alias: "devbox", hostname: "devbox", username: null, port: null, source: "ssh-config" },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
   it.effect("expands tilde-prefixed ssh config include patterns", () =>
