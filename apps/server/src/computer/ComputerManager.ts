@@ -587,8 +587,8 @@ export class ComputerManager {
   }
 
   private revokeControl(threadId: string): Promise<void> {
-    // Settle pending approval prompts synchronously: a mid-turn Off must not
-    // leave a prompt hanging until the gate's five-minute timeout.
+    // Cancel this thread's open app dialogs synchronously: an answer that arrives after a
+    // mid-turn Off must grant nothing.
     computerApprovalGate.cancelThread(threadId);
     const revokeReason = new ComputerBackendError(
       "Computer control was revoked for this conversation; no new input may be dispatched.",
