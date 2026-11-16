@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
 } from "@ryco/contracts";
 import {
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -656,6 +657,82 @@ describe("CheckpointReactor", () => {
       ),
     ).toBe("v2\n");
   });
+
+  it.each(["completed", "interrupted", "cancelled"] as const)(
+    "captures a turn that ends %s exactly once, as a ready checkpoint",
+    async (state) => {
+      const threadId = ThreadId.make("thread-1");
+      const capturedRefs: string[] = [];
+      const harness = await createHarness({
+        seedFilesystemCheckpoints: false,
+        wrapCheckpointStore: (store) => ({
+          ...store,
+          captureCheckpoint: (input) =>
+            Effect.sync(() => capturedRefs.push(input.checkpointRef)).pipe(
+              Effect.andThen(store.captureCheckpoint(input)),
+            ),
+        }),
+      });
+
+      harness.provider.emit({
+        type: "turn.started",
+        eventId: EventId.make(`evt-turn-started-once-${state}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId: asTurnId("turn-1"),
+      });
+      await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0));
+      fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make(`evt-turn-completed-once-${state}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId: asTurnId("turn-1"),
+        payload: { state },
+      });
+      await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+
+      // A provider placeholder for a later turn goes through the same domain stream and
+      // thread lane after the reactor's own turn-1 event, so once it is captured the
+      // turn-1 event has been handled too. It also shows placeholders are still replaced.
+      const placeholderAt = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`provider:test-placeholder-${state}`),
+          threadId,
+          turnId: asTurnId("turn-2"),
+          completedAt: placeholderAt,
+          checkpointRef: CheckpointRef.make("provider-diff:turn-2"),
+          status: "missing",
+          files: [],
+          checkpointTurnCount: 2,
+          createdAt: placeholderAt,
+        }),
+      );
+      await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 2));
+      await harness.drain();
+
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(capturedRefs.filter((ref) => ref === checkpointRefForThreadTurn(threadId, 1))).toEqual(
+        [checkpointRefForThreadTurn(threadId, 1)],
+      );
+      expect(
+        thread?.activities.filter(
+          (activity) => activity.kind === "checkpoint.captured" && activity.turnId === "turn-1",
+        ),
+      ).toHaveLength(1);
+      expect(
+        thread?.checkpoints.find((checkpoint) => checkpoint.turnId === "turn-1"),
+      ).toMatchObject({ checkpointTurnCount: 1, status: "ready" });
+      expect(
+        thread?.checkpoints.find((checkpoint) => checkpoint.turnId === "turn-2"),
+      ).toMatchObject({ checkpointRef: checkpointRefForThreadTurn(threadId, 2), status: "ready" });
+    },
+  );
 
   it("confirms a baseline only after the thread's queued completion capture", async () => {
     let releaseCapture!: () => void;
