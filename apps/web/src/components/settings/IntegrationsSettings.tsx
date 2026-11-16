@@ -45,6 +45,7 @@ import { SettingsSelect } from "./SettingsSelect";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { retryAgentControlStartup } from "./agentControlStartupRetry";
 import { errorMessage } from "~/lib/errorMessage";
+import { fromDateTimeLocalInputValue, toDateTimeLocalInputValue } from "~/lib/dateTimeLocal";
 
 export const AGENT_CONTROL_CLIENT_LABELS: Record<AgentControlExternalClientKind, string> = {
   codex: "Codex",
@@ -212,9 +213,7 @@ function formFromDetail(
         : "",
     capabilities: integration.capabilities,
     expiresAt:
-      integration.expiresAt === null
-        ? ""
-        : new Date(integration.expiresAt).toISOString().slice(0, 16),
+      integration.expiresAt === null ? "" : toDateTimeLocalInputValue(integration.expiresAt),
     rateLimitPerMinute: String(integration.rateLimitPerMinute),
     activeTaskLimit: String(integration.activeTaskLimit),
   };
@@ -247,7 +246,7 @@ export function parseAgentControlIntegrationForm(
     clientKind: form.clientKind,
     projectScope,
     capabilities: form.capabilities,
-    expiresAt: form.expiresAt ? new Date(form.expiresAt).toISOString() : null,
+    expiresAt: form.expiresAt ? fromDateTimeLocalInputValue(form.expiresAt) : null,
     rateLimitPerMinute,
     activeTaskLimit,
   };
