@@ -66,10 +66,12 @@ const EMPTY_SUMMARY: AgentActivitySummary = {
 const MAX_STEPS = 4;
 
 /**
- * Drives the one Live Activity card from the app's own state while it runs (phase 1: local
- * only, no push token). It decides with {@link decideAgentActivity}, coalesces changes for a
- * second, runs one native call at a time, and adopts a card an earlier launch left. A card that
- * ended and still shows its results is gone before another starts, so there is never a second.
+ * Drives the one Live Activity card from the app's own state while it runs; a new card asks for
+ * Hub push updates when `pushUpdates` says so. It decides with {@link decideAgentActivity},
+ * coalesces changes for a second, runs one native call at a time, and adopts a card an earlier
+ * launch left. A card that ended and still shows its results is gone before another starts, so
+ * there is never a second. Sign-out and account switches end every card through `stop` and the
+ * account check in `setSummary`.
  */
 export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveActivityRuntime {
   const now = deps.now ?? Date.now;
@@ -107,7 +109,6 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
       {
         foreground,
         enabled: enabled && deps.native.activitiesEnabled(),
-        signedIn: true,
         known,
         unknownSinceMs: unknownSince,
         nowMs: now(),

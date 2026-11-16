@@ -51,7 +51,6 @@ const SETTLED = summary({ done: 1 }, [{ ...RUNNING.rows[0]!, phase: "done" }]);
 const CONTEXT: AgentActivityContext = {
   foreground: true,
   enabled: true,
-  signedIn: true,
   known: true,
   unknownSinceMs: null,
   nowMs: NOW,
@@ -71,7 +70,7 @@ function card(overrides: Partial<AgentActivityCard> = {}): AgentActivityCard {
 }
 
 describe("deciding the Live Activity", () => {
-  it("starts only in the foreground, when it is on, signed in and something runs or waits", () => {
+  it("starts only in the foreground, when it is on and something runs or waits", () => {
     expect(decideAgentActivity([], RUNNING, CONTEXT, LINKS)).toMatchObject({
       kind: "start",
       staleAtMs: NOW + 600_000,
@@ -94,7 +93,6 @@ describe("deciding the Live Activity", () => {
     for (const context of [
       { ...CONTEXT, foreground: false },
       { ...CONTEXT, enabled: false },
-      { ...CONTEXT, signedIn: false },
       UNKNOWN,
       { ...UNKNOWN, unknownSinceMs: NOW - AGENT_ACTIVITY_STALE_AFTER_MS },
     ]) {
@@ -133,18 +131,13 @@ describe("deciding the Live Activity", () => {
     expect(AGENT_ACTIVITY_DISMISS_AFTER_MS).toBe(15 * 60_000);
   });
 
-  it("ends at once on sign-out or when turned off", () => {
-    for (const context of [
-      { ...CONTEXT, signedIn: false },
-      { ...CONTEXT, enabled: false },
-    ]) {
-      expect(decideAgentActivity([card()], RUNNING, context, LINKS)).toEqual({
-        kind: "end",
-        id: "card-1",
-        state: null,
-        dismissAtMs: null,
-      });
-    }
+  it("ends at once when turned off", () => {
+    expect(decideAgentActivity([card()], RUNNING, { ...CONTEXT, enabled: false }, LINKS)).toEqual({
+      kind: "end",
+      id: "card-1",
+      state: null,
+      dismissAtMs: null,
+    });
   });
 
   it("keeps one card: the newest stays, the others end", () => {
