@@ -952,3 +952,48 @@ describe("threadOutbox restart holds", () => {
     expect(sendQueuedMessage).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("threadOutbox hydration", () => {
+  const AT = "2026-07-24T10:00:00.000Z";
+
+  it("keeps a message queued while the stored queue loads", async () => {
+    kv.set("ryco.threadOutbox.v1", JSON.stringify([queued("m1", AT)]));
+    const hydrating = hydrateThreadOutbox();
+    enqueueThreadOutboxMessage(queued("m2", "2026-07-24T10:01:00.000Z"));
+    await hydrating;
+    expect(listThreadOutboxMessages().map((message) => message.messageId)).toEqual(["m1", "m2"]);
+    const stored = JSON.parse(kv.get("ryco.threadOutbox.v1") ?? "[]") as QueuedThreadMessage[];
+    expect(stored.map((message) => message.messageId)).toEqual(["m1", "m2"]);
+  });
+
+  it("a message queued while loading replaces its stored copy", async () => {
+    kv.set("ryco.threadOutbox.v1", JSON.stringify([queued("m1", AT)]));
+    const hydrating = hydrateThreadOutbox();
+    enqueueThreadOutboxMessage({ ...queued("m1", AT), text: "edited" });
+    await hydrating;
+    const inMemory = listThreadOutboxMessages();
+    expect(inMemory.map((message) => [message.messageId, message.text])).toEqual([["m1", "edited"]]);
+    const stored = JSON.parse(kv.get("ryco.threadOutbox.v1") ?? "[]") as QueuedThreadMessage[];
+    expect(stored.map((message) => [message.messageId, message.text])).toEqual([["m1", "edited"]]);
+  });
+
+  it("keeps the baseline recorded for a message queued while loading", async () => {
+    kv.set(
+      "ryco.threadOutbox.v1",
+      JSON.stringify([{ ...queued("m0", AT), threadId: "t0" as ThreadId }]),
+    );
+    kv.set(
+      "ryco.threadOutboxHolds.v1",
+      JSON.stringify({ holds: {}, acknowledged: { [`${ENV}:t0`]: ["old"] }, seenLive: {} }),
+    );
+    const hydrating = hydrateThreadOutbox();
+    enqueueThreadOutboxMessage(queued("m1", AT));
+    await hydrating;
+    const stored = JSON.parse(kv.get("ryco.threadOutboxHolds.v1") ?? "{}") as {
+      acknowledged: Record<string, unknown>;
+    };
+    expect(Object.keys(stored.acknowledged)).toEqual(
+      expect.arrayContaining([`${ENV}:t0`, KEY]),
+    );
+  });
+});
