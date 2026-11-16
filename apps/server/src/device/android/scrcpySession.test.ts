@@ -1,3 +1,4 @@
+import * as net from "node:net";
 import { describe, expect, it, vi } from "vitest";
 
 import { encodeTouch, ScrcpyTouchAction, type ScrcpyVideoEvent } from "./scrcpyProtocol.ts";
@@ -95,5 +96,47 @@ describe("ScrcpySession", () => {
     await expect(ScrcpySession.start(fake.host, { transportId: "1", video: null })).rejects.toThrow(
       "Could not open video stream",
     );
+  });
+
+  it("rejects without calling onEnded when the server exits during start", async () => {
+    const fake = host(1);
+    fake.spawnAdb.mockImplementation(() => {
+      const child = fakeChild();
+      queueMicrotask(() => child.emit("exit", 1, null));
+      return child;
+    });
+    const ended = vi.fn();
+    await expect(
+      ScrcpySession.start(fake.host, { transportId: "1", video: null, onEnded: ended }),
+    ).rejects.toThrow("scrcpy-server exited (1)");
+    expect(ended).not.toHaveBeenCalled();
+  });
+
+  it("rejects a session whose server exits after the first socket is accepted", async () => {
+    const server = await startFakeScrcpyServer({ video: true });
+    const fake = host(server.port);
+    const opened: net.Socket[] = [];
+    const ended = vi.fn();
+    const start = ScrcpySession.start(
+      {
+        ...fake.host,
+        connect: (port) => {
+          // The server dies while the video session opens its control socket.
+          if (opened.length === 1) fake.children[0]!.emit("exit", 1, null);
+          const socket = net.connect(port, "127.0.0.1");
+          opened.push(socket);
+          return socket;
+        },
+      },
+      {
+        transportId: "1",
+        video: { maxSize: 1600, maxFps: 60, bitRate: 8_000_000 },
+        onEnded: ended,
+      },
+    );
+    await expect(start).rejects.toThrow("scrcpy-server exited (1)");
+    expect(ended).not.toHaveBeenCalled();
+    expect(opened.map((socket) => socket.destroyed)).toEqual([true, true]);
+    await server.close();
   });
 });

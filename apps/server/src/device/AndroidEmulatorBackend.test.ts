@@ -479,9 +479,12 @@ describe("Android scrcpy channel", () => {
   async function scrcpyFixture(options: {
     readonly video: boolean;
     readonly artifact?: "ok" | "offline";
+    /** The scrcpy-server dies at startup: the tunnel never answers and adb exits. */
+    readonly serverDies?: boolean;
   }) {
     const server = await startFakeScrcpyServer({
       video: options.video,
+      refuseFirst: options.serverDies ? Number.POSITIVE_INFINITY : 0,
       initialVideo: Buffer.concat([
         sessionPacket(758, 1600),
         mediaPacket({ config: true, pts: 0n, data: [0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x32] }),
@@ -513,7 +516,10 @@ describe("Android scrcpy channel", () => {
       uiHelper: null,
       spawnProcess: (_command, args) => {
         spawned.push([...args]);
-        return fakeChild();
+        const child = fakeChild();
+        if (options.serverDies && args.includes("shell") && args.some((a) => a.includes("scrcpy")))
+          setTimeout(() => child.emit("exit", 1, null), 5);
+        return child;
       },
     });
     return { backend, run: base.run, server, spawned };
@@ -565,6 +571,21 @@ describe("Android scrcpy channel", () => {
     expect(await f.backend.requestKeyframe(UDID)).toBe(false);
     // A reloaded pane reopens video only while the descriptor still says so.
     expect(f.backend.previewMode(UDID)).toBe("video");
+    await f.backend.dispose();
+    await f.server.close();
+  });
+
+  it("falls back to adb input and screenshots when scrcpy-server dies while starting", async () => {
+    const f = await scrcpyFixture({ video: true, serverDies: true });
+    await f.backend.tap(UDID, 5, 6);
+    expect(f.run.mock.calls.at(-1)?.[1]).toEqual(["-t", "1", "shell", "'input' 'tap' '5' '6'"]);
+    // The failed channel is not kept: the next input starts a fresh one.
+    await f.backend.tap(UDID, 7, 8);
+    expect(f.spawned).toHaveLength(2);
+    await f.backend.attachStream(UDID, () => undefined);
+    expect(f.spawned).toHaveLength(3);
+    expect(f.backend.previewMode(UDID)).toBe("screenshots");
+    expect(await f.backend.requestKeyframe(UDID)).toBe(false);
     await f.backend.dispose();
     await f.server.close();
   });
