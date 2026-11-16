@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -149,6 +149,52 @@ describe("one-click compaction", () => {
       beforeBytes: 10_000,
       afterBytes: 4_000,
       downtimeMs: 95_000,
+    });
+  });
+  describe.each([
+    [
+      "emits an error",
+      (() => {
+        const child = Object.assign(new EventEmitter(), { unref: () => undefined });
+        queueMicrotask(() => child.emit("error", new Error("spawn systemd-run ENOENT")));
+        return child;
+      }) as never,
+    ],
+    [
+      "throws synchronously",
+      (() => {
+        throw new Error("spawn systemd-run ENOENT");
+      }) as never,
+    ],
+  ])("when the doctor cannot start (spawn %s)", (_label, fakeSpawn) => {
+    it("keeps the last run's record and result", async () => {
+      const dir = await stateDir();
+      const oldStartedAt = "2026-11-01T00:00:00.000Z";
+      await writeFile(
+        path.join(dir, COMPACTION_RECORD_FILE),
+        `${JSON.stringify({ version: 1, runner: "service", startedAt: oldStartedAt })}\n`,
+      );
+      await writeFile(path.join(dir, COMPACTION_RESULT_FILE), JSON.stringify(doctorDocument));
+
+      const started = await Effect.runPromise(
+        startServiceCompaction({
+          stateDir: dir,
+          baseDir: "/b",
+          devUrl: null,
+          now: new Date("2026-11-10T12:00:00.000Z"),
+          spawn: fakeSpawn,
+        }),
+      );
+      expect(started.started).toBe(false);
+      expect(started.detail).toContain("ENOENT");
+      expect(
+        JSON.parse(await readFile(path.join(dir, COMPACTION_RECORD_FILE), "utf8")).startedAt,
+      ).toBe(oldStartedAt);
+      await access(path.join(dir, COMPACTION_RESULT_FILE));
+      expect(
+        (await Effect.runPromise(readLastCompactionRun({ stateDir: dir, processStartedAtMs: 0 })))
+          ?.status,
+      ).toBe("repaired");
     });
   });
 });
