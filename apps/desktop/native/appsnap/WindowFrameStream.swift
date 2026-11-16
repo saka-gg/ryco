@@ -18,7 +18,7 @@ final class WindowFrameStream: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stopped = false
     private var timer: DispatchSourceTimer?
     private var sourceSize = CGSize.zero
-    private var framesPerSecond: Int
+    private let framesPerSecond: Int
     private let scaleFactor: Double
     private var receivedFrame = false
 
@@ -88,15 +88,6 @@ final class WindowFrameStream: NSObject, SCStreamOutput, SCStreamDelegate {
                     if self.monitorsWindow { self.startWindowMonitor() }
                 }
             }
-        }
-    }
-
-    func setVisible(_ visible: Bool) {
-        queue.async { [self] in
-            let rate = visible ? 15 : 1
-            guard !stopped, framesPerSecond != rate else { return }
-            framesPerSecond = rate
-            updateConfiguration()
         }
     }
 
