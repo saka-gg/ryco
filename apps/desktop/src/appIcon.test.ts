@@ -10,9 +10,9 @@ const RESOURCES_DIR = Path.join(import.meta.dirname, "../resources");
 
 describe("desktopAppIconResourceName", () => {
   it("names the generated file per platform, and none for the app's own icon", () => {
-    expect(desktopAppIconResourceName("light", "darwin")).toBeNull();
+    expect(desktopAppIconResourceName("ember", "darwin")).toBeNull();
     expect(desktopAppIconResourceName("dark", "darwin")).toBe("app-icons/dark-macos.png");
-    expect(desktopAppIconResourceName("ember", "win32")).toBe("app-icons/ember-windows.ico");
+    expect(desktopAppIconResourceName("light", "win32")).toBe("app-icons/light-windows.ico");
     expect(desktopAppIconResourceName("ignition", "linux")).toBe("app-icons/ignition-linux.png");
   });
 

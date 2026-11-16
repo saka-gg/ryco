@@ -14,7 +14,7 @@ const { IOSConfig, withDangerousMod, withXcodeProject } = require("expo/config-p
  * `iosAlternateAppIconName` (`@ryco/shared/appIcon`), which `UIApplication.setAlternateIconName`
  * receives.
  */
-const ALTERNATE_APP_ICONS = ["AppIcon-dark", "AppIcon-ember", "AppIcon-ignition"];
+const ALTERNATE_APP_ICONS = ["AppIcon-light", "AppIcon-dark", "AppIcon-ignition"];
 
 const SOURCE_DIRECTORY = "assets/app-icons";
 

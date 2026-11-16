@@ -64,7 +64,7 @@ describe("iOS alternate app icons", () => {
       expect(configurations.length).toBeGreaterThan(0);
       for (const settings of configurations) {
         expect(settings.ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES).toBe(
-          '"AppIcon-dark AppIcon-ember AppIcon-ignition"',
+          '"AppIcon-light AppIcon-dark AppIcon-ignition"',
         );
       }
       // Running again (a second prebuild pass) adds nothing twice.

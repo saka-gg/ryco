@@ -244,7 +244,7 @@ const config: ExpoConfig = {
     icon: "./assets/icon.png",
     package: variant.androidPackage,
     adaptiveIcon: {
-      backgroundColor: "#000000",
+      backgroundColor: "#141414",
       foregroundImage: "./assets/adaptive-icon.png",
       monochromeImage: "./assets/android-icon-mark.png",
     },

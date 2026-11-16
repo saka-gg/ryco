@@ -7,7 +7,11 @@ import type {
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
 } from "@ryco/contracts";
-import { DEFAULT_APP_ICON_VARIANT, normalizeAppIconVariant } from "@ryco/shared/appIcon";
+import {
+  DEFAULT_APP_ICON_VARIANT,
+  isAppIconVariant,
+  normalizeAppIconVariant,
+} from "@ryco/shared/appIcon";
 import { type RycoDesktopFlavor, rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
@@ -460,6 +464,7 @@ export function readDesktopSettings(
       readonly hubNodeName?: unknown;
       readonly hubAllowFileSecretStore?: unknown;
       readonly backendPort?: unknown;
+      readonly appIcon?: unknown;
       readonly appIconVariant?: unknown;
     };
 
@@ -506,7 +511,7 @@ export function readDesktopSettings(
       hubNodeName,
       hubAllowFileSecretStore: parsed.hubAllowFileSecretStore === true,
       backendPort: normalizeDesktopBackendPort(parsed.backendPort),
-      appIconVariant: normalizeAppIconVariant(parsed.appIconVariant),
+      appIconVariant: readStoredAppIconVariant(parsed),
     };
   } catch (error) {
     // A corrupt file must not silently revert to defaults: the next write would
@@ -514,6 +519,21 @@ export function readDesktopSettings(
     // configured. Surface it and let the caller decide.
     throw new DesktopSettingsReadError(error);
   }
+}
+
+/**
+ * The chosen app icon. It is stored as `appIcon` since Ember became the app's own icon; earlier
+ * builds stored `appIconVariant` and wrote "light" (then the default) whether or not anyone chose
+ * it, so that reads as today's default and any other choice carries over.
+ */
+function readStoredAppIconVariant(parsed: {
+  readonly appIcon?: unknown;
+  readonly appIconVariant?: unknown;
+}): AppIconVariant {
+  if (isAppIconVariant(parsed.appIcon)) return parsed.appIcon;
+  return parsed.appIconVariant === "light"
+    ? DEFAULT_APP_ICON_VARIANT
+    : normalizeAppIconVariant(parsed.appIconVariant);
 }
 
 function writeOwnerOnlyJsonFile(filePath: string, value: unknown): void {
@@ -537,6 +557,12 @@ export function writeDesktopSettings(settingsPath: string, settings: DesktopSett
   });
   // The legacy boolean is written beside the mode, so a downgraded desktop (which reads only
   // `keepAwakeWhileReachable !== false`) cannot turn on a hold the operator turned off.
-  const stored = { ...settings, keepAwakeWhileReachable: settings.keepAwakeMode !== "off" };
+  // `appIcon` is the icon's current key (see `readStoredAppIconVariant`); `appIconVariant` stays
+  // for a downgraded desktop.
+  const stored = {
+    ...settings,
+    appIcon: settings.appIconVariant,
+    keepAwakeWhileReachable: settings.keepAwakeMode !== "off",
+  };
   writeOwnerOnlyJsonFile(settingsPath, stored);
 }
