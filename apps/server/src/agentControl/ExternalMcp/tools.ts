@@ -97,6 +97,7 @@ import {
   failTool,
   inspectThread,
   listThreadsPage,
+  paginate,
   readThreadDiff,
   readThreadFile,
   readThreadPage,
@@ -952,16 +953,23 @@ export const makeExternalMcpTools = (deps: {
               integration.projectScope.kind === "all" ||
               integration.projectScope.projectIds.includes(project.id),
           );
-          const limit = Math.min(Math.max(1, input.limit ?? 20), 50);
+          const page = paginate({
+            kind: "projects",
+            rows: allowed,
+            order: (project) => ({ createdAt: project.createdAt, id: project.id }),
+            limit: Math.min(Math.max(1, input.limit ?? 20), 50),
+            cursor: input.cursor,
+          });
+          if (page === null) return yield* failTool("Invalid cursor.");
           return Schema.encodeSync(AgentControlMcpListProjectsResult)({
-            projects: allowed.slice(0, limit).map((project) => ({
+            projects: page.items.map((project) => ({
               projectId: project.id,
               kind: projectKindOf(project),
               title: project.title,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,
             })),
-            nextCursor: null,
+            nextCursor: page.nextCursor,
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.listAutomations: {

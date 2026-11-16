@@ -121,21 +121,80 @@ const makeAgentControlExternalRepository = Effect.gen(function* () {
     `,
   });
 
-  const replaceIntegrationRows = SqlSchema.findAll({
-    Request: IntegrationDbRow,
+  const updateSettingsRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      integrationId: IntegrationDbRow.fields.integrationId,
+      displayName: IntegrationDbRow.fields.displayName,
+      clientKind: IntegrationDbRow.fields.clientKind,
+      projectScope: IntegrationDbRow.fields.projectScope,
+      capabilities: IntegrationDbRow.fields.capabilities,
+      rateLimitPerMinute: IntegrationDbRow.fields.rateLimitPerMinute,
+      activeTaskLimit: IntegrationDbRow.fields.activeTaskLimit,
+      expiresAt: IntegrationDbRow.fields.expiresAt,
+      updatedAt: IntegrationDbRow.fields.updatedAt,
+    }),
     Result: IntegrationIdResult,
     execute: (row) => sql`
       UPDATE agent_control_external_integrations SET
         display_name = ${row.displayName}, client_kind = ${row.clientKind},
         project_scope_json = ${row.projectScope}, capabilities_json = ${row.capabilities},
         rate_limit_per_minute = ${row.rateLimitPerMinute},
-        active_task_limit = ${row.activeTaskLimit}, active_task_count = ${row.activeTaskCount},
-        expires_at = ${row.expiresAt}, revoked_at = ${row.revokedAt},
-        pairing_state = ${row.pairingState}, pairing_code_hash = ${row.pairingCodeHash},
-        pairing_code_expires_at = ${row.pairingCodeExpiresAt}, paired_at = ${row.pairedAt},
-        credential_audience = ${row.credentialAudience}, credential_hash = ${row.credentialHash},
-        updated_at = ${row.updatedAt}, last_used_at = ${row.lastUsedAt}
+        active_task_limit = ${row.activeTaskLimit}, expires_at = ${row.expiresAt},
+        updated_at = ${row.updatedAt}
       WHERE integration_id = ${row.integrationId}
+        AND active_task_count <= ${row.activeTaskLimit}
+      RETURNING integration_id AS "integrationId"
+    `,
+  });
+
+  const restartPairingRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      integrationId: AgentControlIntegrationId,
+      pairingCodeHash: AgentControlExternalSecretHash,
+      pairingCodeExpiresAt: Schema.String,
+      now: Schema.String,
+    }),
+    Result: IntegrationIdResult,
+    execute: (input) => sql`
+      UPDATE agent_control_external_integrations SET
+        pairing_state = 'pending', pairing_code_hash = ${input.pairingCodeHash},
+        pairing_code_expires_at = ${input.pairingCodeExpiresAt}, paired_at = NULL,
+        credential_audience = NULL, credential_hash = NULL, updated_at = ${input.now}
+      WHERE integration_id = ${input.integrationId}
+        AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > ${input.now})
+      RETURNING integration_id AS "integrationId"
+    `,
+  });
+
+  const revokeRows = SqlSchema.findAll({
+    Request: Schema.Struct({ integrationId: AgentControlIntegrationId, now: Schema.String }),
+    Result: IntegrationIdResult,
+    execute: (input) => sql`
+      UPDATE agent_control_external_integrations SET
+        revoked_at = ${input.now}, pairing_state = 'unpaired', pairing_code_hash = NULL,
+        pairing_code_expires_at = NULL, credential_audience = NULL, credential_hash = NULL,
+        updated_at = ${input.now}
+      WHERE integration_id = ${input.integrationId} AND revoked_at IS NULL
+      RETURNING integration_id AS "integrationId"
+    `,
+  });
+
+  const rotateCredentialRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      integrationId: AgentControlIntegrationId,
+      credentialHash: AgentControlExternalSecretHash,
+      now: Schema.String,
+    }),
+    Result: IntegrationIdResult,
+    execute: (input) => sql`
+      UPDATE agent_control_external_integrations SET
+        pairing_state = 'paired', pairing_code_hash = NULL, pairing_code_expires_at = NULL,
+        paired_at = ${input.now}, credential_audience = 'external-mcp',
+        credential_hash = ${input.credentialHash}, updated_at = ${input.now}
+      WHERE integration_id = ${input.integrationId}
+        AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > ${input.now})
       RETURNING integration_id AS "integrationId"
     `,
   });
@@ -252,8 +311,21 @@ const makeAgentControlExternalRepository = Effect.gen(function* () {
     map("ExternalRepository.getIntegration", getIntegrationRow({ integrationId }));
   const listIntegrations: AgentControlExternalRepositoryShape["listIntegrations"] = () =>
     map("ExternalRepository.listIntegrations", listIntegrationRows(undefined));
-  const replaceIntegration: AgentControlExternalRepositoryShape["replaceIntegration"] = (record) =>
-    map("ExternalRepository.replaceIntegration", replaceIntegrationRows(record)).pipe(
+  const updateIntegrationSettings: AgentControlExternalRepositoryShape["updateIntegrationSettings"] =
+    (settings) =>
+      map("ExternalRepository.updateIntegrationSettings", updateSettingsRows(settings)).pipe(
+        Effect.map((rows) => rows.length === 1),
+      );
+  const restartPairing: AgentControlExternalRepositoryShape["restartPairing"] = (input) =>
+    map("ExternalRepository.restartPairing", restartPairingRows(input)).pipe(
+      Effect.map((rows) => rows.length === 1),
+    );
+  const revokeIntegration: AgentControlExternalRepositoryShape["revokeIntegration"] = (input) =>
+    map("ExternalRepository.revokeIntegration", revokeRows(input)).pipe(
+      Effect.map((rows) => rows.length === 1),
+    );
+  const rotateCredential: AgentControlExternalRepositoryShape["rotateCredential"] = (input) =>
+    map("ExternalRepository.rotateCredential", rotateCredentialRows(input)).pipe(
       Effect.map((rows) => rows.length === 1),
     );
   const deleteIntegration: AgentControlExternalRepositoryShape["deleteIntegration"] = (
@@ -400,7 +472,10 @@ const makeAgentControlExternalRepository = Effect.gen(function* () {
     insertIntegration,
     getIntegration,
     listIntegrations,
-    replaceIntegration,
+    updateIntegrationSettings,
+    restartPairing,
+    revokeIntegration,
+    rotateCredential,
     deleteIntegration,
     findByCredentialHash,
     exchangePairing,
