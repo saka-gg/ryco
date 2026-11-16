@@ -59,10 +59,6 @@ public final class RycoDeviceKeyModule: Module {
       return try Self.sign(payload: payload, with: key).base64EncodedString()
     }
 
-    AsyncFunction("hasKey") { () -> Bool in
-      ((try? Self.loadKey()) ?? nil) != nil
-    }
-
     AsyncFunction("deleteKey") { () -> Void in
       Self.deleteKey()
     }

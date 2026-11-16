@@ -22,14 +22,13 @@ vi.mock("expo-sqlite/kv-store", () => ({
   default: { getItem: async () => null, setItem: async () => {}, removeItem: async () => {} },
 }));
 
-const { ensureKey, sign, hasKey, deleteKey } = vi.hoisted(() => ({
+const { ensureKey, sign, deleteKey } = vi.hoisted(() => ({
   ensureKey: vi.fn(),
   sign: vi.fn(),
-  hasKey: vi.fn(),
   deleteKey: vi.fn(),
 }));
 vi.mock("@ryco/mobile-device-key", () => ({
-  default: { ensureKey, sign, hasKey, deleteKey },
+  default: { ensureKey, sign, deleteKey },
 }));
 
 /**

@@ -11,7 +11,6 @@ import {
   queuedThreadMessageFollowUpFailure,
   resolveThreadOutboxFailureAction,
   summarizeQueuedThreadMessage,
-  threadOutboxRetryDelayMs,
   type QueuedThreadMessage,
 } from "./threadOutboxModel";
 
@@ -29,13 +28,6 @@ function queued(
 }
 
 describe("threadOutboxModel", () => {
-  it("backs off retries exponentially, capped", () => {
-    expect(threadOutboxRetryDelayMs(1)).toBe(1000);
-    expect(threadOutboxRetryDelayMs(2)).toBe(2000);
-    expect(threadOutboxRetryDelayMs(3)).toBe(4000);
-    expect(threadOutboxRetryDelayMs(99)).toBe(16000);
-  });
-
   it("retries transient/settings-sync/interrupted failures and discards the rest", () => {
     expect(
       resolveThreadOutboxFailureAction({

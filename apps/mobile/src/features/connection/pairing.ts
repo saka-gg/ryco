@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 // the hosted-pairing branch (C-gated: readHostedPairingRequest is inert here).
 
 const MOBILE_PAIRING_URL_PARAM = "pairingUrl";
+const PAIRING_TOKEN_PARAM = "token";
 const RYCO_PAIRING_SCHEMES = new Set(["ryco:", "ryco-dev:", "ryco-preview:"]);
 
 export class PairingQrPayloadEmptyError extends Schema.TaggedError<PairingQrPayloadEmptyError>()(
@@ -32,24 +33,23 @@ export function buildPairingUrl(host: string, code: string): string {
   }
 }
 
-export function parsePairingUrl(url: string): { host: string; code: string } {
-  const trimmed = url.trim();
-  if (!trimmed) return { host: "", code: "" };
-
+/**
+ * Extract a pairing token from a deep-link/QR URL. The token is carried in the
+ * URL fragment (`#token=...`), matching the web take-once invariant, and falls
+ * back to the query string.
+ */
+export function extractPairingToken(rawUrl: string): string | null {
+  let url: URL;
   try {
-    const parsed = new URL(trimmed);
-    const hashParams = new URLSearchParams(parsed.hash.slice(1));
-    const hashToken = hashParams.get("token");
-    const queryToken = parsed.searchParams.get("token");
-    const code = hashToken || queryToken || "";
-
-    parsed.hash = "";
-    parsed.search = "";
-    parsed.pathname = "/";
-    return { host: parsed.toString().replace(/\/$/, ""), code };
+    url = new URL(rawUrl);
   } catch {
-    return { host: trimmed, code: "" };
+    return null;
   }
+  const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  const hashToken = new URLSearchParams(hash).get(PAIRING_TOKEN_PARAM)?.trim();
+  if (hashToken) return hashToken;
+  const searchToken = url.searchParams.get(PAIRING_TOKEN_PARAM)?.trim();
+  return searchToken ? searchToken : null;
 }
 
 export function extractPairingUrlFromQrPayload(payload: string): string {

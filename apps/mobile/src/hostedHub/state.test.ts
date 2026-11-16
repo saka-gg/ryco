@@ -48,7 +48,6 @@ vi.mock("@ryco/mobile-device-key", () => ({
       return { publicKey: "", backing: "unavailable" };
     },
     sign: async () => "",
-    hasKey: async () => false,
     deleteKey: async () => {},
   },
 }));

@@ -9,7 +9,6 @@ import type {
   HttpClientService,
   KVService,
   ObservabilityService,
-  PairingCredentialSourceService,
   PasskeyCeremonyService,
   SecretKVService,
   SessionCredentialsService,
@@ -51,11 +50,6 @@ import { mobileClock, mobileFrameScheduler } from "./frame";
 import { createMobileHttpClient } from "./httpClient";
 import { createMobileKV } from "./kv";
 import { mobileObservability } from "./observability";
-import {
-  createMobilePairingCredentialSource,
-  extractPairingToken,
-  mobilePairingCredentialSource,
-} from "./pairingCredentialSource";
 import { mobilePasskeyCeremony } from "./passkeyCeremony";
 import { createMobileSecretKV, sanitizeSecretKey } from "./secretKv";
 import { createMobileSessionCredentials } from "./sessionCredentials";
@@ -78,7 +72,6 @@ describe("mobile platform adapters", () => {
       createMobileHttpClient(() => null) satisfies HttpClientService,
       createMobileKV() satisfies KVService,
       mobileObservability satisfies ObservabilityService,
-      mobilePairingCredentialSource satisfies PairingCredentialSourceService,
       mobilePasskeyCeremony satisfies PasskeyCeremonyService,
       createMobileSecretKV() satisfies SecretKVService,
       mobileSocket satisfies SocketService,
@@ -86,7 +79,7 @@ describe("mobile platform adapters", () => {
       readMobileClientRuntimeConfig() satisfies ClientRuntimeConfigService,
     ];
 
-    expect(adapters).toHaveLength(14);
+    expect(adapters).toHaveLength(13);
   });
 
   it("keeps the bearer session mode with an in-memory CSRF holder", () => {
@@ -256,21 +249,6 @@ describe("mobile platform adapters", () => {
     expect(await secretKv.set("env-1", "token2")).toBe(false);
     await secretKv.remove("env-1");
     expect(await secretKv.get("env-1")).toBeNull();
-  });
-
-  it("takes a pairing token from a deep link exactly once", async () => {
-    const source = createMobilePairingCredentialSource(
-      async () => "ryco://pair?host=http%3A%2F%2Fnode.local%3A44342#token=pairing-token",
-    );
-    expect(await source.take()).toBe("pairing-token");
-    expect(await source.take()).toBeNull();
-  });
-
-  it("extracts the pairing token from hash and query", () => {
-    expect(extractPairingToken("ryco://pair#token=abc")).toBe("abc");
-    expect(extractPairingToken("https://app.ryco.space/pair?token=def")).toBe("def");
-    expect(extractPairingToken("ryco://pair")).toBeNull();
-    expect(extractPairingToken("not a url")).toBeNull();
   });
 
   it("round-trips a uri attachment through the neutral value", async () => {

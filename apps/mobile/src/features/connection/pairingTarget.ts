@@ -1,8 +1,7 @@
 import { resolveRemotePairingTarget } from "../../connection/remoteApi";
 import { getMobileEndpoint } from "../../connection/runtimeConfig";
-import { extractPairingToken } from "../../platform";
 import type { ResolvedPairingTarget } from "../../connection/environmentActions";
-import { buildPairingUrl } from "./pairing";
+import { buildPairingUrl, extractPairingToken } from "./pairing";
 
 const PAIRING_BASE_ORIGIN_FALLBACK = "https://app.ryco.space";
 

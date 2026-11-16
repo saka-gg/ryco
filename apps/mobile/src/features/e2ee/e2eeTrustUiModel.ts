@@ -178,8 +178,7 @@ export const E2EE_NO_VERIFIED_NODE_TITLE = "No verified node on this Hub";
 export const E2EE_NO_VERIFIED_NODE_MESSAGE =
   "This device has not verified any node on this Hub, so it claims no protection against the Hub itself for anything it sends. Verification lives only on this device: reinstalling Ryco, restoring a backup, or moving to a new phone clears it, and this is what that looks like afterwards.";
 
-/** §12.2's honest label for a channel that fell back, in the words a screen uses. */
-export const E2EE_LEGACY_CHANNEL_LABEL = "legacy";
+/** §12.2's honest message for a channel that fell back, in the words a screen uses. */
 export const E2EE_LEGACY_CHANNEL_MESSAGE =
   "This connection is legacy: Ryco is not encrypting it end to end, and your Hub can read what crosses it. Pair the node to change that.";
 

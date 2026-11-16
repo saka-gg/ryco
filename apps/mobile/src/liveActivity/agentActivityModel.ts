@@ -15,9 +15,12 @@ import { getModelDisplayName } from "@ryco/shared/model";
 import type { InboxEnvironment, InboxSection } from "../features/inbox/inboxModel";
 
 /**
- * The phone's Live Activity for running agents, phase 1: local only. The app starts, updates and
- * ends one card from its own live Inbox state while it runs; nothing is sent anywhere. Once Ryco
- * is suspended the card stops changing and reads "Out of date" at its stale date.
+ * The phone's Live Activity for running agents. The app starts, updates and ends one card from its
+ * own live Inbox state while it runs. A card started with push updates on
+ * (`docs/live-activity-push.md`) also gets counts-only updates from the Hub while Ryco is
+ * suspended; otherwise it stops changing once Ryco is suspended and reads "Out of date" at its
+ * stale date. Sign-out and account switches end cards in the runtime (`liveActivityRuntime.ts`),
+ * not here.
  */
 
 /** Every update moves the card's stale date this far ahead (T3's ten minutes). */
@@ -90,7 +93,6 @@ export interface AgentActivityContext {
   readonly foreground: boolean;
   /** The app's switch is on and iOS allows Live Activities for Ryco. */
   readonly enabled: boolean;
-  readonly signedIn: boolean;
   /** Some machine is live, so the summary says what runs; until then nothing is decided. */
   readonly known: boolean;
   /**
@@ -216,7 +218,7 @@ export function decideAgentActivity(
     };
   }
   const card = cards[0];
-  if (!context.enabled || !context.signedIn) {
+  if (!context.enabled) {
     return card ? { kind: "end", id: card.id, state: null, dismissAtMs: null } : { kind: "noop" };
   }
   const { nowMs } = context;

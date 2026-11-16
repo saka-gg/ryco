@@ -2,20 +2,23 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildPairingUrl,
+  extractPairingToken,
   extractPairingUrlFromQrPayload,
   PairingQrPayloadEmptyError,
-  parsePairingUrl,
 } from "./pairing";
 
 describe("pairing", () => {
-  it("round-trips host + code into a pairing URL and back", () => {
+  it("folds host + code into a pairing URL whose token reads back", () => {
     const url = buildPairingUrl("node.local:44342", "tok-123");
-    expect(parsePairingUrl(url)).toEqual({ host: "https://node.local:44342", code: "tok-123" });
+    expect(new URL(url).origin).toBe("https://node.local:44342");
+    expect(extractPairingToken(url)).toBe("tok-123");
   });
 
-  it("extracts the pairing token from hash or query", () => {
-    expect(parsePairingUrl("https://node.local/#token=abc").code).toBe("abc");
-    expect(parsePairingUrl("https://node.local/?token=xyz").code).toBe("xyz");
+  it("extracts the pairing token from hash and query", () => {
+    expect(extractPairingToken("ryco://pair#token=abc")).toBe("abc");
+    expect(extractPairingToken("https://app.ryco.space/pair?token=def")).toBe("def");
+    expect(extractPairingToken("ryco://pair")).toBeNull();
+    expect(extractPairingToken("not a url")).toBeNull();
   });
 
   it("unwraps a ryco* QR scheme into the embedded pairing URL", () => {
