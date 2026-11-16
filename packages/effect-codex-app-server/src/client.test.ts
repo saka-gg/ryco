@@ -22,16 +22,17 @@ const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
 );
 
 it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
-  it.effect("reports a rejected notification without losing following valid events", () =>
+  it.effect("hands a notification the schema rejects over raw, then keeps decoding", () =>
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();
-      const failed = yield* Deferred.make<string>();
+      const failed = yield* Deferred.make<{ readonly method: string; readonly params: unknown }>();
       const seen = yield* Deferred.make<string>();
-      const client = yield* CodexClient.make(stdio, {
-        onNotificationError: (method) => Deferred.succeed(failed, method).pipe(Effect.asVoid),
-      });
+      const client = yield* CodexClient.make(stdio);
       yield* client.handleServerNotification("item/agentMessage/delta", (params) =>
         Deferred.succeed(seen, params.delta).pipe(Effect.asVoid),
+      );
+      yield* client.handleUndecodableServerNotification((method, params) =>
+        Deferred.succeed(failed, { method, params }).pipe(Effect.asVoid),
       );
       const encoder = new TextEncoder();
       yield* Queue.offer(
@@ -40,7 +41,10 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
           JSON.stringify({ method: "item/agentMessage/delta", params: { delta: 42 } }) + "\n",
         ),
       );
-      assert.equal(yield* Deferred.await(failed), "item/agentMessage/delta");
+      assert.deepEqual(yield* Deferred.await(failed), {
+        method: "item/agentMessage/delta",
+        params: { delta: 42 },
+      });
       yield* Queue.offer(
         input,
         encoder.encode(
