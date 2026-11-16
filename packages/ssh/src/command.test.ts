@@ -6,6 +6,8 @@ import { ChildProcessSpawner } from "effect/process";
 
 import {
   baseSshArgs,
+  buildSshHostSpec,
+  buildSshHostSpecEffect,
   getLastNonEmptyOutputLine,
   normalizeSshErrorMessage,
   parseSshResolveOutput,
@@ -91,6 +93,33 @@ describe("ssh command", () => {
       "fb",
     );
   });
+
+  it("refuses a host or user ssh would read as an option", () => {
+    const target = (alias: string, username: string | null = null) => ({
+      alias,
+      hostname: alias,
+      username,
+      port: null,
+    });
+    assert.throws(() => buildSshHostSpec(target("-oProxyCommand=sh -c id")));
+    assert.throws(() => buildSshHostSpec(target("host name")));
+    assert.throws(() => buildSshHostSpec(target("host\nProxyCommand x")));
+    assert.throws(() => buildSshHostSpec(target("devbox", "-oProxyCommand=x")));
+    assert.equal(buildSshHostSpec(target("devbox", "deploy")), "deploy@devbox");
+    assert.equal(buildSshHostSpec(target("::1")), "::1");
+  });
+
+  it.effect("reports an option-like host as an invalid target", () =>
+    Effect.gen(function* () {
+      const error = yield* buildSshHostSpecEffect({
+        alias: "-oProxyCommand=x",
+        hostname: "-oProxyCommand=x",
+        username: null,
+        port: null,
+      }).pipe(Effect.flip);
+      assert.equal(error._tag, "SshInvalidTargetError");
+    }),
+  );
 
   it.effect("parses resolved ssh config output into a target", () =>
     Effect.sync(() => {
