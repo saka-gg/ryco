@@ -52,8 +52,10 @@ function readTokenRate(
   if (input === null || output === null) return null;
   const cacheRate = (key: string, field: "cacheReadCostPerToken" | "cacheCreationCostPerToken") =>
     finiteNonNegative(entry[`${key}${suffix}`]) ??
-    (standard && standard.inputCostPerToken > 0
-      ? ((standard[field] ?? standard.inputCostPerToken) / standard.inputCostPerToken) * input
+    // A tier never invents a cache price the standard tier lacks, so the live
+    // provider_specific_entry parse and its encoded `_priority` round trip agree.
+    (standard && standard.inputCostPerToken > 0 && standard[field] !== null
+      ? (standard[field] / standard.inputCostPerToken) * input
       : null);
   return {
     inputCostPerToken: input,

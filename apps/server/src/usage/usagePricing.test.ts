@@ -126,6 +126,22 @@ it("keeps canonical and qualified prices regardless of document order", () => {
     );
   }
 });
+it("derives the same fast tier live and after a disk round trip when no cache price is published", () => {
+  const parsed = parseUsageRateTable({
+    model: {
+      input_cost_per_token: 0.000004,
+      output_cost_per_token: 0.00002,
+      provider_specific_entry: { fast: 6 },
+    },
+  });
+  const reloaded = parseUsageRateTable(encodeUsageRateTable(parsed));
+  expect(reloaded).toEqual(parsed);
+  expect(lookupUsageModelRate(parsed, "model")?.fast?.cacheReadCostPerToken).toBeNull();
+  expect(lookupUsageModelRate(reloaded, "model")?.fast?.cacheReadCostPerToken).toBeNull();
+  expect(price(reloaded, { ...record, model: "model", speed: "fast" }).estimatedCostUsd).toBe(
+    price(parsed, { ...record, model: "model", speed: "fast" }).estimatedCostUsd,
+  );
+});
 it("does not guess a bare alias when qualified providers disagree", () => {
   const parsed = parseUsageRateTable({
     "a/custom": canonical,
