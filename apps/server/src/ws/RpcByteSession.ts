@@ -156,7 +156,9 @@ export function makeRpcByteSession<Rpcs extends Rpc.AnyWithProps, E, R>(
      */
     readonly onOutputFailure?: (failure: RpcOutputFailure) => void;
     /**
-     * Told that the interceptor refused a payload and this channel is finished.
+     * Told that an inbound payload was refused and this channel is finished:
+     * the interceptor rejected it, or the peer's bytes could not be
+     * reassembled or decoded.
      *
      * Called once, on the consumer fiber, after the session has stopped
      * consuming. The owner is expected to close its channel here with the
@@ -306,14 +308,15 @@ export function makeRpcByteSession<Rpcs extends Rpc.AnyWithProps, E, R>(
                 Effect.gen(function* () {
                   const assembled = yield* Effect.sync(() => {
                     queuedBytes = Math.max(0, queuedBytes - bytes.byteLength);
-                    const result = assembler.push(bytes);
-                    if (result.kind === "error") {
-                      // Fail the session so the channel closes rather than
-                      // silently decoding a half-message.
-                      throw new Error(`Relay message reassembly failed: ${result.reason}`);
-                    }
-                    return result;
+                    return assembler.push(bytes);
                   });
+                  // A message that cannot be reassembled ends the channel rather
+                  // than being decoded as a half-message. It is a typed failure,
+                  // not a thrown defect: a defect would end this fiber unseen and
+                  // leave the session accepting bytes nothing reads.
+                  if (assembled.kind === "error") {
+                    return yield* Effect.fail(new RpcInboundRejectedError());
+                  }
                   if (assembled.kind === "pending") return;
                   // Discrimination happens here, on the reassembled and
                   // prelude-stripped payload, and never on raw wire bytes: a
@@ -323,11 +326,15 @@ export function makeRpcByteSession<Rpcs extends Rpc.AnyWithProps, E, R>(
                   const disposition = yield* discriminate(assembled.message);
                   if (disposition.kind === "claimed") return;
                   const compressor = options.compressor;
-                  const decoded = parser.decode(
-                    compressor === undefined
-                      ? disposition.message
-                      : compressor.acceptInbound(disposition.message),
-                  );
+                  // Malformed peer bytes (bad JSON, a broken advertisement) end
+                  // the channel the same way, for the same reason.
+                  const decoded = yield* Effect.try(() =>
+                    parser.decode(
+                      compressor === undefined
+                        ? disposition.message
+                        : compressor.acceptInbound(disposition.message),
+                    ),
+                  ).pipe(Effect.mapError(() => new RpcInboundRejectedError()));
                   const messages =
                     compressor === undefined
                       ? decoded
@@ -345,7 +352,8 @@ export function makeRpcByteSession<Rpcs extends Rpc.AnyWithProps, E, R>(
             ),
           ).pipe(
             // A refused payload ends consumption instead of ending the fiber.
-            // Nothing after a record the interceptor rejected may be decoded,
+            // Nothing after a record the interceptor rejected, or one that
+            // could not be reassembled or decoded, may be decoded,
             // and the owner — not this session — decides what the channel
             // reports, so the error is handed over and the loop stops here.
             Effect.catch((error: RpcInboundRejectedError) =>

@@ -296,6 +296,58 @@ describe("RpcByteSession", () => {
     ),
   );
 
+  // A malformed inbound message used to throw on the consumer fiber, which died
+  // unseen: nothing was reported, and the session kept accepting bytes that
+  // nothing read. It now ends the channel like an interceptor rejection does.
+  it.effect("reports a message it cannot decode and refuses everything after it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const rejected = yield* Deferred.make<void>();
+        const sent: string[] = [];
+        const session = yield* makeRpcByteSession(
+          TestGroup,
+          echoHandlers,
+          (bytes) =>
+            Effect.sync(() => {
+              sent.push(new TextDecoder().decode(bytes));
+            }),
+          { onInboundRejected: () => Deferred.doneUnsafe(rejected, Exit.void) },
+        );
+
+        expect(yield* session.receive(new TextEncoder().encode("{not json"))).toBe(true);
+        yield* Deferred.await(rejected);
+        expect(yield* session.receive(request("1", "after"))).toBe(false);
+        for (let turn = 0; turn < 8; turn += 1) yield* Effect.yieldNow;
+        expect(sent).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("reports a message it cannot reassemble and refuses everything after it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const rejected = yield* Deferred.make<void>();
+        const session = yield* makeRpcByteSession(TestGroup, echoHandlers, () => Effect.void, {
+          onInboundRejected: () => Deferred.doneUnsafe(rejected, Exit.void),
+        });
+        const prepared = prepareRelayMessage(request("1", "relay".repeat(400)), {
+          maxChunkBytes: 512,
+          maxMessageBytes: 512 * 1_024,
+          peerSupportsChunking: true,
+        });
+        if (prepared.kind !== "ready") throw new Error(prepared.reason);
+
+        // A whole message arriving between the chunks of another is an
+        // interleaving the assembler cannot recover from.
+        expect(yield* session.receive(prepared.payloads[0]!)).toBe(true);
+        expect(yield* session.receive(request("2", "interleaved"))).toBe(true);
+        yield* Deferred.await(rejected);
+        expect(session.incompleteReassembly()).toBe(false);
+        expect(yield* session.receive(prepared.payloads[1]!)).toBe(false);
+      }),
+    ),
+  );
+
   it.effect("bounds queued input and releases it on scope close", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -54,6 +54,7 @@ export const ensureNodePtySpawnHelperExecutable = Effect.fn(function* (explicitP
 export class NodePtyProcess implements PtyProcess {
   private readonly process: import("node-pty").IPty;
   private readonly platform: NodeJS.Platform;
+  private windowsKilled = false;
 
   constructor(
     process: import("node-pty").IPty,
@@ -76,6 +77,16 @@ export class NodePtyProcess implements PtyProcess {
   }
 
   kill(signal?: string): void {
+    if (this.platform === "win32") {
+      // node-pty's Windows terminal takes no signal: it throws on any (from a deferred
+      // callback when the conpty agent is not ready yet). Its plain kill ends the agent and
+      // the whole console process tree, so there is nothing to escalate to, and a second
+      // kill (the SIGKILL step) would only repeat it on a closed handle.
+      if (this.windowsKilled) return;
+      this.process.kill();
+      this.windowsKilled = true;
+      return;
+    }
     this.process.kill(signal);
   }
 
