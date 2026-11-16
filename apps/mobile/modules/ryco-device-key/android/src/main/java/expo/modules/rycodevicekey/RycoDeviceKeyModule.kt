@@ -54,8 +54,6 @@ class RycoDeviceKeyModule : Module() {
       Base64.encodeToString(signature, Base64.NO_WRAP)
     }
 
-    AsyncFunction("hasKey") { activeHardwareKey() != null }
-
     AsyncFunction("deleteKey") {
       val store = keyStore()
       store.deleteEntry(STRONGBOX_KEY_ALIAS)

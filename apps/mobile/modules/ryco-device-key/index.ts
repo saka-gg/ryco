@@ -25,7 +25,6 @@ export interface RycoDeviceKeyModule {
    * `r ‖ s` form JWS ES256 requires.
    */
   readonly sign: (payloadBase64: string) => Promise<string>;
-  readonly hasKey: () => Promise<boolean>;
   readonly deleteKey: () => Promise<void>;
 }
 
