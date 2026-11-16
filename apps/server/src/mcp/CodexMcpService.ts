@@ -825,15 +825,19 @@ export const makeCodexMcpService = Effect.gen(function* () {
   const removeWithCli = (input: McpServerRemoveInput) =>
     Effect.gen(function* () {
       const workspace = yield* findWorkspace(input.workspaceId);
-      yield* Effect.promise(() =>
-        runProcess(workspace.codexSettings.binaryPath, ["mcp", "remove", input.name], {
-          cwd: serverConfig.cwd,
-          env: runtimeEnvFor(workspace),
-          timeoutMs: MCP_REMOVE_TIMEOUT_MS,
-          maxBufferBytes: 256 * 1024,
-          outputMode: "truncate",
-        }),
-      );
+      // runProcess rejects on a non-zero exit, a timeout or a spawn error: a typed failure,
+      // so callers can recover (a disconnect marks its installation for repair).
+      yield* Effect.tryPromise({
+        try: () =>
+          runProcess(workspace.codexSettings.binaryPath, ["mcp", "remove", input.name], {
+            cwd: serverConfig.cwd,
+            env: runtimeEnvFor(workspace),
+            timeoutMs: MCP_REMOVE_TIMEOUT_MS,
+            maxBufferBytes: 256 * 1024,
+            outputMode: "truncate",
+          }),
+        catch: (cause) => normalizeUnknownError(cause, "Failed to remove MCP server."),
+      });
       return yield* reloadServers({ workspaceId: input.workspaceId });
     }).pipe(
       Effect.mapError((cause) => normalizeUnknownError(cause, "Failed to remove MCP server.")),
