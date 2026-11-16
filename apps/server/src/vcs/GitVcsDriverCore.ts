@@ -3383,22 +3383,29 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
   }, Effect.scoped);
 
+  const logKeptLocalBranch = (localBranch: string, head: string) =>
+    Effect.logWarning(
+      `Kept the local branch ${localBranch} as it is: it has commits ${head} lacks, so it was not moved.`,
+    );
+
   const fetchPullRequestBranch: GitVcsDriver.GitVcsDriverShape["fetchPullRequestBranch"] =
     Effect.fn("fetchPullRequestBranch")(function* (input) {
       const remoteName = yield* resolvePrimaryRemoteName(input.cwd);
-      yield* executeGit(
-        "GitVcsDriver.fetchPullRequestBranch",
+      const operation = "GitVcsDriver.fetchPullRequestBranch";
+      const head = `refs/pull/${input.prNumber}/head`;
+      // No `+`: git creates or fast-forwards the branch and rejects anything else, so a
+      // branch the user committed to is never rewound. Not `--quiet`: that hides the rejection.
+      const args = ["fetch", "--no-tags", remoteName, `${head}:refs/heads/${input.branch}`];
+      const result = yield* executeGit(operation, input.cwd, args, { allowNonZeroExit: true });
+      if (result.exitCode === 0) return;
+      if (/^\s*! \[rejected\].*\(non-fast-forward\)\s*$/m.test(result.stderr)) {
+        return yield* logKeptLocalBranch(input.branch, head);
+      }
+      return yield* createGitCommandError(
+        operation,
         input.cwd,
-        [
-          "fetch",
-          "--quiet",
-          "--no-tags",
-          remoteName,
-          `+refs/pull/${input.prNumber}/head:refs/heads/${input.branch}`,
-        ],
-        {
-          fallbackErrorMessage: "git fetch pull request branch failed",
-        },
+        args,
+        result.stderr.trim() || "git fetch pull request branch failed",
       );
     });
 
@@ -3415,6 +3422,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
     const localBranchAlreadyExists = yield* branchExists(input.cwd, input.localBranch);
     const targetRef = `${input.remoteName}/${input.remoteBranch}`;
+    if (localBranchAlreadyExists && input.keepLocalCommits === true) {
+      const fastForward = yield* isAncestorCommit({
+        cwd: input.cwd,
+        ancestor: `refs/heads/${input.localBranch}`,
+        descendant: `refs/remotes/${targetRef}`,
+      });
+      if (fastForward !== true) {
+        return yield* logKeptLocalBranch(input.localBranch, targetRef);
+      }
+    }
     yield* runGit(
       "GitVcsDriver.fetchRemoteBranch.materialize",
       input.cwd,

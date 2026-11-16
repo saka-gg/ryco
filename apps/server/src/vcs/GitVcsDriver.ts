@@ -315,6 +315,10 @@ export interface GitDeleteBranchInput {
   force?: boolean;
 }
 
+/**
+ * Fetches a pull request's head into the local branch `branch`: creates it, or
+ * fast-forwards it. A branch with commits the head lacks is left as it is.
+ */
 export interface GitFetchPullRequestBranchInput {
   cwd: string;
   prNumber: number;
@@ -332,6 +336,12 @@ export interface GitFetchRemoteBranchInput {
   remoteName: string;
   remoteBranch: string;
   localBranch: string;
+  /**
+   * An existing `localBranch` is only fast-forwarded to the fetched head; one
+   * with commits the head lacks is left as it is. Without it the branch is
+   * reset to the head (`gh pr checkout --force`).
+   */
+  keepLocalCommits?: boolean;
 }
 
 export interface GitFetchRemoteTrackingBranchInput {
