@@ -319,7 +319,8 @@ export function useWorktreeNotes(target: WorktreeNotesTarget | null): WorktreeNo
         setLostReplies((count) => count + 1);
       }
     } finally {
-      inFlight.current.delete(draftKey);
+      // A newer binding cleared the set and may own this key now.
+      if (current.epoch === epochRef.current) inFlight.current.delete(draftKey);
       if (current.epoch === epochRef.current) setSaving((keys) => withKey(keys, draftKey, false));
     }
     if (resend === "now") void flushRef.current(draftKey);

@@ -306,6 +306,56 @@ describe("useWorktreeNotes", () => {
     gate.mockRestore();
   });
 
+  it("a save that ends after the project was left and re-entered does not start a second save", async () => {
+    const releases: Array<() => void> = [];
+    let holdNext = false;
+    const command = fake.api.command;
+    // Applied at once; a held reply waits until its release function is called.
+    const gate = vi.spyOn(fake.api, "command").mockImplementation((input) => {
+      const reply = command(input);
+      if (!holdNext) return reply;
+      holdNext = false;
+      return new Promise((resolve, reject) => {
+        releases.push(() => reply.then(resolve, reject));
+      });
+    });
+    const other = ProjectId.make("project-other");
+    const screen = await render(<Probe target={target()} />);
+    await expect.poll(() => state().loaded).toBe(true);
+
+    holdNext = true;
+    state().edit("project", "First");
+    state().flush("project");
+    await expect.poll(() => node.commands.length).toBe(1);
+
+    await screen.rerender(<Probe target={target({ projectId: other })} />);
+    await screen.rerender(<Probe target={target()} />);
+    await expect.poll(() => state().loaded).toBe(true);
+
+    holdNext = true;
+    state().edit("project", "Second");
+    state().flush("project");
+    await expect.poll(() => node.commands.length).toBe(2);
+
+    // The first save ends while the second is in flight.
+    releases[0]!();
+    await settle();
+    state().edit("project", "Second, more");
+    state().flush("project");
+    await settle();
+    expect(node.commands).toHaveLength(2);
+    const landed = node.documents[0]!.revision;
+
+    releases[1]!();
+    await expect.poll(() => node.commands.length).toBe(3);
+    expect(node.commands[2]).toMatchObject({
+      body: "Second, more",
+      expectedRevision: landed,
+    });
+    await screen.unmount();
+    gate.mockRestore();
+  });
+
   it("stays unavailable without the node's capability and never reads", async () => {
     const screen = await render(<Probe target={target({ available: false })} />);
     await settle();
