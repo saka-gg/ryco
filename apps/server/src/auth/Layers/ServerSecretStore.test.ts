@@ -140,7 +140,76 @@ const makeConcurrentCreateSecretStoreLayer = () =>
     Layer.provideMerge(ConcurrentReadMissFileSystemLayer),
   );
 
+// Fails every write to a freshly created ("wx") file after it was opened, the way ENOSPC or a
+// crash between open and write would.
+const FailingCreateWriteFileSystemLayer = Layer.effect(
+  FileSystem.FileSystem,
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+
+    return {
+      ...fileSystem,
+      open: (path, options) =>
+        options?.flag === "wx"
+          ? fileSystem.open(path, options).pipe(
+              Effect.map((file) =>
+                Object.assign(Object.create(file) as FileSystem.File, {
+                  writeAll: () =>
+                    Effect.fail(
+                      PlatformError.systemError({
+                        _tag: "Unknown",
+                        module: "FileSystem",
+                        method: "writeAll",
+                        pathOrDescriptor: String(path),
+                        description: "No space left on device.",
+                      }),
+                    ),
+                }),
+              ),
+            )
+          : fileSystem.open(path, options),
+    } satisfies FileSystem.FileSystem;
+  }),
+).pipe(Layer.provide(NodeServices.layer));
+
 it.layer(NodeServices.layer)("ServerSecretStoreLive", (it) => {
+  it.effect("never leaves a half-written secret behind when creating one fails", () =>
+    Effect.gen(function* () {
+      const secretStore = yield* ServerSecretStore;
+
+      const error = yield* Effect.flip(secretStore.getOrCreateRandom("session-signing-key", 32));
+      const persisted = yield* secretStore.get("session-signing-key");
+
+      expect(error).toBeInstanceOf(SecretStoreError);
+      expect(persisted).toBeNull();
+    }).pipe(
+      Effect.provide(
+        ServerSecretStoreLive.pipe(
+          Layer.provide(makeServerConfigLayer()),
+          Layer.provideMerge(FailingCreateWriteFileSystemLayer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("replaces an empty or short stored secret instead of handing it out", () =>
+    Effect.gen(function* () {
+      const secretStore = yield* ServerSecretStore;
+
+      for (const stored of [new Uint8Array(0), new Uint8Array(16).fill(7)]) {
+        yield* secretStore.set("session-signing-key", stored);
+
+        const secret = yield* secretStore.getOrCreateRandom("session-signing-key", 32);
+        const persisted = yield* secretStore.get("session-signing-key");
+        const again = yield* secretStore.getOrCreateRandom("session-signing-key", 32);
+
+        expect(secret.byteLength).toBe(32);
+        expect(Array.from(persisted ?? new Uint8Array())).toEqual(Array.from(secret));
+        expect(Array.from(again)).toEqual(Array.from(secret));
+      }
+    }).pipe(Effect.provide(makeServerSecretStoreLayer())),
+  );
+
   it.effect("returns null when a secret file does not exist", () =>
     Effect.gen(function* () {
       const secretStore = yield* ServerSecretStore;
