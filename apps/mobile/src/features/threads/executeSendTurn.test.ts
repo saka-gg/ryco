@@ -48,7 +48,6 @@ function baseInput(overrides: Partial<ExecuteSendTurnInput> = {}): {
       images: [],
       selectedModelSelection: modelSelection,
       selectedModel: "gpt-5",
-      hasSelectedModel: true,
     },
     project: { projectId: PROJECT_ID, projectCwd: "/repo" },
     settings: {
@@ -135,7 +134,6 @@ describe("executeSendTurn", () => {
         images: [image],
         selectedModelSelection: modelSelection,
         selectedModel: "gpt-5",
-        hasSelectedModel: true,
       },
     });
 

@@ -2199,7 +2199,6 @@ export function ThreadDetailScreen(props: {
           images: attachments,
           selectedModelSelection: modelSelection,
           selectedModel: modelSelection.model,
-          hasSelectedModel: true,
         },
         project: {
           projectId: currentThread.projectId,

@@ -2,7 +2,7 @@ import { TurnId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { createInterruptQueueHold, type QueueHold } from "./hold.ts";
-import { createMessageQueueStore, steeringIdsOf } from "./store.ts";
+import { createMessageQueueStore } from "./store.ts";
 
 const attempt = (commandId: string) => ({
   commandId,
@@ -81,7 +81,7 @@ describe("steer attempts", () => {
     expect(store.getState().steerAttemptsByThreadKey["env:thread"]).toEqual({
       first: attempt("cmd-1"),
     });
-    expect(steeringIdsOf(store.getState().steerAttemptsByThreadKey["env:thread"])).toEqual([
+    expect(Object.keys(store.getState().steerAttemptsByThreadKey["env:thread"] ?? {})).toEqual([
       "first",
     ]);
 
@@ -117,7 +117,7 @@ describe("steer attempts", () => {
     store.getState().beginSteer("env:thread", "first", attempt("cmd-1"));
     store.getState().beginSteer("env:thread", "second", attempt("cmd-2"));
     store.getState().remove("env:thread", "first");
-    expect(steeringIdsOf(store.getState().steerAttemptsByThreadKey["env:thread"])).toEqual([
+    expect(Object.keys(store.getState().steerAttemptsByThreadKey["env:thread"] ?? {})).toEqual([
       "second",
     ]);
     store.getState().clear("env:thread");
@@ -223,13 +223,6 @@ describe("queue holds", () => {
           store.getState().beginSend("env:thread", id);
           store.getState().finishSend("env:thread", id, true);
         }
-      },
-    ],
-    [
-      "dequeue",
-      (store: ReturnType<typeof setup>) => {
-        store.getState().dequeue("env:thread");
-        store.getState().dequeue("env:thread");
       },
     ],
     ["clear", (store: ReturnType<typeof setup>) => store.getState().clear("env:thread")],
