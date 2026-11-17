@@ -16,7 +16,12 @@ afterEach(async () => {
 });
 
 describe("TurnstileWidget", () => {
-  for (const action of ["public_signup", "external_signup"] as const) {
+  for (const action of [
+    "public_signup",
+    "external_signup",
+    "password_login",
+    "password_reset",
+  ] as const) {
     it(`binds ${action} to the server-verified Turnstile action`, async () => {
       const renderWidget = vi.fn(
         (

@@ -1,6 +1,8 @@
 import "../../index.css";
 
 import { EnvironmentId } from "@ryco/contracts";
+import { PasswordLoginStartResponse } from "@ryco/contracts/hosted-identity";
+import { Schema } from "effect";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -1448,6 +1450,164 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
  * refresh restored nothing, Back left the Hub instead of stepping out of the
  * ceremony, and no page could be linked or bookmarked.
  */
+type TurnstileRenderOptions = Parameters<NonNullable<Window["turnstile"]>["render"]>[1];
+
+/**
+ * A stand-in for Cloudflare's script: every widget it renders solves at once
+ * with a token no earlier widget had, so a case can tell a reused token from a
+ * fresh one.
+ */
+function installTurnstile() {
+  let issued = 0;
+  const render = vi.fn((_container: HTMLElement, options: TurnstileRenderOptions) => {
+    issued += 1;
+    options.callback(`turnstile-token-${issued}`);
+    return `widget-${issued}`;
+  });
+  const remove = vi.fn();
+  window.turnstile = { render, remove };
+  return { render, remove };
+}
+
+const turnstileConfig = {
+  status: "enabled" as const,
+  antiBot: { provider: "turnstile" as const, siteKey: "0x4AAAAAAAAAAABBBBBBBBBB" },
+};
+const loginStarted = Schema.decodeUnknownSync(PasswordLoginStartResponse)({
+  status: "factor_required",
+  attemptId: "login_aaaaaaaaaaaaaaaaaaaaaa",
+  attemptSecret: "A".repeat(43),
+  factor: "email_code",
+  issuedAt: 1,
+  expiresAt: 2,
+});
+
+async function openPasswordSignIn() {
+  await page.getByRole("button", { name: "Other ways to sign in" }).click();
+  await expect.element(page.getByLabelText("Username or verified email")).toBeVisible();
+}
+
+describe("hosted password sign-in and reset anti-bot check", () => {
+  afterEach(() => {
+    delete window.turnstile;
+  });
+
+  it("sends the Turnstile token with a password sign-in", async () => {
+    vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue(turnstileConfig);
+    const turnstile = installTurnstile();
+    const start = vi.spyOn(hostedHubApi, "startPasswordLogin").mockResolvedValue(loginStarted);
+    mounted = await render(<HostedHubRoot />);
+
+    await openPasswordSignIn();
+    await vi.waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+    expect(turnstile.render.mock.calls[0]?.[1]).toMatchObject({
+      sitekey: turnstileConfig.antiBot.siteKey,
+      action: "password_login",
+    });
+    await page.getByLabelText("Username or verified email").fill("Ada");
+    await page.getByLabelText("Password").fill("password-sensitive-browser-canary");
+    await page.getByRole("button", { name: "Continue" }).click();
+
+    await vi.waitFor(() =>
+      expect(start).toHaveBeenCalledWith({
+        identifier: "ada",
+        password: "password-sensitive-browser-canary",
+        antiBotAssertion: "turnstile-token-1",
+      }),
+    );
+    await expect.element(page.getByLabelText("Email code")).toBeVisible();
+  });
+
+  it("renews the single-use token after a failed sign-in and sends the new one", async () => {
+    vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue(turnstileConfig);
+    const turnstile = installTurnstile();
+    const start = vi
+      .spyOn(hostedHubApi, "startPasswordLogin")
+      .mockRejectedValueOnce(new HostedHubApiError("authentication_failed", 401))
+      .mockResolvedValueOnce(loginStarted);
+    mounted = await render(<HostedHubRoot />);
+
+    await openPasswordSignIn();
+    await vi.waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+    await page.getByLabelText("Username or verified email").fill("ada");
+    await page.getByLabelText("Password").fill("wrong-password-canary");
+    await page.getByRole("button", { name: "Continue" }).click();
+    await expect.element(page.getByRole("alert")).toBeVisible();
+    expect(start).toHaveBeenLastCalledWith(
+      expect.objectContaining({ antiBotAssertion: "turnstile-token-1" }),
+    );
+
+    // The spent widget goes and a fresh one issues the next token.
+    await vi.waitFor(() => expect(turnstile.render).toHaveBeenCalledTimes(2));
+    expect(turnstile.remove).toHaveBeenCalledWith("widget-1");
+    await page.getByLabelText("Password").fill("right-password-canary");
+    await page.getByRole("button", { name: "Continue" }).click();
+
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start).toHaveBeenLastCalledWith({
+      identifier: "ada",
+      password: "right-password-canary",
+      antiBotAssertion: "turnstile-token-2",
+    });
+  });
+
+  it("sends the Turnstile token with a password reset request", async () => {
+    vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue(turnstileConfig);
+    const turnstile = installTurnstile();
+    const requestReset = vi
+      .spyOn(hostedHubApi, "requestPasswordReset")
+      .mockResolvedValue({ status: "accepted" });
+    mounted = await render(<HostedHubRoot />);
+
+    await openPasswordSignIn();
+    await page.getByRole("button", { name: "Forgot password?" }).click();
+    await vi.waitFor(() =>
+      expect(turnstile.render).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "password_reset" }),
+      ),
+    );
+    const resetToken = `turnstile-token-${turnstile.render.mock.calls.length}`;
+    await page.getByLabelText("Username or verified email").fill("Ada@Example.test");
+    await page.getByRole("button", { name: "Send reset email" }).click();
+
+    await vi.waitFor(() =>
+      expect(requestReset).toHaveBeenCalledWith({
+        identifier: "ada@example.test",
+        antiBotAssertion: resetToken,
+      }),
+    );
+  });
+
+  it("renders no check and sends no assertion when the Hub advertises no provider", async () => {
+    // The suite's default configuration: signup disabled, no provider.
+    const turnstile = installTurnstile();
+    const start = vi
+      .spyOn(hostedHubApi, "startPasswordLogin")
+      .mockRejectedValue(new HostedHubApiError("authentication_failed", 401));
+    const requestReset = vi
+      .spyOn(hostedHubApi, "requestPasswordReset")
+      .mockResolvedValue({ status: "accepted" });
+    mounted = await render(<HostedHubRoot />);
+
+    await openPasswordSignIn();
+    await page.getByLabelText("Username or verified email").fill("ada");
+    await page.getByLabelText("Password").fill("password-sensitive-browser-canary");
+    await page.getByRole("button", { name: "Continue" }).click();
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(Object.keys(start.mock.calls[0]![0])).not.toContain("antiBotAssertion");
+
+    await page.getByRole("button", { name: "Forgot password?" }).click();
+    await page.getByLabelText("Username or verified email").fill("ada");
+    await page.getByRole("button", { name: "Send reset email" }).click();
+    await vi.waitFor(() => expect(requestReset).toHaveBeenCalledOnce());
+    expect(Object.keys(requestReset.mock.calls[0]![0])).not.toContain("antiBotAssertion");
+
+    expect(turnstile.render).not.toHaveBeenCalled();
+    await expect.element(page.getByLabelText("Anti-bot verification")).not.toBeInTheDocument();
+  });
+});
+
 describe("hosted Hub routes", () => {
   it("gives each signed-out ceremony its own address and restores it on reload", async () => {
     for (const [control, pathname, heading] of [

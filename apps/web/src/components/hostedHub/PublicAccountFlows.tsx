@@ -23,9 +23,11 @@ import { Button } from "../ui/button";
 import { Input, TOUCH_INPUT_CLASS_NAME } from "../ui/input";
 import { Label } from "../ui/label";
 import { HubStepIndicator } from "./shell/HubStepIndicator";
-import { TurnstileWidget } from "./TurnstileWidget";
+import { TurnstileWidget, type TurnstileAction } from "./TurnstileWidget";
 
 type EnabledSignupConfig = Extract<PublicSignupConfigResponse, { readonly status: "enabled" }>;
+/** The anti-bot provider the Hub advertises, or `null` when it advertises none. */
+export type PublicAntiBotConfig = EnabledSignupConfig["antiBot"];
 export type ExternalIdentityPendingSignup = Extract<
   ExternalIdentityPendingResponse,
   { readonly status: "signup" }
@@ -41,6 +43,37 @@ type SignupEmailCode = Extract<
 
 function identityError(cause: unknown, fallback: string): string {
   return cause instanceof HostedHubApiError ? cause.message : fallback;
+}
+
+const ANTI_BOT_MISSING_MESSAGE = "Complete the anti-bot check before continuing.";
+
+/**
+ * The anti-bot check of one public form, for the provider the Hub advertises.
+ *
+ * `assertion` is what the request carries: `undefined` when the Hub advertises
+ * no provider (the request has no field), `null` while the Turnstile token is
+ * still missing, otherwise the value to send. A Turnstile token is single use,
+ * so call `renew` after a request that carried one failed: the widget mounts
+ * again and issues a fresh token for the next try.
+ */
+function useAntiBotCheck(
+  antiBot: PublicAntiBotConfig | null,
+  action: TurnstileAction,
+): {
+  readonly assertion: string | null | undefined;
+  readonly renew: () => void;
+  readonly widget: ReactNode;
+} {
+  const [token, setToken] = useState<string | null>(null);
+  const [round, setRound] = useState(0);
+  return {
+    assertion: antiBot === null ? undefined : antiBot.provider === "bypass" ? "development" : token,
+    renew: () => setRound((value) => value + 1),
+    widget:
+      antiBot?.provider === "turnstile" ? (
+        <TurnstileWidget key={round} siteKey={antiBot.siteKey} action={action} onToken={setToken} />
+      ) : null,
+  };
 }
 
 function freshIdempotencyKey(): Parameters<
@@ -110,7 +143,7 @@ export function PublicSignupFlow({
   const [emailCode, setEmailCode] = useState("");
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
-  const [antiBotToken, setAntiBotToken] = useState<string | null>(null);
+  const antiBot = useAntiBotCheck(config?.antiBot ?? null, "public_signup");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const signup = useRef<SignupPending | null>(null);
@@ -169,9 +202,9 @@ export function PublicSignupFlow({
   const start = async (event: FormEvent) => {
     event.preventDefault();
     if (pending || config === null) return;
-    const assertion = config.antiBot.provider === "bypass" ? "development" : (antiBotToken ?? "");
+    const assertion = antiBot.assertion;
     if (!assertion) {
-      setError("Complete the anti-bot check before continuing.");
+      setError(ANTI_BOT_MISSING_MESSAGE);
       return;
     }
     setPending(true);
@@ -311,13 +344,7 @@ export function PublicSignupFlow({
               onChange={(event) => setEmail(event.currentTarget.value)}
             />
           </div>
-          {config?.antiBot.provider === "turnstile" ? (
-            <TurnstileWidget
-              siteKey={config.antiBot.siteKey}
-              action="public_signup"
-              onToken={setAntiBotToken}
-            />
-          ) : null}
+          {antiBot.widget}
           <FlowError value={error} />
           <FlowActions
             onCancel={onCancel}
@@ -457,16 +484,16 @@ export function ExternalIdentitySignupFlow({
   readonly onCancel: () => void;
 }) {
   const [username, setUsername] = useState(pendingSignup.suggestedUsername ?? "");
-  const [antiBotToken, setAntiBotToken] = useState<string | null>(null);
+  const antiBot = useAntiBotCheck(config?.antiBot ?? null, "external_signup");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const finish = async (event: FormEvent) => {
     event.preventDefault();
     if (pending || config === null) return;
-    const assertion = config.antiBot.provider === "bypass" ? "development" : (antiBotToken ?? "");
+    const assertion = antiBot.assertion;
     if (!assertion) {
-      setError("Complete the anti-bot check before continuing.");
+      setError(ANTI_BOT_MISSING_MESSAGE);
       return;
     }
     setPending(true);
@@ -521,13 +548,7 @@ export function ExternalIdentitySignupFlow({
           GitHub suggested this name. You can change it before creating the account.
         </p>
       </div>
-      {config?.antiBot.provider === "turnstile" ? (
-        <TurnstileWidget
-          siteKey={config.antiBot.siteKey}
-          action="external_signup"
-          onToken={setAntiBotToken}
-        />
-      ) : null}
+      {antiBot.widget}
       <FlowError value={error} />
       <FlowActions
         onCancel={onCancel}
@@ -545,10 +566,13 @@ type LoginPending = Pick<
 >;
 
 export function PasswordLoginFlow({
+  antiBot: antiBotConfig,
   onCancel,
   onUseRecoveryCode,
   onResetPassword,
 }: {
+  /** The provider the Hub advertises; its token goes with the password. */
+  readonly antiBot: PublicAntiBotConfig | null;
   readonly onCancel: () => void;
   readonly onUseRecoveryCode: () => void;
   readonly onResetPassword: () => void;
@@ -557,22 +581,34 @@ export function PasswordLoginFlow({
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [attempt, setAttempt] = useState<LoginPending | null>(null);
+  const antiBot = useAntiBotCheck(antiBotConfig, "password_login");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (pending) return;
+    const assertion = attempt === null ? antiBot.assertion : undefined;
+    if (assertion === null) {
+      setError(ANTI_BOT_MISSING_MESSAGE);
+      return;
+    }
     setPending(true);
     setError(null);
     try {
       if (attempt === null) {
-        const result = await hostedHubApi.startPasswordLogin({
-          identifier: identifier.trim().toLowerCase() as Parameters<
-            typeof hostedHubApi.startPasswordLogin
-          >[0]["identifier"],
-          password,
-        });
+        const result = await hostedHubApi
+          .startPasswordLogin({
+            identifier: identifier.trim().toLowerCase() as Parameters<
+              typeof hostedHubApi.startPasswordLogin
+            >[0]["identifier"],
+            password,
+            ...(assertion === undefined ? {} : { antiBotAssertion: assertion }),
+          })
+          .catch((cause: unknown) => {
+            if (assertion !== undefined) antiBot.renew();
+            throw cause;
+          });
         setPassword("");
         setAttempt(result);
       } else {
@@ -621,6 +657,7 @@ export function PasswordLoginFlow({
               onChange={(event) => setPassword(event.currentTarget.value)}
             />
           </div>
+          {antiBot.widget}
         </>
       ) : (
         <div className="space-y-1.5">
@@ -671,10 +708,13 @@ type ResetPending = Pick<
 >;
 
 export function PasswordResetFlow({
+  antiBot: antiBotConfig,
   initialLink,
   onConsumeLink,
   onCancel,
 }: {
+  /** The provider the Hub advertises; its token goes with the reset request. */
+  readonly antiBot: PublicAntiBotConfig | null;
   readonly initialLink: HostedIdentityLink | null;
   readonly onConsumeLink: () => void;
   readonly onCancel: () => void;
@@ -691,6 +731,7 @@ export function PasswordResetFlow({
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  const antiBot = useAntiBotCheck(antiBotConfig, "password_reset");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reset = useRef<ResetPending | null>(null);
@@ -741,15 +782,26 @@ export function PasswordResetFlow({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (pending) return;
+    const assertion = stage === "request" ? antiBot.assertion : undefined;
+    if (assertion === null) {
+      setError(ANTI_BOT_MISSING_MESSAGE);
+      return;
+    }
     setPending(true);
     setError(null);
     try {
       if (stage === "request") {
-        await hostedHubApi.requestPasswordReset({
-          identifier: identifier.trim().toLowerCase() as Parameters<
-            typeof hostedHubApi.requestPasswordReset
-          >[0]["identifier"],
-        });
+        await hostedHubApi
+          .requestPasswordReset({
+            identifier: identifier.trim().toLowerCase() as Parameters<
+              typeof hostedHubApi.requestPasswordReset
+            >[0]["identifier"],
+            ...(assertion === undefined ? {} : { antiBotAssertion: assertion }),
+          })
+          .catch((cause: unknown) => {
+            if (assertion !== undefined) antiBot.renew();
+            throw cause;
+          });
         setStage("check-email");
       } else if (stage === "check-email") {
         await verifyToken(token.trim());
@@ -801,21 +853,24 @@ export function PasswordResetFlow({
         />
       )}
       {stage === "request" ? (
-        <div className="space-y-1.5">
-          <Label htmlFor="hub-reset-identifier">Username or verified email</Label>
-          <Input
-            id="hub-reset-identifier"
-            autoCapitalize="none"
-            autoComplete="username"
-            required
-            value={identifier}
-            className={TOUCH_INPUT_CLASS_NAME}
-            onChange={(event) => setIdentifier(event.currentTarget.value)}
-          />
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            If the account is eligible, its verified address receives a single-use reset link.
-          </p>
-        </div>
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="hub-reset-identifier">Username or verified email</Label>
+            <Input
+              id="hub-reset-identifier"
+              autoCapitalize="none"
+              autoComplete="username"
+              required
+              value={identifier}
+              className={TOUCH_INPUT_CLASS_NAME}
+              onChange={(event) => setIdentifier(event.currentTarget.value)}
+            />
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              If the account is eligible, its verified address receives a single-use reset link.
+            </p>
+          </div>
+          {antiBot.widget}
+        </>
       ) : stage === "check-email" ? (
         <>
           <div className="rounded-xl border border-border bg-background/60 p-4">

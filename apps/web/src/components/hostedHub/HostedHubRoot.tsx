@@ -782,6 +782,10 @@ export function HostedAuthenticationSurface({
   );
   const clearIdentityLink = useCallback(() => setIdentityLink(null), []);
   const { config: publicSignupConfig } = usePublicSignupConfiguration();
+  // Password sign-in and reset learn the anti-bot provider from the same
+  // advertisement as signup; none advertised sends no assertion.
+  const publicAntiBot =
+    publicSignupConfig?.status === "enabled" ? publicSignupConfig.antiBot : null;
   const externalIdentityConfiguration = useHostedAccountStore(
     (state) => state.externalIdentityConfiguration,
   );
@@ -1243,6 +1247,7 @@ export function HostedAuthenticationSurface({
         {authError}
         {fallbackMode === "password" ? (
           <PasswordLoginFlow
+            antiBot={publicAntiBot}
             onCancel={() => setFallbackMode(null)}
             onUseRecoveryCode={() => setFallbackMode("recovery-code")}
             onResetPassword={() => setFallbackMode("password-reset")}
@@ -1251,6 +1256,7 @@ export function HostedAuthenticationSurface({
           <RecoveryCodeFlow onCancel={() => setFallbackMode(null)} />
         ) : (
           <PasswordResetFlow
+            antiBot={publicAntiBot}
             initialLink={identityLink}
             onConsumeLink={clearIdentityLink}
             onCancel={() => {
