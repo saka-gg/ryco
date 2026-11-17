@@ -132,6 +132,8 @@ const PROMPT_IDS: ReadonlyArray<HostedAccountPromptId> = [
   "enroll-totp",
   "revoke-totp",
   "verify-email",
+  "resend-email",
+  "cancel-email-change",
   "connect-github",
   "disconnect-github",
   "delete-account",
@@ -221,6 +223,7 @@ function harness(initial?: {
     }),
     revokeTotp: vi.fn(async () => commit()),
     requestEmailVerification: vi.fn(async () => commit()),
+    cancelEmailVerification: vi.fn(async () => commit()),
     connectExternalIdentity: vi.fn(async () => commit()),
     disconnectExternalIdentity: vi.fn(async () => commit()),
     cancelExternalIdentityConnection: vi.fn(),
@@ -1454,6 +1457,102 @@ describe("email verification", () => {
     expect(test.prompt().message).toBe(
       "Your Hub accepted the request. Check your inbox and spam folder; delivery may take a moment.",
     );
+  });
+
+  describe("a requested change of a verified address", () => {
+    const verified = { address: "ada@example.test", verified: true } as const;
+    const security = {
+      passwordConfigured: false,
+      totpEnrolled: false,
+      emailDeliveryConfigured: true,
+      email: verified,
+      externalIdentities: [],
+    };
+    const changeHarness = (pendingExpiresAt = NOW + 23 * 3_600_000) =>
+      harness({
+        account: {
+          security,
+          accountEmail: {
+            email: verified,
+            pendingAddress: "lovelace@example.test",
+            pendingExpiresAt,
+          },
+        },
+      });
+    const emailSection = (test: Harness) =>
+      test.view().sections.find((candidate) => candidate.id === "email");
+
+    it("shows the verified address as current and the new one as pending", () => {
+      const section = emailSection(changeHarness());
+      expect(section?.status).toBe("Change pending");
+      expect(section?.footnote).toContain("Verified for ada@example.test.");
+      expect(section?.footnote).toContain(
+        "Change to lovelace@example.test pending, awaiting confirmation (the link expires in 23h).",
+      );
+      expect(section?.footnote).toContain("ada@example.test stays in use until then.");
+      expect(section?.rows.map((row) => row.id)).toEqual([
+        "resend-email",
+        "verify-email",
+        "cancel-email-change",
+      ]);
+    });
+
+    it("resends to the pending address, with the step-up when the Hub asks for one", async () => {
+      const test = changeHarness();
+      test.open("resend-email");
+      expect(test.prompt().message).toContain("lovelace@example.test");
+      test.nextOutcome(STEP_UP_MESSAGE);
+      test.prompt().submit?.run();
+      await flush();
+      expect(test.actions.requestEmailVerification).toHaveBeenLastCalledWith({
+        email: "lovelace@example.test",
+      });
+      test.type({ stepUpCode: "111111" });
+      test.prompt().submit?.run();
+      await flush();
+      expect(test.actions.requestEmailVerification).toHaveBeenLastCalledWith({
+        email: "lovelace@example.test",
+        totpCode: "111111",
+      });
+    });
+
+    it("cancels the change only from the confirmed submit", async () => {
+      const test = changeHarness();
+      test.open("cancel-email-change");
+      expect(test.prompt().message).toContain("ada@example.test stays your address");
+      expect(test.actions.cancelEmailVerification).not.toHaveBeenCalled();
+      test.prompt().submit?.run();
+      await flush();
+      expect(test.actions.cancelEmailVerification).toHaveBeenCalledTimes(1);
+      expect(test.draft()).toBeNull();
+    });
+
+    it("says the current address stays when asking for a change", () => {
+      const test = changeHarness();
+      test.open("verify-email");
+      expect(test.prompt().message).toContain("current address stays in use");
+    });
+
+    it("drops a change whose link has expired since it was read", () => {
+      const test = changeHarness(NOW);
+      const section = emailSection(test);
+      expect(section?.status).toBe("Verified");
+      expect(section?.footnote).not.toContain("lovelace@example.test");
+      expect(section?.rows.map((row) => row.id)).toEqual(["verify-email"]);
+      test.open("resend-email");
+      expect(test.prompt().submit?.disabled).toBe(true);
+    });
+
+    it("shows no pending state for a Hub that does not report one", () => {
+      const test = harness({ account: { security, accountEmail: null } });
+      const section = emailSection(test);
+      expect(section?.status).toBe("Verified");
+      expect(section?.rows.map((row) => row.id)).toEqual(["verify-email"]);
+      test.open("verify-email");
+      expect(test.prompt().message).toBe(
+        "Your Hub records the address and generates a verification link for it.",
+      );
+    });
   });
 
   it("will not submit an address that is obviously not one", () => {

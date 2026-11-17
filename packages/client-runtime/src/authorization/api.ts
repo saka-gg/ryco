@@ -76,6 +76,7 @@ import type {
 } from "../platform/index.ts";
 
 import type {
+  HostedAccountEmail,
   HostedAccountProfile,
   HostedAccountSecurity,
   HostedAccountSession,
@@ -239,6 +240,7 @@ export type HostedAccountIntent =
   | "confirm-totp-enrollment"
   | "revoke-totp"
   | "request-email-verification"
+  | "cancel-email-verification"
   | "revoke-passkey"
   | "add-passkey"
   | "regenerate-recovery-codes"
@@ -693,6 +695,21 @@ function accountSecurityValue(value: unknown): HostedAccountSecurity | null {
     return Schema.decodeUnknownSync(
       HostedIdentity.HostedAccountSecurityResponse as unknown as Schema.Decoder<HostedAccountSecurity>,
     )(value, { onExcessProperty: "error" });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decode the account's address with its outstanding verification. Members this
+ * client does not know are dropped rather than rejected (see
+ * `HostedAccountEmailResponse`), so the Hub can extend the read.
+ */
+function accountEmailValue(value: unknown): HostedAccountEmail | null {
+  try {
+    return Schema.decodeUnknownSync(
+      HostedIdentity.HostedAccountEmailResponse as unknown as Schema.Decoder<HostedAccountEmail>,
+    )(value);
   } catch {
     return null;
   }
@@ -2091,6 +2108,29 @@ export class HostedHubApi {
     return result;
   }
 
+  /**
+   * Read the account's address with the one an outstanding verification mail
+   * would confirm. `GET /api/account/email`.
+   *
+   * Resolves `null` when the Hub does not serve the route (a Hub older than
+   * pending address changes, where a requested address replaced the old one at
+   * once), so a caller treats the pending state as absent rather than failed.
+   */
+  async getAccountEmail(signal?: AbortSignal): Promise<HostedAccountEmail | null> {
+    try {
+      const result = accountEmailValue(
+        await this.#request("/api/account/email", signal ? { signal } : {}),
+      );
+      if (!result) throw new HostedHubApiError("invalid_response", 502);
+      return result;
+    } catch (error) {
+      if (error instanceof HostedHubApiError && (error.status === 404 || error.status === 405)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async finishBrowserExternalIdentityConnection(
     provider: HostedIdentity.ExternalIdentityProvider,
     input?: HostedAccountStepUp,
@@ -2327,6 +2367,23 @@ export class HostedHubApi {
       { email: input.email, ...stepUpBody(input) },
       signal,
       "request-email-verification",
+    );
+  }
+
+  /**
+   * Withdraw the outstanding verification mail: a requested change of a
+   * verified address is dropped and the verified address stays; a never-verified
+   * address keeps its row without a usable link or code.
+   * `POST /api/account/email/verification/cancel` with `{}` → `{ ok: true }`,
+   * whether or not anything was pending. It only removes a pending state, so
+   * the Hub asks for no step-up.
+   */
+  async cancelEmailVerification(signal?: AbortSignal): Promise<void> {
+    await this.#acknowledgedMutation(
+      "/api/account/email/verification/cancel",
+      {},
+      signal,
+      "cancel-email-verification",
     );
   }
 

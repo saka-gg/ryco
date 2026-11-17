@@ -422,23 +422,53 @@ const ExternalIdentitySummaries = Schema.Array(ExternalIdentitySummary).check(
   ),
 );
 
+/** The account's address as the account reads report it, or `null` when it has none. */
+const AccountEmailSummary = Schema.NullOr(
+  rejectExcessProperties(
+    Schema.Struct({
+      address: HubNormalizedEmail,
+      verified: Schema.Boolean,
+    }),
+  ),
+);
+
 export const HostedAccountSecurityResponse = rejectExcessProperties(
   Schema.Struct({
     passwordConfigured: Schema.Boolean,
     totpEnrolled: Schema.Boolean,
     emailDeliveryConfigured: Schema.Boolean,
-    email: Schema.NullOr(
-      rejectExcessProperties(
-        Schema.Struct({
-          address: HubNormalizedEmail,
-          verified: Schema.Boolean,
-        }),
-      ),
-    ),
+    email: AccountEmailSummary,
     externalIdentities: ExternalIdentitySummaries,
   }),
 );
 export type HostedAccountSecurityResponse = typeof HostedAccountSecurityResponse.Type;
+
+/**
+ * `GET /api/account/email`: the account's address with the one an outstanding
+ * verification mail would confirm.
+ *
+ * `email` is exactly {@link HostedAccountSecurityResponse}'s `email` — during a
+ * requested change still the old, verified address. `pendingAddress` is what
+ * the outstanding link and code would confirm (a requested change, or a
+ * never-verified address itself) and `pendingExpiresAt` when they stop working;
+ * both are `null` together when nothing is pending.
+ *
+ * Unlike the security read, whose key set released clients froze by rejecting
+ * excess properties, this read ignores members it does not know, so the Hub can
+ * extend it without breaking a released client.
+ */
+export const HostedAccountEmailResponse = Schema.Struct({
+  email: AccountEmailSummary,
+  pendingAddress: Schema.NullOr(HubNormalizedEmail),
+  pendingExpiresAt: Schema.NullOr(EpochMs),
+}).check(
+  Schema.makeFilter((value) =>
+    (value.pendingAddress === null) === (value.pendingExpiresAt === null)
+      ? undefined
+      : "pendingAddress and pendingExpiresAt must be null together",
+  ),
+);
+export type HostedAccountEmailResponse = typeof HostedAccountEmailResponse.Type;
 
 export const HubActiveSpaceSummary = rejectExcessProperties(
   Schema.Struct({

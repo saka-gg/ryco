@@ -2341,6 +2341,82 @@ describe("HostedHubApi account credential management", () => {
       });
     }
   });
+
+  it("reads the verified address together with a pending change", async () => {
+    const { api, requests, reply } = await authenticated();
+    const pending = {
+      email: { address: "ada@example.test", verified: true },
+      pendingAddress: "lovelace@example.test",
+      pendingExpiresAt: 1_800_000_000_000,
+    };
+    reply(pending);
+
+    await expect(api.getAccountEmail()).resolves.toEqual(pending);
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/email");
+    expect(request.init).toMatchObject({ method: "GET", cache: "no-store" });
+
+    // Nothing pending, and no address at all, are answers too.
+    for (const payload of [
+      { ...pending, pendingAddress: null, pendingExpiresAt: null },
+      { email: null, pendingAddress: null, pendingExpiresAt: null },
+    ]) {
+      reply(payload);
+      await expect(api.getAccountEmail()).resolves.toEqual(payload);
+    }
+
+    // A member this client does not know is dropped, not a failure: the Hub may
+    // extend this read.
+    reply({ ...pending, futureMember: true });
+    await expect(api.getAccountEmail()).resolves.toEqual(pending);
+  });
+
+  it("rejects a malformed account-email read", async () => {
+    const { api, reply } = await authenticated();
+    const pending = {
+      email: { address: "ada@example.test", verified: true },
+      pendingAddress: "lovelace@example.test",
+      pendingExpiresAt: 1_800_000_000_000,
+    };
+    for (const payload of [
+      {},
+      { ...pending, pendingExpiresAt: null },
+      { ...pending, pendingAddress: null },
+      { ...pending, pendingAddress: "Lovelace@Example.test" },
+      { ...pending, pendingExpiresAt: "soon" },
+      { ...pending, email: { address: "ada@example.test" } },
+    ]) {
+      reply(payload);
+      await expect(api.getAccountEmail()).rejects.toMatchObject({ code: "invalid_response" });
+    }
+  });
+
+  it("reads no account email from a Hub that does not serve the route", async () => {
+    const { api, reply } = await authenticated();
+    reply({ error: "not_found" }, 404);
+    await expect(api.getAccountEmail()).resolves.toBeNull();
+    reply({ error: "method_not_allowed" }, 405);
+    await expect(api.getAccountEmail()).resolves.toBeNull();
+    reply({ error: "unavailable" }, 503);
+    await expect(api.getAccountEmail()).rejects.toMatchObject({ status: 503 });
+  });
+
+  it("cancels a pending email verification with an empty, CSRF-bound body", async () => {
+    const { api, requests, reply } = await authenticated();
+    reply({ ok: true });
+
+    await expect(api.cancelEmailVerification()).resolves.toBeUndefined();
+    const request = requests.at(-1)!;
+    expect(request.input).toBe("/api/account/email/verification/cancel");
+    expect(request.init).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(headersOf(request.init).get("X-Ryco-CSRF")).toBe("csrf-canary");
+    expect(JSON.parse(String(request.init?.body))).toEqual({});
+
+    reply({ ok: true, extra: 1 });
+    await expect(api.cancelEmailVerification()).rejects.toMatchObject({
+      code: "invalid_response",
+    });
+  });
 });
 
 /** In-memory bearer credentials mirroring a native (DPoP) adapter. */

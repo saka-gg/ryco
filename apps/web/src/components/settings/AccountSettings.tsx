@@ -33,12 +33,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import type {
-  HostedAccountOutcome,
-  HostedAccountSecurity,
-  HostedAccountStepUp,
-  HostedExternalIdentity,
-  HostedHubPasskey,
+import {
+  pendingEmailVerification,
+  type HostedAccountOutcome,
+  type HostedAccountSecurity,
+  type HostedAccountStepUp,
+  type HostedExternalIdentity,
+  type HostedHubPasskey,
+  type HostedPendingEmailVerification,
 } from "@ryco/client-runtime/authorization";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -368,6 +370,7 @@ export function AccountSettingsPanel({ group = "all" }: { readonly group?: Accou
   const passkeysStatus = useHostedAccountStore((state) => state.passkeysStatus);
   const security = useHostedAccountStore((state) => state.security);
   const securityStatus = useHostedAccountStore((state) => state.securityStatus);
+  const accountEmail = useHostedAccountStore((state) => state.accountEmail ?? null);
   const externalIdentityConfiguration = useHostedAccountStore(
     (state) => state.externalIdentityConfiguration,
   );
@@ -525,6 +528,8 @@ export function AccountSettingsPanel({ group = "all" }: { readonly group?: Accou
             busy={busy}
             actionStatus={actionStatus}
             email={security === null ? undefined : security.email}
+            pendingKnown={accountEmail !== null}
+            pending={pendingEmailVerification(accountEmail, Date.now())}
             deliveryConfigured={security?.emailDeliveryConfigured}
             run={action.run}
           />
@@ -1428,15 +1433,19 @@ function PasswordSection({
  * The account's email address, changed and confirmed in one place.
  *
  * Asking for a change mails a six-digit code (and a link) to the new address.
- * The Hub keeps one address per account, so the new one replaces the old one
- * at once and stays unverified until the code is entered here or the link is
- * opened. A committed request means *accepted*, never delivered — the Hub
- * answers the same way whether or not the address is already known.
+ * A Hub that reports pending verifications (`pendingKnown`) keeps the verified
+ * address in use until the new one is confirmed, and the change can be
+ * cancelled; that state comes from the Hub, so it survives a reload. An older
+ * Hub replaces the address at once and leaves it unverified until confirmed.
+ * A committed request means *accepted*, never delivered — the Hub answers the
+ * same way whether or not the address is already known.
  */
 function EmailSection({
   busy,
   actionStatus,
   email: configuredEmail,
+  pendingKnown,
+  pending,
   deliveryConfigured,
   run,
 }: {
@@ -1444,6 +1453,9 @@ function EmailSection({
   readonly actionStatus: string;
   /** `undefined` means the security read has not produced a value yet. */
   readonly email: HostedAccountSecurity["email"] | undefined;
+  /** Whether the Hub reported its pending verification state (absent on older Hubs). */
+  readonly pendingKnown: boolean;
+  readonly pending: HostedPendingEmailVerification | null;
   readonly deliveryConfigured: boolean | undefined;
   readonly run: RunAccountAction;
 }) {
@@ -1456,12 +1468,22 @@ function EmailSection({
   const [confirming, setConfirming] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
   const requesting = actionStatus === "requesting-email-verification";
+  const cancelling = actionStatus === "cancelling-email-verification";
   const issue = emailIssue(email);
-  const pending = configuredEmail != null && !configuredEmail.verified;
-  const awaitingCode = sentTo !== null || pending;
+  const unverified = configuredEmail != null && !configuredEmail.verified;
+  const unverifiedAddress = unverified ? configuredEmail.address : null;
+  const pendingChange = pending?.change === true ? pending : null;
+  // A Hub that reports pending verifications is the authority on whether a
+  // code is outstanding (asking for the verified address itself withdraws a
+  // change and mails nothing); an older one only tells this visit what it sent.
+  const awaitingCode = pendingKnown
+    ? pending !== null || unverified
+    : sentTo !== null || unverified;
 
-  /** The address a fresh code would go to: the one just asked for, else the pending one. */
-  const resendAddress = sentTo ?? (pending ? configuredEmail.address : null);
+  /** The address a fresh code would go to: the pending one, else the unverified one. */
+  const resendAddress = pendingKnown
+    ? (pending?.address ?? unverifiedAddress)
+    : (sentTo ?? unverifiedAddress);
 
   const request = (address: string) =>
     run(
@@ -1484,6 +1506,14 @@ function EmailSection({
     setTouched(true);
     if (issue) return;
     await request(email.trim());
+  };
+
+  const cancelChange = async () => {
+    const outcome = await hostedHubController.cancelEmailVerification();
+    if (outcome.status !== "committed") return;
+    setSentTo(null);
+    setCode("");
+    setCodeError(null);
   };
 
   const confirm = async (event: FormEvent) => {
@@ -1589,19 +1619,25 @@ function EmailSection({
               </p>
             ) : (
               <p className="pt-2 text-xs text-muted-foreground">
-                We mail a six-digit code to this address. It replaces your current one right away
-                and counts once you enter the code.
+                {pendingKnown && configuredEmail?.verified
+                  ? "We mail a six-digit code to this address. Your current address stays in use until you enter the code."
+                  : "We mail a six-digit code to this address. It replaces your current one right away and counts once you enter the code."}
               </p>
             )}
           </form>
         ) : awaitingCode ? (
           <form className="pt-3 pb-3.5" onSubmit={(event) => void confirm(event)}>
             <p role="status" className="text-xs text-muted-foreground">
+              {pendingChange
+                ? `Change to ${pendingChange.address} pending until ${formatEpoch(pendingChange.expiresAt)}. ${configuredEmail?.address ?? "Your current address"} stays in use until you confirm it. `
+                : null}
               {deliveryConfigured === false
                 ? "Request accepted. No message is delivered until this Hub can send mail."
-                : sentTo
-                  ? `We sent a code to ${sentTo}. Enter it here, or open the link in that email.`
-                  : "Enter the code from the verification email, or open the link in it."}
+                : pendingKnown && pending === null
+                  ? "The last verification email is no longer valid. Send a new code."
+                  : sentTo
+                    ? `We sent a code to ${sentTo}. Enter it here, or open the link in that email.`
+                    : "Enter the code from the verification email, or open the link in it."}
             </p>
             <div className="flex flex-col gap-2 pt-2 sm:flex-row">
               <Input
@@ -1637,6 +1673,18 @@ function EmailSection({
                   onClick={() => void request(resendAddress)}
                 >
                   <ActionLabel busy={requesting}>Resend code</ActionLabel>
+                </Button>
+              )}
+              {pendingChange === null ? null : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="shrink-0"
+                  disabled={busy || confirming}
+                  onClick={() => void cancelChange()}
+                >
+                  <ActionLabel busy={cancelling}>Cancel change</ActionLabel>
                 </Button>
               )}
             </div>

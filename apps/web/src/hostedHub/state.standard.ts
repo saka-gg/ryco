@@ -102,6 +102,7 @@ const standardHostedHubController: {
   confirmTotpEnrollment: refuseSignedOut,
   revokeTotp: refuseSignedOut,
   requestEmailVerification: refuseSignedOut,
+  cancelEmailVerification: refuseSignedOut,
   connectExternalIdentity: refuseSignedOut,
   cancelExternalIdentityConnection: ignore,
   finishBrowserExternalIdentityConnection: refuseSignedOut,

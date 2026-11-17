@@ -40,6 +40,7 @@ import {
   INITIAL_HOSTED_RECOVERY_CODE_DISPLAY_STATE,
 } from "./hostedStores.ts";
 import type {
+  HostedAccountEmail,
   HostedAccountOutcome,
   HostedAccountRefusalReason,
   HostedAccountRefused,
@@ -133,6 +134,7 @@ export type HostedAccountActionStatus =
   | "confirming-totp"
   | "revoking-totp"
   | "requesting-email-verification"
+  | "cancelling-email-verification"
   | "connecting-external-identity"
   | "disconnecting-external-identity"
   | "deleting-account";
@@ -160,6 +162,17 @@ export interface HostedAccountState {
   readonly e2eeDevicesStatus?: HostedE2eeDeviceDirectoryStatus;
   readonly security: HostedAccountSecurity | null;
   readonly securityStatus: HostedAccountSecurityStatus;
+  /**
+   * The account's address with the one an outstanding verification mail would
+   * confirm, read together with {@link security}. `null` when unknown: not read
+   * yet, the read failed, or a Hub older than pending address changes does not
+   * serve it — a surface then shows no pending state, as before. Read it
+   * through {@link pendingEmailVerification}.
+   *
+   * Declared optional for the same reason `errorCode` is. The runtime's own
+   * store always carries the slot.
+   */
+  readonly accountEmail?: HostedAccountEmail | null;
   readonly actionStatus: HostedAccountActionStatus;
   readonly errorMessage: string | null;
   /**
@@ -345,6 +358,24 @@ function isSessionFailure(error: unknown): boolean {
     error.code !== "invalid_response" &&
     (error.status === 401 || error.code === "session_invalid")
   );
+}
+
+/**
+ * Read the account's pending address alongside its security posture. A failure
+ * other than the session ending reads as "nothing known" (`null`), never as a
+ * failed security read: the pending state is supplementary, and a stale value
+ * could show an address as still pending after it was confirmed.
+ */
+async function readAccountEmail(
+  api: ReturnType<typeof getHostedHubApi>,
+  signal: AbortSignal,
+): Promise<HostedAccountEmail | null> {
+  try {
+    return await api.getAccountEmail(signal);
+  } catch (error) {
+    if (isSessionFailure(error)) throw error;
+    return null;
+  }
 }
 
 /**
@@ -1636,13 +1667,17 @@ class HostedHubController {
     sessionId: string | null,
   ): Promise<void> {
     try {
-      const security = await getHostedHubApi().getAccountSecurity(operation.signal);
+      const api = getHostedHubApi();
+      const [security, accountEmail] = await Promise.all([
+        api.getAccountSecurity(operation.signal),
+        readAccountEmail(api, operation.signal),
+      ]);
       if (operation.signal.aborted) return;
       if (!this.#isCurrentAccountSession(operation.signal, sessionId)) {
         this.#discardStaleSecurity();
         return;
       }
-      patchAccountState({ security, securityStatus: "ready" });
+      patchAccountState({ security, securityStatus: "ready", accountEmail });
     } catch (error) {
       if (operation.signal.aborted) return;
       if (isSessionFailure(error)) {
@@ -1658,7 +1693,7 @@ class HostedHubController {
   }
 
   #discardStaleSecurity(): void {
-    patchAccountState({ security: null, securityStatus: "idle" });
+    patchAccountState({ security: null, securityStatus: "idle", accountEmail: null });
   }
 
   /**
@@ -1981,6 +2016,22 @@ class HostedHubController {
   ): Promise<HostedAccountOutcome> {
     const outcome = await this.#accountAction("requesting-email-verification", async (signal) => {
       await getHostedHubApi().requestEmailVerification(input, signal);
+      return () => undefined;
+    });
+    if (outcome.status === "committed") {
+      await this.refreshAccountSecurity({ force: true });
+    }
+    return outcome;
+  }
+
+  /**
+   * Withdraw the outstanding verification mail. A requested change is dropped
+   * and the verified address stays; a never-verified address stays without a
+   * usable link or code. No step-up: it only removes a pending state.
+   */
+  async cancelEmailVerification(): Promise<HostedAccountOutcome> {
+    const outcome = await this.#accountAction("cancelling-email-verification", async (signal) => {
+      await getHostedHubApi().cancelEmailVerification(signal);
       return () => undefined;
     });
     if (outcome.status === "committed") {

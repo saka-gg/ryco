@@ -1712,6 +1712,110 @@ describe("AccountSettingsPanel", () => {
     expect(request).toHaveBeenCalledWith({ email: "ada@example.com" });
   });
 
+  describe("a requested change of a verified address", () => {
+    const verifiedSecurity = {
+      passwordConfigured: false,
+      totpEnrolled: false,
+      emailDeliveryConfigured: true,
+      email: { address: "ada@example.com", verified: true },
+      externalIdentities: [],
+    };
+    const pendingChange = () => ({
+      email: { address: "ada@example.com", verified: true },
+      pendingAddress: "lovelace@example.com",
+      pendingExpiresAt: Date.now() + 23 * 3_600_000,
+    });
+
+    it("keeps the verified address current and offers code entry, resend and cancel", async () => {
+      hostedAccountStore.setState({
+        security: verifiedSecurity,
+        securityStatus: "ready",
+        accountEmail: pendingChange(),
+      });
+      const request = vi
+        .spyOn(hostedHubController, "requestEmailVerification")
+        .mockImplementation(async () => committed());
+      const cancel = vi
+        .spyOn(hostedHubController, "cancelEmailVerification")
+        .mockImplementation(async () => {
+          hostedAccountStore.setState({
+            accountEmail: { ...pendingChange(), pendingAddress: null, pendingExpiresAt: null },
+          });
+          return committed();
+        });
+
+      await mount("profile");
+      const email = settingsSection("Email");
+      await expect.element(email.getByText("ada@example.com", { exact: true })).toBeVisible();
+      await expect.element(email.getByText("Verified", { exact: true })).toBeVisible();
+      await expect
+        .element(
+          email.getByText(
+            /Change to lovelace@example\.com pending until .+\. ada@example\.com stays in use/,
+          ),
+        )
+        .toBeVisible();
+      await expect.element(page.getByRole("textbox", { name: "Verification code" })).toBeVisible();
+
+      await page.getByRole("button", { name: "Resend code" }).click();
+      expect(request).toHaveBeenCalledWith({ email: "lovelace@example.com" });
+
+      await page.getByRole("button", { name: "Cancel change" }).click();
+      expect(cancel).toHaveBeenCalledTimes(1);
+      await expect
+        .element(page.getByRole("textbox", { name: "Verification code" }))
+        .not.toBeInTheDocument();
+      await expect.element(email.getByText(/lovelace@example\.com/)).not.toBeInTheDocument();
+      await expect.element(email.getByText("ada@example.com", { exact: true })).toBeVisible();
+    });
+
+    it("says the current address stays in use while a new one is confirmed", async () => {
+      hostedAccountStore.setState({
+        security: verifiedSecurity,
+        securityStatus: "ready",
+        accountEmail: { ...pendingChange(), pendingAddress: null, pendingExpiresAt: null },
+      });
+
+      await mount("profile");
+      await expect
+        .element(page.getByRole("textbox", { name: "Verification code" }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "Change email" }).click();
+      await expect
+        .element(page.getByText(/Your current address stays in use until you enter the code/))
+        .toBeVisible();
+    });
+
+    it("keeps the earlier copy and shows no pending change for a Hub that does not report one", async () => {
+      hostedAccountStore.setState({
+        security: verifiedSecurity,
+        securityStatus: "ready",
+        accountEmail: null,
+      });
+
+      await mount("profile");
+      await expect
+        .element(page.getByRole("button", { name: "Cancel change" }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "Change email" }).click();
+      await expect.element(page.getByText(/It replaces your current one right away/)).toBeVisible();
+    });
+
+    it("does not show a change whose link expired since it was read", async () => {
+      hostedAccountStore.setState({
+        security: verifiedSecurity,
+        securityStatus: "ready",
+        accountEmail: { ...pendingChange(), pendingExpiresAt: Date.now() - 1 },
+      });
+
+      await mount("profile");
+      await expect
+        .element(page.getByRole("textbox", { name: "Verification code" }))
+        .not.toBeInTheDocument();
+      await expect.element(page.getByText(/lovelace@example\.com/)).not.toBeInTheDocument();
+    });
+  });
+
   /* ------------------------------------------------------------------ copy */
 
   it("says that email verification currently delivers nothing", async () => {

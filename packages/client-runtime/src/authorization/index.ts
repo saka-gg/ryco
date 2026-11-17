@@ -1,3 +1,4 @@
+export * from "./accountEmail.ts";
 export * from "./connectionStatus.ts";
 export * from "./api.ts";
 export * from "./capabilities.ts";
