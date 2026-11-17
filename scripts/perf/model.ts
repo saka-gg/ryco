@@ -500,6 +500,13 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 788 KiB on 2026-11-13 (route 782.7 → 787.1 KiB): Send while attachments
  * upload (`heldSends`, its reload recovery, the pending message's status line
  * and the composer's send path; +4.4 KiB). The watcher stays out of the shell.
+ * 763.7 KiB and 113 files on 2026-11-17 (787.2 KiB before; cap unchanged): the
+ * route reads the preview file registry instead of the editor session's module
+ * (-3.1 KiB), resolves a thread's pull requests without the overview panel's
+ * logic (-2.6 KiB), and loads the new-thread source picker panel (-9.9 KiB) and
+ * the context meter's usage popup (-8.0 KiB, its arrow drawn inline so no icon
+ * regroups) on their first open. Base UI's Switch, which the route no longer
+ * imports, folded into a shell vendor chunk (+0.6 KiB there).
  */
 const CHAT_ROUTE_GZIP_BUDGET = 788 * KIB;
 /**
@@ -611,7 +618,8 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // parser, which boot no longer carries. 403 KiB and 83 files on
       // 2026-10-31 with the alert dialog, which boot no longer carries.
       // 428 KiB on 2026-11-10 (425.7 KiB, 93 files): the toast UI, which boot
-      // no longer carries.
+      // no longer carries. 426.8 KiB on 2026-11-17: Base UI's Switch joined a
+      // shell vendor chunk once the chat route stopped importing it (+0.6 KiB).
       maxGzipBytes: 428 * KIB,
       maxFiles: 115,
       forbiddenSources: [
