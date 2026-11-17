@@ -136,17 +136,18 @@ conversation, so it can be archived before you send anything in it. See
 
 ## Deleting a chat
 
-Archiving a chat hides it from the Chats section. **Move to Trash** keeps the conversation
-recoverable, and the chat's folder and files stay on disk.
-
-To delete a chat permanently, use **Settings → Data & backup → Cleanup suggestions → Delete permanently**. When no
-conversation of the chat is left, including in Trash, Ryco also removes the chat record. The folder
-stays on disk unless you select **Also delete the chat's folder** in the confirmation. That option
-is off by default. If you select it, Ryco deletes the folder and everything in it. It does not move
-the files to the OS trash. The node deletes the folder only when all of these hold:
+Archiving a chat hides it from the Chats section. **Delete** removes the conversation. You can
+undo it for a few seconds; after that it is gone for good. When the chat's last conversation is
+deleted, Ryco also removes the chat record. The folder stays on disk unless you select **Also
+delete files** in the confirmation. That option is off by default, and it is offered only when
+Ryco asks to confirm the delete (the **Delete confirmation** setting). If you select it, Ryco
+deletes the folder and everything in it once the conversation can no longer be restored, about ten
+seconds after the delete. Undo keeps the folder, and so does closing Ryco before then. It does not
+move the files to the OS trash. The node deletes the folder only when all of these hold:
 
 - The project is still a chat (it was not turned into a project).
-- No conversation of the chat remains, whether in the sidebar, the archive or Trash.
+- No conversation of the chat remains, whether in the sidebar or the archive, and none can still
+  be restored.
 - The folder's real path is strictly inside the current chats folder, and is never the chats
   folder itself.
 - No agent session runs for the chat or inside its folder. Ryco briefly waits for the sessions of

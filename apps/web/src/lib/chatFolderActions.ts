@@ -1,8 +1,5 @@
-import type { EnvironmentId, ProjectId } from "@ryco/contracts";
-
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { openInPreferredEditor } from "../editorPreferences";
-import { readEnvironmentApi } from "../environmentApi";
 import { readLocalApi } from "../localApi";
 import { errorMessage } from "~/lib/errorMessage";
 
@@ -35,49 +32,6 @@ export async function openFolderWithFeedback(
         type: "error",
         title: "Unable to open folder",
         description: errorMessage(error, "An error occurred."),
-      }),
-    );
-  }
-}
-
-/**
- * Deletes a chat's folder through its node (which only ever removes folders
- * strictly inside its chats root) and reports the outcome as a toast. Never
- * throws: the conversation itself is already gone when this runs.
- */
-export async function deleteChatFolderWithFeedback(input: {
-  readonly environmentId: EnvironmentId;
-  readonly projectId: ProjectId;
-  readonly folderPath: string;
-}): Promise<void> {
-  const deleteChatFolder = readEnvironmentApi(input.environmentId)?.projects.deleteChatFolder;
-  if (!deleteChatFolder) {
-    toastManager.add(
-      stackedThreadToast({
-        type: "error",
-        title: "Could not delete the chat folder",
-        description: `This device cannot delete chat folders. The files are still in ${input.folderPath}.`,
-      }),
-    );
-    return;
-  }
-  try {
-    const result = await deleteChatFolder({ projectId: input.projectId });
-    toastManager.add(
-      result.deleted
-        ? { type: "success", title: "Chat folder deleted", description: input.folderPath }
-        : {
-            type: "info",
-            title: "Chat folder already gone",
-            description: `Nothing was left to delete at ${input.folderPath}.`,
-          },
-    );
-  } catch (error) {
-    toastManager.add(
-      stackedThreadToast({
-        type: "error",
-        title: "Could not delete the chat folder",
-        description: `${errorMessage(error, "The request failed.")} The files are still in ${input.folderPath}.`,
       }),
     );
   }
