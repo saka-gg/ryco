@@ -2480,7 +2480,8 @@ export const WsOrchestrationSearchThreadMessagesRpc = Rpc.make(
   {
     payload: OrchestrationSearchThreadMessagesInput,
     success: OrchestrationRpcSchemas.searchThreadMessages.output,
-    error: OrchestrationGetSnapshotError,
+    // AuthRpcError: the handler checks the policy tier like threads.searchMessages does.
+    error: Schema.Union([OrchestrationGetSnapshotError, AuthRpcError]),
   },
 );
 

@@ -293,7 +293,8 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.textGenerationCancelSideQuestion]: "operator",
   [WS_METHODS.textGenerationGenerateBranchName]: "operator",
   [WS_METHODS.textGenerationGenerateIssueContent]: "operator",
-  [WS_METHODS.searchThreadMessages]: "owner",
+  // Same query as orchestration.searchThreadMessages, so the same tier.
+  [WS_METHODS.searchThreadMessages]: "viewer",
   [WS_METHODS.threadsSetManualBucket]: "operator",
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.

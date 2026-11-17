@@ -29,10 +29,10 @@ describe("RPC access policy", () => {
     );
   });
 
-  it("preserves owner-only statistics and legacy message-search boundaries", () => {
+  it("preserves owner-only statistics and gives both message-search methods one tier", () => {
     expect(rpcAccessFor(WS_METHODS.serverGetStatistics)).toBe("owner");
     expect(rpcAccessFor(WS_METHODS.serverGetUsageSummary)).toBe("owner");
-    expect(rpcAccessFor(WS_METHODS.searchThreadMessages)).toBe("owner");
+    expect(rpcAccessFor(WS_METHODS.searchThreadMessages)).toBe("viewer");
     expect(rpcAccessFor(ORCHESTRATION_WS_METHODS.searchThreadMessages)).toBe("viewer");
     expect(rpcAccessFor(WS_METHODS.sourceControlMergeChangeRequest)).toBe("operator");
   });

@@ -77,7 +77,8 @@ describe("shared RPC access policy", () => {
         ...Object.values(AGENT_CONTROL_WS_METHODS),
       ]),
     );
-    expect(rpcAccessFor(WS_METHODS.searchThreadMessages)).toBe("owner");
+    // Both message-search methods run the same query, so they share one tier.
+    expect(rpcAccessFor(WS_METHODS.searchThreadMessages)).toBe("viewer");
     expect(rpcAccessFor(ORCHESTRATION_WS_METHODS.searchThreadMessages)).toBe("viewer");
     expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.listProposals)).toBe("owner");
     expect(rpcAccessFor(AGENT_CONTROL_WS_METHODS.acceptProposal)).toBe("owner");

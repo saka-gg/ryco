@@ -59,6 +59,7 @@ describe("relay RPC integration", () => {
       timestamp: "2026-07-16T00:00:00.000Z",
     };
     const handlers = makeOrchestrationHandlers({
+      withAccess: (_access: unknown, _method: string, effect: unknown) => effect,
       projectionSnapshotQuery: {
         searchThreadMessages: () => Effect.succeed([searchResult]),
       },
