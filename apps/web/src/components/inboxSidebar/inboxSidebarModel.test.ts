@@ -249,7 +249,7 @@ describe("buildSavedInboxSidebarEnvironment", () => {
       expect(rowOf(environment)).toMatchObject({
         state: "reconnecting",
         statusLabel: "Reconnecting",
-        placementState: "idle",
+        placementState: "offline",
         mutationEnabled: false,
       });
       expect(rowOf(environment, UNTIL)).toMatchObject({
@@ -262,8 +262,23 @@ describe("buildSavedInboxSidebarEnvironment", () => {
       expect(rowOf(saved({ connectionState: "connecting" }))).toMatchObject({
         state: "connecting",
         statusLabel: "Connecting",
-        placementState: "idle",
+        placementState: "offline",
       });
+    });
+
+    it("changes the label only: a working thread stays in Recent, as between retries", () => {
+      for (const connectionState of ["connecting", "error", "disconnected"] as const) {
+        const sections = buildInboxSidebarSections({
+          projects: [project(ENV_A)],
+          worktrees: [],
+          threads: [thread("busy", { backgroundLiveness: "working" })],
+          environments: [saved({ connectionState })],
+          filters: ALL_FILTERS,
+          nowMs: NOW,
+        });
+        expect(sections.map((section) => section.key)).toEqual(["recent"]);
+        expect(sections[0]?.rows[0]?.placementState).toBe("offline");
+      }
     });
 
     it("keeps a disconnected, cached or unpaired machine offline", () => {

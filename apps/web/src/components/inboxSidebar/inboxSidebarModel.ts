@@ -741,7 +741,14 @@ function resolvePlacementState(
   const settled = isMachineConnecting(environment)
     ? { ...environment, connectionState: "idle" as const }
     : environment;
-  return resolveThreadState(thread, settled, deliveryUnknownThreadKeys, nowMs);
+  // A reconnect grace changes the label only: between retries the machine reads offline
+  // regardless, so letting the grace place rows would bounce them between sections.
+  return resolveThreadState(
+    thread,
+    settled === undefined ? undefined : { ...settled, reconnectingUntilMs: undefined },
+    deliveryUnknownThreadKeys,
+    nowMs,
+  );
 }
 
 function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
