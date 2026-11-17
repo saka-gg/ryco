@@ -152,7 +152,7 @@ import {
   readWorktreePullRequestLinks,
   workspaceDiscoversPullRequests,
 } from "@ryco/shared/worktreePullRequests";
-import { resolveThreadPullRequests } from "./chat/ChatOverviewPanel.logic";
+import { resolveThreadPullRequests } from "./chat/threadPullRequests.logic";
 import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequestsPopover";
 import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
