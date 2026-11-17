@@ -14,6 +14,13 @@ export const SAVED_ENVIRONMENT_RECONNECT_GRACE_MS = 30_000;
  * socket failures it records are ones `classifySavedEnvironmentFailure` calls
  * unreachable. Calling it again with the same states is a no-op, so a memo may
  * call it on every rebuild. Presentation only: it decides no connection.
+ *
+ * The drop time is when this first sees the machine not connected, not a
+ * runtime record: the runtime has none to anchor on, since `disconnectedAt`
+ * moves with each failed retry and the drop's own close reason may stamp
+ * `lastErrorAt` just after it. So if that first look comes late (a throttled
+ * background tab) and a retry has already failed, that failure does not end
+ * the grace; the next failed retry, or the grace running out, does.
  */
 export function createSavedEnvironmentReconnectGrace() {
   // true: connected; a number: when it dropped; false: no grace.
