@@ -146,9 +146,7 @@ describe("web code splitting", () => {
     ]);
     // Declared ahead of `vendor` at no lower priority, so it takes the Switch
     // modules that `vendor` would otherwise fold into the shell's Checkbox chunk.
-    const switchVendor = groups[3] as unknown as { readonly priority: number };
-    const vendor = groups[4] as unknown as { readonly priority: number };
-    expect(switchVendor.priority).toBeGreaterThanOrEqual(vendor.priority);
+    expect(groups[3]!.priority).toBeGreaterThanOrEqual(groups[4]!.priority);
     // The boot graph stays one chunk: a size split cut the effect runtime into
     // chunks that import each other, and boot then read uninitialised bindings.
     expect(groups[0]).not.toHaveProperty("maxSize");
