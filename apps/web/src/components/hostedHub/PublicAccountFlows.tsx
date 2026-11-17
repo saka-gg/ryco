@@ -222,6 +222,7 @@ export function PublicSignupFlow({
       signup.current = started;
       setStage("check-email");
     } catch (cause) {
+      antiBot.renew();
       setError(identityError(cause, "Account creation is temporarily unavailable."));
     } finally {
       setPending(false);
@@ -512,6 +513,7 @@ export function ExternalIdentitySignupFlow({
         completed.recoveryCodes,
       );
     } catch (cause) {
+      antiBot.renew();
       setError(identityError(cause, "GitHub signup did not complete."));
     } finally {
       setPending(false);

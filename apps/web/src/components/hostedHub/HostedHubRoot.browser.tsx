@@ -1579,6 +1579,32 @@ describe("hosted password sign-in and reset anti-bot check", () => {
     );
   });
 
+  it("renews the single-use token after a failed signup start and sends the new one", async () => {
+    vi.mocked(hostedHubApi.getPublicSignupConfiguration).mockResolvedValue(turnstileConfig);
+    const turnstile = installTurnstile();
+    const start = vi
+      .spyOn(hostedHubApi, "startPublicSignup")
+      .mockRejectedValue(new HostedHubApiError("username_unavailable", 409));
+    mounted = await render(<HostedHubRoot />);
+
+    await page.getByRole("button", { name: "Create account" }).click();
+    await vi.waitFor(() => expect(turnstile.render).toHaveBeenCalledOnce());
+    await page.getByLabelText("Username").fill("ada");
+    await page.getByLabelText("Email").fill("ada@example.test");
+    await page.getByRole("button", { name: "Send verification email" }).click();
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(start).toHaveBeenLastCalledWith(
+      expect.objectContaining({ antiBotAssertion: "turnstile-token-1" }),
+    );
+
+    await vi.waitFor(() => expect(turnstile.render).toHaveBeenCalledTimes(2));
+    await page.getByRole("button", { name: "Send verification email" }).click();
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start).toHaveBeenLastCalledWith(
+      expect.objectContaining({ antiBotAssertion: "turnstile-token-2" }),
+    );
+  });
+
   it("renders no check and sends no assertion when the Hub advertises no provider", async () => {
     // The suite's default configuration: signup disabled, no provider.
     const turnstile = installTurnstile();
