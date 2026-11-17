@@ -2,6 +2,7 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  McpListWorkspacesResult,
   McpProviderCapabilities,
   McpProviderSupport,
   McpServerConfig,
@@ -42,6 +43,34 @@ describe("provider-neutral MCP contracts", () => {
     expect(workspace.nativeScope).toBe("user");
     expect(workspace.capabilities.health).toBe("unknown");
     expect(workspace.providerMetadata.cliVersion).toBe("2.1.0");
+  });
+
+  it("decodes a workspace without the deprecated Codex compatibility fields", () => {
+    // Stage 1 of dropping sharedHomePath, effectiveHomePath and mode: clients accept a node
+    // that no longer writes them, before any node stops writing them.
+    const result = Schema.decodeUnknownSync(McpListWorkspacesResult)({
+      workspaces: [
+        {
+          id: "cursor:dXNlcg",
+          driver: "cursor",
+          displayPath: "~/.cursor/mcp.json",
+          nativeScope: "user",
+          formatGeneration: "cursor-mcp-json-v1",
+          capabilities: { readConfiguration: "available", scopes: ["user"] },
+          selectedInstanceId: "cursor",
+          providerInstances: [{ instanceId: "cursor", displayName: "Cursor" }],
+        },
+      ],
+    });
+
+    const [workspace] = result.workspaces;
+    expect(workspace?.driver).toBe("cursor");
+    expect(workspace && "sharedHomePath" in workspace).toBe(false);
+    expect(workspace && "effectiveHomePath" in workspace).toBe(false);
+    expect(workspace && "mode" in workspace).toBe(false);
+    expect(Schema.encodeSync(McpListWorkspacesResult)(result).workspaces[0]).not.toHaveProperty(
+      "sharedHomePath",
+    );
   });
 
   it("defaults omitted capability entries to unavailable", () => {
