@@ -73,8 +73,6 @@ const SOURCE_ITEM_TABS_LOAD: LazyComponentReadyOptions = {
   onLoadError: (error, retry) => notifySurfaceLoadFailure("source list", error, retry),
 };
 
-export { useSourcePickerState, type SourcePickerState } from "./sourcePickerState";
-
 /** The branch tab's controls for a branch about to be created (the new-thread picker's). */
 export interface SourcePickerBranchCreation {
   readonly fetchOrigin: boolean;

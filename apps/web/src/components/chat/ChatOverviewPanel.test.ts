@@ -1,15 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OverviewPullRequestCheckRun } from "../overview/overviewTypes";
 import {
-  branchNameCandidates,
   buildOverviewItems,
   buildOverviewPullRequestOpeners,
   overviewCheckReveal,
   compactQueryErrorMessage,
-  findChangeRequestForBranch,
-  resolveThreadPullRequests,
   resolveWorkflowDetailRunIds,
 } from "./ChatOverviewPanel.logic";
+import {
+  branchNameCandidates,
+  findChangeRequestForBranch,
+  resolveThreadPullRequests,
+} from "./threadPullRequests.logic";
 
 describe("compactQueryErrorMessage", () => {
   it("returns undefined for falsy error", () => {

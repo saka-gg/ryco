@@ -10,13 +10,6 @@ import {
 import { errorMessage } from "~/lib/errorMessage";
 import type { GitStatusData } from "./threadPullRequests.logic";
 
-export {
-  branchNameCandidates,
-  findChangeRequestForBranch,
-  resolveThreadPullRequests,
-} from "./threadPullRequests.logic";
-export type { GitStatusData, LiveBranchPullRequest } from "./threadPullRequests.logic";
-
 export function compactQueryErrorMessage(error: unknown): string | undefined {
   if (!error) return undefined;
   const message = errorMessage(error, "Failed to load.");
