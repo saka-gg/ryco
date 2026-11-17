@@ -506,7 +506,7 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * logic (-2.6 KiB), and loads the new-thread source picker panel (-9.9 KiB) and
  * the context meter's usage popup (-8.0 KiB, its arrow drawn inline so no icon
  * regroups) on their first open. Base UI's Switch, which the route no longer
- * imports, folded into a shell vendor chunk (+0.6 KiB there).
+ * imports, gets its own vendor group so it stays off the shell's first load.
  */
 const CHAT_ROUTE_GZIP_BUDGET = 788 * KIB;
 /**
@@ -618,8 +618,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // parser, which boot no longer carries. 403 KiB and 83 files on
       // 2026-10-31 with the alert dialog, which boot no longer carries.
       // 428 KiB on 2026-11-10 (425.7 KiB, 93 files): the toast UI, which boot
-      // no longer carries. 426.8 KiB on 2026-11-17: Base UI's Switch joined a
-      // shell vendor chunk once the chat route stopped importing it (+0.6 KiB).
+      // no longer carries.
       maxGzipBytes: 428 * KIB,
       maxFiles: 115,
       forbiddenSources: [
