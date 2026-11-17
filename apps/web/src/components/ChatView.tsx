@@ -60,7 +60,7 @@ import {
   appendReturnedComposerPrompt,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
+import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessionRegistry";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
 import {
   isSavedEnvironmentSwitchedOff,

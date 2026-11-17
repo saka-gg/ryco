@@ -1,5 +1,5 @@
 import { reportPreviewNavigationBlocked } from "../../previewNavigation";
-import { flushPreviewFiles } from "../previewFileSessions";
+import { flushPreviewFiles } from "../previewFileSessionRegistry";
 import "../../index.css";
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
@@ -20,7 +20,13 @@ import { THREAD_MENTION_DROP_ZONE_PROPS } from "./ComposerMentionDrop";
 import { CHAT_PANES_STORAGE_KEY, startPaneDrag, useChatPanesStore } from "../../chatPanesStore";
 import { PANE_DRAG_TYPE, decodePaneLayout, paneLeaves, type PaneNode } from "../../chatPanes.logic";
 import { resetClosedViewsForTests, takeClosedView } from "../../closedViews";
-vi.mock("../previewFileSessions", () => ({ flushPreviewFiles: vi.fn(async () => true) }));
+vi.mock("../previewFileSessionRegistry", () => ({
+  previewFileSessionRegistry: new Map(),
+  retargetPreviewFileSessions: vi.fn(),
+  hasUnsavedPreviewFiles: vi.fn(() => false),
+  matchingPreviewFileOwners: vi.fn(() => []),
+  flushPreviewFiles: vi.fn(async () => true),
+}));
 let preventClose = false;
 const a = { environmentId: EnvironmentId.make("pane-test"), threadId: ThreadId.make("a") };
 const b = { ...a, threadId: ThreadId.make("b") };
