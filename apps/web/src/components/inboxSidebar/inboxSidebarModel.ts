@@ -108,6 +108,12 @@ export interface InboxSidebarEnvironment {
   readonly queued?: boolean | undefined;
   readonly stale: boolean;
   readonly staleDetail?: string;
+  /**
+   * A saved machine retrying soon after its live connection dropped: until this
+   * time its rows show the connection's progress though its data is last known
+   * (see `createSavedEnvironmentReconnectGrace`).
+   */
+  readonly reconnectingUntilMs?: number | undefined;
   readonly role: NodeSessionRole | null;
   readonly trust:
     | "not-required"
@@ -342,6 +348,7 @@ export interface BuildInboxSidebarInput {
 
 export interface InboxSidebarModel {
   readonly sections: ReadonlyArray<InboxSidebarSection>;
+  /** When time alone changes the model: a settlement rule, or a reconnect grace ending. */
   readonly nextSettlementEvaluationAtMs: number | null;
 }
 
@@ -470,6 +477,8 @@ export function buildSavedInboxSidebarEnvironment(input: {
   readonly runtime: SavedEnvironmentRuntimeState | null | undefined;
   readonly hydratedFromCache: boolean;
   readonly capabilities: EnvironmentThreadCapabilities;
+  /** The end of its reconnect grace, if it is in one. */
+  readonly reconnectingUntilMs?: number | undefined;
 }): InboxSidebarEnvironment {
   const runtime = input.runtime;
   // A rejected pairing is not an outage: no reconnect will fix it, so the row
@@ -496,6 +505,8 @@ export function buildSavedInboxSidebarEnvironment(input: {
       : stale
         ? { staleDetail: "Offline · last known" }
         : {}),
+    // Cached data was never live in this session: it has no connection to resume.
+    reconnectingUntilMs: input.hydratedFromCache ? undefined : input.reconnectingUntilMs,
     role: runtime?.role ?? null,
     trust: "unknown",
     deliveryUnknown: false,
@@ -536,6 +547,8 @@ export interface InboxSidebarEnvironmentSources {
   readonly savedEnvironmentRuntimeById: Readonly<
     Record<string, SavedEnvironmentRuntimeState | undefined>
   >;
+  /** Saved machines in their reconnect grace; see `createSavedEnvironmentReconnectGrace`. */
+  readonly savedEnvironmentReconnectingUntilMs?: ReadonlyMap<string, number>;
   readonly cacheHydratedEnvironmentIds: ReadonlySet<string>;
   /** What each node reported to this client; see `getReportedThreadCapabilitiesSnapshot`. */
   readonly reportedThreadCapabilities: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities>;
@@ -630,6 +643,7 @@ export function buildInboxSidebarEnvironments(
         label: runtime?.descriptor?.label ?? saved?.label ?? environmentId,
         runtime,
         hydratedFromCache,
+        reconnectingUntilMs: input.savedEnvironmentReconnectingUntilMs?.get(environmentId),
         capabilities: resolveEnvironmentThreadCapabilities(environmentId, {
           reported,
           shellSettlementRules,
@@ -678,7 +692,12 @@ function resolveThreadState(
   deliveryUnknownThreadKeys: ReadonlySet<string>,
   nowMs: number,
 ): InboxSidebarThreadState {
-  if (environment?.stale || environment?.connectionState === "offline") return "offline";
+  if (
+    environment?.connectionState === "offline" ||
+    (environment?.stale && !(nowMs < (environment.reconnectingUntilMs ?? 0)))
+  ) {
+    return "offline";
+  }
   const activity = deriveThreadActivityStatus(thread);
   if (activity === "approval" || activity === "input" || activity === "plan-ready")
     return "needs-input";
@@ -1314,9 +1333,20 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   ];
 
   const status = input.filters.status;
+  // A machine's reconnect grace ending turns its rows offline: evaluate again then.
+  let nextSettlementEvaluationAtMs = inbox.nextSettlementEvaluationAtMs;
+  for (const { reconnectingUntilMs: until } of input.environments) {
+    if (
+      until !== undefined &&
+      until > nowMs &&
+      (nextSettlementEvaluationAtMs === null || until < nextSettlementEvaluationAtMs)
+    ) {
+      nextSettlementEvaluationAtMs = until;
+    }
+  }
   return {
     sections: status === "all" ? sections : sections.filter((section) => section.key === status),
-    nextSettlementEvaluationAtMs: inbox.nextSettlementEvaluationAtMs,
+    nextSettlementEvaluationAtMs,
   };
 }
 

@@ -130,6 +130,7 @@ import {
   sameInboxProviderCatalogs,
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
+import { createSavedEnvironmentReconnectGrace } from "./inboxSidebar/savedEnvironmentReconnectGrace";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import { useLogicalProjectSnapshots } from "~/hooks/useLogicalProjectSnapshots";
 import { useProjectGroupingSettings } from "~/hooks/useProjectGroupingSettings";
@@ -539,6 +540,7 @@ export default function Sidebar() {
   const primaryConnectionState = getWsConnectionUiState(primaryWsConnectionStatus);
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
+  const [savedEnvironmentReconnectGrace] = useState(createSavedEnvironmentReconnectGrace);
   const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
@@ -618,6 +620,9 @@ export default function Sidebar() {
           : null,
       savedEnvironmentRegistry,
       savedEnvironmentRuntimeById,
+      savedEnvironmentReconnectingUntilMs: savedEnvironmentReconnectGrace(
+        savedEnvironmentRuntimeById,
+      ),
       cacheHydratedEnvironmentIds,
       reportedThreadCapabilities,
       shellSettlementRules,
@@ -635,6 +640,7 @@ export default function Sidebar() {
     primaryEnvironmentId,
     projects,
     reportedThreadCapabilities,
+    savedEnvironmentReconnectGrace,
     savedEnvironmentRegistry,
     savedEnvironmentRuntimeById,
     shellSettlementRules,
