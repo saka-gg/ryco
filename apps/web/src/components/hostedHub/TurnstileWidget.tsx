@@ -3,12 +3,23 @@ import { useEffect, useRef, useState } from "react";
 const TURNSTILE_SCRIPT_URL =
   "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
 
+/**
+ * The action each public form binds its token to. The Hub checks the token's
+ * action against the endpoint it was submitted to, so these must match the
+ * Hub's names (the phone app's Turnstile challenge uses the same ones).
+ */
+export type TurnstileAction =
+  | "external_signup"
+  | "password_login"
+  | "password_reset"
+  | "public_signup";
+
 interface TurnstileApi {
   readonly render: (
     container: HTMLElement,
     options: {
       readonly sitekey: string;
-      readonly action: "external_signup" | "public_signup";
+      readonly action: TurnstileAction;
       readonly theme: "auto" | "dark" | "light";
       readonly callback: (token: string) => void;
       readonly "expired-callback": () => void;
@@ -60,7 +71,7 @@ export function TurnstileWidget({
   onToken,
 }: {
   readonly siteKey: string;
-  readonly action: "external_signup" | "public_signup";
+  readonly action: TurnstileAction;
   readonly onToken: (token: string | null) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
