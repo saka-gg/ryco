@@ -32,6 +32,46 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.50",
+    date: "November 18, 2026",
+    dateTime: "2026-11-18",
+    summary:
+      "A release of fixes from a review of the whole app: turns that could hang, git problems with unusual file names, sign-in and security hardening, plus an animated background for empty chats and an email change that keeps your verified address until the new one is confirmed.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.50`,
+    highlights: [
+      {
+        title: "Turns that no longer hang",
+        summary:
+          "A newer Codex, Cursor or Grok CLI that sends a message this version does not know no longer leaves a thread on Working or drops the connection mid-turn. An agent process that crashed is noticed at once instead of after several minutes, an approval that Codex withdrew clears its card, and a stopped turn is saved once.",
+      },
+      {
+        title: "Git with real-world file names and branches",
+        summary:
+          "Files with umlauts, spaces or quotes in their names can be staged and committed. Opening a pull request in a worktree no longer resets a local branch that has commits you have not pushed, and creating a worktree in a large repository copies the files your .worktreeinclude names instead of timing out.",
+      },
+      {
+        title: "Sign-in and access hardening",
+        summary:
+          "Leaving a Hub now ends the sessions and pairing codes it had vouched for. Only owners can change a project's picture, a damaged signing key is replaced instead of used, old sign-in records are cleaned up, and a machine whose clock is slightly off can connect to Ryco Cloud again.",
+      },
+      {
+        title: "Email change keeps your verified address",
+        summary:
+          "On Ryco Cloud, a new email address stays pending until you confirm it, so password sign-in and reset keep working with the old one in the meantime. The account screen shows the pending address with resend and cancel, and password sign-in in the browser now includes the anti-bot check. This needs a Ryco Cloud update that follows this release.",
+      },
+      {
+        title: "Chats: background, files and steered turns",
+        summary:
+          "Empty chats get an animated background; choose Flow field, Halftone or Off under Settings → Appearance → Interface → Chat background. When you delete the last conversation of a chat you can choose Also delete files. Statistics count all the work of a Claude turn you steered, and opening a thread from a message link no longer pulls you back while the turn streams.",
+      },
+      {
+        title: "Desktop, terminals and the iPhone app",
+        summary:
+          "On Windows and Linux the desktop app quits when you close its window, and closing a terminal on Windows ends its shell. Menu actions open the app when no window is open. Devices that are not showing a terminal no longer download its history. In the iPhone app, still in development, you can enter the code from a verification email and delete a chat with its files.",
+      },
+    ],
+  },
+  {
     version: "0.1.49",
     date: "November 15, 2026",
     dateTime: "2026-11-15",
