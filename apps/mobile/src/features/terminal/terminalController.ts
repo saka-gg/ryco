@@ -3,6 +3,7 @@ import {
   createTerminalEventReconciler,
   createTerminalInputCoalescer,
   isTerminalReplayEvent,
+  isTerminalStartWithoutHistory,
   selectPendingTerminalEventEntries,
   selectTerminalEventEntries,
   selectTerminalEventEntriesAfterSnapshot,
@@ -657,8 +658,12 @@ export class TerminalController {
       return;
     }
     if (!surface.reconciler.accept(event)) return;
-    if (isTerminalReplayEvent(event)) {
-      // Output was missed and the replay carries no history: re-hydrate.
+    if (
+      isTerminalReplayEvent(event) ||
+      (isTerminalStartWithoutHistory(event) && !this.#showsStart(surface, event))
+    ) {
+      // Output was missed, or a start of a session this connection had not attached left its
+      // history out: the event carries no history, so re-hydrate instead of showing it empty.
       surface.hydrated = false;
       this.#requestOpen(surface.terminalId);
       return;
@@ -676,11 +681,7 @@ export class TerminalController {
         return;
       case "started":
       case "restarted":
-        if (
-          surface.snapshot?.cursor !== undefined &&
-          event.snapshot.cursor?.generation === surface.snapshot.cursor.generation &&
-          event.snapshot.cursor.sequence === surface.snapshot.cursor.sequence
-        ) {
+        if (this.#showsStart(surface, event)) {
           return; // The snapshot this surface already hydrated from (a restart's own answer).
         }
         this.#flushOutput(surface.terminalId);
@@ -695,6 +696,18 @@ export class TerminalController {
         this.#syncWritable();
         return;
     }
+  }
+
+  /** Whether the surface hydrated from the snapshot `event` carries (an open's or a restart's own). */
+  #showsStart(
+    surface: Surface,
+    event: Extract<TerminalEvent, { type: "started" | "restarted" }>,
+  ): boolean {
+    return (
+      surface.snapshot?.cursor !== undefined &&
+      event.snapshot.cursor?.generation === surface.snapshot.cursor.generation &&
+      event.snapshot.cursor.sequence === surface.snapshot.cursor.sequence
+    );
   }
 
   // --- Hydration -----------------------------------------------------------------

@@ -46,6 +46,8 @@ describe("terminal output scope", () => {
     expect(scope.subscribeInput()).toEqual({
       replay: "metadata",
       output: { attached: [ref] },
+      // Declares that this client hydrates starts that leave their history out.
+      startHistory: "attached",
     });
     scope.acknowledge();
     releaseA();
