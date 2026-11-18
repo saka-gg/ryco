@@ -59,6 +59,7 @@ import {
 } from "../observability/PerfInstrumentation.ts";
 import { TASK_MESSAGE_PENDING_LIMIT_METHOD } from "../provider/Errors.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
+import { rpcAccessFor } from "./RpcAccessPolicy.ts";
 import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
   ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
@@ -764,26 +765,32 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "orchestration" },
       ),
+    // Both message-search methods run the same query, so they share one tier from the access
+    // policy (viewer: a viewer already reads every thread through the window and replay RPCs).
     [ORCHESTRATION_WS_METHODS.searchThreadMessages]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.searchThreadMessages,
-        projectionSnapshotQuery
-          .searchThreadMessages({
-            ...input,
-            limit: clamp(input.limit, {
-              maximum: 50,
-              minimum: 1,
-            }),
-          })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationGetSnapshotError({
-                  message: "Failed to search thread messages",
-                  cause,
-                }),
+        withAccess(
+          rpcAccessFor(ORCHESTRATION_WS_METHODS.searchThreadMessages),
+          ORCHESTRATION_WS_METHODS.searchThreadMessages,
+          projectionSnapshotQuery
+            .searchThreadMessages({
+              ...input,
+              limit: clamp(input.limit, {
+                maximum: 50,
+                minimum: 1,
+              }),
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({
+                    message: "Failed to search thread messages",
+                    cause,
+                  }),
+              ),
             ),
-          ),
+        ),
         { "rpc.aggregate": "orchestration" },
       ),
     [ORCHESTRATION_WS_METHODS.getThreadWindow]: (input) =>
@@ -1059,7 +1066,8 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     [WS_METHODS.searchThreadMessages]: (input) =>
       observeRpcEffect(
         WS_METHODS.searchThreadMessages,
-        ownerEffect(
+        withAccess(
+          rpcAccessFor(WS_METHODS.searchThreadMessages),
           WS_METHODS.searchThreadMessages,
           Effect.gen(function* () {
             const query = input.query.trim();

@@ -186,6 +186,48 @@ it.effect("routes orchestration message search through the projection query", ()
   }),
 );
 
+it.effect("guards both message-search methods with the same viewer tier", () =>
+  Effect.gen(function* () {
+    const { ctx } = makeOrchestrationContext("client");
+    const guarded: Array<{ readonly access: WsRpcAccess; readonly method: string }> = [];
+    const searchResult = {
+      threadId: ThreadId.make("thread-search"),
+      messageId: MessageId.make("message-search"),
+      snippet: "needle",
+      timestamp: "2026-03-01T00:00:00.000Z",
+    };
+    const handlers = makeOrchestrationHandlers({
+      ...ctx,
+      withAccess: <A, E, R>(access: WsRpcAccess, method: string, effect: Effect.Effect<A, E, R>) =>
+        Effect.suspend(() => {
+          guarded.push({ access, method });
+          return ctx.withAccess(access, method, effect);
+        }),
+      projectionSnapshotQuery: {
+        ...ctx.projectionSnapshotQuery,
+        searchThreadMessages: () => Effect.succeed([searchResult]),
+      },
+    } as WsRpcContext);
+    const orchestrationSearch = getTestHandler<
+      { readonly query: string; readonly limit: number },
+      readonly (typeof searchResult)[],
+      OrchestrationGetSnapshotError | AuthRpcError
+    >(handlers, ORCHESTRATION_WS_METHODS.searchThreadMessages);
+    const threadsSearch = getTestHandler<
+      { readonly query: string },
+      { readonly results: readonly (typeof searchResult)[] },
+      AuthRpcError
+    >(handlers, WS_METHODS.searchThreadMessages);
+
+    expect(yield* orchestrationSearch({ query: "needle", limit: 5 })).toEqual([searchResult]);
+    expect(yield* threadsSearch({ query: "needle" })).toEqual({ results: [searchResult] });
+    expect(guarded).toEqual([
+      { access: "viewer", method: ORCHESTRATION_WS_METHODS.searchThreadMessages },
+      { access: "viewer", method: WS_METHODS.searchThreadMessages },
+    ]);
+  }),
+);
+
 it.effect(
   "lets client sessions read a thread's attachments, but only attachments of its messages",
   () =>

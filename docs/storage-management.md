@@ -107,6 +107,20 @@ live frame coalescing.
   (fixture homes from `generate-fixture-home.ts --progress-ticks-per-turn N
   --reasoning-flushes-per-turn N --subagent-flushes-per-turn N`).
 
+## Database: old sign-in records
+
+Every pairing link and every session (each bearer renewal adds one) keeps a database row with its
+credential and client details (IP address, user agent). The server removes the ones that can no
+longer sign anyone in (`apps/server/src/persistence/Layers/AuthRecordRetention.ts`):
+
+- Pairing links consumed, revoked or expired more than 30 days ago.
+- Session rows revoked or expired more than 90 days ago, but never a row of a pairing that still
+  has a session that is neither revoked nor expired: reusing an old bearer of a live pairing must
+  still find its row, which revokes the pairing.
+- At most 5,000 rows per pass, 200 per delete statement, on the compaction cadence above (10
+  minutes after startup, every 2 minutes while rows are left over, otherwise every 6 hours). It
+  runs only while `RYCO_EVENT_COMPACTION` is on; `off` and `dry-run` keep every row.
+
 ## Database: free space and automatic shrinking
 
 Deleting rows (compaction, thread purges, finished message chunks) leaves free pages inside

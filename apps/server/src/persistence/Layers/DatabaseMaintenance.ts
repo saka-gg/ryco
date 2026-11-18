@@ -24,6 +24,12 @@
  * (`NONE`) keep their free pages inside the file; changing the mode needs an offline VACUUM.
  * The file shrinks once the WAL is checkpointed. This runs regardless of the compaction setting.
  *
+ * Auth record retention (`AuthRecordRetention.ts`, loaded with `import()` on its first pass)
+ * removes pairing links and ended pairings' session rows long past their end, on the
+ * compaction schedule: 10 minutes after startup, every 2 minutes while a pass stopped at its row
+ * bound, otherwise every 6 hours. It deletes only when compaction is on: `off` and `dry-run`
+ * leave the auth tables alone.
+ *
  * @module DatabaseMaintenance
  */
 import { readEnv } from "@ryco/shared/runtimeEnv";
@@ -37,6 +43,7 @@ import {
   EventLogCompaction,
   type EventLogCompactionPassOptions,
 } from "../Services/EventLogCompaction.ts";
+import type { AuthRecordRetentionResult } from "./AuthRecordRetention.ts";
 import {
   EventLogCompactionDeferredLive,
   hasCompactionBacklog,
@@ -204,6 +211,61 @@ export const makeDatabaseMaintenance = (options: DatabaseMaintenanceOptions) =>
     yield* Effect.forkScoped(loop);
   });
 
+/** One auth record retention pass with the default bounds; the module loads on first use. */
+export const loadedAuthRecordRetentionPass: Effect.Effect<
+  AuthRecordRetentionResult,
+  SqlError,
+  SqlClient.SqlClient
+> = Effect.promise(() => import("./AuthRecordRetention.ts")).pipe(
+  Effect.flatMap((module) =>
+    Effect.flatMap(Clock.currentTimeMillis, (nowMs) =>
+      module.runAuthRecordRetentionPass(module.DEFAULT_AUTH_RECORD_RETENTION_OPTIONS, nowMs),
+    ),
+  ),
+);
+
+export interface AuthRecordRetentionScheduleOptions {
+  readonly setting: EventCompactionSetting;
+  readonly startupDelay: Duration.Input;
+  /** Cadence while a pass stopped at its row bound. */
+  readonly catchUpInterval: Duration.Input;
+  /** Cadence otherwise, and after a failure. */
+  readonly idleInterval: Duration.Input;
+  readonly runPass: Effect.Effect<AuthRecordRetentionResult, SqlError, SqlClient.SqlClient>;
+}
+
+/** Forks the auth record retention loop on the main connection. */
+export const makeAuthRecordRetention = (options: AuthRecordRetentionScheduleOptions) =>
+  Effect.gen(function* () {
+    if (options.setting !== "on") return;
+    const sql = yield* SqlClient.SqlClient;
+    const pass = options.runPass.pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.tap((result) =>
+        result.deletedPairingLinks + result.deletedSessions === 0
+          ? Effect.void
+          : Effect.logInfo("auth record retention pass", result),
+      ),
+      Effect.map((result) => (result.backlog ? options.catchUpInterval : options.idleInterval)),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("auth record retention pass failed; retrying later", {
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as(options.idleInterval)),
+      ),
+    );
+    yield* Effect.forkScoped(
+      Effect.gen(function* () {
+        let delay: Duration.Input = options.startupDelay;
+        while (true) {
+          yield* Effect.sleep(delay);
+          delay = yield* pass;
+        }
+      }),
+    );
+  });
+
 /** `PRAGMA auto_vacuum` as a name: 0 none, 1 full, 2 incremental. */
 export type AutoVacuumMode = "none" | "full" | "incremental";
 
@@ -349,6 +411,11 @@ export const DatabaseMaintenanceLive = Layer.effectDiscard(
     Effect.flatMap((setting) =>
       Effect.all([
         makeDatabaseMaintenance({ ...DEFAULT_DATABASE_MAINTENANCE_OPTIONS, setting }),
+        makeAuthRecordRetention({
+          ...DEFAULT_DATABASE_MAINTENANCE_OPTIONS,
+          setting,
+          runPass: loadedAuthRecordRetentionPass,
+        }),
         makeFreePageReclaim(DEFAULT_FREE_PAGE_RECLAIM_OPTIONS),
       ]),
     ),

@@ -86,12 +86,15 @@ export const McpWorkspace = Schema.Struct({
   providerMetadata: McpWorkspaceProviderMetadata.pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  // The three deprecated fields below are optional on the wire so a later release can stop
+  // writing them. Every adapter still writes them until the oldest supported client decodes
+  // this optional form; nothing should read them.
   /** @deprecated Codex compatibility metadata. Use providerMetadata. */
-  sharedHomePath: TrimmedNonEmptyString,
+  sharedHomePath: Schema.optionalKey(TrimmedNonEmptyString),
   /** @deprecated Codex compatibility metadata. Use providerMetadata. */
   effectiveHomePath: Schema.optionalKey(TrimmedNonEmptyString),
   /** @deprecated Codex compatibility metadata. Use providerMetadata. */
-  mode: Schema.Literals(["direct", "authOverlay"]),
+  mode: Schema.optionalKey(Schema.Literals(["direct", "authOverlay"])),
   selectedInstanceId: ProviderInstanceId,
   providerInstances: Schema.Array(McpProviderInstanceUsage),
 });
