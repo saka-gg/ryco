@@ -1,5 +1,5 @@
 import type { TerminalCursor, TerminalEvent } from "@ryco/contracts";
-import { isTerminalReplayEvent } from "@ryco/client-runtime/state/terminal";
+import { terminalEventNeedsHydration } from "@ryco/client-runtime/state/terminal";
 import { MAX_TERMINALS_PER_GROUP } from "@ryco/client-runtime/state/threads";
 
 /**
@@ -116,8 +116,8 @@ export function createTerminalViewCache<Terminal extends { dispose(): void }, St
  * up from the client buffer and must hydrate from `terminal.open` instead:
  * the buffer may have dropped events it never saw, the session ended
  * meanwhile (an open restarts an ended session, which a replayed exit would
- * not show), or a reconnect replay stands for output that never reached the
- * buffer (the open then asks for the history after the view's cursor). The
+ * not show), or a reconnect replay or a start without its history stands for
+ * output that never reached the buffer (the open then brings it). The
  * open that follows still verifies the result against the server's cursor,
  * so an empty buffer only skips work that is not needed.
  */
@@ -136,7 +136,7 @@ export function resolveTerminalViewCatchUp<Entry extends { id: number; event: Te
       (entry) =>
         entry.event.type === "exited" ||
         entry.event.type === "error" ||
-        isTerminalReplayEvent(entry.event),
+        terminalEventNeedsHydration(entry.event),
     )
   ) {
     return null;

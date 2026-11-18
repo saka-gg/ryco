@@ -86,6 +86,34 @@ export function isTerminalReplayEvent(event: TerminalEvent): event is TerminalRe
   return event.type === "started" && event.replay === true;
 }
 
+export type TerminalStartWithoutHistoryEvent = Extract<
+  TerminalEvent,
+  { type: "started" | "restarted" }
+> & { readonly snapshot: { readonly historyOmitted: true } };
+
+/**
+ * A real start whose snapshot left the retained history out (`historyOmitted`, sent to clients
+ * that subscribed with `startHistory: "attached"` for terminals they had not attached). It may
+ * open and focus the terminal like any start, but its empty `history` is no scrollback: a surface
+ * that shows the terminal hydrates through `terminal.open` instead of showing it empty.
+ */
+export function isTerminalStartWithoutHistory(
+  event: TerminalEvent,
+): event is TerminalStartWithoutHistoryEvent {
+  return (
+    (event.type === "started" || event.type === "restarted") &&
+    event.snapshot.historyOmitted === true
+  );
+}
+
+/**
+ * Whether a surface that applies `event` must hydrate through `terminal.open`: the event's
+ * snapshot does not hold the history it stands for (a reconnect replay or a start without history).
+ */
+export function terminalEventNeedsHydration(event: TerminalEvent): boolean {
+  return isTerminalReplayEvent(event) || isTerminalStartWithoutHistory(event);
+}
+
 /** Highest cursor a surface has accounted for, output or activity alike, in one generation. */
 function latestAccountedSequence(
   current: TerminalReconciliationState,

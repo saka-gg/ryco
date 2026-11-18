@@ -76,6 +76,9 @@ export function createTerminalOutputScope(ports: TerminalOutputScopePorts) {
         output: {
           attached: readTerminalOutputHolds(environment()).slice(0, MAX_ATTACHED_IN_SUBSCRIPTION),
         },
+        // Surfaces hydrate through `terminal.open` (`terminalEventNeedsHydration`), so starts of
+        // terminals nobody here holds may leave their history out.
+        startHistory: "attached",
       };
     },
     /** The stream's `outputScope` item arrived: the node filters output for this connection. */

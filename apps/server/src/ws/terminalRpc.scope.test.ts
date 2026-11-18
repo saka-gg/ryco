@@ -58,6 +58,22 @@ const snapshot = (terminalId: string): TerminalSessionSnapshot => ({
   cursor: { generation, sequence: 1 },
 });
 
+/** A live start of a session that restored `history` from disk (a first open). */
+const started = (terminalId: string, history: string): TerminalEvent => {
+  const cursor = at();
+  return {
+    type: "started",
+    threadId: "thread-1",
+    terminalId,
+    createdAt: "2026-11-10T00:00:00.000Z",
+    cursor,
+    snapshot: { ...snapshot(terminalId), history, cursor },
+  };
+};
+
+const startedSnapshot = (item: unknown) =>
+  (item as Extract<TerminalEvent, { type: "started" }>).snapshot;
+
 /** One connection: its handlers share attachments and visibility, as a socket's do. */
 const connection = () => {
   let listener: (event: TerminalEvent) => Effect.Effect<void> = () => Effect.void;
@@ -266,6 +282,126 @@ describe("scoped terminal output", () => {
       node.visibility.set("foreground");
       yield* stream.settle;
       assert.deepEqual(typesOf(stream.items), ["outputScope", "output:t:a"]);
+    }),
+  );
+});
+
+describe("start history for unattached terminals", () => {
+  const scoped = (startHistory?: "attached"): TerminalSubscribeEventsInput => ({
+    replay: "metadata",
+    output: { attached: [{ threadId: "thread-1", terminalId: "shown" }] },
+    ...(startHistory ? { startHistory } : {}),
+  });
+
+  it.effect("leaves it out, marked, for a client that declared it handles that", () =>
+    Effect.gen(function* () {
+      const node = connection();
+      const stream = yield* collect(node.subscribe(scoped("attached")));
+      yield* stream.settle;
+      yield* node.emit(started("hidden", "restored scrollback\r\n"));
+      yield* node.emit(started("shown", "shown scrollback\r\n"));
+      // A start without history has nothing to leave out and stays unmarked.
+      yield* node.emit(started("empty", ""));
+      yield* stream.settle;
+      assert.deepEqual(typesOf(stream.items), [
+        "outputScope",
+        "started:hidden",
+        "started:shown",
+        "started:empty",
+      ]);
+      const hidden = startedSnapshot(stream.items[1]);
+      assert.equal(hidden.history, "");
+      assert.isTrue(hidden.historyOmitted);
+      // Everything else of the start still arrives: it is a real start, not a replay.
+      assert.equal(hidden.status, "running");
+      assert.notProperty(stream.items[1] as object, "replay");
+      const shown = startedSnapshot(stream.items[2]);
+      assert.equal(shown.history, "shown scrollback\r\n");
+      assert.notProperty(shown, "historyOmitted");
+      assert.notProperty(startedSnapshot(stream.items[3]), "historyOmitted");
+    }),
+  );
+
+  it.effect("keeps it for a terminal attached by an open after the subscription", () =>
+    Effect.gen(function* () {
+      const node = connection();
+      const stream = yield* collect(node.subscribe(scoped("attached")));
+      yield* stream.settle;
+      yield* node.handlers[WS_METHODS.terminalOpen]({
+        threadId: "thread-1",
+        terminalId: "opened",
+        cwd: "/tmp",
+        attachOutput: true,
+      });
+      yield* node.emit(started("opened", "restored\r\n"));
+      yield* stream.settle;
+      const start = stream.items.find((item) => (item as TerminalEvent).type === "started");
+      assert.equal(startedSnapshot(start).history, "restored\r\n");
+    }),
+  );
+
+  it.effect("keeps it in every start for clients that did not declare it (older clients)", () =>
+    Effect.gen(function* () {
+      for (const input of [
+        scoped(),
+        { replay: "metadata", startHistory: "attached" } as const,
+        {},
+      ] satisfies ReadonlyArray<TerminalSubscribeEventsInput>) {
+        const node = connection();
+        const stream = yield* collect(node.subscribe(input));
+        yield* stream.settle;
+        yield* node.emit(started("hidden", "restored scrollback\r\n"));
+        yield* stream.settle;
+        const start = stream.items.find((item) => (item as TerminalEvent).type === "started");
+        assert.equal(startedSnapshot(start).history, "restored scrollback\r\n");
+        assert.notProperty(startedSnapshot(start), "historyOmitted");
+      }
+    }),
+  );
+
+  it.effect("leaves it out of starts held in the background too", () =>
+    Effect.gen(function* () {
+      const node = connection();
+      node.visibility.set("background");
+      const stream = yield* collect(node.subscribe(scoped("attached")));
+      yield* stream.settle;
+      yield* node.emit(started("hidden", "restored scrollback\r\n"));
+      node.visibility.set("foreground");
+      yield* stream.settle;
+      assert.deepEqual(typesOf(stream.items), ["outputScope", "started:hidden"]);
+      assert.isTrue(startedSnapshot(stream.items[1]).historyOmitted);
+    }),
+  );
+
+  it.effect("saves the restored histories a metadata subscriber never attached", () =>
+    Effect.gen(function* () {
+      // Four terminals restore scrollback (the manager keeps up to 2 MiB each) while a phone
+      // holds a metadata subscription that shows none of them.
+      const histories = [256, 512, 1024, 64].map((kib) => "$ make\r\n".repeat(kib * 128));
+      const bytesFor = (input: TerminalSubscribeEventsInput) =>
+        Effect.gen(function* () {
+          const node = connection();
+          const stream = yield* collect(node.subscribe(input));
+          yield* stream.settle;
+          for (const [index, history] of histories.entries()) {
+            yield* node.emit(started(`restored-${index}`, history));
+          }
+          yield* stream.settle;
+          const starts = stream.items.filter(
+            (item) => (item as TerminalEvent).type === "started",
+          ) as TerminalEvent[];
+          assert.lengthOf(starts, histories.length);
+          return starts.reduce(
+            (total, event) => total + Buffer.byteLength(JSON.stringify(event)),
+            0,
+          );
+        });
+      const before = yield* bytesFor(scoped());
+      const after = yield* bytesFor(scoped("attached"));
+      // 1.8 MiB of history before, a few hundred bytes of metadata per terminal after.
+      assert.isAbove(before, 1_900_000);
+      assert.isBelow(after, 2_000);
+      console.info(`terminal starts for a metadata subscriber: ${before} B -> ${after} B`);
     }),
   );
 });

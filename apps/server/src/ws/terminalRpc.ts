@@ -91,6 +91,27 @@ export function terminalBootstrapEvent(
   };
 }
 
+/** One history-less copy per published start, shared by every subscriber that gets it. */
+const startsWithoutHistory = new WeakMap<TerminalEvent, TerminalEvent>();
+
+/**
+ * A live `started` event as a `startHistory: "attached"` subscriber gets it for a terminal not
+ * attached on its connection: the retained history left out and marked, so the client hydrates
+ * through `terminal.open` when it shows the terminal instead of showing it empty. A start without
+ * history goes out unchanged. Not a replay: it is a real start.
+ */
+export function terminalStartWithoutHistory(event: TerminalEvent): TerminalEvent {
+  if (event.type !== "started" || event.snapshot.history.length === 0) return event;
+  const cached = startsWithoutHistory.get(event);
+  if (cached) return cached;
+  const stripped: TerminalEvent = {
+    ...event,
+    snapshot: { ...event.snapshot, history: "", historyOmitted: true },
+  };
+  startsWithoutHistory.set(event, stripped);
+  return stripped;
+}
+
 type TerminalStreamItemOut = TerminalEvent | TerminalOutputScopeEvent;
 
 export interface TerminalSubscriberLedger {
@@ -319,10 +340,18 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
                 ? makeTerminalBackgroundHold({ sizeOf: terminalEventBytes })
                 : null;
               let holding = hold !== null && connectionVisibility.isBackground();
-              const scopedOffer = (event: TerminalEvent) => {
-                if (event.type === "output" && !outputAttachments.includes(event)) {
+              // Only a client that declared it handles `historyOmitted` gets starts without history.
+              const omitStartHistory = scope !== undefined && input.startHistory === "attached";
+              const scopedOffer = (published: TerminalEvent) => {
+                if (published.type === "output" && !outputAttachments.includes(published)) {
                   return Effect.void;
                 }
+                const event =
+                  omitStartHistory &&
+                  published.type === "started" &&
+                  !outputAttachments.includes(published)
+                    ? terminalStartWithoutHistory(published)
+                    : published;
                 if (holding && hold) return Effect.sync(() => hold.hold(event));
                 return offer(event);
               };

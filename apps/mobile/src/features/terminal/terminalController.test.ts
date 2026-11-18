@@ -373,6 +373,36 @@ describe("terminal controller", () => {
     expect(context.controller.getSnapshot().writable).toBe(true);
   });
 
+  it("re-hydrates through an open when a start left its history out", async () => {
+    const context = setup();
+    await startHydrated(context, "$ before");
+    const restored = snapshot({ pid: 9, cursor: { generation: "g1", sequence: 8 } });
+    // Another client started the session again; this connection had not attached it, so the
+    // node left the restored history out of the start.
+    context.store.getState().applyTerminalEvent(
+      { environmentId: ENV, threadId: THREAD },
+      {
+        type: "started",
+        threadId: THREAD,
+        terminalId: "default",
+        createdAt: AT,
+        cursor: restored.cursor,
+        snapshot: { ...restored, history: "", historyOmitted: true },
+      },
+    );
+    await flush();
+    // Never shown as an empty terminal.
+    expect(context.sent.findLast((message) => message.type === "hydrate")).toMatchObject({
+      history: "$ before",
+    });
+    expect(context.server.terminal.open).toHaveBeenCalledTimes(2);
+    context.server.opens[1]!.answer.resolve({ ...restored, history: "$ restored" });
+    await flush();
+    expect(context.sent.findLast((message) => message.type === "hydrate")).toMatchObject({
+      history: "$ restored",
+    });
+  });
+
   it("drops an open answer that lands after the app went to the background", async () => {
     const context = setup();
     context.controller.startTerminal();
