@@ -215,6 +215,16 @@ describe("email code refusals", () => {
       "The Hub could not complete that. Try again in a moment.",
     );
   });
+
+  it("keeps its own fallback for failures the confirm route does not word itself", () => {
+    for (const errorCode of ["unavailable", "forbidden", "internal_error"]) {
+      expect(
+        emailCodeRefusalMessage(
+          refusal({ errorCode, errorMessage: "Hub is temporarily unavailable." }),
+        ),
+      ).toBe("The Hub could not complete that. Try again in a moment.");
+    }
+  });
 });
 
 describe("passkey presentation", () => {
