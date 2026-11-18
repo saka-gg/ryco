@@ -139,6 +139,26 @@ export function claudeCacheWriteInputTokens(usage: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/**
+ * What a result's processed usage counts. Claude Code starts `result.usage` from zero for every
+ * prompt it runs, so it covers only the CLI segment that result closes, and only main-loop calls
+ * (`modelUsage` is the session-cumulative, all-calls figure). In the pinned CLI, `query()`'s
+ * per-prompt run starts its usage at the empty usage and adds each main-loop message's usage at
+ * `message_stop`; the SDK types call it "per-turn in streaming-input sessions"; a capture against
+ * a fake endpoint showed a `/compact` result with zero usage and a steer's segment with only its
+ * own calls (the opt-in probe in claudeCompactionCliProbe.test.ts re-checks this). One Ryco turn
+ * spans several segments when a steer runs as its own CLI turn or the turn compacts before it
+ * closes, so each segment is its own request, keyed by the result's uuid, and Statistics adds
+ * them up. A result without a uuid (older producers) stays a turn total.
+ */
+export function claudeResultProcessedUsageIdentity(
+  result: SDKResultMessage | undefined,
+): { readonly scope: "request"; readonly requestId: string } | { readonly scope: "turn" } {
+  const uuid: unknown = result?.uuid;
+  const requestId = typeof uuid === "string" ? uuid.trim() : "";
+  return requestId.length > 0 ? { scope: "request", requestId } : { scope: "turn" };
+}
+
 /** The context gauge a result (or a local close without one) publishes. */
 export const resolveResultUsageSnapshot = Effect.fn("resolveResultUsageSnapshot")(function* (
   context: ClaudeSessionContext,
@@ -164,11 +184,10 @@ export const resolveResultUsageSnapshot = Effect.fn("resolveResultUsageSnapshot"
     context.lastKnownContextWindow = resultContextWindow;
   }
 
-  // The SDK result.usage contains *accumulated* totals across all API calls
-  // (input_tokens, cache_read_input_tokens, etc. summed over every request).
-  // This does NOT represent the current context window size.
-  // Prefer the last main-loop request gauge (legacy main-task telemetry is
-  // a fallback) and keep cumulative totals separate as totalProcessedTokens.
+  // result.usage sums the main-loop API calls of the CLI segment this result closes
+  // (see claudeResultProcessedUsageIdentity). It does NOT represent the current context
+  // window size. Prefer the last main-loop request gauge (legacy main-task telemetry is
+  // a fallback) and keep the segment's sum separate as totalProcessedTokens.
   const accumulatedSnapshot = normalizeClaudeTokenUsage(
     result?.usage,
     resultContextWindow ?? context.lastKnownContextWindow,
@@ -189,7 +208,7 @@ export const resolveResultUsageSnapshot = Effect.fn("resolveResultUsageSnapshot"
           ...(accumulatedSnapshot
             ? {
                 processedUsage: {
-                  scope: "turn" as const,
+                  ...claudeResultProcessedUsageIdentity(result),
                   inputTokens: accumulatedSnapshot.inputTokens ?? 0,
                   cachedInputTokens: accumulatedSnapshot.cachedInputTokens ?? 0,
                   cacheWriteInputTokens: claudeCacheWriteInputTokens(result?.usage),
