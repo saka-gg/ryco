@@ -70,6 +70,42 @@ describe("processed token counters", () => {
     );
     expect(result.entries.map((entry) => entry.totalTokens)).toEqual([3000, 2000]);
   });
+  it("adds up the CLI segments of one Claude turn and ignores its gauge-only totals", () => {
+    const segment = (requestId: string, input: number, output: number) => ({
+      usedTokens: 100,
+      processedUsage: {
+        scope: "request",
+        requestId,
+        inputTokens: input,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: output,
+        reasoningOutputTokens: 0,
+        totalTokens: input + output,
+      },
+    });
+    const result = collectProcessedTokenUsage(
+      [
+        // A historical-looking gauge (a total without counters) in a turn with exact counters.
+        row(0, { usedTokens: 100, totalProcessedTokens: 9000 }),
+        row(1, segment("result-prompt", 1000, 10)),
+        // The steer's segment, then a gauge-only snapshot (the compaction's result) after it.
+        row(2, segment("result-steer", 2000, 20)),
+        row(3, { usedTokens: 100, totalProcessedTokens: 9000 }),
+        // A turn with only the historical total keeps it as an approximation.
+        row(4, { usedTokens: 100, totalProcessedTokens: 500 }, "turn-legacy"),
+      ],
+      () => "claudeAgent",
+    );
+    expect(
+      result.entries.map((entry) => [entry.row.turnId, entry.totalTokens, entry.approximate]),
+    ).toEqual([
+      ["turn-legacy", 500, true],
+      ["turn-a", 1010, false],
+      ["turn-a", 2020, false],
+    ]);
+    expect([...result.turns].toSorted()).toEqual(["thread\0turn-a", "thread\0turn-legacy"]);
+  });
   it("keeps malformed and legacy gauge-only payloads for the existing fallback", () => {
     const result = collectProcessedTokenUsage(
       [row(0, { usedTokens: 100 }), { ...row(1, {}), payloadJson: "invalid" }],

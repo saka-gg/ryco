@@ -10,6 +10,9 @@
  * reads a user settings file it writes into that temporary directory), tools, MCP servers or hooks,
  * a fake API key, and a loopback API endpoint that rejects every request and records only its path.
  * Context usage is read with `detail: "summary"`, which makes no token-count calls.
+ *
+ * The result-usage probe instead answers the Messages API itself with canned replies (still no
+ * inference), so a real `/compact` runs and every call's usage is known.
  */
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -21,6 +24,7 @@ import {
   query,
   type Query,
   type SDKMessage,
+  type SDKResultMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AUTO_COMPACT_WINDOW_MIN } from "@ryco/shared/claudeAutoCompact";
@@ -37,6 +41,85 @@ import {
 } from "./contextCompactionPolicy.ts";
 
 const PROBE_MODEL = "claude-opus-5-5";
+
+/**
+ * A CLI session whose prompt stream yields only what `send` pushes, isolated in `root` and pointed
+ * at the loopback `endpoint`. `settings` are flag settings, as the adapter passes them;
+ * `settingSources: ["user"]` also reads the temporary user settings.
+ */
+function startProbeSession(input: {
+  readonly root: string;
+  readonly endpoint: string;
+  /** Settle when each CLI process exits: it writes its config until then. */
+  readonly processExits: Promise<void>[];
+  readonly settings?: Record<string, unknown>;
+  readonly settingSources?: Array<"user">;
+}) {
+  const { root, endpoint, processExits, settings = {}, settingSources = [] } = input;
+  const pending: SDKUserMessage[] = [];
+  let wake: (() => void) | undefined;
+  let closed = false;
+  const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+    while (true) {
+      const next = pending.shift();
+      if (next) {
+        yield next;
+        continue;
+      }
+      if (closed) return;
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+    }
+  })();
+  const executable = process.env.RYCO_CLAUDE_PROBE_EXECUTABLE;
+  const runtime: Query = query({
+    prompt,
+    options: {
+      cwd: root,
+      model: PROBE_MODEL,
+      ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
+      env: {
+        HOME: root,
+        CLAUDE_CONFIG_DIR: join(root, ".claude"),
+        TMPDIR: root,
+        PATH: process.env.PATH ?? "",
+        ANTHROPIC_API_KEY: "ryco-probe-not-a-real-key",
+        ANTHROPIC_BASE_URL: endpoint,
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        DISABLE_AUTOUPDATER: "1",
+      },
+      settingSources,
+      tools: [],
+      mcpServers: {},
+      strictMcpConfig: true,
+      persistSession: false,
+      settings: { disableAllHooks: true, ...settings },
+      spawnClaudeCodeProcess: (options) => {
+        const child = spawn(options.command, options.args, {
+          cwd: options.cwd,
+          env: options.env,
+          signal: options.signal,
+          stdio: ["pipe", "pipe", "ignore"],
+        });
+        processExits.push(new Promise((resolve) => child.once("close", () => resolve())));
+        return child;
+      },
+    },
+  });
+  return {
+    runtime,
+    send: (message: SDKUserMessage) => {
+      pending.push(message);
+      wake?.();
+    },
+    close: () => {
+      closed = true;
+      wake?.();
+      runtime.close();
+    },
+  };
+}
 
 describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compaction probe", () => {
   let root = "";
@@ -70,78 +153,10 @@ describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compac
     }
   });
 
-  /**
-   * A session whose prompt stream yields only what `send` pushes. `settings` are flag settings,
-   * as the adapter passes them; `settingSources: ["user"]` also reads the temporary user settings.
-   */
   const startSession = (
     settings: Record<string, unknown> = {},
     settingSources: Array<"user"> = [],
-  ) => {
-    const pending: SDKUserMessage[] = [];
-    let wake: (() => void) | undefined;
-    let closed = false;
-    const prompt = (async function* (): AsyncGenerator<SDKUserMessage> {
-      while (true) {
-        const next = pending.shift();
-        if (next) {
-          yield next;
-          continue;
-        }
-        if (closed) return;
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-        });
-      }
-    })();
-    const executable = process.env.RYCO_CLAUDE_PROBE_EXECUTABLE;
-    const runtime: Query = query({
-      prompt,
-      options: {
-        cwd: root,
-        model: PROBE_MODEL,
-        ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
-        env: {
-          HOME: root,
-          CLAUDE_CONFIG_DIR: join(root, ".claude"),
-          TMPDIR: root,
-          PATH: process.env.PATH ?? "",
-          ANTHROPIC_API_KEY: "ryco-probe-not-a-real-key",
-          ANTHROPIC_BASE_URL: endpoint,
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-          DISABLE_AUTOUPDATER: "1",
-        },
-        settingSources,
-        tools: [],
-        mcpServers: {},
-        strictMcpConfig: true,
-        persistSession: false,
-        settings: { disableAllHooks: true, ...settings },
-        spawnClaudeCodeProcess: (options) => {
-          const child = spawn(options.command, options.args, {
-            cwd: options.cwd,
-            env: options.env,
-            signal: options.signal,
-            stdio: ["pipe", "pipe", "ignore"],
-          });
-          processExits.push(new Promise((resolve) => child.once("close", () => resolve())));
-          return child;
-        },
-      },
-    });
-    return {
-      runtime,
-      send: (message: SDKUserMessage) => {
-        pending.push(message);
-        wake?.();
-      },
-      close: () => {
-        closed = true;
-        wake?.();
-        runtime.close();
-      },
-    };
-  };
+  ) => startProbeSession({ root, endpoint, processExits, settings, settingSources });
 
   const readWindow = async (runtime: Query) => {
     const usage = await runtime.getContextUsage({ detail: "summary" });
@@ -298,3 +313,144 @@ describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compac
     }
   });
 });
+
+/**
+ * Why Ryco publishes each Claude result's processed usage as its own request
+ * (`claudeResultProcessedUsageIdentity`): `result.usage` covers only the prompt the CLI just ran,
+ * main-loop calls only, while `modelUsage` keeps a running total of every call, compaction
+ * included. Should `result.usage` ever become cumulative, re-audit that function.
+ */
+describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")(
+  "Claude Code result usage probe",
+  () => {
+    let root = "";
+    let server: Server | undefined;
+    let endpoint = "";
+    const processExits: Promise<void>[] = [];
+    /** Input tokens of the n-th Messages call (1-based); output is a hundredth of it. */
+    const inputTokensOfCall = (call: number) => 1_000 * call;
+    let calls = 0;
+
+    beforeAll(async () => {
+      root = await mkdtemp(join(tmpdir(), "ryco-claude-result-usage-probe-"));
+      server = createServer((request, response) => {
+        const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+        if (!path.endsWith("/v1/messages")) {
+          request.resume();
+          response.writeHead(403).end();
+          return;
+        }
+        let body = "";
+        request.on("data", (chunk) => (body += chunk));
+        request.on("end", () => {
+          calls += 1;
+          const { model } = JSON.parse(body) as { readonly model: string };
+          const input_tokens = inputTokensOfCall(calls);
+          const output_tokens = input_tokens / 100;
+          const usage = {
+            input_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          };
+          const send = (type: string, data: Record<string, unknown>) =>
+            response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          send("message_start", {
+            message: {
+              id: `msg_${calls}`,
+              type: "message",
+              role: "assistant",
+              model,
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { ...usage, output_tokens: 1 },
+            },
+          });
+          send("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+          send("content_block_delta", {
+            index: 0,
+            delta: { type: "text_delta", text: `<summary>Reply ${calls}.</summary>` },
+          });
+          send("content_block_stop", { index: 0 });
+          send("message_delta", {
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: { ...usage, output_tokens },
+          });
+          send("message_stop", {});
+          response.end();
+        });
+      });
+      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("No loopback port");
+      endpoint = `http://127.0.0.1:${address.port}`;
+    });
+
+    afterAll(async () => {
+      try {
+        await Promise.all(processExits);
+      } finally {
+        if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+        if (root) await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it("reports each prompt's own main-loop usage, a /compact's as zero", async () => {
+      const session = startProbeSession({ root, endpoint, processExits });
+      const frames = session.runtime[Symbol.asyncIterator]();
+      /** Sends a prompt and reads its frames up to its result. */
+      const run = async (text: string) => {
+        session.send({
+          type: "user",
+          message: { role: "user", content: text },
+          parent_tool_use_id: null,
+          uuid: crypto.randomUUID(),
+          session_id: "",
+        });
+        const seen: SDKMessage[] = [];
+        while (true) {
+          const next = await frames.next();
+          if (next.done) throw new Error("The CLI ended before its result");
+          seen.push(next.value);
+          if (next.value.type === "result") {
+            return { result: next.value as SDKResultMessage, frames: seen, callsSoFar: calls };
+          }
+        }
+      };
+      const mainLoop = (result: SDKResultMessage) => ({
+        input: result.usage.input_tokens,
+        output: result.usage.output_tokens,
+      });
+      const allCalls = (result: SDKResultMessage) => ({
+        input: result.modelUsage[PROBE_MODEL]?.inputTokens,
+        output: result.modelUsage[PROBE_MODEL]?.outputTokens,
+      });
+      try {
+        const first = await run("hello");
+        expect(first.callsSoFar).toBe(1);
+        expect(mainLoop(first.result)).toEqual({ input: 1_000, output: 10 });
+        expect(allCalls(first.result)).toEqual({ input: 1_000, output: 10 });
+
+        // The summary call (call 2) is in modelUsage only.
+        const compaction = await run(NATIVE_COMPACTION_COMMAND);
+        expect(
+          compaction.frames.some(
+            (frame) => frame.type === "system" && frame.subtype === "compact_boundary",
+          ),
+        ).toBe(true);
+        expect(compaction.callsSoFar).toBe(2);
+        expect(mainLoop(compaction.result)).toEqual({ input: 0, output: 0 });
+        expect(allCalls(compaction.result)).toEqual({ input: 3_000, output: 30 });
+
+        // The next prompt counts its own call (3), not the session's.
+        const next = await run("again");
+        expect(next.callsSoFar).toBe(3);
+        expect(mainLoop(next.result)).toEqual({ input: 3_000, output: 30 });
+        expect(allCalls(next.result)).toEqual({ input: 6_000, output: 60 });
+      } finally {
+        session.close();
+      }
+    });
+  },
+);
