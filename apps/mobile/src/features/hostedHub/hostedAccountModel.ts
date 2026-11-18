@@ -937,6 +937,8 @@ interface PromptSpec {
   readonly perform: () => Promise<void>;
   /** Overrides the default "close or report" behaviour of a committed action. */
   readonly onCommitted?: () => void;
+  /** Draft fields a refusal resets, e.g. a typed code that turned out wrong. */
+  readonly clearOnRefusal?: Partial<HostedAccountPromptDraft>;
   readonly enrollment: HostedTotpEnrollmentView | null;
 }
 
@@ -1068,12 +1070,15 @@ function derivePrompt(
               else set({ attempted: true, completed: true });
               return;
             }
-            // The one refusal a surface can act on. A wrong code lands here too,
-            // so the field is cleared and the runtime's message stays visible;
-            // the retry is the user pressing submit again — never an automatic
-            // one, because regenerating recovery codes must never re-run itself.
+            // The one refusal a surface can act on. A wrong step-up code lands
+            // here too, so that field is cleared (as is whatever the prompt
+            // names in `clearOnRefusal`) and the runtime's message stays
+            // visible; the retry is the user pressing submit again — never an
+            // automatic one, because regenerating recovery codes must never
+            // re-run itself.
             set({
               attempted: true,
+              ...spec.clearOnRefusal,
               ...(isHostedStepUpMessage(after.errorMessage)
                 ? { stepUpRequired: true, stepUpCode: "" }
                 : {}),
@@ -1357,7 +1362,10 @@ function promptSpec(
         notice: null,
         destructive: false,
         submitLabel: "Verify",
-        completionMessage: `${address ?? "The address"} is verified.`,
+        // By the time the prompt reports completion the controller has re-read
+        // the account, so the pending change is gone and the confirmed address
+        // is the account's own.
+        completionMessage: `${address ?? input.accountState.security?.email?.address ?? "The address"} is verified.`,
         fields: [
           field("text", "Code from the email", "123456", draft.text, {
             keyboardType: "number-pad",
@@ -1369,6 +1377,8 @@ function promptSpec(
         perform: async () => {
           await actions.confirmEmailVerificationCode(digits);
         },
+        // A wrong or expired code is useless to edit; the web clears it too.
+        clearOnRefusal: { text: "" },
       };
     }
 

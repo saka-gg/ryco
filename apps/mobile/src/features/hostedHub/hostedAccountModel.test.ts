@@ -225,7 +225,22 @@ function harness(initial?: {
     revokeTotp: vi.fn(async () => commit()),
     requestEmailVerification: vi.fn(async () => commit()),
     cancelEmailVerification: vi.fn(async () => commit()),
-    confirmEmailVerificationCode: vi.fn(async () => commit()),
+    // The controller re-reads the account once the Hub accepts the code, so by
+    // the time it resolves the confirmed address is the account's own.
+    confirmEmailVerificationCode: vi.fn(async () => {
+      await commit();
+      const confirmed = account.accountEmail?.pendingAddress ?? account.security?.email?.address;
+      if (account.errorMessage !== null || confirmed == null || account.security == null) return;
+      const email = { address: confirmed, verified: true };
+      account = {
+        ...account,
+        security: { ...account.security, email },
+        accountEmail:
+          account.accountEmail == null
+            ? account.accountEmail
+            : { email, pendingAddress: null, pendingExpiresAt: null },
+      };
+    }),
     connectExternalIdentity: vi.fn(async () => commit()),
     disconnectExternalIdentity: vi.fn(async () => commit()),
     cancelExternalIdentityConnection: vi.fn(),
@@ -1436,6 +1451,7 @@ describe("email verification", () => {
     test.prompt().submit?.run();
     await flush();
     expect(test.actions.confirmEmailVerificationCode).toHaveBeenCalledExactlyOnceWith("654321");
+    expect(test.prompt().message).toBe("ada@example.test is verified.");
 
     test.close();
     test.setAccount({ security: { ...security, email: null } });
@@ -1563,6 +1579,8 @@ describe("email verification", () => {
         await flush();
         expect(test.prompt().errorMessage).toBe(message);
         expect(test.prompt().submit).not.toBeNull();
+        // The wrong code is cleared for the next attempt, as on the web.
+        expect(test.draft()?.text).toBe("");
         // The prompt owns the refusal; the screen does not repeat it.
         expect(test.view().errorMessage).toBeNull();
       }
