@@ -114,9 +114,14 @@ credential and client details (IP address, user agent). The server removes the o
 longer sign anyone in (`apps/server/src/persistence/Layers/AuthRecordRetention.ts`):
 
 - Pairing links consumed, revoked or expired more than 30 days ago.
-- Session rows revoked or expired more than 90 days ago, but never a row of a pairing that still
-  has a session that is neither revoked nor expired: reusing an old bearer of a live pairing must
-  still find its row, which revokes the pairing.
+- Session rows revoked or expired more than 90 days ago of a pairing that ended (revoked, or every
+  session expired).
+- In a pairing that still has a session that is neither revoked nor expired (a phone that renews
+  daily adds a row a day), only superseded rows that expired more than 90 days ago. The server
+  refuses such a bearer as expired before it checks for reuse, so its row no longer matters. It
+  keeps the current session, the row before it (the current session reads it), and every
+  superseded row that has not expired: reusing one of those still finds its row and revokes the
+  pairing.
 - At most 5,000 rows per pass, 200 per delete statement, on the compaction cadence above (10
   minutes after startup, every 2 minutes while rows are left over, otherwise every 6 hours). It
   runs only while `RYCO_EVENT_COMPACTION` is on; `off` and `dry-run` keep every row.
