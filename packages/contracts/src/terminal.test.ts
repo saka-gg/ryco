@@ -306,6 +306,26 @@ describe("TerminalSessionSnapshot", () => {
     };
     expect(decodeSync(TerminalSessionSnapshot, delta)).toEqual(delta);
   });
+
+  it("marks a snapshot whose history was left out and leaves others unmarked", () => {
+    const snapshot = {
+      threadId: "thread-1",
+      terminalId: DEFAULT_TERMINAL_ID,
+      cwd: "/tmp/project",
+      worktreePath: null,
+      status: "running",
+      pid: 1234,
+      history: "",
+      exitCode: null,
+      exitSignal: null,
+      updatedAt: "2026-10-12T00:00:00.000Z",
+    };
+    expect(decodeSync(TerminalSessionSnapshot, snapshot)).not.toHaveProperty("historyOmitted");
+    expect(
+      decodeSync(TerminalSessionSnapshot, { ...snapshot, historyOmitted: true }).historyOmitted,
+    ).toBe(true);
+    expect(decodes(TerminalSessionSnapshot, { ...snapshot, historyOmitted: false })).toBe(false);
+  });
 });
 
 describe("TerminalEvent", () => {
@@ -403,5 +423,11 @@ describe("TerminalSubscribeEventsInput", () => {
     });
     expect(decodeSync(TerminalSubscribeEventsInput, {})).toEqual({});
     expect(decodes(TerminalSubscribeEventsInput, { replay: "full" })).toBe(false);
+  });
+
+  it("accepts the attached-only start history mode", () => {
+    const input = { replay: "metadata", output: { attached: [] }, startHistory: "attached" };
+    expect(decodeSync(TerminalSubscribeEventsInput, input)).toEqual(input);
+    expect(decodes(TerminalSubscribeEventsInput, { startHistory: "none" })).toBe(false);
   });
 });

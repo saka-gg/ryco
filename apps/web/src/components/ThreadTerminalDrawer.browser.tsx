@@ -1,7 +1,7 @@
 import "../index.css";
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
@@ -620,6 +620,51 @@ describe("TerminalViewport", () => {
       expect(terminalWriteSpy).not.toHaveBeenCalledWith("\u001bc");
     } finally {
       await second.cleanup();
+      useTerminalStateStore.getState().removeTerminalState(threadRef);
+    }
+  });
+
+  it("re-hydrates through terminal.open when a start left its history out", async () => {
+    const environment = createEnvironmentApi("prompt$ ");
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef(EnvironmentId.make("environment-a"), THREAD_ID);
+
+    const mounted = await mountTerminalViewport({ threadRef });
+    try {
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("prompt$ ");
+      });
+      terminalWriteSpy.mockClear();
+      const restored = {
+        threadId: THREAD_ID,
+        terminalId: "default",
+        cwd: "/repo/project",
+        worktreePath: null,
+        status: "running" as const,
+        pid: 456,
+        history: "restored scrollback\r\n",
+        exitCode: null,
+        exitSignal: null,
+        updatedAt: "2026-04-07T00:01:00.000Z",
+        cursor: { generation: "g1", sequence: 8 },
+      };
+      environment.terminal.open.mockImplementation(async () => restored);
+      // The session was started again (another client opened it) and the node left the
+      // restored history out of the start this connection received.
+      useTerminalStateStore.getState().applyTerminalEvent(threadRef, {
+        type: "started",
+        threadId: THREAD_ID,
+        terminalId: "default",
+        createdAt: restored.updatedAt,
+        cursor: restored.cursor,
+        snapshot: { ...restored, history: "", historyOmitted: true },
+      });
+      await vi.waitFor(() => {
+        expect(terminalWriteSpy).toHaveBeenCalledWith("restored scrollback\r\n");
+      });
+      expect(environment.terminal.open).toHaveBeenCalledTimes(2);
+    } finally {
+      await mounted.cleanup();
       useTerminalStateStore.getState().removeTerminalState(threadRef);
     }
   });

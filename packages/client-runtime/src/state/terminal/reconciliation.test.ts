@@ -4,6 +4,8 @@ import {
   createTerminalEventReconciler,
   isTerminalEventAfterSnapshot,
   isTerminalSnapshotDeltaFor,
+  isTerminalStartWithoutHistory,
+  terminalEventNeedsHydration,
 } from "./reconciliation.ts";
 import {
   createTerminalStateStore,
@@ -142,6 +144,31 @@ describe("terminal cursor reconciliation", () => {
     expect(reconciler.accept(replay(1, "server-b"))).toBe(true);
     // A surface that never hydrated always takes the replay.
     expect(createTerminalEventReconciler().accept(replay(1))).toBe(true);
+  });
+
+  it("hydrates through an open for replays and starts that left their history out", () => {
+    const start = (
+      snapshotFields: Partial<TerminalSessionSnapshot>,
+      replay?: true,
+    ): TerminalEvent => ({
+      ...output(4, ""),
+      type: "started",
+      snapshot: { ...snapshot(4), ...snapshotFields },
+      ...(replay ? { replay } : {}),
+    });
+    const withoutHistory = start({ history: "", historyOmitted: true });
+    expect(isTerminalStartWithoutHistory(withoutHistory)).toBe(true);
+    expect(terminalEventNeedsHydration(withoutHistory)).toBe(true);
+    // A start without history (a relaunch) is an empty terminal, shown as it is.
+    expect(terminalEventNeedsHydration(start({ history: "" }))).toBe(false);
+    expect(terminalEventNeedsHydration(start({}))).toBe(false);
+    expect(terminalEventNeedsHydration(start({ history: "" }, true))).toBe(true);
+    expect(terminalEventNeedsHydration(output(5))).toBe(false);
+    // It is still a real start: the surface's reconciliation moves to it.
+    const reconciler = createTerminalEventReconciler();
+    reconciler.reset(snapshot(1));
+    expect(reconciler.accept(withoutHistory)).toBe(true);
+    expect(reconciler.accept(output(4))).toBe(false);
   });
 
   it("delivers the exit paired with a recovered exited snapshot exactly once", () => {

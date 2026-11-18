@@ -146,7 +146,10 @@ describe("resolveTerminalViewCatchUp", () => {
   });
 
   it("hands a reconnect replay to terminal.open, since its output never reached the buffer", () => {
-    const start = (replay: boolean): { id: number; event: TerminalEvent } => ({
+    const start = (
+      replay: boolean,
+      historyOmitted = false,
+    ): { id: number; event: TerminalEvent } => ({
       id: 4,
       event: {
         threadId: "thread",
@@ -164,6 +167,7 @@ describe("resolveTerminalViewCatchUp", () => {
           exitCode: null,
           exitSignal: null,
           updatedAt: "2026-10-12T00:00:00Z",
+          ...(historyOmitted ? { historyOmitted: true as const } : {}),
         },
         ...(replay ? { replay: true as const } : {}),
       },
@@ -173,6 +177,8 @@ describe("resolveTerminalViewCatchUp", () => {
     ).toBeNull();
     // A live start carries its full snapshot, which the view applies itself.
     expect(resolveTerminalViewCatchUp([entry(3, "output"), start(false)], 3)).toHaveLength(1);
+    // A start that left its history out is no empty terminal either: the open brings it.
+    expect(resolveTerminalViewCatchUp([entry(3, "output"), start(false, true)], 3)).toBeNull();
   });
 });
 

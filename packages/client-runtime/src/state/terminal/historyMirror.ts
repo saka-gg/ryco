@@ -1,6 +1,6 @@
 import type { TerminalCursor, TerminalEvent, TerminalSessionSnapshot } from "@ryco/contracts";
 
-import { isTerminalSnapshotDeltaFor } from "./reconciliation.ts";
+import { isTerminalSnapshotDeltaFor, isTerminalStartWithoutHistory } from "./reconciliation.ts";
 
 /** What a surface shows of one terminal: its scrollback up to `cursor`. */
 export interface TerminalHistoryMirror {
@@ -107,6 +107,11 @@ export function createTerminalHistoryMirrorCache(options: TerminalHistoryMirrorC
     },
     /** Follows an event the surface applied on top of its hydration. */
     apply(key: string, event: TerminalEvent): void {
+      if (isTerminalStartWithoutHistory(event)) {
+        // No scrollback to keep: what the surface shows next comes from `terminal.open`.
+        remove(key);
+        return;
+      }
       if (event.type === "started" || event.type === "restarted") {
         if (event.snapshot.cursor) {
           store(key, { cursor: event.snapshot.cursor, history: event.snapshot.history });

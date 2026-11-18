@@ -155,6 +155,13 @@ export const TerminalSessionSnapshot = Schema.Struct({
    * is the full retained scrollback.
    */
   historySince: Schema.optional(TerminalCursor),
+  /**
+   * Set only on a live `started` event sent to a subscriber that asked for
+   * `startHistory: "attached"` (see `TerminalSubscribeEventsInput`), for a terminal not attached
+   * on its connection: the session has retained history, but `history` is `""`. It never means an
+   * empty terminal; a surface that shows it hydrates through `terminal.open`.
+   */
+  historyOmitted: Schema.optional(Schema.Literal(true)),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
@@ -272,6 +279,13 @@ export const TerminalSubscribeEventsInput = Schema.Struct({
       attached: Schema.Array(TerminalRef).check(Schema.isMaxLength(64)),
     }),
   ),
+  /**
+   * With `output`: a live `started` event carries the retained history only for terminals
+   * attached on this connection; the others come with `history: ""` and
+   * `snapshot.historyOmitted: true`. A client that sends it handles that flag. Older nodes ignore
+   * the field and send the history in every start, as does a node for a stream without `output`.
+   */
+  startHistory: Schema.optional(Schema.Literal("attached")),
 });
 export type TerminalSubscribeEventsInput = typeof TerminalSubscribeEventsInput.Type;
 

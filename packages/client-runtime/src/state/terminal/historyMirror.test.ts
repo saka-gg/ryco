@@ -63,6 +63,32 @@ describe("terminal history mirror", () => {
     ).toBe("after");
   });
 
+  it("forgets a terminal whose start left its history out", () => {
+    const cache = make();
+    cache.hydrate("a", { history: "before", cursor: cursor(1) }, undefined);
+    const start = {
+      ...output(5, ""),
+      type: "started",
+      snapshot: {
+        threadId: "t",
+        terminalId: "default",
+        cwd: "/tmp",
+        worktreePath: null,
+        status: "running",
+        pid: 1,
+        history: "",
+        historyOmitted: true,
+        exitCode: null,
+        exitSignal: null,
+        updatedAt: "",
+        cursor: cursor(5),
+      },
+    } as TerminalEvent;
+    cache.apply("a", start);
+    // Not an empty scrollback at cursor 5: the next open asks for all of it.
+    expect(cache.cursorFor("a")).toBeUndefined();
+  });
+
   it("stays within its bounds", () => {
     const cache = make({ maxEntries: 2, maxHistoryUnits: 10, maxTotalUnits: 100 });
     cache.hydrate("a", { history: "x".repeat(30), cursor: cursor(1) }, undefined);

@@ -31,10 +31,10 @@ export function claudePostCompactionUsage(
 }
 
 /**
- * The gauge a Claude result publishes. `result.usage` is cumulative across every API call of the
- * turn, so the last main-loop gauge wins and the cumulative figure only rides along as
- * `totalProcessedTokens`. Without a gauge the cumulative snapshot is a fallback, but never for a
- * turn that crossed a compaction boundary: its cumulative input is the pre-compaction size.
+ * The gauge a Claude result publishes. `result.usage` sums every main-loop API call of the CLI
+ * segment the result closes, so the last main-loop gauge wins and the summed figure only rides
+ * along as `totalProcessedTokens`. Without a gauge the summed snapshot is a fallback, but never for
+ * a segment that crossed a compaction boundary: its summed input is the pre-compaction size.
  */
 export function selectClaudeResultUsageGauge(input: {
   readonly lastGauge: ThreadTokenUsageSnapshot | undefined;

@@ -64,6 +64,7 @@ import { ProviderAdapterRequestError, ProviderAdapterValidationError } from "../
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import type { ClaudeTranscriptPresence } from "../claudeTranscriptPresence.ts";
 import { isMissingConversationError } from "../resumeFailure.ts";
+import { collectProcessedTokenUsage } from "../../statistics/processedTokenUsage.ts";
 import {
   makeClaudeAdapter,
   type ClaudeAdapterLiveOptions,
@@ -9110,6 +9111,30 @@ function lastUsageBefore(events: ReadonlyArray<ProviderRuntimeEvent>, index: num
   return usage?.type === "thread.token-usage.updated" ? usage.payload.usage : undefined;
 }
 
+/** What Statistics counts for a turn from the usage snapshots the adapter published. */
+function processedUsageOfTurn(events: ReadonlyArray<ProviderRuntimeEvent>, turnId: unknown) {
+  const rows = events.flatMap((event, sequence) =>
+    event.type === "thread.token-usage.updated" && event.turnId === turnId
+      ? [
+          {
+            threadId: String(event.threadId),
+            turnId: String(event.turnId),
+            sequence,
+            createdAt: event.createdAt,
+            payloadJson: JSON.stringify(event.payload.usage),
+          },
+        ]
+      : [],
+  );
+  const { entries } = collectProcessedTokenUsage(rows, () => "claudeAgent");
+  return {
+    inputTokens: entries.reduce((sum, entry) => sum + entry.inputTokens, 0),
+    outputTokens: entries.reduce((sum, entry) => sum + entry.outputTokens, 0),
+    totalTokens: entries.reduce((sum, entry) => sum + entry.totalTokens, 0),
+    approximate: entries.some((entry) => entry.approximate),
+  };
+}
+
 describe("ClaudeAdapterLive automatic compaction", () => {
   const UNAVAILABLE_WARNING =
     "Automatic context compaction is unavailable for this session. Start a new session if the context window fills.";
@@ -9250,6 +9275,64 @@ describe("ClaudeAdapterLive automatic compaction", () => {
       assert.equal(usage?.usedTokens, 40_000);
       assert.deepEqual(warnings(log.events), []);
       assert.isUndefined((yield* adapter.listSessions())[0]?.activeTurnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("counts the turn's own work once its /compact segment closes it", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-processed-usage");
+
+      // As the CLI reports it: the prompt's result sums its own main-loop calls.
+      const fill = yield* emitFullTurn(adapter, harness, {
+        prompt: "fill",
+        result: { uuid: "result-fill" },
+      });
+      assert.equal(promptText(yield* readPrompt), "fill");
+      const compactUuid = yield* readCompactionPrompt(readPrompt);
+      harness.query.emit(systemStatusFrame("compacting"));
+      harness.query.emit(
+        compactBoundaryFrame({ trigger: "manual", pre_tokens: 168_012, post_tokens: 40_000 }),
+      );
+      // The /compact result: zero main-loop usage, the summary call only in modelUsage.
+      harness.query.emit(
+        resultFrame({
+          result: "",
+          num_turns: 0,
+          uuid: "result-compact",
+          user_message_uuids: [compactUuid],
+          usage: {
+            input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 0,
+          },
+          modelUsage: {
+            [GAUGE_MODEL]: {
+              inputTokens: 168_012,
+              outputTokens: 4_000,
+              contextWindow: 200_000,
+              maxOutputTokens: 64_000,
+            },
+          },
+        }),
+      );
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, fill.turnId);
+      assert.deepEqual(processedUsageOfTurn(log.events, fill.turnId), {
+        inputTokens: 160_012,
+        outputTokens: 900,
+        totalTokens: 160_912,
+        approximate: false,
+      });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -11680,6 +11763,59 @@ describe("ClaudeAdapterLive steering", () => {
         log.events.filter((event) => event.type === "turn.started"),
         1,
       );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("counts every CLI segment of a steered turn, not only the last", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      const turn = yield* startPromptTurn(adapter, harness, log, "steer-processed-usage");
+      emitPromptSegment(harness.query, turn.turnId);
+      yield* settle(harness.query, log, "p-open");
+      yield* steer(adapter, turn.turnId);
+      yield* readPrompt;
+      const steerUuid = (yield* readPrompt).uuid!;
+
+      // The prompt finished first: its result sums only its own calls, the steer runs next.
+      harness.query.emit(
+        resultFrame({
+          uuid: "result-prompt",
+          user_message_uuids: [turn.turnId],
+          queued_turn_count: 1,
+          usage: { input_tokens: 12, cache_read_input_tokens: 160_000, output_tokens: 900 },
+          contextWindow: 200_000,
+        }),
+      );
+      yield* settle(harness.query, log, "p-result");
+      assert.isFalse(log.events.some(isTurnTerminal));
+      // The steer's CLI turn starts its usage from zero again.
+      emitSteerCliTurn(
+        harness.query,
+        steerUuid,
+        resultFrame({
+          uuid: "result-steer",
+          user_message_uuids: [steerUuid],
+          queued_turn_count: 0,
+          usage: { input_tokens: 30, cache_read_input_tokens: 161_000, output_tokens: 400 },
+          contextWindow: 200_000,
+        }),
+      );
+      const completed = yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      assert.equal(completed.turnId, turn.turnId);
+      assert.deepEqual(processedUsageOfTurn(log.events, turn.turnId), {
+        inputTokens: 160_012 + 161_030,
+        outputTokens: 900 + 400,
+        totalTokens: 160_912 + 161_430,
+        approximate: false,
+      });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

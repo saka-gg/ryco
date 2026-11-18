@@ -9,6 +9,7 @@ import {
   bracketedTerminalSnippet,
   selectPendingTerminalEventEntries,
   selectTerminalEventEntriesAfterSnapshot,
+  terminalEventNeedsHydration,
   type TerminalReplayGate,
 } from "@ryco/client-runtime/state/terminal";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
@@ -722,9 +723,11 @@ export function TerminalViewport({
         return;
       }
 
-      // A replay carries no history: the view still shows output up to the old
-      // cursor, which the re-hydrating open asks the server to continue from.
-      if (!isTerminalReplayEvent(event)) {
+      // A replay (or a start that left its history out) carries no history: the view
+      // still shows output up to the old cursor, which the re-hydrating open asks the
+      // server to continue from.
+      const needsHydration = terminalEventNeedsHydration(event);
+      if (!needsHydration) {
         appliedCursor =
           event.type === "started" || event.type === "restarted"
             ? event.snapshot.cursor
@@ -760,9 +763,18 @@ export function TerminalViewport({
         }
         hasHandledExitRef.current = false;
         clearSelectionAction();
-        if (isTerminalReplayEvent(event)) {
-          // Output was missed while disconnected and the replay carries no history:
-          // re-hydrate from terminal.open instead of resetting to an empty snapshot.
+        if (needsHydration) {
+          // A start this view's own open already answered with its history.
+          if (
+            !isTerminalReplayEvent(event) &&
+            isTerminalViewCurrent(event.snapshot.cursor, appliedCursor)
+          ) {
+            recordTerminalApply();
+            return;
+          }
+          // Output was missed while disconnected, or the start of a terminal this
+          // connection had not attached left its history out: re-hydrate from
+          // terminal.open instead of resetting to an empty snapshot.
           terminalHydratedRef.current = false;
           void openTerminal({ resync: true });
           recordTerminalApply();

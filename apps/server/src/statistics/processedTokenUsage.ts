@@ -81,6 +81,9 @@ export function collectParsedProcessedTokenUsage(
   const sessions = new Map<string, Counters & { exact: boolean }>();
   const finalRequests = new Map<string, ProcessedUsageEntry>();
   const finalTurns = new Map<string, ProcessedUsageEntry>();
+  // Historical Claude totals, kept only for turns without exact counters (see below).
+  const approximateTurns = new Map<string, ProcessedUsageEntry>();
+  const exactTurns = new Set<string>();
   // Legacy Codex snapshots retained the session total but only the last request's split.
   for (const { row, payload } of parsed) {
     const provider = payload?.statisticsProvider ?? providerForThread(row.threadId);
@@ -128,6 +131,7 @@ export function collectParsedProcessedTokenUsage(
         finalRequests.set(`${row.threadId}\0${processed.requestId}`, entry);
       else finalTurns.set(turnKey, entry);
       turns.add(turnKey);
+      exactTurns.add(turnKey);
       continue;
     }
     if (
@@ -183,7 +187,9 @@ export function collectParsedProcessedTokenUsage(
     } else if (provider === "claudeAgent" && count(payload.totalProcessedTokens) > 0) {
       // Historical Claude result snapshots contain a turn total even when the
       // context gauge replaced its split. Keep that total, mark attribution approximate.
-      finalTurns.set(turnKey, {
+      // A turn with exact counters (a Claude turn publishes one per CLI segment) never takes
+      // it: a gauge-only snapshot of such a turn would replace or add to them.
+      approximateTurns.set(turnKey, {
         row,
         ...modelFields,
         provider,
@@ -197,6 +203,9 @@ export function collectParsedProcessedTokenUsage(
       });
       turns.add(turnKey);
     }
+  }
+  for (const [turnKey, entry] of approximateTurns) {
+    if (!exactTurns.has(turnKey)) finalTurns.set(turnKey, entry);
   }
   entries.push(...finalTurns.values(), ...finalRequests.values());
   return { entries, sessionThreads, turns };
