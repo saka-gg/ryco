@@ -52,7 +52,11 @@ import {
   type ThreadMenuActionItem,
 } from "../threadMenuInventory";
 import type { useRouter } from "@tanstack/react-router";
-import { deleteConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
+import {
+  confirmThreadDeletion,
+  type DeleteThreadOptions,
+  type useThreadActions,
+} from "../../../hooks/useThreadActions";
 import { shouldConfirmSidebarThreadDelete } from "../../Sidebar.logic";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import type { SidebarThreadSummary } from "../../../types";
@@ -146,20 +150,21 @@ export function useThreadMenuActions(params: {
         return;
       }
       const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+      let confirmed: DeleteThreadOptions | null = {};
       if (
         shouldConfirmSidebarThreadDelete({
           confirmThreadDelete: appSettingsConfirmThreadDelete,
           thread,
         })
       ) {
-        const message = deleteConfirmationMessage([thread.title]);
-        const confirmed = await confirmAction(message);
+        confirmed = await confirmThreadDeletion(threadRef, thread.title);
         if (!confirmed) {
           return;
         }
       }
       await deleteThread(threadRef, {
         ...opts,
+        ...confirmed,
         // Always optimistic after the (synchronous) confirmation. The
         // non-optimistic branch awaits the WS round-trip before touching
         // the UI — perceived as a multi-second freeze. The optimistic

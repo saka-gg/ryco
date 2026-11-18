@@ -6,6 +6,7 @@ import {
 } from "@ryco/client-runtime/scoped";
 import { isThreadArchiveBlockedByTurn } from "@ryco/client-runtime/state/lifecycle";
 import { type ScopedThreadRef, ThreadId } from "@ryco/contracts";
+import { isChatProject } from "@ryco/shared/projectKind";
 import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useRef } from "react";
@@ -21,8 +22,11 @@ import { sidebarUndo } from "../sidebarUndo";
 import { undoThreadDeletes } from "../threadDeleteUndo";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
+import { confirmAction } from "../confirmAction";
+import type { ChatFolderTarget } from "../lib/chatFolderDelete";
 import {
   selectEnvironmentState,
+  selectProjectByRef,
   selectSidebarThreadSummaryByRef,
   selectThreadByRef,
   selectThreadExistsByRef,
@@ -36,12 +40,14 @@ import { useSettings } from "./useSettings";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { errorMessage } from "~/lib/errorMessage";
 
-type DeleteThreadOptions = {
+export type DeleteThreadOptions = {
   /** Every thread deleted alongside this one, so the fallback route skips them too. */
   deletedThreadKeys?: ReadonlySet<string>;
   optimistic?: boolean;
   /** False when the caller shows one Undo toast for a whole selection. */
   notify?: boolean;
+  /** Runs once the node accepted the delete. */
+  onDeleted?: () => void;
 };
 
 /** A thread the server accepted for deletion; Undo restores it until the grace period ends. */
@@ -292,6 +298,7 @@ export function useThreadActions() {
         .then((): DeletedThread => {
           const deleted = { threadRef, title: thread.title };
           if (opts.notify !== false) presentThreadDeleteToast([deleted]);
+          opts.onDeleted?.();
           return deleted;
         });
 
@@ -399,14 +406,16 @@ export function useThreadActions() {
       if (!resolved) return;
       const { thread } = resolved;
 
+      let options: DeleteThreadOptions = {};
       if (confirmThreadDelete && localApi) {
-        const confirmed = await localApi.dialogs.confirm(deleteConfirmationMessage([thread.title]));
+        const confirmed = await confirmThreadDeletion(target, thread.title);
         if (!confirmed) {
           return;
         }
+        options = confirmed;
       }
 
-      await deleteThread(target);
+      await deleteThread(target, options);
     },
     [confirmThreadDelete, deleteThread, resolveThreadEntry],
   );
@@ -445,6 +454,43 @@ export function useThreadActions() {
     stopThreadSession,
     interruptThreadTurn,
   };
+}
+
+/**
+ * The folder deleting this conversation leaves unused: its project is a chat
+ * and no other listed conversation, archived included, belongs to it.
+ */
+function chatFolderFreedByDelete(threadRef: ScopedThreadRef): ChatFolderTarget | null {
+  const state = useStore.getState();
+  const environment = selectEnvironmentState(state, threadRef.environmentId);
+  const projectId = environment.threadShellById[threadRef.threadId]?.projectId;
+  if (projectId === undefined) return null;
+  const project = selectProjectByRef(state, scopeProjectRef(threadRef.environmentId, projectId));
+  if (!isChatProject(project) || !project?.cwd) return null;
+  const shared = environment.threadIds.some(
+    (threadId) =>
+      threadId !== threadRef.threadId &&
+      environment.threadShellById[threadId]?.projectId === projectId,
+  );
+  return shared
+    ? null
+    : { environmentId: threadRef.environmentId, projectId, folderPath: project.cwd };
+}
+
+/**
+ * Confirms deleting one conversation; null when declined, else the options for
+ * `deleteThread`. A chat's last conversation asks in Ryco's own dialog, which
+ * also offers to delete the chat's folder (off by default).
+ */
+export async function confirmThreadDeletion(
+  threadRef: ScopedThreadRef,
+  title: string,
+): Promise<DeleteThreadOptions | null> {
+  const message = deleteConfirmationMessage([title]);
+  const folder = chatFolderFreedByDelete(threadRef);
+  if (!folder) return (await confirmAction(message)) ? {} : null;
+  const { confirmChatDelete } = await import("../components/ChatDeleteDialog");
+  return confirmChatDelete({ message, threadId: threadRef.threadId, folder });
 }
 
 /** Shared by every Delete confirmation (single row, menu, multi-select). */
