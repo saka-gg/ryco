@@ -6,9 +6,10 @@ import {
 import type { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 import { Alert, Platform } from "react-native";
 
-import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { ensureEnvironmentApi, readEnvironmentApi } from "../../connection/environmentApi";
 import { holdThreadOutboxForInterrupt } from "../../state/threadOutbox";
 import {
+  selectEnvironmentState,
   selectThreadByRef,
   selectThreadExistsByRef,
   selectWorkingDelegatedDescendants,
@@ -18,7 +19,12 @@ import { requeueNewTaskLaunch, retryNewTaskLaunch } from "../newTask/newTaskLaun
 import { createNewTaskLaunchDeps } from "../newTask/newTaskLaunchRuntime";
 import type { ProposedPlan } from "@ryco/client-runtime/state/threads";
 import { planMarkdownExport, resolvePlanSavePath } from "./proposedPlanActions";
-import { clearThreadGoal, interruptThreadTurn, setThreadGoal } from "./sessionActions";
+import { clearThreadGoal, interruptThreadTurn, setThreadGoal, trashThread } from "./sessionActions";
+import {
+  chatFolderForThreadDelete,
+  scheduleChatFolderDelete,
+  threadDeleteConfirmation,
+} from "./threadDeleteModel";
 
 /**
  * The thread screen's (`ThreadDetailScreen.tsx`) one-shot actions and prompts that hold no
@@ -168,17 +174,52 @@ export function confirmClearThreadGoal(clear: () => void): void {
 
 /**
  * Confirms a Delete: the node trashes the chat and purges it shortly after, with its
- * attachments and terminal history.
+ * attachments and terminal history. The last conversation of a "No project" chat also offers
+ * "Delete with files" (web's "Also delete files"); plain Delete keeps the chat's folder.
+ * `run` wraps the delete in the screen's failure handling; `after` runs once it succeeded.
  */
-export function confirmDeleteThread(title: string, remove: () => void): void {
-  Alert.alert(
-    `Delete "${title}"?`,
-    "The chat, its attachments and its terminal history are removed for good.",
-    [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: remove },
-    ],
+export function confirmDeleteThread(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly title: string;
+  readonly run: (action: () => Promise<void>) => void;
+  readonly after: () => void;
+}): void {
+  const { environmentId, threadId } = input;
+  const folder = chatFolderForThreadDelete(
+    selectEnvironmentState(useStore.getState(), environmentId),
+    environmentId,
+    threadId,
   );
+  const confirmation = threadDeleteConfirmation(input.title, folder);
+  const remove = (deleteFiles: boolean) =>
+    input.run(async () => {
+      await trashThread(ensureEnvironmentApi(environmentId), threadId);
+      if (deleteFiles && folder !== null) {
+        scheduleChatFolderDelete({
+          target: folder,
+          threadId,
+          readEnvironment: () => selectEnvironmentState(useStore.getState(), environmentId),
+          resolveDeleteChatFolder: () =>
+            readEnvironmentApi(environmentId)?.projects.deleteChatFolder,
+          alert: (title, message) => Alert.alert(title, message),
+        });
+      }
+      input.after();
+    });
+  Alert.alert(confirmation.title, confirmation.message, [
+    { text: "Cancel", style: "cancel" },
+    ...(confirmation.deleteWithFiles === null
+      ? []
+      : [
+          {
+            text: confirmation.deleteWithFiles.label,
+            style: "destructive" as const,
+            onPress: () => remove(true),
+          },
+        ]),
+    { text: "Delete", style: "destructive", onPress: () => remove(false) },
+  ]);
 }
 
 /**
