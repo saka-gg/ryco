@@ -1,8 +1,7 @@
 import type { ThreadId } from "@ryco/contracts";
 import { useState } from "react";
 
-import { type ChatFolderTarget, deleteChatFolderAfterPurge } from "../lib/chatFolderDelete";
-import { selectEnvironmentState, useStore } from "../store";
+import { type ChatFolderTarget, scheduleChatFolderDelete } from "../lib/chatFolderDelete";
 import { mountDialog } from "./chat/mountDialog";
 import {
   AlertDialog,
@@ -35,10 +34,6 @@ export function confirmChatDelete(input: {
   readonly folder: ChatFolderTarget;
 }): Promise<ChatDeleteChoice | null> {
   const { folder, threadId } = input;
-  // Undo, here or on another device, lists the conversation again.
-  const isRestored = () =>
-    selectEnvironmentState(useStore.getState(), folder.environmentId).threadShellById[threadId] !==
-    undefined;
   return new Promise((resolve) => {
     mountDialog((close) => (
       <ChatDeleteDialog
@@ -49,7 +44,7 @@ export function confirmChatDelete(input: {
             choice === null
               ? null
               : choice
-                ? { onDeleted: () => deleteChatFolderAfterPurge(folder, isRestored) }
+                ? { onDeleted: () => scheduleChatFolderDelete(folder, threadId) }
                 : {},
           );
           close();

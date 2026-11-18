@@ -2342,6 +2342,29 @@ describe("HostedHubApi account credential management", () => {
     }
   });
 
+  it("says which way a mailed code was refused", async () => {
+    const { api, reply } = await authenticated();
+    for (const [error, status, message] of [
+      ["invalid_request", 400, "That code is not right. Check the newest email and try again."],
+      ["not_found", 404, "That code expired. Send a new one."],
+      ["rate_limited", 429, "Too many attempts. Send a new code."],
+      ["conflict", 409, "That email address is already in use."],
+    ] as const) {
+      reply({ error }, status);
+      await expect(api.confirmEmailVerificationCode("123456")).rejects.toMatchObject({
+        code: error,
+        intent: "confirm-email-verification",
+        message,
+      });
+    }
+    // A bare 403 here is not the step-up gate: the route has none.
+    reply({ error: "forbidden" }, 403);
+    await expect(api.confirmEmailVerificationCode("123456")).rejects.toMatchObject({
+      code: "forbidden",
+      inferred: false,
+    });
+  });
+
   it("reads the verified address together with a pending change", async () => {
     const { api, requests, reply } = await authenticated();
     const pending = {

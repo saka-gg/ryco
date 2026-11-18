@@ -1658,7 +1658,10 @@ describe("AccountSettingsPanel", () => {
       .mockImplementation(async () => committed());
     const confirm = vi
       .spyOn(hostedHubApi, "confirmEmailVerificationCode")
-      .mockRejectedValueOnce(new HostedHubApiError("invalid_request", 400))
+      // The API scopes the Hub's code to this route, which picks the copy.
+      .mockRejectedValueOnce(
+        new HostedHubApiError("invalid_request", 400, undefined, "confirm-email-verification"),
+      )
       .mockResolvedValueOnce();
     const refresh = vi.mocked(hostedHubController.refreshAccountSecurity);
 
@@ -1673,14 +1676,16 @@ describe("AccountSettingsPanel", () => {
     await expect.element(verify).toBeDisabled();
     await code.fill("111111");
     await verify.click();
-    expect(confirm).toHaveBeenLastCalledWith("111111");
+    expect(confirm).toHaveBeenLastCalledWith("111111", expect.any(AbortSignal));
     await expect.element(page.getByText(/That code is not right/)).toBeVisible();
+    // Shown under the code field only, never again in the page-wide alert.
+    await expect.element(page.getByText("That did not work")).not.toBeInTheDocument();
     await expect.element(code).toHaveValue("");
     expect(refresh).not.toHaveBeenCalledWith({ force: true });
 
     await code.fill("654321");
     await verify.click();
-    expect(confirm).toHaveBeenLastCalledWith("654321");
+    expect(confirm).toHaveBeenLastCalledWith("654321", expect.any(AbortSignal));
     await expect.poll(() => refresh.mock.calls).toContainEqual([{ force: true }]);
     await expect
       .element(page.getByRole("textbox", { name: "Verification code" }))

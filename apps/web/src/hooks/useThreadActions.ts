@@ -6,7 +6,7 @@ import {
 } from "@ryco/client-runtime/scoped";
 import { isThreadArchiveBlockedByTurn } from "@ryco/client-runtime/state/lifecycle";
 import { type ScopedThreadRef, ThreadId } from "@ryco/contracts";
-import { isChatProject } from "@ryco/shared/projectKind";
+import { chatFolderFreedByDelete } from "@ryco/client-runtime/state/chats";
 import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useRef } from "react";
@@ -23,10 +23,8 @@ import { undoThreadDeletes } from "../threadDeleteUndo";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
 import { confirmAction } from "../confirmAction";
-import type { ChatFolderTarget } from "../lib/chatFolderDelete";
 import {
   selectEnvironmentState,
-  selectProjectByRef,
   selectSidebarThreadSummaryByRef,
   selectThreadByRef,
   selectThreadExistsByRef,
@@ -457,27 +455,6 @@ export function useThreadActions() {
 }
 
 /**
- * The folder deleting this conversation leaves unused: its project is a chat
- * and no other listed conversation, archived included, belongs to it.
- */
-function chatFolderFreedByDelete(threadRef: ScopedThreadRef): ChatFolderTarget | null {
-  const state = useStore.getState();
-  const environment = selectEnvironmentState(state, threadRef.environmentId);
-  const projectId = environment.threadShellById[threadRef.threadId]?.projectId;
-  if (projectId === undefined) return null;
-  const project = selectProjectByRef(state, scopeProjectRef(threadRef.environmentId, projectId));
-  if (!isChatProject(project) || !project?.cwd) return null;
-  const shared = environment.threadIds.some(
-    (threadId) =>
-      threadId !== threadRef.threadId &&
-      environment.threadShellById[threadId]?.projectId === projectId,
-  );
-  return shared
-    ? null
-    : { environmentId: threadRef.environmentId, projectId, folderPath: project.cwd };
-}
-
-/**
  * Confirms deleting one conversation; null when declined, else the options for
  * `deleteThread`. A chat's last conversation asks in Ryco's own dialog, which
  * also offers to delete the chat's folder (off by default).
@@ -487,7 +464,10 @@ export async function confirmThreadDeletion(
   title: string,
 ): Promise<DeleteThreadOptions | null> {
   const message = deleteConfirmationMessage([title]);
-  const folder = chatFolderFreedByDelete(threadRef);
+  const folder = chatFolderFreedByDelete(
+    selectEnvironmentState(useStore.getState(), threadRef.environmentId),
+    threadRef,
+  );
   if (!folder) return (await confirmAction(message)) ? {} : null;
   const { confirmChatDelete } = await import("../components/ChatDeleteDialog");
   return confirmChatDelete({ message, threadId: threadRef.threadId, folder });

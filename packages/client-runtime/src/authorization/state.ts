@@ -134,6 +134,7 @@ export type HostedAccountActionStatus =
   | "confirming-totp"
   | "revoking-totp"
   | "requesting-email-verification"
+  | "confirming-email-verification"
   | "cancelling-email-verification"
   | "connecting-external-identity"
   | "disconnecting-external-identity"
@@ -196,6 +197,16 @@ export interface HostedAccountState {
    * prompt built on one must stay escapable.
    */
   readonly errorCodeInferred?: boolean;
+  /**
+   * The account action whose refusal {@link errorMessage} is, or `null` for an
+   * error no action raised (a failed read, a refusal before anything started).
+   * Lets a surface that shows an action's refusal next to that action's own
+   * form keep it out of a page-wide error slot.
+   *
+   * Declared optional for the same reason `errorCode` is. The runtime's own
+   * store always carries the slot.
+   */
+  readonly errorAction?: Exclude<HostedAccountActionStatus, "idle"> | null;
 }
 
 const initialAccountState = INITIAL_HOSTED_ACCOUNT_STATE;
@@ -286,27 +297,32 @@ function hostedErrorPatch(error: unknown): Pick<HostedHubState, "errorMessage" |
  * cleared). Every account-store error write goes through this or
  * {@link NO_ACCOUNT_ERROR}.
  */
-function accountErrorPatch(error: unknown): Partial<HostedAccountState> {
+function accountErrorPatch(
+  error: unknown,
+  action: Exclude<HostedAccountActionStatus, "idle"> | null = null,
+): Partial<HostedAccountState> {
   const message = errorMessage(error) || null;
   if (error instanceof HostedHubApiError) {
     return {
       errorMessage: message,
       errorCode: error.code,
       errorCodeInferred: error.inferred,
+      errorAction: action,
     };
   }
-  return { errorMessage: message, errorCode: null, errorCodeInferred: false };
+  return { errorMessage: message, errorCode: null, errorCodeInferred: false, errorAction: action };
 }
 
 /** A bounded, runtime-authored refusal that never came from the Hub. */
 function localErrorPatch(message: string | null): Partial<HostedAccountState> {
-  return { errorMessage: message, errorCode: null, errorCodeInferred: false };
+  return { errorMessage: message, errorCode: null, errorCodeInferred: false, errorAction: null };
 }
 
 const NO_ACCOUNT_ERROR: Partial<HostedAccountState> = {
   errorMessage: null,
   errorCode: null,
   errorCodeInferred: false,
+  errorAction: null,
 };
 
 /** Build the refusal outcome that matches what was just published to the store. */
@@ -2025,6 +2041,24 @@ class HostedHubController {
   }
 
   /**
+   * Confirm the outstanding verification with the six-digit code it mailed: a
+   * requested change swaps the new address in, a never-verified address becomes
+   * verified. The account state is re-read once the Hub accepted the code. A
+   * wrong, expired or rate-limited code is refused with copy that says which.
+   * No step-up: the mailed code is the proof.
+   */
+  async confirmEmailVerificationCode(code: string): Promise<HostedAccountOutcome> {
+    const outcome = await this.#accountAction("confirming-email-verification", async (signal) => {
+      await getHostedHubApi().confirmEmailVerificationCode(code, signal);
+      return () => undefined;
+    });
+    if (outcome.status === "committed") {
+      await this.refreshAccountSecurity({ force: true });
+    }
+    return outcome;
+  }
+
+  /**
    * Withdraw the outstanding verification mail. A requested change is dropped
    * and the verified address stays; a never-verified address stays without a
    * usable link or code. No step-up: it only removes a pending state.
@@ -2164,7 +2198,7 @@ class HostedHubController {
       if (!this.#isCurrentAccountSession(operation.signal, sessionId)) {
         return refused("superseded", error);
       }
-      patchAccountState(accountErrorPatch(error));
+      patchAccountState(accountErrorPatch(error, status));
       return refused("request-failed", error);
     } finally {
       if (this.#accountOperation === operation) {

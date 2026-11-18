@@ -73,6 +73,7 @@ const ACCOUNT_INTENTS = {
   "confirm-totp-enrollment": true,
   "revoke-totp": true,
   "request-email-verification": true,
+  "confirm-email-verification": true,
   "cancel-email-verification": true,
   "revoke-passkey": true,
   "add-passkey": true,
@@ -172,6 +173,7 @@ export interface HostedAccountActions {
     readonly totpCode?: string;
   }) => unknown;
   readonly cancelEmailVerification: () => unknown;
+  readonly confirmEmailVerificationCode: (code: string) => unknown;
   readonly connectExternalIdentity: (
     provider: "github",
     input?: { readonly totpCode?: string },
@@ -327,6 +329,24 @@ function ageLabel(timestamp: number | null, now: number): string | null {
   return `${Math.floor(days / 365)}y ago`;
 }
 
+/**
+ * The address the outstanding verification code would confirm: the new one of
+ * a requested change, else the account's own never-verified address. `null`
+ * when no code can be outstanding.
+ */
+function emailCodeAddress(accountState: HostedAccountState, now: number): string | null {
+  const email = accountState.security?.email ?? null;
+  if (email === null) return null;
+  const pending = pendingEmailVerification(accountState.accountEmail, now);
+  if (email.verified) return pending?.change ? pending.address : null;
+  return pending?.address ?? email.address;
+}
+
+/** The digits of a typed email code; the mail shows six and nothing else counts. */
+function emailCodeDigits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
 /** How long until a pending verification mail stops working, e.g. "in 23h". */
 function untilLabel(timestamp: number, now: number): string {
   const minutes = Math.floor((timestamp - now) / 60_000);
@@ -373,6 +393,7 @@ export type HostedAccountPromptId =
   | "enroll-totp"
   | "revoke-totp"
   | "verify-email"
+  | "confirm-email-code"
   | "resend-email"
   | "cancel-email-change"
   | "connect-github"
@@ -618,6 +639,8 @@ const MAX_EMAIL_LENGTH = 254;
 const MAX_DELETE_IDENTIFIER_LENGTH = 320;
 const MAX_CODE_LENGTH = 16;
 const MIN_CODE_LENGTH = 6;
+/** The Hub mails exactly this many digits. */
+const EMAIL_CODE_LENGTH = 6;
 /** The app's own floor. The Hub owns the real policy and may demand more. */
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -729,6 +752,10 @@ export function deriveHostedAccountManagementView(
   const pendingEmail = pendingEmailVerification(accountState.accountEmail, now);
   const emailChange =
     security?.email?.verified === true && pendingEmail?.change ? pendingEmail : null;
+  const enterEmailCode =
+    emailCodeAddress(accountState, now) === null
+      ? []
+      : [row("confirm-email-code", "Enter the code from the email")];
   const emailFootnote =
     security === null
       ? EMAIL_DISABLED_FOOTNOTE
@@ -842,11 +869,13 @@ export function deriveHostedAccountManagementView(
           ? []
           : emailChange !== null
             ? [
+                ...enterEmailCode,
                 row("resend-email", "Resend verification email"),
                 row("verify-email", "Change to a different address"),
                 row("cancel-email-change", "Cancel email change", { destructive: true }),
               ]
             : [
+                ...enterEmailCode,
                 row(
                   "verify-email",
                   security.email === null
@@ -908,6 +937,8 @@ interface PromptSpec {
   readonly perform: () => Promise<void>;
   /** Overrides the default "close or report" behaviour of a committed action. */
   readonly onCommitted?: () => void;
+  /** Draft fields a refusal resets, e.g. a typed code that turned out wrong. */
+  readonly clearOnRefusal?: Partial<HostedAccountPromptDraft>;
   readonly enrollment: HostedTotpEnrollmentView | null;
 }
 
@@ -1039,12 +1070,15 @@ function derivePrompt(
               else set({ attempted: true, completed: true });
               return;
             }
-            // The one refusal a surface can act on. A wrong code lands here too,
-            // so the field is cleared and the runtime's message stays visible;
-            // the retry is the user pressing submit again — never an automatic
-            // one, because regenerating recovery codes must never re-run itself.
+            // The one refusal a surface can act on. A wrong step-up code lands
+            // here too, so that field is cleared (as is whatever the prompt
+            // names in `clearOnRefusal`) and the runtime's message stays
+            // visible; the retry is the user pressing submit again — never an
+            // automatic one, because regenerating recovery codes must never
+            // re-run itself.
             set({
               attempted: true,
+              ...spec.clearOnRefusal,
               ...(isHostedStepUpMessage(after.errorMessage)
                 ? { stepUpRequired: true, stepUpCode: "" }
                 : {}),
@@ -1307,6 +1341,44 @@ function promptSpec(
         perform: async () => {
           await actions.requestEmailVerification({ email, ...stepUp });
         },
+      };
+    }
+
+    case "confirm-email-code": {
+      const now = input.now ?? Date.now();
+      const address = emailCodeAddress(input.accountState, now);
+      const expired =
+        input.accountState.accountEmail != null &&
+        pendingEmailVerification(input.accountState.accountEmail, now) === null;
+      const digits = emailCodeDigits(draft.text);
+      return {
+        title: "Enter the verification code",
+        message:
+          address === null
+            ? "Nothing is waiting for confirmation any more."
+            : expired
+              ? `The last verification email for ${address} is no longer valid. Send a new code.`
+              : `Enter the six-digit code from the email sent to ${address}.`,
+        notice: null,
+        destructive: false,
+        submitLabel: "Verify",
+        // By the time the prompt reports completion the controller has re-read
+        // the account, so the pending change is gone and the confirmed address
+        // is the account's own.
+        completionMessage: `${address ?? input.accountState.security?.email?.address ?? "The address"} is verified.`,
+        fields: [
+          field("text", "Code from the email", "123456", draft.text, {
+            keyboardType: "number-pad",
+            maxLength: EMAIL_CODE_LENGTH,
+          }),
+        ],
+        incomplete: address === null || digits.length !== EMAIL_CODE_LENGTH,
+        enrollment: null,
+        perform: async () => {
+          await actions.confirmEmailVerificationCode(digits);
+        },
+        // A wrong or expired code is useless to edit; the web clears it too.
+        clearOnRefusal: { text: "" },
       };
     }
 

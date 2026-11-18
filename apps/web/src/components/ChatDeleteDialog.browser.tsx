@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 
 const scheduled = vi.hoisted(() => vi.fn());
-vi.mock("../lib/chatFolderDelete", () => ({ deleteChatFolderAfterPurge: scheduled }));
+vi.mock("../lib/chatFolderDelete", () => ({ scheduleChatFolderDelete: scheduled }));
 
 import { confirmChatDelete } from "./ChatDeleteDialog";
 
@@ -49,7 +49,7 @@ describe("confirmChatDelete", () => {
     // Choosing it schedules nothing yet: deleteThread runs onDeleted after the node accepts.
     expect(scheduled).not.toHaveBeenCalled();
     result?.onDeleted?.();
-    expect(scheduled).toHaveBeenCalledExactlyOnceWith(folder, expect.any(Function));
+    expect(scheduled).toHaveBeenCalledExactlyOnceWith(folder, ThreadId.make("thread-1"));
   });
 
   it("resolves null when dismissed", async () => {

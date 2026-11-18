@@ -93,10 +93,38 @@ export function inlineErrorMessage(
   errorMessage: string | null,
   errorCode: string | null | undefined,
   stepUpPending: boolean,
+  errorAction?: string | null,
 ): string | null {
   if (!errorMessage) return null;
   if (stepUpPending && errorCode === STEP_UP_REQUIRED_CODE) return null;
+  // The email section shows a refused verification code under its own field.
+  if (errorAction === "confirming-email-verification") return null;
   return errorMessage;
+}
+
+/**
+ * The refusals the confirm route words for itself (see the runtime's
+ * `confirm-email-verification` copy). Every other failure keeps this page's
+ * own fallback rather than the runtime's generic per-code text.
+ */
+const EMAIL_CODE_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "invalid_request",
+  "not_found",
+  "rate_limited",
+  "conflict",
+]);
+
+/** What the email section's code field says when the mailed code was not accepted. */
+export function emailCodeRefusalMessage(outcome: HostedAccountRefused): string {
+  if (outcome.reason === "session-expired") return "Your session ended. Sign in again.";
+  if (
+    outcome.errorMessage !== null &&
+    outcome.errorCode !== null &&
+    EMAIL_CODE_REFUSAL_CODES.has(outcome.errorCode)
+  ) {
+    return outcome.errorMessage;
+  }
+  return "The Hub could not complete that. Try again in a moment.";
 }
 
 /** A passkey is revoked once the Hub reports a revocation timestamp for it. */

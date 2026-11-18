@@ -104,6 +104,7 @@ const hostedHubApi = {
   revokeTotp: vi.fn(),
   requestEmailVerification: vi.fn(),
   cancelEmailVerification: vi.fn(),
+  confirmEmailVerificationCode: vi.fn(),
   clearSessionMaterial: vi.fn(),
 } as unknown as HostedHubApi;
 
@@ -2995,6 +2996,79 @@ describe("hosted account management state", () => {
         security,
         accountEmail: { email: verified, pendingAddress: null, pendingExpiresAt: null },
       });
+    });
+
+    it("is confirmed with the mailed code through the account mutex and re-read", async () => {
+      await authenticate();
+      const confirmedAddress = { address: "lovelace@example.test", verified: true } as const;
+      vi.spyOn(hostedHubApi, "getAccountSecurity")
+        .mockResolvedValueOnce(security)
+        .mockResolvedValueOnce({ ...security, email: confirmedAddress });
+      vi.spyOn(hostedHubApi, "getAccountEmail")
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({
+          email: confirmedAddress,
+          pendingAddress: null,
+          pendingExpiresAt: null,
+        });
+      const confirm = vi.spyOn(hostedHubApi, "confirmEmailVerificationCode").mockResolvedValue();
+      await hostedHubController.refreshAccountSecurity();
+
+      await expect(hostedHubController.confirmEmailVerificationCode("123456")).resolves.toEqual({
+        status: "committed",
+      });
+
+      expect(confirm).toHaveBeenCalledWith("123456", expect.any(AbortSignal));
+      expect(hostedAccountStore.getState()).toMatchObject({
+        actionStatus: "idle",
+        errorMessage: null,
+        errorAction: null,
+        security: { email: confirmedAddress },
+        accountEmail: { email: confirmedAddress, pendingAddress: null },
+      });
+    });
+
+    it.each([
+      ["invalid_request", 400, "That code is not right. Check the newest email and try again."],
+      ["not_found", 404, "That code expired. Send a new one."],
+      ["rate_limited", 429, "Too many attempts. Send a new code."],
+      ["conflict", 409, "That email address is already in use."],
+    ] as const)("says why a code was refused (%s)", async (code, status, message) => {
+      await authenticate();
+      vi.spyOn(hostedHubApi, "getAccountSecurity").mockResolvedValue(security);
+      vi.spyOn(hostedHubApi, "getAccountEmail").mockResolvedValue(pending);
+      await hostedHubController.refreshAccountSecurity();
+      const reads = vi.mocked(hostedHubApi.getAccountSecurity).mock.calls.length;
+      vi.spyOn(hostedHubApi, "confirmEmailVerificationCode").mockRejectedValue(
+        // The API scopes the code to this route, as `confirmEmailVerificationCode` does.
+        new HostedHubApiError(code, status, undefined, "confirm-email-verification"),
+      );
+
+      await expect(hostedHubController.confirmEmailVerificationCode("000000")).resolves.toEqual(
+        expect.objectContaining({ status: "refused", reason: "request-failed", errorCode: code }),
+      );
+
+      expect(hostedAccountStore.getState()).toMatchObject({
+        actionStatus: "idle",
+        errorMessage: message,
+        errorCode: code,
+        errorAction: "confirming-email-verification",
+        accountEmail: pending,
+      });
+      expect(vi.mocked(hostedHubApi.getAccountSecurity).mock.calls.length).toBe(reads);
+      expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+    });
+
+    it("ends the session when the Hub rejects it while confirming", async () => {
+      await authenticate();
+      vi.spyOn(hostedHubApi, "confirmEmailVerificationCode").mockRejectedValue(
+        new HostedHubApiError("session_invalid", 401),
+      );
+
+      await expect(hostedHubController.confirmEmailVerificationCode("123456")).resolves.toEqual(
+        expect.objectContaining({ status: "refused", reason: "session-expired" }),
+      );
+      expect(hostedHubStore.getState().accountStatus).not.toBe("authenticated");
     });
   });
 

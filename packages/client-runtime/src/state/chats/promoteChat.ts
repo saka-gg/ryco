@@ -533,7 +533,8 @@ export function readProjectChatErrorReason(cause: unknown): ProjectChatErrorReas
   return isProjectChatErrorReason(reason) ? reason : null;
 }
 
-function causeMessage(cause: unknown): string | null {
+/** A thrown value's own message, trimmed; null when it has none. */
+export function causeMessage(cause: unknown): string | null {
   if (cause instanceof Error && cause.message.trim().length > 0) return cause.message.trim();
   if (typeof cause === "object" && cause !== null && "message" in cause) {
     const message = (cause as { readonly message?: unknown }).message;

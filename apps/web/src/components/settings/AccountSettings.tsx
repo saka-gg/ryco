@@ -81,6 +81,7 @@ import {
   activePasskeys,
   emailIssue,
   EMAIL_MAX_LENGTH,
+  emailCodeRefusalMessage,
   inlineErrorMessage,
   isPasskeyRevoked,
   isPasskeySessionRequired,
@@ -110,7 +111,6 @@ import {
 } from "../hostedHub/ExternalIdentityWeb.logic";
 import { AccountE2eeDevices } from "./AccountE2eeDevices";
 import { ProfileSection, SessionsSection } from "./AccountProfileSections";
-import { confirmAccountEmailCode } from "../../hostedHub/accountProfile";
 
 const timestampFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -377,6 +377,7 @@ export function AccountSettingsPanel({ group = "all" }: { readonly group?: Accou
   const actionStatus = useHostedAccountStore((state) => state.actionStatus);
   const errorMessage = useHostedAccountStore((state) => state.errorMessage);
   const errorCode = useHostedAccountStore((state) => state.errorCode ?? null);
+  const errorAction = useHostedAccountStore((state) => state.errorAction ?? null);
   const recoveryCodes = useHostedHubStore((state) => state.recoveryCodes);
   const totpEnrollment = useHostedHubStore((state) => state.totpEnrollment ?? null);
   const [externalIdentityPending, setExternalIdentityPending] = useState(false);
@@ -458,7 +459,7 @@ export function AccountSettingsPanel({ group = "all" }: { readonly group?: Accou
   // believing.
   const inlineError = action.stepUpUnresolved
     ? STEP_UP_UNRESOLVED_MESSAGE
-    : inlineErrorMessage(errorMessage, errorCode, action.stepUp !== null);
+    : inlineErrorMessage(errorMessage, errorCode, action.stepUp !== null, errorAction);
   const passkeySessionGate = !action.stepUpUnresolved && isPasskeySessionRequired(errorCode);
   const posture = accountPosture(passkeys, passkeysStatus);
 
@@ -1518,17 +1519,16 @@ function EmailSection({
 
   const confirm = async (event: FormEvent) => {
     event.preventDefault();
-    if (confirming || code.length !== EMAIL_CODE_LENGTH) return;
+    if (busy || confirming || code.length !== EMAIL_CODE_LENGTH) return;
     setConfirming(true);
     setCodeError(null);
-    const result = await confirmAccountEmailCode(code);
+    const outcome = await hostedHubController.confirmEmailVerificationCode(code);
     setConfirming(false);
-    if (result.ok) {
+    setCode("");
+    if (outcome.status === "committed") {
       setSentTo(null);
-      setCode("");
     } else {
-      setCodeError(result.message);
-      setCode("");
+      setCodeError(emailCodeRefusalMessage(outcome));
     }
   };
 
@@ -1659,7 +1659,7 @@ function EmailSection({
                 type="submit"
                 size="sm"
                 className="shrink-0"
-                disabled={confirming || code.length !== EMAIL_CODE_LENGTH}
+                disabled={busy || confirming || code.length !== EMAIL_CODE_LENGTH}
               >
                 <ActionLabel busy={confirming}>Verify</ActionLabel>
               </Button>
