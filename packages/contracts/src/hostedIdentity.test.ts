@@ -17,6 +17,7 @@ import {
   ExternalIdentitySignupFinishRequest,
   GITHUB_EXTERNAL_IDENTITY_CONNECT_PATH,
   GITHUB_EXTERNAL_IDENTITY_DISCONNECT_PATH,
+  HostedAccountEmailResponse,
   HostedAccountSecurityResponse,
   BrowserExternalIdentityConnectRequest,
   BrowserExternalIdentityConnectResponse,
@@ -361,6 +362,28 @@ describe("external identity contracts", () => {
           expiresAt,
         }),
       ).toThrow();
+    }
+  });
+
+  it("decodes the account-email read and keeps the pending pair consistent", () => {
+    const decode = Schema.decodeUnknownSync(HostedAccountEmailResponse);
+    const pending = {
+      email: { address: "ada@example.test", verified: true },
+      pendingAddress: "lovelace@example.test",
+      pendingExpiresAt: 1_800_000_000_000,
+    };
+    expect(decode(pending)).toEqual(pending);
+    expect(decode({ email: null, pendingAddress: null, pendingExpiresAt: null })).toBeTruthy();
+    // The Hub may extend this read; an unknown member is dropped, not refused.
+    expect(decode({ ...pending, futureMember: 1 })).toEqual(pending);
+    for (const invalid of [
+      { ...pending, pendingExpiresAt: null },
+      { ...pending, pendingAddress: null },
+      { ...pending, pendingAddress: "Lovelace@example.test" },
+      { ...pending, pendingExpiresAt: -1 },
+      { ...pending, email: { address: "ada@example.test", verified: true, extra: 1 } },
+    ]) {
+      expect(() => decode(invalid)).toThrow();
     }
   });
 

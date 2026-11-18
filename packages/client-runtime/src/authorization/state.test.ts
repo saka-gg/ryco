@@ -86,6 +86,7 @@ const hostedHubApi = {
   listPasskeys: vi.fn(),
   listE2eeDevices: vi.fn(),
   getAccountSecurity: vi.fn(),
+  getAccountEmail: vi.fn(),
   getExternalIdentityConfiguration: vi.fn(),
   connectExternalIdentity: vi.fn(),
   cancelExternalIdentityConnection: vi.fn(),
@@ -102,6 +103,7 @@ const hostedHubApi = {
   confirmTotpEnrollment: vi.fn(),
   revokeTotp: vi.fn(),
   requestEmailVerification: vi.fn(),
+  cancelEmailVerification: vi.fn(),
   clearSessionMaterial: vi.fn(),
 } as unknown as HostedHubApi;
 
@@ -220,6 +222,7 @@ function node(
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(hostedHubApi.getAccountSecurity).mockResolvedValue(emptySecurity);
+  vi.mocked(hostedHubApi.getAccountEmail).mockResolvedValue(null);
   hasHostedRelayPendingRequests.mockReturnValue(false);
   configureHostedRuntime(fakeRuntime(), hostedHubApi);
 });
@@ -2911,6 +2914,87 @@ describe("hosted account management state", () => {
     expect(hostedAccountStore.getState()).toMatchObject({
       security: configured,
       securityStatus: "stale",
+    });
+  });
+
+  describe("a pending email change", () => {
+    const verified = { address: "ada@example.test", verified: true } as const;
+    const security = { ...emptySecurity, email: verified };
+    const pending = {
+      email: verified,
+      pendingAddress: "lovelace@example.test",
+      pendingExpiresAt: 1_800_000_000_000,
+    };
+
+    it("is read together with the security posture", async () => {
+      await authenticate();
+      vi.spyOn(hostedHubApi, "getAccountSecurity").mockResolvedValue(security);
+      const getAccountEmail = vi.spyOn(hostedHubApi, "getAccountEmail").mockResolvedValue(pending);
+
+      await hostedHubController.refreshAccountSecurity();
+
+      expect(getAccountEmail).toHaveBeenCalledOnce();
+      expect(hostedAccountStore.getState()).toMatchObject({
+        security,
+        securityStatus: "ready",
+        accountEmail: pending,
+      });
+    });
+
+    it("reads as absent when that read fails, without staling the posture", async () => {
+      await authenticate();
+      vi.spyOn(hostedHubApi, "getAccountSecurity").mockResolvedValue(security);
+      vi.spyOn(hostedHubApi, "getAccountEmail").mockResolvedValueOnce(pending);
+      await hostedHubController.refreshAccountSecurity();
+
+      // A pending state kept from an earlier read could show an address as
+      // still pending after it was confirmed, so a failed read drops it.
+      vi.spyOn(hostedHubApi, "getAccountEmail").mockRejectedValueOnce(
+        new HostedHubApiError("unavailable", 503),
+      );
+      await hostedHubController.refreshAccountSecurity({ force: true });
+
+      expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+      expect(hostedAccountStore.getState()).toMatchObject({
+        security,
+        securityStatus: "ready",
+        accountEmail: null,
+      });
+    });
+
+    it("ends the session when that read is unauthenticated", async () => {
+      await authenticate();
+      vi.spyOn(hostedHubApi, "getAccountEmail").mockRejectedValue(
+        new HostedHubApiError("session_invalid", 401),
+      );
+
+      await hostedHubController.refreshAccountSecurity();
+
+      expect(hostedHubStore.getState().accountStatus).not.toBe("authenticated");
+    });
+
+    it("is cancelled through the account mutex and re-read", async () => {
+      await authenticate();
+      vi.spyOn(hostedHubApi, "getAccountSecurity").mockResolvedValue(security);
+      const getAccountEmail = vi
+        .spyOn(hostedHubApi, "getAccountEmail")
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({ ...pending, pendingAddress: null, pendingExpiresAt: null });
+      const cancel = vi.spyOn(hostedHubApi, "cancelEmailVerification").mockResolvedValue();
+      await hostedHubController.refreshAccountSecurity();
+
+      await expect(hostedHubController.cancelEmailVerification()).resolves.toEqual({
+        status: "committed",
+      });
+
+      expect(cancel).toHaveBeenCalledWith(expect.any(AbortSignal));
+      expect(getAccountEmail).toHaveBeenCalledTimes(2);
+      expect(hostedAccountStore.getState()).toMatchObject({
+        actionStatus: "idle",
+        errorMessage: null,
+        security,
+        accountEmail: { email: verified, pendingAddress: null, pendingExpiresAt: null },
+      });
     });
   });
 

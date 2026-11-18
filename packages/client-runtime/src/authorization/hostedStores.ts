@@ -86,6 +86,7 @@ export const INITIAL_HOSTED_ACCOUNT_STATE: HostedAccountState = {
   e2eeDevicesStatus: "idle",
   security: null,
   securityStatus: "idle",
+  accountEmail: null,
   actionStatus: "idle",
   errorMessage: null,
   errorCode: null,

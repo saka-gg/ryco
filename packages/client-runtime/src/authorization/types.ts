@@ -196,6 +196,24 @@ export interface HostedAccountSecurity {
 }
 
 /**
+ * The account's address together with the one an outstanding verification mail
+ * would confirm, read from `GET /api/account/email`.
+ *
+ * `email` is the same value as {@link HostedAccountSecurity.email}: while a
+ * change is pending it is still the old, verified address. `pendingAddress` is
+ * the address the outstanding link and code would confirm — a requested change
+ * (different from `email.address`) or a never-verified address itself (equal to
+ * it) — and `pendingExpiresAt` the epoch-ms instant that mail stops working.
+ * Both are `null` when nothing is pending. Addresses are the user's own PII:
+ * never logged, never placed in an error.
+ */
+export interface HostedAccountEmail {
+  readonly email: HostedAccountSecurity["email"];
+  readonly pendingAddress: string | null;
+  readonly pendingExpiresAt: number | null;
+}
+
+/**
  * The signed-in account's profile, read from `GET /api/account/profile`.
  *
  * `usernameNeedsChange` is `true` for an account that still carries the

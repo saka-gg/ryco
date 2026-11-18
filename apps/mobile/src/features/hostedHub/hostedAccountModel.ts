@@ -1,6 +1,7 @@
 import {
   HostedHubApiError,
   PASSKEY_SESSION_REQUIRED_CODE,
+  pendingEmailVerification,
   STEP_UP_REQUIRED_CODE,
   type HostedAccountIntent,
   type HostedAccountState,
@@ -72,6 +73,7 @@ const ACCOUNT_INTENTS = {
   "confirm-totp-enrollment": true,
   "revoke-totp": true,
   "request-email-verification": true,
+  "cancel-email-verification": true,
   "revoke-passkey": true,
   "add-passkey": true,
   "regenerate-recovery-codes": true,
@@ -169,6 +171,7 @@ export interface HostedAccountActions {
     readonly email: string;
     readonly totpCode?: string;
   }) => unknown;
+  readonly cancelEmailVerification: () => unknown;
   readonly connectExternalIdentity: (
     provider: "github",
     input?: { readonly totpCode?: string },
@@ -324,6 +327,14 @@ function ageLabel(timestamp: number | null, now: number): string | null {
   return `${Math.floor(days / 365)}y ago`;
 }
 
+/** How long until a pending verification mail stops working, e.g. "in 23h". */
+function untilLabel(timestamp: number, now: number): string {
+  const minutes = Math.floor((timestamp - now) / 60_000);
+  if (minutes < 1) return "within a minute";
+  if (minutes < 60) return `in ${minutes}m`;
+  return `in ${Math.floor(minutes / 60)}h`;
+}
+
 function passkeyLabel(passkey: HostedHubPasskey): string {
   const label = passkey.label === null ? "" : passkey.label.trim();
   return label.length > 0 ? label : "Unnamed passkey";
@@ -362,6 +373,8 @@ export type HostedAccountPromptId =
   | "enroll-totp"
   | "revoke-totp"
   | "verify-email"
+  | "resend-email"
+  | "cancel-email-change"
   | "connect-github"
   | "disconnect-github"
   | "delete-account";
@@ -711,10 +724,15 @@ export function deriveHostedAccountManagementView(
         void input.actions.refreshAccountSecurity({ force: true });
       })
     : null;
+  // A requested change of a verified address: the verified one stays in use
+  // until the new one is confirmed. Only a Hub that reports it can have one.
+  const pendingEmail = pendingEmailVerification(accountState.accountEmail, now);
+  const emailChange =
+    security?.email?.verified === true && pendingEmail?.change ? pendingEmail : null;
   const emailFootnote =
     security === null
       ? EMAIL_DISABLED_FOOTNOTE
-      : `${security.email === null ? "" : `${security.email.verified ? "Verified" : "Verification pending"} for ${security.email.address}. `}${security.emailDeliveryConfigured ? EMAIL_CONFIGURED_FOOTNOTE : EMAIL_DISABLED_FOOTNOTE}`;
+      : `${security.email === null ? "" : `${security.email.verified ? "Verified" : "Verification pending"} for ${security.email.address}. `}${emailChange === null ? "" : `Change to ${emailChange.address} pending, awaiting confirmation (the link expires ${untilLabel(emailChange.expiresAt, now)}). ${security.email?.address ?? "The current address"} stays in use until then. `}${security.emailDeliveryConfigured ? EMAIL_CONFIGURED_FOOTNOTE : EMAIL_DISABLED_FOOTNOTE}`;
   const githubPolicy =
     accountState.externalIdentityConfiguration?.providers.find(
       (provider) => provider.provider === "github",
@@ -813,23 +831,31 @@ export function deriveHostedAccountManagementView(
           ? "Checking…"
           : security.email === null
             ? "Not set"
-            : security.email.verified
-              ? "Verified"
-              : "Pending",
+            : emailChange !== null
+              ? "Change pending"
+              : security.email.verified
+                ? "Verified"
+                : "Pending",
       footnote: emailFootnote,
       rows:
         security === null
           ? []
-          : [
-              row(
-                "verify-email",
-                security.email === null
-                  ? "Send a verification email"
-                  : security.email.verified
-                    ? "Change email address"
-                    : "Resend or change verification email",
-              ),
-            ],
+          : emailChange !== null
+            ? [
+                row("resend-email", "Resend verification email"),
+                row("verify-email", "Change to a different address"),
+                row("cancel-email-change", "Cancel email change", { destructive: true }),
+              ]
+            : [
+                row(
+                  "verify-email",
+                  security.email === null
+                    ? "Send a verification email"
+                    : security.email.verified
+                      ? "Change email address"
+                      : "Resend or change verification email",
+                ),
+              ],
     },
   ];
 
@@ -1255,7 +1281,13 @@ function promptSpec(
       const deliveryConfigured = input.accountState.security?.emailDeliveryConfigured === true;
       return {
         title: "Send a verification email",
-        message: "Your Hub records the address and generates a verification link for it.",
+        // A Hub that reports pending verifications keeps a verified address in
+        // use until the new one is confirmed; an older one replaced it at once.
+        message:
+          input.accountState.accountEmail != null &&
+          input.accountState.security?.email?.verified === true
+            ? "Your Hub mails a verification link to the new address. Your current address stays in use until you open it."
+            : "Your Hub records the address and generates a verification link for it.",
         notice: deliveryConfigured
           ? null
           : "This Hub has no mail transport configured, so the message is discarded rather than delivered. Nothing will arrive in your inbox until an operator wires one up.",
@@ -1274,6 +1306,52 @@ function promptSpec(
         enrollment: null,
         perform: async () => {
           await actions.requestEmailVerification({ email, ...stepUp });
+        },
+      };
+    }
+
+    case "resend-email": {
+      const pending = pendingEmailVerification(
+        input.accountState.accountEmail,
+        input.now ?? Date.now(),
+      );
+      const deliveryConfigured = input.accountState.security?.emailDeliveryConfigured === true;
+      return {
+        title: "Resend the verification email?",
+        message:
+          pending === null
+            ? "Nothing is waiting for confirmation any more."
+            : `Your Hub mails a new link to ${pending.address}. The earlier one stops working.`,
+        notice: null,
+        destructive: false,
+        submitLabel: "Resend",
+        completionMessage: deliveryConfigured
+          ? "Your Hub accepted the request. Check your inbox and spam folder; delivery may take a moment."
+          : "Your Hub accepted the request. It cannot deliver mail yet, so no message will arrive.",
+        fields: withStepUp([]),
+        incomplete: pending === null,
+        enrollment: null,
+        perform: async () => {
+          if (pending === null) return;
+          await actions.requestEmailVerification({ email: pending.address, ...stepUp });
+        },
+      };
+    }
+
+    case "cancel-email-change": {
+      const current = input.accountState.security?.email?.address ?? "your current address";
+      return {
+        title: "Cancel the email change?",
+        message: `The link already sent stops working, and ${current} stays your address.`,
+        notice: null,
+        destructive: true,
+        submitLabel: "Cancel change",
+        completionMessage: null,
+        fields: [],
+        incomplete: false,
+        enrollment: null,
+        perform: async () => {
+          await actions.cancelEmailVerification();
         },
       };
     }
