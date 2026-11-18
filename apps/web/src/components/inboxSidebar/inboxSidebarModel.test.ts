@@ -192,15 +192,126 @@ describe("buildSavedInboxSidebarEnvironment", () => {
   });
 
   it("keeps a transport error on the reconnecting path", () => {
-    expect(
+    const environment = buildSavedInboxSidebarEnvironment({
+      environmentId: ENV_A,
+      label: "Studio Mac",
+      runtime: runtime({ connectionState: "error" }),
+      hydratedFromCache: false,
+      capabilities: SUPPORTED,
+    });
+    expect(environment).toMatchObject({
+      connectionState: "reconnecting",
+      staleDetail: "Offline · last known",
+    });
+    // Outside a reconnect grace its threads are last known.
+    const sections = build({ environments: [environment], threads: [thread("dropped")] });
+    expect(sections[0]?.rows[0]).toMatchObject({
+      state: "offline",
+      statusLabel: "Offline · last known",
+    });
+  });
+
+  describe("within the reconnect grace", () => {
+    const NOW = Date.parse("2026-11-17T10:00:00.000Z");
+    const UNTIL = NOW + 10_000;
+    const saved = (
+      overrides: Partial<SavedEnvironmentRuntimeState>,
+      input: { readonly hydratedFromCache?: boolean } = {},
+    ) =>
       buildSavedInboxSidebarEnvironment({
         environmentId: ENV_A,
         label: "Studio Mac",
-        runtime: runtime({ connectionState: "error" }),
-        hydratedFromCache: false,
+        runtime: runtime(overrides),
+        hydratedFromCache: input.hydratedFromCache ?? false,
         capabilities: SUPPORTED,
-      }),
-    ).toMatchObject({ connectionState: "reconnecting", staleDetail: "Offline · last known" });
+        reconnectingUntilMs: UNTIL,
+      });
+    const rowOf = (environment: InboxSidebarEnvironment, nowMs = NOW) =>
+      buildInboxSidebarSections({
+        projects: [project(ENV_A)],
+        worktrees: [],
+        threads: [thread("dropped")],
+        environments: [environment],
+        filters: ALL_FILTERS,
+        nowMs,
+      })
+        .flatMap((section) => section.rows)
+        .find((row) => row.title === "dropped");
+
+    it("shows a retrying machine's threads reconnecting, then offline once it ends", () => {
+      const environment = saved({ connectionState: "error" });
+      expect(environment).toMatchObject({
+        reconnectingUntilMs: UNTIL,
+        stale: true,
+        shellCurrent: false,
+        mutationReady: false,
+      });
+      expect(rowOf(environment)).toMatchObject({
+        state: "reconnecting",
+        statusLabel: "Reconnecting",
+        placementState: "offline",
+        mutationEnabled: false,
+      });
+      expect(rowOf(environment, UNTIL)).toMatchObject({
+        state: "offline",
+        statusLabel: "Offline · last known",
+      });
+    });
+
+    it("shows a connect attempt as connecting", () => {
+      expect(rowOf(saved({ connectionState: "connecting" }))).toMatchObject({
+        state: "connecting",
+        statusLabel: "Connecting",
+        placementState: "offline",
+      });
+    });
+
+    it("changes the label only: a working thread stays in Recent, as between retries", () => {
+      for (const connectionState of ["connecting", "error", "disconnected"] as const) {
+        const sections = buildInboxSidebarSections({
+          projects: [project(ENV_A)],
+          worktrees: [],
+          threads: [thread("busy", { backgroundLiveness: "working" })],
+          environments: [saved({ connectionState })],
+          filters: ALL_FILTERS,
+          nowMs: NOW,
+        });
+        expect(sections.map((section) => section.key)).toEqual(["recent"]);
+        expect(sections[0]?.rows[0]?.placementState).toBe("offline");
+      }
+    });
+
+    it("keeps a disconnected, cached or unpaired machine offline", () => {
+      expect(rowOf(saved({ connectionState: "disconnected" }))?.state).toBe("offline");
+      const cached = saved({ connectionState: "error" }, { hydratedFromCache: true });
+      expect(cached.reconnectingUntilMs).toBeUndefined();
+      expect(rowOf(cached)?.state).toBe("offline");
+      expect(rowOf(saved({ connectionState: "error", authState: "requires-auth" }))).toMatchObject({
+        state: "offline",
+        statusLabel: "Needs re-pair",
+      });
+    });
+
+    it("evaluates the model again when the grace ends", () => {
+      const model = buildInboxSidebarModel({
+        projects: [project(ENV_A)],
+        worktrees: [],
+        threads: [thread("dropped")],
+        environments: [saved({ connectionState: "error" })],
+        filters: ALL_FILTERS,
+        nowMs: NOW,
+      });
+      expect(model.nextSettlementEvaluationAtMs).toBe(UNTIL);
+      const after = buildInboxSidebarModel({
+        projects: [project(ENV_A)],
+        worktrees: [],
+        threads: [thread("dropped")],
+        environments: [saved({ connectionState: "error" })],
+        filters: ALL_FILTERS,
+        nowMs: UNTIL,
+      });
+      expect(after.nextSettlementEvaluationAtMs).toBeNull();
+    });
   });
 
   it("is mutation-ready only while connected with a known role", () => {
