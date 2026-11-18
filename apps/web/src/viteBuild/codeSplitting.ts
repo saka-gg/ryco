@@ -51,6 +51,7 @@ const SEP = String.raw`[\\/]`;
 const NODE_MODULES = String.raw`[\\/]node_modules[\\/](?:\.bun[\\/][^\\/]+[\\/]node_modules[\\/])?`;
 const LUCIDE_MODULE = new RegExp(`${NODE_MODULES}lucide-react${SEP}`);
 const VENDOR_MODULE = new RegExp(`${NODE_MODULES}@base-ui${SEP}`);
+const SWITCH_MODULE = new RegExp(`${NODE_MODULES}@base-ui${SEP}react${SEP}switch${SEP}`);
 const LEXICAL_MODULE = new RegExp(`${NODE_MODULES}(?:lexical|@lexical${SEP}[^\\\\/]+)${SEP}`);
 const MARKDOWN_PACKAGES = [
   "react-markdown",
@@ -102,6 +103,17 @@ export function isMergeableIconModule(moduleId: string): boolean {
 
 export function isMergeableVendorModule(moduleId: string): boolean {
   return VENDOR_MODULE.test(moduleId);
+}
+
+/**
+ * Base UI's Switch. Settings surfaces and lazy pickers share it, but neither
+ * the shell nor the chat route imports it. As a `vendor` subgroup it is under
+ * the merge threshold and folds into the shell's Checkbox subgroup, which
+ * would put it on the shell's first load (about 0.6 KiB compressed); its own
+ * group keeps it with the surfaces that render a switch.
+ */
+export function isSwitchVendorModule(moduleId: string): boolean {
+  return SWITCH_MODULE.test(moduleId);
 }
 
 export function isLexicalModule(moduleId: string): boolean {
@@ -426,6 +438,7 @@ export const MERGED_CHUNK_GROUP_NAMES = [
   "route-vendor",
   "route-shared",
   "icons",
+  "switch-vendor",
   "vendor",
   "lexical",
   "markdown-stack",
@@ -533,6 +546,8 @@ export function createWebCodeSplittingOptions(input: {
       },
       ...routeGroups,
       icons,
+      // Same priority as `vendor` and declared first, so it takes its modules.
+      { name: "switch-vendor", test: isSwitchVendorModule, priority: 4, ...shared },
       { name: "vendor", test: isMergeableVendorModule, priority: 4, ...shared },
       { name: "lexical", test: isLexicalModule, priority: 3, ...shared },
       { name: "markdown-stack", test: isMarkdownModule, priority: 2, ...shared },

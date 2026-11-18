@@ -60,7 +60,7 @@ import {
   appendReturnedComposerPrompt,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
-import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
+import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessionRegistry";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
 import {
   isSavedEnvironmentSwitchedOff,
@@ -152,7 +152,7 @@ import {
   readWorktreePullRequestLinks,
   workspaceDiscoversPullRequests,
 } from "@ryco/shared/worktreePullRequests";
-import { resolveThreadPullRequests } from "./chat/ChatOverviewPanel.logic";
+import { resolveThreadPullRequests } from "./chat/threadPullRequests.logic";
 import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequestsPopover";
 import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";

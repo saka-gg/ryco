@@ -2,17 +2,25 @@ import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { ChevronDownIcon, CircleDotIcon, GitBranchIcon, GitPullRequestIcon } from "lucide-react";
 import { useCallback, useState } from "react";
 
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 import { cn } from "~/lib/utils";
 import { AtlassianJiraIcon } from "../Icons";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import {
-  preloadSourceItemTabs,
-  SourcePickerPanel,
-  useSourcePickerState,
-  type NewThreadSource,
-} from "./SourcePickerPanel";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
+import type { NewThreadSource } from "./SourcePickerPanel";
+import { useSourcePickerState } from "./sourcePickerState";
 
 export type { NewThreadSource } from "./SourcePickerPanel";
+
+/*
+ * The panel (shared with the Tasks page's link picker) loads with the picker's
+ * first open, not with every draft: most new threads keep the default branch.
+ */
+const loadSourcePickerPanel = () => import("./SourcePickerPanel");
+const LazySourcePickerPanel = preloadableLazy(() =>
+  loadSourcePickerPanel().then((module) => module.SourcePickerPanel),
+);
+const preloadSourcePickerPanel = () => void LazySourcePickerPanel.preload();
 
 export interface NewThreadSourcePickerProps {
   readonly label: string;
@@ -69,13 +77,28 @@ export function NewThreadSourcePicker({
   const handleOpenChange = useCallback((nextOpen: boolean) => {
     // Opening the picker is the intent: by the time a segment is picked, its
     // list has usually loaded.
-    if (nextOpen) preloadSourceItemTabs();
+    if (nextOpen) {
+      void loadSourcePickerPanel().then(
+        (module) => module.preloadSourceItemTabs(),
+        () => undefined,
+      );
+    }
     setOpen(nextOpen);
   }, []);
+  // The popover opens once the panel's chunk is in (at once after the first).
+  const panelReady = useLazyComponentReady(LazySourcePickerPanel, open, {
+    // Closed again, so the next click (or Retry) loads it afresh.
+    onLoadError: (error) => {
+      setOpen(false);
+      notifySurfaceLoadFailure("source picker", error, () => setOpen(true));
+    },
+  });
 
   return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
+    <Popover open={open && panelReady} onOpenChange={handleOpenChange}>
       <PopoverTrigger
+        onPointerEnter={preloadSourcePickerPanel}
+        onFocus={preloadSourcePickerPanel}
         aria-label={`Change what this worktree branches from (currently ${label})`}
         className="inline-flex cursor-pointer items-center gap-1 rounded-md px-1 py-0.5 font-medium text-foreground/85 transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
         render={<button type="button" />}
@@ -90,7 +113,7 @@ export function NewThreadSourcePicker({
         className="w-[30rem] overflow-hidden p-0"
         viewportClassName="p-0 [--viewport-inline-padding:0px]"
       >
-        <SourcePickerPanel
+        <LazySourcePickerPanel
           state={pickerState}
           repository={{ environmentId, projectId, cwd }}
           onSelect={choose}

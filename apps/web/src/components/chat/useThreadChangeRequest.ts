@@ -4,7 +4,7 @@ import { useMemo } from "react";
 
 import { useGitStatus } from "~/lib/gitStatusState";
 import { useOverviewChangeRequestList } from "~/rpc/useOverview";
-import { findChangeRequestForBranch, resolveThreadPullRequests } from "./ChatOverviewPanel.logic";
+import { findChangeRequestForBranch, resolveThreadPullRequests } from "./threadPullRequests.logic";
 
 /**
  * The change requests a thread works on. The workspace's links (a shipped

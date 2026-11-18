@@ -22,6 +22,7 @@ import {
   isMergeableVendorModule,
   isReexportBarrel,
   isShikiModule,
+  isSwitchVendorModule,
   webChunkFileName,
   type ModuleGraphContext,
 } from "./codeSplitting";
@@ -127,17 +128,25 @@ describe("web code splitting", () => {
     expect(isMergeableVendorModule("/repo/apps/web/src/components/Sidebar.tsx")).toBe(false);
     expect(isMergeableVendorModule("/repo/node_modules/mermaid/dist/chunks/x.mjs")).toBe(false);
     expect(isMergeableIconModule("/repo/apps/web/src/lucide-react/local.ts")).toBe(false);
+    expect(isSwitchVendorModule(bun("@base-ui/react", "switch/root/SwitchRoot.mjs"))).toBe(true);
+    expect(isSwitchVendorModule(bun("@base-ui/react", "checkbox/root/CheckboxRoot.mjs"))).toBe(
+      false,
+    );
 
     const { groups } = createWebCodeSplittingOptions({ bootEntry: "/repo/apps/web/src/main.tsx" });
     expect(groups.map((group) => (typeof group.name === "string" ? group.name : "boot*"))).toEqual([
       "boot*",
       "boot*",
       "icons",
+      "switch-vendor",
       "vendor",
       "lexical",
       "markdown-stack",
       "shiki-engine",
     ]);
+    // Declared ahead of `vendor` at no lower priority, so it takes the Switch
+    // modules that `vendor` would otherwise fold into the shell's Checkbox chunk.
+    expect(groups[3]!.priority).toBeGreaterThanOrEqual(groups[4]!.priority);
     // The boot graph stays one chunk: a size split cut the effect runtime into
     // chunks that import each other, and boot then read uninitialised bindings.
     expect(groups[0]).not.toHaveProperty("maxSize");
@@ -472,6 +481,9 @@ describe("web code splitting", () => {
       "assets/icons-[hash].js",
     );
     expect(webChunkFileName({ name: "vendor" })).toBe("assets/vendor-[hash].js");
+    expect(webChunkFileName({ name: "switch-vendor~SettingsPanels~SourcePickerPanel" })).toBe(
+      "assets/switch-vendor-[hash].js",
+    );
     expect(webChunkFileName({ name: "boot" })).toBe("assets/boot-[hash].js");
     expect(webChunkFileName({ name: "markdown-stack~ChatView~MarkdownView" })).toBe(
       "assets/markdown-stack-[hash].js",

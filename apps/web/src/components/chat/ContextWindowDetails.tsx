@@ -1,0 +1,418 @@
+import { AccountEmail, CliProxyAccountName } from "../usage/AccountEmail";
+import { useCliProxyHubs } from "../usage/cliProxyHubsQuery";
+import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
+import { useRelativeLabelTick } from "../../hooks/useRelativeTimeTick";
+import {
+  cliProxyCurrentAccount,
+  cliProxyWindowLabel,
+  findCliProxyRouteForInstance,
+  formatCliProxyPlan,
+  poolCliProxyWindows,
+  rateLimitWindowList,
+  staleRateLimitsReason,
+} from "@ryco/client-runtime/usage";
+import type {
+  ClaudeCacheObservation,
+  CliProxyHubSnapshot,
+  EnvironmentId,
+  ServerProviderRateLimits,
+} from "@ryco/contracts";
+import { useNavigate } from "@tanstack/react-router";
+import { type ReactNode, useMemo } from "react";
+
+import { formatTokenCount } from "@ryco/shared/tokenCount";
+import { formatRelativeTimeLabel } from "~/timestampFormat";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
+import { parseStatisticsSearch } from "../statistics/statisticsSearch";
+import { Button } from "../ui/button";
+import {
+  hasAccountDetails,
+  type ContextWindowAccount,
+  type ContextWindowMeterProps,
+} from "./ContextWindowMeter";
+
+// The hub's provider slug for the accounts serving a routed Claude instance.
+const CLI_PROXY_CLAUDE_PROVIDER = "claude";
+
+/**
+ * Lucide's arrow-up-right, drawn here: importing the icon into this chunk would regroup the
+ * shared icon chunks the chat route loads.
+ */
+function ArrowUpRightGlyph(props: { readonly className?: string }) {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={props.className}
+    >
+      <path d="M7 7h10v10" />
+      <path d="M7 17 17 7" />
+    </svg>
+  );
+}
+
+function SectionLabel(props: { readonly children: ReactNode }) {
+  return (
+    <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+      {props.children}
+    </div>
+  );
+}
+
+function MeterBar(props: { readonly percent: number | null }) {
+  if (props.percent === null) return null;
+  const percent = Math.max(0, Math.min(100, props.percent));
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+      <div
+        className={
+          percent >= 95
+            ? "h-full rounded-full bg-destructive"
+            : percent >= 80
+              ? "h-full rounded-full bg-warning"
+              : "h-full rounded-full bg-foreground/60"
+        }
+        style={{ width: `${percent}%` }}
+      />
+    </div>
+  );
+}
+
+/** The instance and login the composer sends with. The web phone tier is frozen without it. */
+function AccountSection(props: { readonly account: ContextWindowAccount }) {
+  const { account } = props;
+  return (
+    <div className="phone:hidden mb-2.5 space-y-1 border-b border-border/60 pb-2 leading-tight">
+      <SectionLabel>Account</SectionLabel>
+      <div className="truncate text-xs font-medium text-foreground">{account.displayName}</div>
+      {account.label ? (
+        <div className="truncate text-xs text-muted-foreground">{account.label}</div>
+      ) : null}
+      {/* On its own line: beside the plan label, a typical email does not fit the popup. */}
+      {account.email ? (
+        <div className="flex min-w-0">
+          <AccountEmail email={account.email} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Asks the provider to compact now; the transcript and this meter show the result. */
+function CompactNowAction(props: {
+  readonly blocker: string | null;
+  readonly compacting: boolean;
+  readonly onCompact: () => void;
+}) {
+  return (
+    <div className="space-y-1 pt-1">
+      <Button
+        variant="outline"
+        size="xs"
+        className="w-full"
+        disabled={props.compacting || props.blocker !== null}
+        onClick={props.onCompact}
+      >
+        {props.compacting ? "Compacting…" : "Compact now"}
+      </Button>
+      {props.blocker !== null && !props.compacting ? (
+        <div className="text-xs text-muted-foreground">{props.blocker}</div>
+      ) : null}
+      <div className="text-[11px] text-muted-foreground">
+        Summarizes older context. The summary request itself uses tokens.
+      </div>
+    </div>
+  );
+}
+
+/** Observed counters from Claude's last main-loop request; no future-hit claim. */
+function PromptCacheSection(props: {
+  readonly observation: ClaudeCacheObservation;
+  readonly now: number;
+}) {
+  const { observation } = props;
+  const lifetimeMinutes = observation.observedTtlSeconds
+    ? Math.round(observation.observedTtlSeconds / 60)
+    : null;
+  return (
+    <div className="mt-2.5 space-y-1 border-t border-border/60 pt-2 leading-tight">
+      <SectionLabel>Prompt cache</SectionLabel>
+      <div className="whitespace-nowrap text-xs font-medium text-foreground">
+        {formatTokenCount(observation.cacheReadInputTokens)} read
+        <span className="mx-1">⋅</span>
+        {formatTokenCount(observation.cacheWriteInputTokens)} written
+        <span className="mx-1">⋅</span>
+        {formatTokenCount(observation.directInputTokens)} uncached
+      </div>
+      <div className="text-xs text-muted-foreground">
+        Last request {formatRelativeTimeLabel(observation.observedAt, props.now)}
+        {lifetimeMinutes !== null ? ` · ${lifetimeMinutes}m write lifetime` : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Usage of a Claude instance routed through a CLIProxyAPI hub. The hub picks an account per
+ * request, so "last request" is the account the hub used last for any of its clients.
+ */
+function CliProxyRouteSection(props: {
+  readonly hub: CliProxyHubSnapshot;
+  readonly environmentId: EnvironmentId;
+  readonly available: boolean;
+  readonly now: number;
+}) {
+  const { hub, now } = props;
+  const navigate = useNavigate();
+  const current = cliProxyCurrentAccount(hub, CLI_PROXY_CLAUDE_PROVIDER, now);
+  const quota = current?.account.quota;
+  const plan = formatCliProxyPlan(quota?.planType);
+  const lastUsed = current?.account.lastUsedAt
+    ? formatRelativeTimeLabel(current.account.lastUsedAt, now)
+    : undefined;
+  const pooled = poolCliProxyWindows(
+    hub.accounts.filter((account) => account.provider === CLI_PROXY_CLAUDE_PROVIDER),
+  ).filter((window) => window.accountCount > 1);
+  return (
+    <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2 leading-tight">
+      <div className="flex items-center justify-between gap-2">
+        <SectionLabel>Usage limits</SectionLabel>
+        <button
+          type="button"
+          className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+          onClick={() =>
+            void navigate({
+              to: "/statistics",
+              search: parseStatisticsSearch({
+                view: "limits",
+                environmentIds: [props.environmentId],
+              }),
+            })
+          }
+        >
+          All accounts
+          <ArrowUpRightGlyph className="size-3" />
+        </button>
+      </div>
+      <div className="truncate text-xs font-medium text-foreground">
+        Via CLIProxyAPI · {hub.label}
+      </div>
+      {hub.status === "error" ? (
+        <div className="text-xs text-destructive-foreground">{hub.error}</div>
+      ) : current ? (
+        <>
+          <div
+            className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground"
+            title="The account the hub used last for any of its clients."
+          >
+            <span>Last request:</span>
+            <CliProxyAccountName account={current.account} />
+            {plan || lastUsed ? (
+              <span className="whitespace-nowrap">
+                · {[plan, lastUsed].filter(Boolean).join(" · ")}
+              </span>
+            ) : null}
+          </div>
+          {current.recentAccountCount > 1 ? (
+            <div className="text-[11px] text-muted-foreground">
+              Rotating across {current.recentAccountCount} accounts
+            </div>
+          ) : null}
+          {quota?.status === "ok" && quota.windows.length > 0 ? (
+            <div className="grid gap-1">
+              {quota.windows.map((window) => (
+                <ProviderLimitWindow
+                  key={window.id}
+                  window={window}
+                  label={cliProxyWindowLabel(window)}
+                  checkedAt={quota.checkedAt}
+                  available={props.available}
+                  now={now}
+                  compact
+                />
+              ))}
+            </div>
+          ) : quota?.status === "failed" ? (
+            <div className="text-xs text-destructive-foreground">
+              {quota.message ?? "The quota could not be read."}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <div className="text-xs text-muted-foreground">
+          The hub has not reported which account it used yet.
+        </div>
+      )}
+      {pooled.length > 0 ? (
+        <div
+          className="text-[11px] text-muted-foreground"
+          title="Plans of different sizes count equally in the average."
+        >
+          Pool of {Math.max(...pooled.map((window) => window.accountCount))} accounts:{" "}
+          {pooled
+            .map((window) => `${window.label} ${Math.round(window.usedPercent)}% used`)
+            .join(" · ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const secondsToMs = (seconds: number | undefined) =>
+  seconds === undefined ? undefined : seconds * 1000;
+
+/**
+ * The instants the popup labels relative to now: resets, a stale read, the last cache read, the
+ * hub's last use.
+ */
+export function contextWindowLabelInstants(
+  rateLimits: ServerProviderRateLimits | undefined,
+  claudeCache: ClaudeCacheObservation | null | undefined,
+  route: CliProxyHubSnapshot | undefined,
+): ReadonlyArray<number | undefined> {
+  const instants = rateLimitWindowList(rateLimits).map(({ window }) =>
+    secondsToMs(window.resetsAt),
+  );
+  if (rateLimits?.stale && rateLimits.observedAt) instants.push(Date.parse(rateLimits.observedAt));
+  if (claudeCache) instants.push(Date.parse(claudeCache.observedAt));
+  for (const hubAccount of route?.accounts ?? []) {
+    if (hubAccount.lastUsedAt) instants.push(Date.parse(hubAccount.lastUsedAt));
+    if (hubAccount.quota?.status === "ok") {
+      for (const window of hubAccount.quota.windows) instants.push(secondsToMs(window.resetsAt));
+    }
+  }
+  return instants;
+}
+
+/** The popup body. It mounts only while the popup is open, so nothing ticks or reads when closed. */
+export function ContextWindowDetails(
+  props: ContextWindowMeterProps & {
+    readonly usedPercentage: string | null;
+    readonly normalizedPercentage: number;
+    readonly compacting: boolean;
+    readonly onCompactNow: () => void;
+  },
+) {
+  const { usage, rateLimits, account, usedPercentage, normalizedPercentage } = props;
+  const phone = usePresentationTier() === "phone";
+  const hubsQuery = useCliProxyHubs(
+    account?.checkCliProxyRoute && !phone ? account.environmentId : null,
+  );
+  const route =
+    account && hubsQuery.data
+      ? findCliProxyRouteForInstance(hubsQuery.data, account.instanceId)
+      : undefined;
+  // Re-render when one of the popup's relative labels changes, not every second.
+  const now = useRelativeLabelTick(
+    useMemo(
+      () => contextWindowLabelInstants(rateLimits, props.claudeCache, route),
+      [rateLimits, props.claudeCache, route],
+    ),
+  );
+  // A routed instance's own limits describe no account the hub uses.
+  const limitWindows = route === undefined ? rateLimitWindowList(rateLimits) : [];
+  const staleReason = staleRateLimitsReason(rateLimits);
+  const observedAt = rateLimits?.observedAt ?? props.checkedAt;
+
+  return (
+    <>
+      {account && hasAccountDetails(account) ? <AccountSection account={account} /> : null}
+      <div className="space-y-1.5 leading-tight">
+        <SectionLabel>Context window</SectionLabel>
+        {usage.maxTokens !== null && usedPercentage ? (
+          <div className="whitespace-nowrap text-xs font-medium text-foreground">
+            <span>{usedPercentage}</span>
+            <span className="mx-1">⋅</span>
+            <span>{formatTokenCount(usage.usedTokens)}</span>
+            <span>/</span>
+            <span>{formatTokenCount(usage.maxTokens ?? null)} context used</span>
+          </div>
+        ) : (
+          <div className="whitespace-nowrap text-xs font-medium text-foreground">
+            {formatTokenCount(usage.usedTokens)} context used
+          </div>
+        )}
+        <MeterBar
+          percent={
+            usage.maxTokens !== null && usage.usedPercentage !== null ? normalizedPercentage : null
+          }
+        />
+        {(usage.totalProcessedTokens ?? null) !== null &&
+        (usage.totalProcessedTokens ?? 0) > usage.usedTokens ? (
+          <div className="text-xs text-muted-foreground">
+            Total processed: {formatTokenCount(usage.totalProcessedTokens ?? null)} tokens
+          </div>
+        ) : null}
+        {usage.compactsAutomatically ? (
+          <div className="text-xs text-muted-foreground">
+            Automatically compacts its context when needed.
+          </div>
+        ) : null}
+        {/* A provider that compacts on its own can be asked to now. Not on the frozen phone tier. */}
+        {props.compactNow && usage.compactsAutomatically && !phone ? (
+          <CompactNowAction
+            blocker={props.compactNow.blocker}
+            compacting={props.compacting}
+            onCompact={props.onCompactNow}
+          />
+        ) : null}
+      </div>
+      {props.claudeCache ? <PromptCacheSection observation={props.claudeCache} now={now} /> : null}
+      {route && account ? (
+        <CliProxyRouteSection
+          hub={route}
+          environmentId={account.environmentId}
+          available={props.available === true}
+          now={now}
+        />
+      ) : hubsQuery.isFetching && hubsQuery.data === null ? (
+        <div className="mt-2.5 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          Checking CLIProxyAPI hubs…
+        </div>
+      ) : null}
+      {hubsQuery.error ? (
+        <div className="mt-2 text-xs text-destructive-foreground">
+          Couldn't read CLIProxyAPI hubs: {hubsQuery.error.message}
+        </div>
+      ) : null}
+      {limitWindows.length > 0 ? (
+        <div className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2 leading-tight">
+          <SectionLabel>Usage limits</SectionLabel>
+          <div className="grid gap-1">
+            {limitWindows.map(({ label, window }) => (
+              <ProviderLimitWindow
+                key={label}
+                window={window}
+                label={label}
+                checkedAt={props.checkedAt}
+                available={props.available === true}
+                now={now}
+                compact
+              />
+            ))}
+          </div>
+          {staleReason ? (
+            <div className="text-[11px] text-muted-foreground first-letter:uppercase">
+              {observedAt
+                ? `Last read ${formatRelativeTimeLabel(observedAt, now)}; ${staleReason}.`
+                : `${staleReason}.`}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {rateLimits?.resetCredits ? (
+        <div className="phone:hidden mt-2 border-t border-border/60 pt-2 text-xs text-muted-foreground">
+          {props.available
+            ? `${rateLimits.resetCredits.availableCount} banked resets`
+            : "Banked resets unavailable while disconnected"}
+          <div>Review and redeem in Settings → Providers.</div>
+        </div>
+      ) : null}
+    </>
+  );
+}

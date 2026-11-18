@@ -47,7 +47,7 @@ import { cn } from "../../lib/utils";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { selectThreadExistsByRef, selectSidebarThreadSummaryByRef, useStore } from "../../store";
 import { useDraftThreadExistsByRef } from "../../composerDraftSelectors";
-import { flushPreviewFiles } from "../previewFileSessions";
+import { flushPreviewFiles } from "../previewFileSessionRegistry";
 import { InboxMotionContext } from "../inboxSidebar/useInboxListMotion";
 import { toastManager } from "../ui/toast";
 import { retainDesktopWorkspaceThreadScope } from "../../platform/desktopWorkspace";

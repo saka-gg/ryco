@@ -12,9 +12,9 @@ import { type KeyboardEvent, useId, useMemo, useState } from "react";
 import {
   preloadSourceItemTabs,
   SourcePickerPanel,
-  useSourcePickerState,
   type NewThreadSource,
 } from "../chat/SourcePickerPanel";
+import { useSourcePickerState } from "../chat/sourcePickerState";
 import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { toastManager } from "../ui/toast";

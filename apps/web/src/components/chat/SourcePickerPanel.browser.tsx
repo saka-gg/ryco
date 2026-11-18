@@ -4,7 +4,8 @@ import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { expect, it } from "vite-plus/test";
 
-import { SourcePickerPanel, useSourcePickerState } from "./SourcePickerPanel";
+import { SourcePickerPanel } from "./SourcePickerPanel";
+import { useSourcePickerState } from "./sourcePickerState";
 
 /**
  * Hosts the panel the way the Tasks page's link popover does: added tabs whose

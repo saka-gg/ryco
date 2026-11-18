@@ -4,7 +4,6 @@ import type {
   ProjectId,
   SourceControlIssueSummary,
   VcsListRefsResult,
-  WorkItemStateFilter,
   WorkItemSummary,
 } from "@ryco/contracts";
 import { GitBranchIcon, PlusIcon } from "lucide-react";
@@ -17,15 +16,12 @@ import {
   type LazyComponentReadyOptions,
 } from "../../lib/preloadableLazy";
 import { cn } from "~/lib/utils";
-import type {
-  ChangeRequestStateFilter,
-  IssueStateFilter,
-} from "../projectExplorer/StateFilterButtons";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { Switch } from "../ui/switch";
 import { ContextPickerTabs } from "./ContextPickerTabs";
+import type { SourcePickerState } from "./sourcePickerState";
 import { errorMessage } from "~/lib/errorMessage";
 
 /** What the user picked: a branch, a pull request, an issue or a Jira item. */
@@ -76,41 +72,6 @@ export function preloadSourceItemTabs(): void {
 const SOURCE_ITEM_TABS_LOAD: LazyComponentReadyOptions = {
   onLoadError: (error, retry) => notifySurfaceLoadFailure("source list", error, retry),
 };
-
-/**
- * The picker's tab, searches and filters. Its popover unmounts the panel when
- * it closes, so the trigger keeps them: the picker opens again where it was.
- */
-export function useSourcePickerState(initialTab: string = "branches") {
-  const [tab, setTab] = useState(initialTab);
-  const [branchQuery, setBranchQuery] = useState("");
-  const [prQuery, setPrQuery] = useState("");
-  const [issueQuery, setIssueQuery] = useState("");
-  const [workItemQuery, setWorkItemQuery] = useState("");
-  const [prStateFilter, setPrStateFilter] = useState<ChangeRequestStateFilter>("open");
-  const [issueStateFilter, setIssueStateFilter] = useState<IssueStateFilter>("open");
-  const [workItemStateFilter, setWorkItemStateFilter] = useState<WorkItemStateFilter>("open");
-  return {
-    tab,
-    setTab,
-    branchQuery,
-    setBranchQuery,
-    prQuery,
-    setPrQuery,
-    issueQuery,
-    setIssueQuery,
-    workItemQuery,
-    setWorkItemQuery,
-    prStateFilter,
-    setPrStateFilter,
-    issueStateFilter,
-    setIssueStateFilter,
-    workItemStateFilter,
-    setWorkItemStateFilter,
-  };
-}
-
-export type SourcePickerState = ReturnType<typeof useSourcePickerState>;
 
 /** The branch tab's controls for a branch about to be created (the new-thread picker's). */
 export interface SourcePickerBranchCreation {
