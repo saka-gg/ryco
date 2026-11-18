@@ -998,9 +998,11 @@ Invitation redemption and first-owner setup ask for it, and Profile can change i
 the Hub holds the new name for 14 days. An account created before usernames is asked to choose one
 and is shown by its old display name until it does.
 
-Changing the email address mails a six-digit code and a link to the new address. The Hub keeps one
-address per account: the new one replaces the old one at once and is marked unverified until the
-code is entered on Profile or the link is opened.
+Changing the email address mails a six-digit code and a link to the new address. The verified
+address stays in use until the code is entered (on Profile, or under Email in the phone app's
+account screen) or the link is opened; until then the change shows as pending and can be resent or
+cancelled. A Hub older than pending changes replaces the address at once and marks it unverified
+until it is confirmed the same way.
 
 **Sessions & devices** lists each live sign-in with a coarse label the Hub recorded when it started
 (a browser and operating system family, never a raw user agent), how it signed in and when it was
