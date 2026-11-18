@@ -11,6 +11,7 @@ import {
 import {
   accountPosture,
   activePasskeys,
+  emailCodeRefusalMessage,
   emailIssue,
   formatRecoveryCodesForClipboard,
   inlineErrorMessage,
@@ -172,6 +173,57 @@ describe("inline error suppression", () => {
     );
     expect(inlineErrorMessage(message, "forbidden", true)).toBe(message);
     expect(inlineErrorMessage(null, STEP_UP_REQUIRED_CODE, true)).toBeNull();
+  });
+
+  it("leaves a refused email code to the code field, and only that refusal", () => {
+    const wrongCode = "That code is not right. Check the newest email and try again.";
+    expect(
+      inlineErrorMessage(wrongCode, "invalid_request", false, "confirming-email-verification"),
+    ).toBeNull();
+    expect(
+      inlineErrorMessage(wrongCode, "invalid_request", false, "requesting-email-verification"),
+    ).toBe(wrongCode);
+  });
+});
+
+describe("email code refusals", () => {
+  const refusal = (patch: Partial<HostedAccountRefused>): HostedAccountRefused => ({
+    status: "refused",
+    reason: "request-failed",
+    errorCode: null,
+    wireErrorCode: null,
+    inferredErrorCode: false,
+    errorMessage: null,
+    ...patch,
+  });
+
+  it("shows the runtime's copy for the code the Hub refused", () => {
+    expect(
+      emailCodeRefusalMessage(
+        refusal({ errorCode: "not_found", errorMessage: "That code expired. Send a new one." }),
+      ),
+    ).toBe("That code expired. Send a new one.");
+  });
+
+  it("keeps its own copy for an ended session and a refusal without a message", () => {
+    expect(
+      emailCodeRefusalMessage(
+        refusal({ reason: "session-expired", errorMessage: "Your Hub session has expired." }),
+      ),
+    ).toBe("Your session ended. Sign in again.");
+    expect(emailCodeRefusalMessage(refusal({ reason: "cancelled" }))).toBe(
+      "The Hub could not complete that. Try again in a moment.",
+    );
+  });
+
+  it("keeps its own fallback for failures the confirm route does not word itself", () => {
+    for (const errorCode of ["unavailable", "forbidden", "internal_error"]) {
+      expect(
+        emailCodeRefusalMessage(
+          refusal({ errorCode, errorMessage: "Hub is temporarily unavailable." }),
+        ),
+      ).toBe("The Hub could not complete that. Try again in a moment.");
+    }
   });
 });
 

@@ -91,6 +91,7 @@ export const INITIAL_HOSTED_ACCOUNT_STATE: HostedAccountState = {
   errorMessage: null,
   errorCode: null,
   errorCodeInferred: false,
+  errorAction: null,
 };
 
 export const INITIAL_HOSTED_RECOVERY_CODE_DISPLAY_STATE: HostedRecoveryCodeDisplayState = {

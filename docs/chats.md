@@ -143,7 +143,9 @@ delete files** in the confirmation. That option is off by default, and it is off
 Ryco asks to confirm the delete (the **Delete confirmation** setting). If you select it, Ryco
 deletes the folder and everything in it once the conversation can no longer be restored, about ten
 seconds after the delete. Undo keeps the folder, and so does closing Ryco before then. It does not
-move the files to the OS trash. The node deletes the folder only when all of these hold:
+move the files to the OS trash. On the phone app, the Delete confirmation of a chat's last
+conversation offers **Delete with files** next to **Delete**, which keeps the files; it works the
+same way. The node deletes the folder only when all of these hold:
 
 - The project is still a chat (it was not turned into a project).
 - No conversation of the chat remains, whether in the sidebar or the archive, and none can still

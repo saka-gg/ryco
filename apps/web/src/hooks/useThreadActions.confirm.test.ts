@@ -7,16 +7,15 @@ const mocks = vi.hoisted(() => ({
   environment: {
     threadIds: [] as string[],
     threadShellById: {} as Record<string, { readonly projectId: string }>,
+    projectById: {} as Record<string, { readonly kind?: "chat"; readonly cwd: string }>,
   },
-  projects: {} as Record<string, { readonly kind?: "chat"; readonly cwd: string }>,
 }));
 vi.mock("../confirmAction", () => ({ confirmAction: mocks.confirmAction }));
 vi.mock("../components/ChatDeleteDialog", () => ({ confirmChatDelete: mocks.confirmChatDelete }));
 vi.mock("../store", () => ({
   useStore: { getState: () => ({}) },
   selectEnvironmentState: () => mocks.environment,
-  selectProjectByRef: (_state: unknown, ref: { readonly projectId: string }) =>
-    mocks.projects[ref.projectId],
+  selectProjectByRef: () => undefined,
   selectSidebarThreadSummaryByRef: () => undefined,
   selectThreadByRef: () => undefined,
   selectThreadExistsByRef: () => false,
@@ -36,7 +35,7 @@ function seed(input: {
   mocks.environment.threadShellById = Object.fromEntries(
     input.threads.map(([threadId, projectId]) => [threadId, { projectId }]),
   );
-  mocks.projects = {
+  mocks.environment.projectById = {
     "project-1": input.kind === "chat" ? { kind: "chat", cwd: "/chats/c1" } : { cwd: "/code/p1" },
   };
 }

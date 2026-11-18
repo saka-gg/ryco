@@ -132,6 +132,7 @@ const PROMPT_IDS: ReadonlyArray<HostedAccountPromptId> = [
   "enroll-totp",
   "revoke-totp",
   "verify-email",
+  "confirm-email-code",
   "resend-email",
   "cancel-email-change",
   "connect-github",
@@ -224,6 +225,22 @@ function harness(initial?: {
     revokeTotp: vi.fn(async () => commit()),
     requestEmailVerification: vi.fn(async () => commit()),
     cancelEmailVerification: vi.fn(async () => commit()),
+    // The controller re-reads the account once the Hub accepts the code, so by
+    // the time it resolves the confirmed address is the account's own.
+    confirmEmailVerificationCode: vi.fn(async () => {
+      await commit();
+      const confirmed = account.accountEmail?.pendingAddress ?? account.security?.email?.address;
+      if (account.errorMessage !== null || confirmed == null || account.security == null) return;
+      const email = { address: confirmed, verified: true };
+      account = {
+        ...account,
+        security: { ...account.security, email },
+        accountEmail:
+          account.accountEmail == null
+            ? account.accountEmail
+            : { email, pendingAddress: null, pendingExpiresAt: null },
+      };
+    }),
     connectExternalIdentity: vi.fn(async () => commit()),
     disconnectExternalIdentity: vi.fn(async () => commit()),
     cancelExternalIdentityConnection: vi.fn(),
@@ -1412,6 +1429,37 @@ describe("TOTP enrolment", () => {
 });
 
 describe("email verification", () => {
+  it("offers code entry for an address the Hub still has unverified, and none without one", async () => {
+    const security = {
+      passwordConfigured: false,
+      totpEnrolled: false,
+      emailDeliveryConfigured: true,
+      email: { address: "ada@example.test", verified: false },
+      externalIdentities: [],
+    };
+    const test = harness({ account: { security, accountEmail: null } });
+    const rows = () =>
+      test
+        .view()
+        .sections.find((candidate) => candidate.id === "email")
+        ?.rows.map((row) => row.id);
+    expect(rows()).toEqual(["confirm-email-code", "verify-email"]);
+
+    test.open("confirm-email-code");
+    expect(test.prompt().message).toContain("sent to ada@example.test");
+    test.type({ text: "654321" });
+    test.prompt().submit?.run();
+    await flush();
+    expect(test.actions.confirmEmailVerificationCode).toHaveBeenCalledExactlyOnceWith("654321");
+    expect(test.prompt().message).toBe("ada@example.test is verified.");
+
+    test.close();
+    test.setAccount({ security: { ...security, email: null } });
+    expect(rows()).toEqual(["verify-email"]);
+    test.setAccount({ security: { ...security, email: { ...security.email, verified: true } } });
+    expect(rows()).toEqual(["verify-email"]);
+  });
+
   it("says the Hub cannot deliver mail rather than letting the user wait", async () => {
     const test = harness();
     const section = test.view().sections.find((candidate) => candidate.id === "email");
@@ -1491,10 +1539,52 @@ describe("email verification", () => {
       );
       expect(section?.footnote).toContain("ada@example.test stays in use until then.");
       expect(section?.rows.map((row) => row.id)).toEqual([
+        "confirm-email-code",
         "resend-email",
         "verify-email",
         "cancel-email-change",
       ]);
+    });
+
+    it("confirms the change with the mailed code and says so", async () => {
+      const test = changeHarness();
+      test.open("confirm-email-code");
+      expect(test.prompt().message).toBe(
+        "Enter the six-digit code from the email sent to lovelace@example.test.",
+      );
+      expect(test.prompt().fields.map((field) => field.keyboardType)).toEqual(["number-pad"]);
+      test.type({ text: "12345" });
+      expect(test.prompt().submit?.disabled).toBe(true);
+      test.type({ text: "123 456" });
+      expect(test.prompt().submit?.disabled).toBe(false);
+
+      test.prompt().submit?.run();
+      await flush();
+
+      expect(test.actions.confirmEmailVerificationCode).toHaveBeenCalledExactlyOnceWith("123456");
+      expect(test.prompt().message).toBe("lovelace@example.test is verified.");
+      expect(test.prompt().errorMessage).toBeNull();
+    });
+
+    it("keeps the prompt open with the runtime's reason for a wrong or expired code", async () => {
+      const test = changeHarness();
+      test.open("confirm-email-code");
+      for (const message of [
+        "That code is not right. Check the newest email and try again.",
+        "That code expired. Send a new one.",
+      ]) {
+        test.type({ text: "000000" });
+        test.nextOutcome(message);
+        test.prompt().submit?.run();
+        await flush();
+        expect(test.prompt().errorMessage).toBe(message);
+        expect(test.prompt().submit).not.toBeNull();
+        // The wrong code is cleared for the next attempt, as on the web.
+        expect(test.draft()?.text).toBe("");
+        // The prompt owns the refusal; the screen does not repeat it.
+        expect(test.view().errorMessage).toBeNull();
+      }
+      expect(test.actions.confirmEmailVerificationCode).toHaveBeenCalledTimes(2);
     });
 
     it("resends to the pending address, with the step-up when the Hub asks for one", async () => {
@@ -1540,6 +1630,9 @@ describe("email verification", () => {
       expect(section?.footnote).not.toContain("lovelace@example.test");
       expect(section?.rows.map((row) => row.id)).toEqual(["verify-email"]);
       test.open("resend-email");
+      expect(test.prompt().submit?.disabled).toBe(true);
+      test.open("confirm-email-code");
+      test.type({ text: "123456" });
       expect(test.prompt().submit?.disabled).toBe(true);
     });
 

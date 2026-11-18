@@ -273,7 +273,6 @@ import {
   clearThreadGoal,
   compactThreadNow,
   stopThreadSession,
-  trashThread,
   interruptThreadTurn,
   renameThread,
   setThreadGoal,
@@ -3140,15 +3139,13 @@ export function ThreadDetailScreen(props: {
   // Delete: the node trashes the chat and purges it shortly after, with its attachments and
   // terminal history.
   const deleteCurrentThread = () => {
-    const title = headerTitle ?? "this chat";
-    confirmDeleteThread(
-      title,
-      () =>
-        void runAction(async () => {
-          await trashThread(ensureEnvironmentApi(environmentId), threadId);
-          goBackOrHome(navigation);
-        }, "Could not delete the chat"),
-    );
+    confirmDeleteThread({
+      environmentId,
+      threadId,
+      title: headerTitle ?? "this chat",
+      run: (action) => void runAction(action, "Could not delete the chat"),
+      after: () => goBackOrHome(navigation),
+    });
   };
 
   const onHeaderMenuActionRef = useRef(onHeaderMenuAction);
