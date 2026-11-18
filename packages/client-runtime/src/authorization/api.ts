@@ -240,6 +240,7 @@ export type HostedAccountIntent =
   | "confirm-totp-enrollment"
   | "revoke-totp"
   | "request-email-verification"
+  | "confirm-email-verification"
   | "cancel-email-verification"
   | "revoke-passkey"
   | "add-passkey"
@@ -472,6 +473,7 @@ function intentMessage(code: string, intent: HostedAccountIntent): string | null
       case "confirm-totp-enrollment":
         return "This setup is no longer in progress. Start again.";
       case "request-email-verification":
+      case "confirm-email-verification":
         return "That email address is already in use.";
       case "disconnect-external-identity":
         return "GitHub is the only sign-in method on this account. Add another before disconnecting it.";
@@ -491,6 +493,21 @@ function intentMessage(code: string, intent: HostedAccountIntent): string | null
   }
   if (code === "not_found" && intent === "revoke-passkey") {
     return "That passkey is no longer on this account.";
+  }
+  if (intent === "confirm-email-verification") {
+    // The Hub answers a wrong code with `invalid_request` and a verification
+    // that is no longer outstanding (expired, or dropped after too many wrong
+    // codes) with `not_found`; `rate_limited` is the route's request budget.
+    switch (code) {
+      case "invalid_request":
+        return "That code is not right. Check the newest email and try again.";
+      case "not_found":
+        return "That code expired. Send a new one.";
+      case "rate_limited":
+        return "Too many attempts. Send a new code.";
+      default:
+        return null;
+    }
   }
   return null;
 }
@@ -2484,11 +2501,12 @@ export class HostedHubApi {
       method: "POST",
       body: { code },
       csrf: true,
+      intent: "confirm-email-verification",
       ...(signal ? { signal } : {}),
     });
     const email = result.email as { readonly verified?: unknown } | null | undefined;
     if (typeof email !== "object" || email === null || email.verified !== true) {
-      throw new HostedHubApiError("invalid_response", 502);
+      throw new HostedHubApiError("invalid_response", 502, undefined, "confirm-email-verification");
     }
   }
 

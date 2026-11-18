@@ -157,17 +157,3 @@ export async function revokeOtherAccountSessions(): Promise<AccountMutationResul
   await refreshAccountSessions();
   return { ok: true };
 }
-
-export async function confirmAccountEmailCode(code: string): Promise<AccountMutationResult> {
-  try {
-    await hostedHubApi.confirmEmailVerificationCode(code);
-  } catch (error) {
-    return refused(error, {
-      invalid_request: "That code is not right. Check the newest email and try again.",
-      not_found: "That code expired. Send a new one.",
-      rate_limited: "Too many attempts. Send a new code.",
-    });
-  }
-  await hostedHubController.refreshAccountSecurity({ force: true });
-  return { ok: true };
-}

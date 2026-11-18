@@ -93,10 +93,19 @@ export function inlineErrorMessage(
   errorMessage: string | null,
   errorCode: string | null | undefined,
   stepUpPending: boolean,
+  errorAction?: string | null,
 ): string | null {
   if (!errorMessage) return null;
   if (stepUpPending && errorCode === STEP_UP_REQUIRED_CODE) return null;
+  // The email section shows a refused verification code under its own field.
+  if (errorAction === "confirming-email-verification") return null;
   return errorMessage;
+}
+
+/** What the email section's code field says when the mailed code was not accepted. */
+export function emailCodeRefusalMessage(outcome: HostedAccountRefused): string {
+  if (outcome.reason === "session-expired") return "Your session ended. Sign in again.";
+  return outcome.errorMessage ?? "The Hub could not complete that. Try again in a moment.";
 }
 
 /** A passkey is revoked once the Hub reports a revocation timestamp for it. */
