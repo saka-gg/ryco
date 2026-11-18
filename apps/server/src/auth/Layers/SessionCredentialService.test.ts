@@ -7,6 +7,10 @@ import { TestClock } from "effect/testing";
 import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import {
+  DEFAULT_AUTH_RECORD_RETENTION_OPTIONS,
+  runAuthRecordRetentionPass,
+} from "../../persistence/Layers/AuthRecordRetention.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
@@ -421,6 +425,52 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       expect(successor.message).toContain("revoked");
       expect(yield* sessions.listActive()).toHaveLength(0);
     }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("keeps catching a reused bearer after old rows of a renewing pairing are pruned", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const sql = yield* SqlClient.SqlClient;
+      const paired = yield* sessions.issue({ method: "bearer-session-token", subject: "daily" });
+      // A phone renewing every day for 200 days.
+      const tokens = [paired];
+      for (let day = 1; day <= 200; day += 1) {
+        yield* TestClock.adjust(Duration.days(1));
+        const rotated = yield* sessions.rotate(tokens[tokens.length - 1]!.sessionId);
+        yield* sessions.verify(rotated.token);
+        tokens.push(rotated);
+      }
+      const head = tokens[200]!;
+      const rowCount = sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM auth_sessions
+      `.pipe(Effect.map((rows) => rows[0]!.count));
+      expect(yield* rowCount).toBe(201);
+
+      const result = yield* runAuthRecordRetentionPass(
+        { ...DEFAULT_AUTH_RECORD_RETENTION_OPTIONS, batchPauseMs: 0 },
+        yield* Clock.currentTimeMillis,
+      );
+      // Sessions issued on days 0 to 79 expired (30 days later) more than 90 days ago.
+      expect(result.deletedSessions).toBe(80);
+      expect(yield* rowCount).toBe(121);
+
+      // A pruned bearer is refused as expired, exactly as before, and changes nothing.
+      const pruned = yield* Effect.flip(sessions.verify(tokens[0]!.token));
+      expect(pruned.message).toBe("Session token expired.");
+      const prunedLast = yield* Effect.flip(sessions.verify(tokens[79]!.token));
+      expect(prunedLast.message).toBe("Session token expired.");
+      expect((yield* sessions.verify(head.token)).sessionId).toBe(head.sessionId);
+      expect((yield* sessions.listActive()).map((entry) => entry.sessionId)).toEqual([
+        head.sessionId,
+      ]);
+
+      // An unexpired superseded bearer kept its row: reusing it still ends the pairing.
+      const reused = yield* Effect.flip(sessions.verify(tokens[195]!.token));
+      expect(reused.message).toContain("reused");
+      const after = yield* Effect.flip(sessions.verify(head.token));
+      expect(after.message).toContain("revoked");
+      expect(yield* sessions.listActive()).toHaveLength(0);
+    }).pipe(Effect.provide(withStore())),
   );
 
   it.effect("never renews a pairing past one year from when it was made", () =>

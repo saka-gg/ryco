@@ -7,12 +7,18 @@
  * a session row. This pass removes, conservatively:
  *
  * - pairing links consumed, revoked or expired more than `pairingLinkRetentionMs` ago (30 days);
- * - session rows revoked or expired more than `sessionRetentionMs` ago (90 days), but never a
- *   row of a pairing (rotation chain) that still has a live session: one that is neither
- *   revoked nor expired. Reusing a superseded bearer of a live pairing must keep finding its row,
- *   which is what revokes the pairing (`SessionCredentialService.verify`), and the chain head
- *   reads its predecessor (`AuthSessions.ts`'s `isChainHead`). A pairing that ended (revoked, or
- *   every session expired) goes row by row as each row passes the cutoff.
+ * - session rows of a pairing (rotation chain) that ended, revoked or with every session
+ *   expired, once revoked or expired more than `sessionRetentionMs` ago (90 days): row by row as
+ *   each passes the cutoff;
+ * - in a pairing that still has a live session, one that is neither revoked nor expired, only
+ *   superseded rows that expired more than `sessionRetentionMs` ago, and never
+ *   the predecessor of a row that has not expired (the chain head's, or a pending successor's).
+ *   Reusing a superseded bearer is what revokes the pairing (`SessionCredentialService.verify`),
+ *   but `verify` rejects a token past its signed expiry, which is the row's `expires_at`, before
+ *   it reads the row: a row expired that long ago can no longer be reused, deleted or not. Every
+ *   unexpired superseded row stays and still revokes the pairing when reused. The chain head reads
+ *   its direct predecessor (`AuthSessions.ts`'s `isChainHead`): without that row the head would
+ *   read as a successor nobody has used yet and the pairing would show no session.
  *
  * Each delete is one statement of at most `deleteBatch` rows on the main connection, with a
  * pause after a full batch; `maxRowsPerPass` bounds a pass, and `backlog` says it stopped there.
@@ -33,7 +39,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export interface AuthRecordRetentionOptions {
   /** How long a consumed, revoked or expired pairing link stays. */
   readonly pairingLinkRetentionMs: number;
-  /** How long a revoked or expired session row of an ended pairing stays. */
+  /**
+   * How long a revoked or expired session row of an ended pairing stays, and an expired
+   * superseded row of a live one.
+   */
   readonly sessionRetentionMs: number;
   /** Rows per delete statement. */
   readonly deleteBatch: number;
@@ -108,6 +117,7 @@ export const runAuthRecordRetentionPass = (
 
     // Rows from before bearer rotation have no chain id and are their own chain, which a
     // successor names by the first row's session id (`COALESCE`, as in AuthSessions.ts).
+    // `rotated_from IS NOT NULL` keeps the `NOT IN` list free of NULLs, which would match nothing.
     const deletedSessions = yield* deleteInBatches(
       (limit) => sql`
         DELETE FROM auth_sessions
@@ -115,11 +125,23 @@ export const runAuthRecordRetentionPass = (
           SELECT rowid
           FROM auth_sessions
           WHERE (revoked_at < ${sessionCutoff} OR expires_at < ${sessionCutoff})
-            AND COALESCE(chain_id, session_id) NOT IN (
-              SELECT COALESCE(chain_id, session_id)
-              FROM auth_sessions
-              WHERE revoked_at IS NULL
-                AND expires_at > ${now}
+            AND (
+              COALESCE(chain_id, session_id) NOT IN (
+                SELECT COALESCE(chain_id, session_id)
+                FROM auth_sessions
+                WHERE revoked_at IS NULL
+                  AND expires_at > ${now}
+              )
+              OR (
+                superseded_at IS NOT NULL
+                AND expires_at < ${sessionCutoff}
+                AND session_id NOT IN (
+                  SELECT rotated_from
+                  FROM auth_sessions
+                  WHERE rotated_from IS NOT NULL
+                    AND expires_at > ${now}
+                )
+              )
             )
           LIMIT ${limit}
         )

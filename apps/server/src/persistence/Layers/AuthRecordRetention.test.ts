@@ -113,63 +113,133 @@ describe("AuthRecordRetention", () => {
     }).pipe(Effect.provide(database())),
   );
 
-  it.live("removes ended pairings' sessions 90 days after they ended, never a live pairing's", () =>
+  it.live(
+    "removes ended pairings' sessions 90 days after they ended, and a live pairing's old rows",
+    () =>
+      Effect.gen(function* () {
+        yield* insertSession({ id: "revoked-old", expiresDaysAgo: -20, revokedDaysAgo: 100 });
+        yield* insertSession({ id: "revoked-recent", expiresDaysAgo: -20, revokedDaysAgo: 10 });
+        yield* insertSession({ id: "expired-old", expiresDaysAgo: 91 });
+        yield* insertSession({ id: "expired-recent", expiresDaysAgo: 89 });
+        // A pairing renewed for months: a superseded row that expired long ago goes (its bearer is
+        // refused as expired before reuse is checked), but the head's predecessor stays.
+        yield* insertSession({ id: "live-1", expiresDaysAgo: 120, supersededDaysAgo: 150 });
+        yield* insertSession({
+          id: "live-2",
+          chainId: "live-1",
+          rotatedFrom: "live-1",
+          expiresDaysAgo: 95,
+          supersededDaysAgo: 120,
+        });
+        yield* insertSession({
+          id: "live-3",
+          chainId: "live-1",
+          rotatedFrom: "live-2",
+          expiresDaysAgo: -20,
+        });
+        // A session from before rotation has no chain id; its successor names it as the chain,
+        // and as the head's predecessor it stays.
+        yield* insertSession({
+          id: "legacy",
+          chainId: null,
+          expiresDaysAgo: 100,
+          supersededDaysAgo: 110,
+        });
+        yield* insertSession({
+          id: "legacy-next",
+          chainId: "legacy",
+          rotatedFrom: "legacy",
+          expiresDaysAgo: -10,
+        });
+        // A pairing whose sessions all expired goes row by row.
+        yield* insertSession({ id: "ended-1", expiresDaysAgo: 120, supersededDaysAgo: 121 });
+        yield* insertSession({
+          id: "ended-2",
+          chainId: "ended-1",
+          rotatedFrom: "ended-1",
+          expiresDaysAgo: 60,
+        });
+
+        const result = yield* runAuthRecordRetentionPass(options, NOW_MS);
+
+        assert.deepEqual(result, { deletedPairingLinks: 0, deletedSessions: 4, backlog: false });
+        assert.deepEqual(yield* sessionIds, [
+          "ended-2",
+          "expired-recent",
+          "legacy",
+          "legacy-next",
+          "live-2",
+          "live-3",
+          "revoked-recent",
+        ]);
+      }).pipe(Effect.provide(database())),
+  );
+
+  it.live(
+    "shrinks a live pairing to its head, the rows it reads and the bearers reuse can catch",
+    () =>
+      Effect.gen(function* () {
+        // A phone renewing every day for 200 days: row `n` was issued `200 - n` days ago and
+        // expired 30 days later; each was superseded the day after it was issued.
+        for (let n = 0; n <= 200; n += 1) {
+          const age = 200 - n;
+          yield* insertSession({
+            id: `day-${String(n).padStart(3, "0")}`,
+            chainId: "day-000",
+            ...(n === 0 ? {} : { rotatedFrom: `day-${String(n - 1).padStart(3, "0")}` }),
+            expiresDaysAgo: age - 30,
+            ...(n === 200 ? {} : { supersededDaysAgo: age - 1 }),
+          });
+        }
+        // The head renewed once more and its successor is not used yet: the head stays its
+        // predecessor, and the successor does not count as superseded.
+        yield* insertSession({
+          id: "day-201",
+          chainId: "day-000",
+          rotatedFrom: "day-200",
+          expiresDaysAgo: -30,
+        });
+        // A row expired long ago but never superseded (a successor nobody used) is not part of
+        // the renewal trail this pass prunes.
+        yield* insertSession({
+          id: "unused",
+          chainId: "day-000",
+          rotatedFrom: "day-010",
+          expiresDaysAgo: 150,
+        });
+
+        const result = yield* runAuthRecordRetentionPass(options, NOW_MS);
+
+        // Rows 0 to 79 expired more than 90 days ago (row 80 exactly at the cutoff stays).
+        assert.deepEqual(result, { deletedPairingLinks: 0, deletedSessions: 80, backlog: false });
+        const kept = yield* sessionIds;
+        assert.strictEqual(kept.length, 202 - 80 + 1);
+        assert.strictEqual(kept[0], "day-080");
+        assert.includeMembers(kept, ["day-199", "day-200", "day-201", "unused"]);
+        // A second pass finds nothing more.
+        assert.deepEqual(yield* runAuthRecordRetentionPass(options, NOW_MS), {
+          deletedPairingLinks: 0,
+          deletedSessions: 0,
+          backlog: false,
+        });
+      }).pipe(Effect.provide(database())),
+  );
+
+  it.live("keeps a live pairing's old row that an unexpired row names as its predecessor", () =>
     Effect.gen(function* () {
-      yield* insertSession({ id: "revoked-old", expiresDaysAgo: -20, revokedDaysAgo: 100 });
-      yield* insertSession({ id: "revoked-recent", expiresDaysAgo: -20, revokedDaysAgo: 10 });
-      yield* insertSession({ id: "expired-old", expiresDaysAgo: 91 });
-      yield* insertSession({ id: "expired-recent", expiresDaysAgo: 89 });
-      // A pairing renewed for months: its superseded rows expired long ago, but reusing one of
-      // its bearers must still find the row (and revoke the pairing), so the chain stays whole.
-      yield* insertSession({ id: "live-1", expiresDaysAgo: 120, supersededDaysAgo: 150 });
+      // Data no renewal writes today, guarded anyway: a head whose predecessor expired long ago.
+      yield* insertSession({ id: "old", expiresDaysAgo: 200, supersededDaysAgo: 210 });
       yield* insertSession({
-        id: "live-2",
-        chainId: "live-1",
-        rotatedFrom: "live-1",
-        expiresDaysAgo: 95,
-        supersededDaysAgo: 120,
-      });
-      yield* insertSession({
-        id: "live-3",
-        chainId: "live-1",
-        rotatedFrom: "live-2",
-        expiresDaysAgo: -20,
-      });
-      // A session from before rotation has no chain id; its successor names it as the chain.
-      yield* insertSession({
-        id: "legacy",
-        chainId: null,
-        expiresDaysAgo: 100,
-        supersededDaysAgo: 110,
-      });
-      yield* insertSession({
-        id: "legacy-next",
-        chainId: "legacy",
-        rotatedFrom: "legacy",
+        id: "head",
+        chainId: "old",
+        rotatedFrom: "old",
         expiresDaysAgo: -10,
-      });
-      // A pairing whose sessions all expired goes row by row.
-      yield* insertSession({ id: "ended-1", expiresDaysAgo: 120, supersededDaysAgo: 121 });
-      yield* insertSession({
-        id: "ended-2",
-        chainId: "ended-1",
-        rotatedFrom: "ended-1",
-        expiresDaysAgo: 60,
       });
 
       const result = yield* runAuthRecordRetentionPass(options, NOW_MS);
 
-      assert.deepEqual(result, { deletedPairingLinks: 0, deletedSessions: 3, backlog: false });
-      assert.deepEqual(yield* sessionIds, [
-        "ended-2",
-        "expired-recent",
-        "legacy",
-        "legacy-next",
-        "live-1",
-        "live-2",
-        "live-3",
-        "revoked-recent",
-      ]);
+      assert.deepEqual(result, { deletedPairingLinks: 0, deletedSessions: 0, backlog: false });
+      assert.deepEqual(yield* sessionIds, ["head", "old"]);
     }).pipe(Effect.provide(database())),
   );
 
