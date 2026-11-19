@@ -74,7 +74,8 @@ env:
 jobs:
   static:
     name: Static
-    runs-on: ubuntu-24.04
+    # Runner pool routing: CI_* repository variables pick the runner; the literal is the default.
+    runs-on: ${{ fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -122,7 +123,7 @@ jobs:
   # fetches the lockfile's exact Turbo itself when nothing is installed.
   test-matrix:
     name: Test matrix
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) }}
     timeout-minutes: 10
     outputs:
       include: ${{ steps.pick.outputs.include }}
@@ -152,7 +153,7 @@ jobs:
     name: Test ${{ matrix.name }}
     needs: test-matrix
     if: ${{ needs.test-matrix.outputs.has-tests == 'true' }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner == 'ubuntu-24.04' && fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) || matrix.runner }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -205,7 +206,7 @@ jobs:
   # below, so the job builds them once.
   build:
     name: Build
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) }}
     timeout-minutes: 20
     env:
       # Unreferenced sourcemaps let the bundle budget check below name the
@@ -391,7 +392,7 @@ jobs:
   browser:
     name: Browser tests ${{ matrix.shard }}
     if: ${{ inputs['run-browser-tests'] }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -576,7 +577,7 @@ jobs:
     name: Release Smoke
     needs: test-matrix
     if: ${{ inputs['run-release-smoke'] && needs.test-matrix.outputs.release == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -605,7 +606,7 @@ jobs:
     name: Mobile bundle
     needs: test-matrix
     if: ${{ needs.test-matrix.outputs.mobile == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(format(vars.CI_LINUX || '["ubuntu-24.04"]', github.run_id, github.run_attempt)) }}
     timeout-minutes: 15
     steps:
       - name: Checkout
