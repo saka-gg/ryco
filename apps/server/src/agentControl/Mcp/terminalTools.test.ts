@@ -420,6 +420,13 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
   }, 30_000);
 
   it("does not take a mark printed by the command for the command's end", async () => {
+    // A sign-in link and code an earlier command left on screen are not this command's: its
+    // quiet second must not read as "waits for a sign-in".
+    await call({
+      action: "run",
+      command: "echo 'Open https://github.com/login/device and enter the one-time code WXYZ-1234'",
+      timeout_seconds: 15,
+    });
     // What a cat'ed file, a test or a remote host could print: Ryco's own marks look the same
     // apart from this session's nonce.
     const result = await call({

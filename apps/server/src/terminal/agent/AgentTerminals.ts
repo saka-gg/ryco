@@ -382,12 +382,20 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
         const inputMode = running && quiet >= 300 ? yield* readInputMode(t) : undefined;
         const { beforeCursor, afterCursor } = t.mirror.cursorLine();
         const execution = t.current;
+        // Only what the running command printed: an earlier command's prompt, link or code still
+        // on screen is not this one's. Without a tracked command, the screen.
+        const tail =
+          execution !== undefined && !execution.ended
+            ? outputOf(t, execution)
+                .lines.filter((line) => line.trim() !== "")
+                .slice(-8)
+            : t.mirror.tail(8);
         return assessActivity({
           running,
           quietMs: quiet,
           beforeCursor,
           afterCursor,
-          tail: t.mirror.tail(8),
+          tail,
           alternate: t.mirror.alternate,
           outputSinceStart: execution === undefined || t.mirror.lastWriteAt >= execution.startedAt,
           inputMode,
