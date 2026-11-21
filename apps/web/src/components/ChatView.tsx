@@ -7121,22 +7121,24 @@ export default function ChatView(props: ChatViewProps) {
     () => terminalsWaitingForUser(threadActivities, Date.now()),
     [threadActivities],
   );
-  // Show on a terminal hand-off's card: the drawer opens on that terminal.
-  const userActionShowHandler = (request: UserActionRequestView) => {
+  // Show on a hand-off card, per surface: null when this window cannot show it (the card then
+  // says where to continue). A terminal opens in the drawer on that terminal.
+  const showUserActionTerminal = (request: UserActionRequestView) => {
     const terminalId = request.target;
-    if (
-      request.surface !== "terminal" ||
-      terminalId === null ||
-      !activeThreadRef ||
-      !terminalCapability.allowed
-    ) {
-      return null;
-    }
+    if (terminalId === null || !activeThreadRef || !terminalCapability.allowed) return null;
     return () => {
       storeSetActiveTerminal(activeThreadRef, terminalId);
       storeSetTerminalOpen(activeThreadRef, true);
       setTerminalFocusRequestId((value) => value + 1);
     };
+  };
+  const userActionShowHandler = (request: UserActionRequestView) => {
+    switch (request.surface) {
+      case "terminal":
+        return showUserActionTerminal(request);
+      default:
+        return null;
+    }
   };
   const showUserActionRequests =
     presentationTier !== "phone" &&
