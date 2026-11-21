@@ -852,8 +852,9 @@ export function withTerminalTools(
       const data = commandBytes(t, command);
       const sent = yield* write(t, data, true).pipe(
         Effect.as("sent" as const),
+        // Someone typed a moment ago, or the process table could not be read: one more try.
         Effect.catch((error) =>
-          isBusyError(error) && error.reason === "inputRaced"
+          isBusyError(error) && (error.reason === "inputRaced" || error.reason === "unverified")
             ? Effect.sleep(600).pipe(
                 Effect.andThen(write(t, data, true)),
                 Effect.as("sent" as const),
