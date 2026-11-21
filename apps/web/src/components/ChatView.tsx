@@ -11,6 +11,8 @@ import {
   resolveOptionalAnswerRoute,
 } from "@ryco/client-runtime/state/user-input";
 import type { PendingUserInput } from "@ryco/client-runtime/state/session";
+import { terminalsWaitingForUser } from "@ryco/client-runtime/state/terminal";
+import type { UserActionRequestView } from "@ryco/shared/userActionRequestState";
 import { ResumeFallbackHandoffIcon } from "./chat/ContextHandoffMarkerRow";
 import { useIsLocalComputerEnvironment } from "../computerUse/localComputer";
 import {
@@ -7112,6 +7114,29 @@ export default function ChatView(props: ChatViewProps) {
   );
   // An agent's hand-offs of a browser tab or terminal: a card per request with Done / Won't do,
   // loaded only for threads that handed one over, and off the frozen phone tier.
+  // Terminals an agent handed to the user: their drawer tab shows a marker until the hand-off
+  // ends (the node records an expiry as its end, so the expiry is not re-read here).
+  const terminalsWaitingForYou = useMemo(
+    () => terminalsWaitingForUser(threadActivities, 0),
+    [threadActivities],
+  );
+  // Show on a terminal hand-off's card: the drawer opens on that terminal.
+  const userActionShowHandler = (request: UserActionRequestView) => {
+    const terminalId = request.target;
+    if (
+      request.surface !== "terminal" ||
+      terminalId === null ||
+      !activeThreadRef ||
+      !terminalCapability.allowed
+    ) {
+      return null;
+    }
+    return () => {
+      storeSetActiveTerminal(activeThreadRef, terminalId);
+      storeSetTerminalOpen(activeThreadRef, true);
+      setTerminalFocusRequestId((value) => value + 1);
+    };
+  };
   const showUserActionRequests =
     presentationTier !== "phone" &&
     threadActivities.some((activity) => activity.kind === USER_ACTION_REQUESTED_ACTIVITY_KIND);
@@ -7818,6 +7843,7 @@ export default function ChatView(props: ChatViewProps) {
                   environmentId={environmentId}
                   threadId={activeThread.id}
                   activities={threadActivities}
+                  showHandler={userActionShowHandler}
                   disabledReason={
                     activeEnvironmentUnavailable || sideChatConnection.phase !== "connected"
                       ? (mutationUnavailableReason ?? "Connect to the node to answer.")
@@ -8235,6 +8261,9 @@ export default function ChatView(props: ChatViewProps) {
             mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
           }
           focusRequestId={mountedThreadKey === activeThreadKey ? terminalFocusRequestId : 0}
+          {...(mountedThreadKey === activeThreadKey && terminalsWaitingForYou.length > 0
+            ? { waitingTerminalIds: terminalsWaitingForYou }
+            : {})}
           splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
           newShortcutLabel={newTerminalShortcutLabel ?? undefined}
           closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}

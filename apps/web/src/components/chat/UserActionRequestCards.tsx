@@ -19,6 +19,7 @@ import {
   type UserActionOutcome,
   WS_METHODS,
 } from "@ryco/contracts";
+import { userActionRequestHints, type UserActionHint } from "@ryco/shared/userActionHints";
 import { HandIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -69,6 +70,7 @@ export function UserActionRequestCards({
   }, []);
   const requests = userActionRequestCards(activities, nowMs);
   if (requests.length === 0) return null;
+  const hints = userActionRequestHints(activities);
   const reason = !nodeSupports
     ? "Update this node to answer this request."
     : !capability.allowed
@@ -84,6 +86,7 @@ export function UserActionRequestCards({
           request={request}
           reason={reason}
           show={showHandler?.(request) ?? null}
+          hint={hints.get(request.requestId)}
         />
       ))}
     </>
@@ -96,12 +99,15 @@ function UserActionRequestCard({
   request,
   reason,
   show,
+  hint,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   request: UserActionRequestView;
   reason: string | null;
   show: (() => void) | null;
+  /** Sign-in links and codes the surface found (a terminal's device code). */
+  hint: UserActionHint | undefined;
 }) {
   const [sending, setSending] = useState<"done" | "declined" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +149,7 @@ function UserActionRequestCard({
         <span>{label}</span>
       </div>
       <p className="mt-1 text-sm whitespace-pre-wrap">{request.message}</p>
+      {outcome === null && hint !== undefined ? <UserActionHintRows hint={hint} /> : null}
       {outcome !== null ? (
         <p role="status" className="mt-2 text-sm">
           {userActionOutcomeLine(outcome)}
@@ -194,5 +201,47 @@ function UserActionRequestCard({
         </p>
       ) : null}
     </section>
+  );
+}
+
+/** The links and codes a terminal printed for a sign-in: Open and Copy, so nothing is retyped. */
+function UserActionHintRows({ hint }: { hint: UserActionHint }) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const copy = (code: string) => {
+    void navigator.clipboard?.writeText(code).then(
+      () => setCopied(code),
+      () => setCopied(null),
+    );
+  };
+  return (
+    <div className="mt-2 flex flex-col gap-1.5 text-sm" aria-label="From the terminal">
+      {hint.codes.map((code) => (
+        <div key={`code-${code}`} className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Code</span>
+          <code className="rounded bg-muted px-1.5 py-0.5 font-mono tracking-wider">{code}</code>
+          <button
+            type="button"
+            onClick={() => copy(code)}
+            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+          >
+            {copied === code ? "Copied" : "Copy"}
+          </button>
+        </div>
+      ))}
+      {hint.links.map((link) => (
+        <div key={`link-${link}`} className="flex min-w-0 items-center gap-2">
+          <span className="text-xs text-muted-foreground">Link</span>
+          <span className="min-w-0 truncate font-mono text-xs">{link}</span>
+          <a
+            href={link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 text-xs text-primary underline-offset-2 hover:underline"
+          >
+            Open
+          </a>
+        </div>
+      ))}
+    </div>
   );
 }

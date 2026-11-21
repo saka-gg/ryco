@@ -22,13 +22,27 @@ import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_TERMINAL_MCP_TOOL,
   AgentControlRequestId,
+  CommandId,
+  EventId,
   TerminalBusyError,
+  USER_ACTION_HINT_ACTIVITY_KIND,
+  USER_ACTION_HINTS_MAX_PER_REQUEST,
+  USER_ACTION_REQUEST_MAX_PENDING_PER_THREAD,
+  USER_ACTION_REQUEST_MESSAGE_MAX_CHARS,
+  USER_ACTION_REQUEST_WAIT_MS_MAX,
+  UserActionNeed,
+  TurnId,
+  type ThreadId,
+  type UserActionOutcome,
+  type UserActionRequestId,
   type AgentControlProposalId,
   type TerminalRef,
   type TerminalSessionSnapshot,
 } from "@ryco/contracts";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
 import { encodeTerminalPaste } from "@ryco/shared/terminalPaste";
+import type { UserActionHintActivityPayload } from "@ryco/contracts/user-action-request-details";
+import type { UserActionRequestView } from "@ryco/shared/userActionRequestState";
 import { Effect, Option, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -41,7 +55,19 @@ import {
   type ConsentStatus,
   type TerminalUse,
 } from "../../terminal/agent/access.ts";
-import type { Activity } from "../../terminal/agent/activity.ts";
+import { extractSignIn, type Activity } from "../../terminal/agent/activity.ts";
+import type { Mark } from "../../terminal/agent/mirror.ts";
+import { registerUserActionSurfaceHook } from "../../userActionRequests/surfaceHooks.ts";
+import {
+  openUserActionRequest,
+  readThreadUserActionRequests,
+  resolveUserActionRequest,
+  userActionRequestIdFor,
+  UserActionRequestOpenError,
+  waitForUserActionRequest,
+  watchUserActionRequest,
+  type UserActionWaitDeps,
+} from "../../userActionRequests/userActionRequests.ts";
 import {
   makeAgentTerminals,
   type AgentTerminals,
@@ -96,20 +122,35 @@ const ACTIVITY_CHECK_MS = 1_000;
 const MAX_COMMAND_CHARS = 16_000;
 const MAX_SEND_TEXT_CHARS = 4_000;
 const MAX_TERMINALS_PER_THREAD = 8;
+const HANDOFF_EXPIRY_S_MIN = 30;
+const HANDOFF_EXPIRY_S_MAX = 3_600;
+/** How often a pending hand-off checks its terminal (command end, closed, new sign-in details). */
+const HANDOFF_WATCH_MS = 1_000;
+const HANDOFFS_KEPT = 32;
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 
-const ACTIONS = ["run", "read", "wait", "send", "interrupt", "create", "list", "close"] as const;
+const ACTIONS = [
+  "run",
+  "read",
+  "wait",
+  "send",
+  "interrupt",
+  "handoff",
+  "create",
+  "list",
+  "close",
+] as const;
 type Action = (typeof ACTIONS)[number];
 
 export const TERMINAL_TOOL_DESCRIPTOR: AgentControlMcpToolDescriptor = {
   name: TOOL,
   description: [
     "Use this thread's terminals: real shells the user sees in Ryco's terminal panel and can type in too.",
-    'Actions: run (a shell command; returns its output and exit code, or, if it still runs after timeout_seconds, what it is doing; it keeps running), read (what: "new" output since your last look, "command" the last command\'s whole output, paged with from_line, "screen" what is on screen now), wait (until the command ends or for_text appears), send (type text and/or press keys: answer a prompt, drive a menu or full-screen program), interrupt (Ctrl+C), create (open another terminal), list, close (only terminals you opened).',
+    'Actions: run (a shell command; returns its output and exit code, or, if it still runs after timeout_seconds, what it is doing; it keeps running), read (what: "new" output since your last look, "command" the last command\'s whole output, paged with from_line, "screen" what is on screen now), wait (until the command ends or for_text appears), send (type text and/or press keys: answer a prompt, drive a menu or full-screen program), interrupt (Ctrl+C), handoff (give the terminal to the user, see below), create (open another terminal), list, close (only terminals you opened).',
     'Without `terminal`, actions use your current terminal; run opens one when you have none. For servers and watchers use a short timeout_seconds, then wait with for_text (e.g. "ready").',
     `Waits are bounded (at most ${MAX_WAIT_SECONDS} s); results say what the terminal is doing (working, waiting-for-input, full-screen, silent) and the exact next call. Output is what the screen shows, cut to max_chars (default ${DEFAULT_MAX_CHARS}) keeping the end; a cut names the call that reads the rest.`,
-    "Secrets: never type a password, token or code you were not given, and never ask for one in chat. When a result says the terminal waits for hidden input or a sign-in, tell the user in chat which terminal needs them, let them type it there, and wait. What anyone types at a hidden prompt never reaches you; text the terminal displays does.",
+    "Secrets: never type a password, token or code you were not given, and never ask for one in chat. For a password, sudo, a 2FA code, a login (gh auth login, a device code or browser sign-in) or a decision only the user can make, call handoff: it shows the user a card (with the sign-in link and code when the terminal prints them) and notifies them; it ends when the command finishes, the user clicks Done or Won't do, it expires, or the terminal closes. Optionally pass command to start it first. Pass your own requestId and a short message the first time; call again with the same requestId to keep waiting. What anyone types at a hidden prompt never reaches you; text the terminal displays does.",
     "Terminals the user opened can be read; typing into them asks the user once per task.",
   ].join(" "),
   inputSchema: {
@@ -126,13 +167,13 @@ export const TERMINAL_TOOL_DESCRIPTOR: AgentControlMcpToolDescriptor = {
         type: "string",
         minLength: 1,
         maxLength: MAX_COMMAND_CHARS,
-        description: "run: as typed at the shell's prompt.",
+        description: "run, handoff: as typed at the shell's prompt.",
       },
       timeout_seconds: {
         type: "number",
         minimum: 0,
         maximum: MAX_WAIT_SECONDS,
-        description: `run, wait: longest wait. Default ${DEFAULT_RUN_TIMEOUT_SECONDS}.`,
+        description: `run, wait, handoff: longest wait in this call. Default ${DEFAULT_RUN_TIMEOUT_SECONDS}.`,
       },
       what: {
         type: "string",
@@ -162,6 +203,32 @@ export const TERMINAL_TOOL_DESCRIPTOR: AgentControlMcpToolDescriptor = {
         description:
           'send: pressed after text, e.g. ["Enter"], ["Down","Enter"], ["Ctrl+C"], ["Escape"], ["q"].',
       },
+      requestId: {
+        type: "string",
+        minLength: 1,
+        maxLength: 128,
+        description:
+          "handoff: your id for this hand-off; reuse it to keep waiting on the same one.",
+      },
+      message: {
+        type: "string",
+        minLength: 1,
+        maxLength: USER_ACTION_REQUEST_MESSAGE_MAX_CHARS,
+        description:
+          'handoff, first call: one or two sentences for the user, e.g. "Log in to GitHub: pick HTTPS and finish in the browser."',
+      },
+      need: {
+        type: "string",
+        enum: [...UserActionNeed.literals],
+        description: "handoff: what the user does; default from the screen (sign-in or input).",
+      },
+      expires_in_seconds: {
+        type: "integer",
+        minimum: HANDOFF_EXPIRY_S_MIN,
+        maximum: HANDOFF_EXPIRY_S_MAX,
+        description: "handoff: how long the user has. Default 600.",
+      },
+      cancel: { type: "boolean", description: "handoff: withdraw it." },
       wait_seconds: {
         type: "number",
         minimum: 0,
@@ -207,6 +274,21 @@ const Input = Schema.Struct({
       Schema.isLessThanOrEqualTo(MAX_SEND_WAIT_SECONDS),
     ),
   ),
+  requestId: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
+  message: Schema.optional(
+    Schema.String.check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(USER_ACTION_REQUEST_MESSAGE_MAX_CHARS),
+    ),
+  ),
+  need: Schema.optional(UserActionNeed),
+  expires_in_seconds: Schema.optional(
+    Schema.Int.check(
+      Schema.isGreaterThanOrEqualTo(HANDOFF_EXPIRY_S_MIN),
+      Schema.isLessThanOrEqualTo(HANDOFF_EXPIRY_S_MAX),
+    ),
+  ),
+  cancel: Schema.optional(Schema.Boolean),
   max_chars: Schema.optional(
     Schema.Int.check(
       Schema.isGreaterThanOrEqualTo(MIN_MAX_CHARS),
@@ -235,8 +317,22 @@ export interface TerminalToolDeps {
     "getThreadShellById" | "getThreadCheckpointContext"
   >;
   readonly terminals: TerminalManagerShape;
+  /** User action requests (`handoff`); without them, hand-offs are refused. */
+  readonly userActions?: UserActionWaitDeps;
   /** Tests pass their own clock. */
   readonly now?: () => number;
+}
+
+interface HandoffState {
+  readonly callerRequestId: string;
+  readonly ref: TerminalRef;
+  /** Where the screen was when the user got the terminal: the output after it is reported. */
+  readonly since: Mark;
+  /** The command whose end ends the hand-off, when one runs. */
+  readonly execution: Execution | undefined;
+  hintsRecorded: number;
+  lastHint: string;
+  ended: boolean;
 }
 
 interface TerminalConsentKey extends TaskConsentKey {
@@ -279,6 +375,23 @@ export function withTerminalTools(
   const refusedUntil = new Map<string, number>();
   /** Each thread's current terminal: the one it last used. */
   const currentByThread = new Map<string, string>();
+  /** Pending hand-offs this process opened, by the node's request id. */
+  const handoffs = new Map<string, HandoffState>();
+  // However a hand-off ends (the user's answer, the command's end, expiry, a closed terminal),
+  // the terminal is the agent's again.
+  // Its state stays until the agent's next handoff call reports the end (its output since the
+  // hand-off); at most HANDOFFS_KEPT ended ones are kept for that.
+  registerUserActionSurfaceHook("terminal", (ended) =>
+    Effect.sync(() => {
+      const state = handoffs.get(ended.requestId);
+      if (state === undefined) return;
+      state.ended = true;
+      const finished = [...handoffs].filter(([, entry]) => entry.ended);
+      for (const [id] of finished.slice(0, Math.max(0, finished.length - HANDOFFS_KEPT))) {
+        handoffs.delete(id);
+      }
+    }),
+  );
   let runtime: AgentTerminals | undefined;
   const getRuntime = Effect.suspend(() =>
     runtime !== undefined
@@ -505,14 +618,14 @@ export function withTerminalTools(
       case "waiting-for-input": {
         const prompt = activity.prompt === undefined ? "" : ` at "${activity.prompt}"`;
         if (activity.secret) {
-          return `Activity: waiting-for-input, secret${prompt}${activity.evidence === "tty" ? " (the terminal's echo is off: hidden input)" : ""}. Do not type it and never ask for it in chat: tell the user in chat that terminal ${id} needs them to type it there, then ${call({ action: "wait", terminal: id })}. What they type there never reaches you.`;
+          return `Activity: waiting-for-input, secret${prompt}${activity.evidence === "tty" ? " (the terminal's echo is off: hidden input)" : ""}. Do not type it and never ask for it in chat: hand the terminal to the user with ${call({ action: "handoff", terminal: id, requestId: "<your id>", message: "<what to enter>" })}. What they type there never reaches you.`;
         }
         if (activity.signIn !== undefined) {
           const parts = [
             ...activity.signIn.urls.map((url) => `link ${url}`),
             ...activity.signIn.codes.map((code) => `code ${code}`),
           ].join(", ");
-          return `Activity: waiting-for-input, sign-in${prompt}: the command waits for a sign-in (${parts}). Tell the user in chat to finish it (in the terminal and their browser), then ${call({ action: "wait", terminal: id })}.`;
+          return `Activity: waiting-for-input, sign-in${prompt}: the command waits for a sign-in (${parts}). Hand it to the user with ${call({ action: "handoff", terminal: id, requestId: "<your id>", message: "<what to do>", need: "sign-in" })}; their card shows the link and code.`;
         }
         return `Activity: waiting-for-input${prompt} (no output for ${quiet}). Answer with ${call({ action: "send", terminal: id, text: "…", keys: ["Enter"] })} only if you know the answer; otherwise ask the user in chat.`;
       }
@@ -736,6 +849,7 @@ export function withTerminalTools(
         }
         const t = yield* trackOrFail(rt, { threadId: session.threadId, terminalId });
         if (status === "exited" || status === "error") yield* waitForShell(rt, t);
+        yield* refuseWhileHandedOff(t);
         if (isBusy(rt, t)) return yield* Effect.fail(busyFailure(rt, t));
         currentByThread.set(session.threadId, terminalId);
         return { t, note: undefined as string | undefined };
@@ -758,7 +872,8 @@ export function withTerminalTools(
           terminalId: candidate.terminalId,
         });
         if (Option.isNone(tracked)) continue;
-        if (!isBusy(rt, tracked.value)) {
+        const handedOff = yield* pendingHandoffOn(session.threadId, candidate.terminalId);
+        if (handedOff === undefined && !isBusy(rt, tracked.value)) {
           currentByThread.set(session.threadId, candidate.terminalId);
           return {
             t: tracked.value,
@@ -836,17 +951,9 @@ export function withTerminalTools(
 
   // ── actions ────────────────────────────────────────────────────────
 
-  const runAction = (
-    rt: AgentTerminals,
-    session: AgentControlSessionRecord,
-    authority: AgentControlTurnAuthority,
-    input: Input,
-  ) =>
+  /** Types `command` at `t`'s idle prompt and tracks it; nothing is typed when the shell is busy. */
+  const startCommand = (rt: AgentTerminals, t: TrackedTerminal, command: string) =>
     Effect.gen(function* () {
-      if (input.command === undefined)
-        return yield* Effect.fail(new ToolFailure("run needs `command`."));
-      const command = input.command;
-      const { t, note } = yield* forCommand(rt, session, authority, input.terminal);
       const execution = rt.beginExecution(t, command);
       const data = commandBytes(t, command);
       const sent = yield* write(t, data, true).pipe(
@@ -861,19 +968,32 @@ export function withTerminalTools(
             : Effect.succeed(error),
         ),
       );
-      if (sent !== "sent") {
-        rt.abandonExecution(t, execution);
-        if (isBusyError(sent) && sent.reason !== "unverified") {
-          return yield* Effect.fail(
-            new ToolFailure(
-              sent.reason === "running"
-                ? `Nothing was typed: ${t.ref.terminalId} is running a command. Wait for it (${call({ action: "wait", terminal: t.ref.terminalId })}), or omit \`terminal\` to run in a free terminal of your own.`
-                : `Nothing was typed: someone is typing in ${t.ref.terminalId} right now. Try again in a moment, or omit \`terminal\` to use a terminal of your own.`,
-            ),
-          );
-        }
-        return yield* Effect.fail(new ToolFailure(`Nothing was typed: ${sent.message}`));
+      if (sent === "sent") return execution;
+      rt.abandonExecution(t, execution);
+      if (isBusyError(sent) && sent.reason !== "unverified") {
+        return yield* Effect.fail(
+          new ToolFailure(
+            sent.reason === "running"
+              ? `Nothing was typed: ${t.ref.terminalId} is running a command. Wait for it (${call({ action: "wait", terminal: t.ref.terminalId })}), or omit \`terminal\` to run in a free terminal of your own.`
+              : `Nothing was typed: someone is typing in ${t.ref.terminalId} right now. Try again in a moment, or omit \`terminal\` to use a terminal of your own.`,
+          ),
+        );
       }
+      return yield* Effect.fail(new ToolFailure(`Nothing was typed: ${sent.message}`));
+    });
+
+  const runAction = (
+    rt: AgentTerminals,
+    session: AgentControlSessionRecord,
+    authority: AgentControlTurnAuthority,
+    input: Input,
+  ) =>
+    Effect.gen(function* () {
+      if (input.command === undefined)
+        return yield* Effect.fail(new ToolFailure("run needs `command`."));
+      const command = input.command;
+      const { t, note } = yield* forCommand(rt, session, authority, input.terminal);
+      const execution = yield* startCommand(rt, t, command);
       const timeoutMs = waitMs(input.timeout_seconds, DEFAULT_RUN_TIMEOUT_SECONDS);
       const stoppedAt = yield* awaitExecution(rt, t, execution, timeoutMs, execution.startedAt);
       const block = outputBlock(rt, t, execution, input.max_chars);
@@ -1029,6 +1149,7 @@ export function withTerminalTools(
     Effect.gen(function* () {
       const t = yield* existing(rt, session, authority, input.terminal, "control");
       if (t.exited) return yield* Effect.fail(new ToolFailure(statusOf(rt, t, undefined)));
+      yield* refuseWhileHandedOff(t);
       const keys = yield* Effect.try({
         try: () =>
           encodeKeys(input.keys ?? [], { applicationCursor: t.mirror.applicationCursorKeys }),
@@ -1045,7 +1166,7 @@ export function withTerminalTools(
       if (activity.secret && (typed.length > 0 || keys.some((key) => key.printable))) {
         return yield* Effect.fail(
           new ToolFailure(
-            `Nothing was sent: ${t.ref.terminalId} waits for hidden input${activity.prompt === undefined ? "" : ` ("${activity.prompt}")`}. Never type a password, token or code you were not given, and never ask for one in chat. Tell the user in chat that terminal ${t.ref.terminalId} needs them to type it there, then ${call({ action: "wait", terminal: t.ref.terminalId })}. Keys such as Ctrl+C or Escape still go through.`,
+            `Nothing was sent: ${t.ref.terminalId} waits for hidden input${activity.prompt === undefined ? "" : ` ("${activity.prompt}")`}. Never type a password, token or code you were not given, and never ask for one in chat. Hand the terminal to the user: ${call({ action: "handoff", terminal: t.ref.terminalId, requestId: "<your id>", message: "<what to enter>" })}. Keys such as Ctrl+C or Escape still go through.`,
           ),
         );
       }
@@ -1087,6 +1208,7 @@ export function withTerminalTools(
     Effect.gen(function* () {
       const t = yield* existing(rt, session, authority, input.terminal, "control");
       if (t.exited) return yield* Effect.fail(new ToolFailure(statusOf(rt, t, undefined)));
+      yield* refuseWhileHandedOff(t);
       const execution = t.current;
       const wasRunning = rt.isRunning(t);
       yield* write(t, "\u0003", false).pipe(
@@ -1203,6 +1325,323 @@ export function withTerminalTools(
       );
     });
 
+  // ── hand-off ───────────────────────────────────────────────────────
+
+  /** The pending hand-off of `terminalId`, from the thread's own record (also after a restart). */
+  const pendingHandoffOn = (threadId: ThreadId, terminalId: string) =>
+    deps.userActions === undefined
+      ? Effect.succeed(undefined)
+      : readThreadUserActionRequests(deps.userActions, threadId).pipe(
+          Effect.map((requests) =>
+            requests?.find(
+              (request) =>
+                request.status === "pending" &&
+                request.surface === "terminal" &&
+                request.target === terminalId,
+            ),
+          ),
+          Effect.orElseSucceed(() => undefined),
+        );
+
+  const handoffBusyFailure = (terminalId: string, request: UserActionRequestView) => {
+    const callerRequestId = handoffs.get(request.requestId)?.callerRequestId;
+    return new ToolFailure(
+      `Nothing was typed: ${terminalId} is with the user ("${request.message}"). Do not type into it meanwhile. ${
+        callerRequestId === undefined
+          ? "Call handoff again with the requestId you used to keep waiting"
+          : `${call({ action: "handoff", requestId: callerRequestId })} keeps waiting`
+      }; omit \`terminal\` to work in a terminal of your own.`,
+    );
+  };
+
+  const refuseWhileHandedOff = (t: TrackedTerminal) =>
+    pendingHandoffOn(t.ref.threadId as ThreadId, t.ref.terminalId).pipe(
+      Effect.flatMap((request) =>
+        request === undefined
+          ? Effect.void
+          : Effect.fail(handoffBusyFailure(t.ref.terminalId, request)),
+      ),
+    );
+
+  /** Records the sign-in links and codes now on screen, when they changed (a few per request). */
+  const recordHints = (
+    userActions: UserActionWaitDeps,
+    t: TrackedTerminal,
+    request: UserActionRequestView,
+    state: HandoffState | undefined,
+  ) =>
+    Effect.gen(function* () {
+      if (state === undefined || state.hintsRecorded >= USER_ACTION_HINTS_MAX_PER_REQUEST) return;
+      // Only what the terminal printed since the hand-off began (its command's start): an earlier
+      // sign-in's code still on screen is not this one's.
+      const hint = extractSignIn(t.mirror.linesSince(state.since).lines.slice(-30));
+      if (hint === undefined) return;
+      const payload: UserActionHintActivityPayload = {
+        requestId: request.requestId,
+        links: hint.urls.filter((url) => url.length <= 500 && !/\s/.test(url)).slice(0, 3),
+        codes: hint.codes.filter((code) => /^[A-Za-z0-9-]{1,32}$/.test(code)).slice(0, 3),
+      };
+      if (payload.links.length === 0 && payload.codes.length === 0) return;
+      const key = JSON.stringify([payload.links, payload.codes]);
+      if (key === state.lastHint) return;
+      state.lastHint = key;
+      state.hintsRecorded += 1;
+      const createdAt = new Date(now()).toISOString();
+      const n = state.hintsRecorded;
+      yield* userActions.engine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`user-action:${request.requestId}:hint:${n}`),
+          threadId: t.ref.threadId as ThreadId,
+          activity: {
+            id: EventId.make(`${request.requestId}:hint:${n}`),
+            tone: "info",
+            kind: USER_ACTION_HINT_ACTIVITY_KIND,
+            // Never terminal text: the links and codes stay in the payload, for the card.
+            summary: "Sign-in details from the terminal",
+            payload,
+            turnId: request.turnId === null ? null : TurnId.make(request.turnId),
+            createdAt,
+          },
+          createdAt,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("terminal hand-off hint not recorded", { cause }),
+          ),
+        );
+    });
+
+  /** The node's watch of a pending hand-off: its command's end, its terminal closing, hints. */
+  const watchHandoff = (
+    rt: AgentTerminals,
+    userActions: UserActionWaitDeps,
+    threadId: ThreadId,
+    request: UserActionRequestView,
+  ) =>
+    watchUserActionRequest(userActions, {
+      threadId,
+      requestId: request.requestId,
+      everyMs: HANDOFF_WATCH_MS,
+      check: Effect.gen(function* () {
+        if (request.target === null) return "closed" as const;
+        const ref = { threadId, terminalId: request.target };
+        const known = yield* rt.inspect(ref);
+        if (Option.isNone(known)) return "closed" as const;
+        const status = known.value.snapshot.status;
+        if (status === "exited" || status === "error") return "closed" as const;
+        const tracked = yield* rt.track(ref);
+        if (Option.isNone(tracked) || tracked.value.exited) return "closed" as const;
+        const state = handoffs.get(request.requestId);
+        const execution = state?.execution;
+        if (execution?.ended === true) {
+          return execution.endedBy === "exit" ? ("closed" as const) : ("condition-met" as const);
+        }
+        yield* recordHints(userActions, tracked.value, request, state);
+        return null;
+      }).pipe(Effect.orElseSucceed((): UserActionOutcome | null => null)),
+    });
+
+  const describeHandoffOutcome = (
+    outcome: UserActionOutcome,
+    terminalId: string,
+    execution: Execution | undefined,
+    waitedMs: number,
+  ) => {
+    const after = formatDuration(waitedMs);
+    const running =
+      execution !== undefined && !execution.ended
+        ? ` ${execution.commandLine === undefined ? "Its command" : `\`${shortCommand(execution.commandLine)}\``} is still running.`
+        : "";
+    switch (outcome) {
+      case "condition-met":
+        return execution === undefined
+          ? `The hand-off ended after ${after}.`
+          : `${execution.commandLine === undefined ? "The command" : `\`${shortCommand(execution.commandLine)}\``} ${exitWords(execution)} after ${after}, with the user at the terminal.`;
+      case "done":
+        return `The user said they are done (after ${after}).${running}`;
+      case "declined":
+        return `The user declined ("Won't do") after ${after}. Do not ask again; continue without it, or ask the user in chat what they would prefer.${running}`;
+      case "timeout":
+        return `No answer from the user within ${after}; the hand-off expired.${running} Ask the user in chat before trying again.`;
+      case "closed":
+        return `The terminal ${terminalId} was closed or its shell ended (after ${after}).`;
+      case "cancelled":
+        return `The hand-off was withdrawn after ${after}.${running}`;
+    }
+  };
+
+  const handoffEnded = (
+    rt: AgentTerminals,
+    session: AgentControlSessionRecord,
+    request: UserActionRequestView,
+    input: Input,
+    note: string | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const outcome = request.status as UserActionOutcome;
+      const terminalId = request.target ?? "the terminal";
+      const state = handoffs.get(request.requestId);
+      handoffs.delete(request.requestId);
+      const waitedMs = Math.max(0, now() - Date.parse(request.requestedAt));
+      const headline = describeHandoffOutcome(outcome, terminalId, state?.execution, waitedMs);
+      if (request.target === null) return text(join([note, headline]));
+      const tracked = yield* rt.track({ threadId: session.threadId, terminalId: request.target });
+      if (Option.isNone(tracked)) return text(join([note, headline]));
+      const t = tracked.value;
+      const { lines, startLost } = t.mirror.linesSince(state?.since);
+      const more =
+        state?.execution !== undefined
+          ? readCall(t, 1)
+          : call({ action: "read", terminal: t.ref.terminalId, what: "screen" });
+      const block = formatClip(clipLines(lines, { maxChars: input.max_chars }), () => more, {
+        startLost,
+      });
+      rt.markRead(t, session.threadId, state?.execution);
+      if (state?.execution !== undefined) rt.noteReported(t, session.threadId, state.execution);
+      const activity = yield* rt.activityOf(t);
+      return text(
+        join([
+          note,
+          headline,
+          `Output in ${t.ref.terminalId} since the hand-off (only what the terminal displayed; what the user typed at hidden prompts never reaches you):`,
+          block,
+          statusOf(rt, t, activity),
+        ]),
+      );
+    });
+
+  const handoffAction = (
+    rt: AgentTerminals,
+    session: AgentControlSessionRecord,
+    authority: AgentControlTurnAuthority,
+    input: Input,
+  ) =>
+    Effect.gen(function* () {
+      const userActions = deps.userActions;
+      if (userActions === undefined) {
+        return yield* Effect.fail(new ToolFailure("Hand-offs are unavailable on this node."));
+      }
+      if (input.requestId === undefined) {
+        return yield* Effect.fail(
+          new ToolFailure(
+            "handoff needs `requestId` (your own id for it) and, the first time, `message` for the user.",
+          ),
+        );
+      }
+      const threadId = session.threadId;
+      const requestId: UserActionRequestId = userActionRequestIdFor(threadId, input.requestId);
+      const requests = yield* readThreadUserActionRequests(userActions, threadId).pipe(
+        Effect.mapError(() => new ToolFailure("The thread could not be read.")),
+      );
+      let request = requests?.find((candidate) => candidate.requestId === requestId);
+      if (request !== undefined && request.surface !== "terminal") {
+        return yield* Effect.fail(
+          new ToolFailure(
+            "This requestId already handed over something else. Use a new requestId.",
+          ),
+        );
+      }
+      if (input.cancel === true) {
+        if (request === undefined) {
+          return yield* Effect.fail(new ToolFailure("No hand-off with this requestId."));
+        }
+        if (request.status === "pending") {
+          const ended = yield* resolveUserActionRequest(
+            userActions,
+            threadId,
+            requestId,
+            "cancelled",
+          ).pipe(Effect.orElseSucceed(() => undefined));
+          request = ended ?? request;
+        }
+        return yield* handoffEnded(rt, session, request, input, undefined);
+      }
+
+      let note: string | undefined;
+      if (request === undefined) {
+        if (input.message === undefined) {
+          return yield* Effect.fail(
+            new ToolFailure(
+              "The first handoff call needs `message`: one or two sentences for the user (at most 300 characters).",
+            ),
+          );
+        }
+        let t: TrackedTerminal;
+        let execution: Execution | undefined;
+        if (input.command !== undefined) {
+          const chosen = yield* forCommand(rt, session, authority, input.terminal);
+          t = chosen.t;
+          note = chosen.note;
+          execution = yield* startCommand(rt, t, input.command);
+        } else {
+          t = yield* existing(rt, session, authority, input.terminal, "read");
+          if (t.exited) return yield* Effect.fail(new ToolFailure(statusOf(rt, t, undefined)));
+          yield* refuseWhileHandedOff(t);
+          execution = t.current !== undefined && !t.current.ended ? t.current : undefined;
+        }
+        const activity = yield* rt.activityOf(t);
+        const opened = yield* openUserActionRequest(userActions, {
+          threadId,
+          turnId: authority.turnId,
+          callerRequestId: input.requestId,
+          surface: "terminal",
+          need: input.need ?? (activity.signIn !== undefined ? "sign-in" : "input"),
+          message: input.message,
+          target: t.ref.terminalId,
+          ttlMs: (input.expires_in_seconds ?? 600) * 1_000,
+          maxPending: USER_ACTION_REQUEST_MAX_PENDING_PER_THREAD,
+        }).pipe(
+          Effect.mapError((error) =>
+            error instanceof UserActionRequestOpenError
+              ? new ToolFailure(error.text)
+              : new ToolFailure("The hand-off could not be opened."),
+          ),
+        );
+        request = opened.request;
+        if (opened.created) {
+          const state: HandoffState = {
+            callerRequestId: input.requestId,
+            ref: t.ref,
+            since: execution?.startMark ?? t.mirror.mark(),
+            execution,
+            hintsRecorded: 0,
+            lastHint: "",
+            ended: false,
+          };
+          handoffs.set(request.requestId, state);
+          yield* recordHints(userActions, t, request, state);
+        }
+      }
+
+      if (request.status === "pending") {
+        // Started on every call, once per request in this process: also after a node restart.
+        yield* watchHandoff(rt, userActions, threadId, request);
+        const waited = yield* waitForUserActionRequest(userActions, {
+          threadId,
+          requestId,
+          waitMs: Math.min(
+            USER_ACTION_REQUEST_WAIT_MS_MAX,
+            waitMs(input.timeout_seconds, DEFAULT_WAIT_TIMEOUT_SECONDS),
+          ),
+        }).pipe(Effect.mapError(() => new ToolFailure("The hand-off could not be read.")));
+        if (waited === undefined) {
+          return yield* Effect.fail(new ToolFailure("The hand-off no longer exists."));
+        }
+        request = waited;
+      }
+      if (request.status === "pending") {
+        const terminalId = request.target ?? "the terminal";
+        return text(
+          join([
+            note,
+            `The user has ${terminalId} now and has not finished. ${call({ action: "handoff", requestId: input.requestId })} keeps waiting, or end your turn and tell the user the card is waiting. Do not type into ${terminalId} meanwhile; your other terminals still work. Never ask for the password or code in chat.`,
+          ]),
+        );
+      }
+      return yield* handoffEnded(rt, session, request, input, note);
+    });
+
   const handle = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       const authority = yield* requireAuthority(session);
@@ -1231,6 +1670,8 @@ export function withTerminalTools(
           return yield* listAction(rt, session);
         case "close":
           return yield* closeAction(rt, session, authority, input);
+        case "handoff":
+          return yield* handoffAction(rt, session, authority, input);
       }
     });
 

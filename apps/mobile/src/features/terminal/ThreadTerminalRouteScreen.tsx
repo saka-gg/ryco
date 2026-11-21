@@ -25,6 +25,8 @@ import { ThreadTerminalScreen } from "./ThreadTerminalScreen";
 type ThreadTerminalRouteScreenProps = StaticScreenProps<{
   readonly environmentId: string;
   readonly threadId: string;
+  /** Opens on this terminal (a hand-off card's Show). */
+  readonly terminalId?: string;
 }>;
 
 /**
@@ -40,6 +42,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       key={`${params.environmentId}\u0000${params.threadId}`}
       environmentId={params.environmentId}
       threadId={params.threadId}
+      terminalId={params.terminalId}
     />
   );
 }
@@ -47,8 +50,16 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 function ResolvedThreadTerminalRoute(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  readonly terminalId: string | null;
 }) {
-  const { environmentId, threadId } = props;
+  const { environmentId, threadId, terminalId } = props;
+  // Show on a hand-off card names the terminal that waits for the user.
+  useEffect(() => {
+    if (terminalId === null) return;
+    useTerminalStateStore
+      .getState()
+      .setActiveTerminal(scopeThreadRef(environmentId, threadId), terminalId);
+  }, [environmentId, terminalId, threadId]);
   // A cold deep link drives the supervisor onto this node, as the thread screen does.
   useEffect(() => {
     useStore.getState().setActiveEnvironmentId(environmentId);

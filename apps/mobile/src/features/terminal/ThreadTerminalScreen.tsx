@@ -1,3 +1,5 @@
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { terminalsWaitingForUser } from "@ryco/client-runtime/state/terminal";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { MenuView, type MenuAction, type NativeActionEvent } from "@react-native-menu/menu";
 import { useState } from "react";
@@ -10,6 +12,7 @@ import { AppText as Text } from "../../components/AppText";
 import { showConfirmDialog } from "../../components/ConfirmDialogHost";
 import { EmptyState } from "../../components/EmptyState";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { selectThreadByRef, useStore } from "../../state/threadsRuntime";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { TerminalAccessoryKeys } from "./TerminalAccessoryKeys";
 import { TERMINAL_COLORS } from "./terminalController";
@@ -68,6 +71,12 @@ export function ThreadTerminalScreen(props: {
 }) {
   const { appearance } = useAppearancePreferences();
   const insets = useSafeAreaInsets();
+  // Terminals an agent handed to the user: their tab says it waits for them.
+  const activities = useStore(
+    (state) =>
+      selectThreadByRef(state, scopeThreadRef(props.environmentId, props.threadId))?.activities,
+  );
+  const waitingTerminalIds = terminalsWaitingForUser(activities ?? [], 0);
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const iconColor = String(useThemeColor("--color-icon"));
   const placeholderColor = String(useThemeColor("--color-placeholder"));
@@ -260,6 +269,7 @@ export function ThreadTerminalScreen(props: {
       {view.hasSession ? (
         <TerminalTabs
           tabs={view.tabs}
+          waitingTerminalIds={waitingTerminalIds}
           canAdd={view.canCreateTerminal}
           onSelect={controller.selectTerminal}
           onAdd={() => void controller.createTerminal()}

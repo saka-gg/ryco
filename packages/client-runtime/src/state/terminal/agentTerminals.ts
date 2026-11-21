@@ -16,3 +16,50 @@ export function agentTerminalLabel(terminalId: string): string | null {
   const suffix = terminalId.slice(AGENT_TERMINAL_ID_PREFIX.length);
   return /^\d{1,4}$/.test(suffix) ? `Agent ${Number(suffix)}` : "Agent";
 }
+
+interface HandoffActivity {
+  readonly kind: string;
+  readonly payload: unknown;
+}
+
+const field = (payload: unknown, name: string): unknown =>
+  payload !== null && typeof payload === "object"
+    ? (payload as Record<string, unknown>)[name]
+    : undefined;
+
+/**
+ * The terminals an agent handed to the user that still wait for them (a pending terminal
+ * `user-action.requested` without its `user-action.resolved`, not past its expiry): their tabs
+ * show a marker. Reads only the fields it needs, without the payload schemas, so the chat and the
+ * drawer can call it on every render.
+ */
+export function terminalsWaitingForUser(
+  activities: ReadonlyArray<HandoffActivity>,
+  nowMs: number,
+): ReadonlyArray<string> {
+  const resolved = new Set<string>();
+  for (const activity of activities) {
+    if (activity.kind !== "user-action.resolved") continue;
+    const requestId = field(activity.payload, "requestId");
+    if (typeof requestId === "string") resolved.add(requestId);
+  }
+  const waiting = new Set<string>();
+  for (const activity of activities) {
+    if (activity.kind !== "user-action.requested") continue;
+    const { payload } = activity;
+    const requestId = field(payload, "requestId");
+    const target = field(payload, "target");
+    const expiresAt = field(payload, "expiresAt");
+    if (
+      field(payload, "surface") !== "terminal" ||
+      typeof requestId !== "string" ||
+      typeof target !== "string" ||
+      resolved.has(requestId) ||
+      (typeof expiresAt === "string" && Date.parse(expiresAt) <= nowMs)
+    ) {
+      continue;
+    }
+    waiting.add(target);
+  }
+  return [...waiting];
+}

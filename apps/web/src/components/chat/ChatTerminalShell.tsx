@@ -31,6 +31,8 @@ export interface PersistentThreadTerminalDrawerProps {
   closeShortcutLabel: string | undefined;
   keybindings: ResolvedKeybindingsConfig;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
+  /** Terminals an agent handed to the user that still wait for them. */
+  waitingTerminalIds?: ReadonlyArray<string>;
 }
 
 export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDrawer({
@@ -44,6 +46,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
   closeShortcutLabel,
   keybindings,
   onAddTerminalContext,
+  waitingTerminalIds,
 }: PersistentThreadTerminalDrawerProps) {
   const serverThread = useStore(
     useMemo(() => createThreadStructureSelectorByRef(threadRef), [threadRef]),
@@ -187,6 +190,7 @@ export const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerm
             height={terminalState.terminalHeight}
             terminalIds={terminalState.terminalIds}
             runningTerminalIds={terminalState.runningTerminalIds}
+            {...(waitingTerminalIds === undefined ? {} : { waitingTerminalIds })}
             activeTerminalId={terminalState.activeTerminalId}
             terminalGroups={terminalState.terminalGroups}
             activeTerminalGroupId={terminalState.activeTerminalGroupId}
