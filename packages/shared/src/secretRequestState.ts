@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 
 import {
   foldResolvableRequests,
+  isNodeRequestExpired,
   type PendingThreadRequestActivity,
 } from "./pendingRequestOrder.ts";
 
@@ -65,9 +66,7 @@ export function isSecretRequestExpired(
   request: Pick<SecretRequestView, "expiresAt">,
   nowMs: number,
 ): boolean {
-  const expiresAtMs = Date.parse(request.expiresAt);
-  // An unreadable expiry fails closed: the request can no longer be answered.
-  return !Number.isFinite(expiresAtMs) || nowMs >= expiresAtMs;
+  return isNodeRequestExpired(request.expiresAt, nowMs);
 }
 
 /**

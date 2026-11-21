@@ -625,3 +625,28 @@ export function retainTurnItemsAfterRevert<
       keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
   );
 }
+
+/**
+ * Whether a user action request (a browser tab or terminal handed to the user) in these
+ * activities still waits: requested, not resolved, not past its expiry. Reads only ids and the
+ * expiry string, so views on the boot path can ask without the payload schemas
+ * (`@ryco/shared/userActionRequestState` derives the requests properly for the card).
+ */
+export function hasPendingUserActionRequest(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>,
+  nowMs: number,
+): boolean {
+  const resolved = new Set<unknown>();
+  for (const activity of activities) {
+    if (hasActivityKind(activity, USER_ACTION_RESOLVED_ACTIVITY_KIND)) {
+      resolved.add((activity.payload as { requestId?: unknown } | null)?.requestId);
+    }
+  }
+  return activities.some((activity) => {
+    if (!hasActivityKind(activity, USER_ACTION_REQUESTED_ACTIVITY_KIND)) return false;
+    const payload = activity.payload as { requestId?: unknown; expiresAt?: unknown } | null;
+    if (typeof payload?.requestId !== "string" || resolved.has(payload.requestId)) return false;
+    const expiresAt = typeof payload.expiresAt === "string" ? Date.parse(payload.expiresAt) : NaN;
+    return Number.isFinite(expiresAt) && expiresAt > nowMs;
+  });
+}

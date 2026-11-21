@@ -22,6 +22,8 @@ import { createHash } from "node:crypto";
 import {
   CommandId,
   EventId,
+  USER_ACTION_REQUEST_MESSAGE_MAX_CHARS,
+  USER_ACTION_REQUEST_TARGET_MAX_CHARS,
   USER_ACTION_REQUEST_TTL_MS_DEFAULT,
   USER_ACTION_REQUEST_TTL_MS_MAX,
   USER_ACTION_REQUEST_TTL_MS_MIN,
@@ -40,9 +42,9 @@ import {
   type UserActionRequestFailureReason,
   type UserActionSurface,
 } from "@ryco/contracts";
-import type {
+import {
   UserActionRequestedActivityPayload,
-  UserActionResolvedActivityPayload,
+  type UserActionResolvedActivityPayload,
 } from "@ryco/contracts/user-action-request-details";
 import { userActionOutcomeLine, userActionRequestLabel } from "@ryco/shared/userActionRequests";
 import {
@@ -51,10 +53,17 @@ import {
   pendingUserActionRequests,
   type UserActionRequestView,
 } from "@ryco/shared/userActionRequestState";
-import { Clock, Duration, Effect } from "effect";
-import * as Semaphore from "effect/Semaphore";
+import { Clock, Deferred, Duration, Effect, Stream } from "effect";
+import * as Schema from "effect/Schema";
 
 import type { threadWakeSource, waitUntil } from "../agentControl/eventDrivenWait.ts";
+import {
+  forEachPendingRequestAfterRestart,
+  makeExpiryScheduler,
+  makeKeyedSemaphore,
+  readLiveThread,
+  readThreadRecord,
+} from "../nodeRequests/nodeRequestLifecycle.ts";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { findThreadInArray } from "../orchestration/threadIndex.ts";
 import { userActionSurfaceHook } from "./surfaceHooks.ts";
@@ -82,6 +91,8 @@ export class UserActionRequestOpenError {
   }
 }
 
+const isRequestedPayload = Schema.is(UserActionRequestedActivityPayload);
+
 const failWith = (reason: UserActionRequestFailureReason) =>
   Effect.fail(new UserActionRequestError({ reason }));
 
@@ -104,12 +115,7 @@ export const clampUserActionTtlMs = (ttlMs: number | undefined): number =>
     : Math.min(USER_ACTION_REQUEST_TTL_MS_MAX, Math.max(USER_ACTION_REQUEST_TTL_MS_MIN, ttlMs));
 
 const readThread = (deps: UserActionRequestDeps, threadId: ThreadId) =>
-  Effect.gen(function* () {
-    if (deps.engine.getReadModel === undefined) return undefined;
-    const model = yield* deps.engine.getReadModel();
-    const thread: OrchestrationThread | undefined = deps.findThreadInArray(model.threads, threadId);
-    return thread === undefined || thread.deletedAt !== null ? undefined : thread;
-  });
+  readLiveThread(deps, threadId);
 
 /** Every request of the thread, with an unanswered request past its expiry read as `timeout`. */
 export const readThreadUserActionRequests = (deps: UserActionRequestDeps, threadId: ThreadId) =>
@@ -134,34 +140,13 @@ const readRecordedRequest = (
     ),
   );
 
-// One resolution per request at a time in this process; a second waits for the first. A lock is
-// dropped once nobody holds or waits on it, so locks do not pile up per request.
-const requestLocks = new Map<string, { readonly lock: Semaphore.Semaphore; users: number }>();
+// One resolution per request at a time in this process; a second waits for the first.
+const requestLocks = makeKeyedSemaphore();
 const withRequestLock = <A, E, R>(
   threadId: ThreadId,
   requestId: string,
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-  Effect.suspend(() => {
-    const key = `${threadId}\u0000${requestId}`;
-    let entry = requestLocks.get(key);
-    if (entry === undefined) {
-      entry = { lock: Semaphore.makeUnsafe(1), users: 0 };
-      requestLocks.set(key, entry);
-    }
-    const held = entry;
-    held.users += 1;
-    return held.lock
-      .withPermits(1)(effect)
-      .pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            held.users -= 1;
-            if (held.users === 0 && requestLocks.get(key) === held) requestLocks.delete(key);
-          }),
-        ),
-      );
-  });
+): Effect.Effect<A, E, R> => requestLocks.withPermit(`${threadId}\u0000${requestId}`, effect);
 
 /** Tells the request's surface it ended. Never fails: a surface's failure is only logged. */
 const notifySurface = (
@@ -197,7 +182,15 @@ export const resolveUserActionRequest = (
     threadId,
     requestId,
     Effect.gen(function* () {
-      const request = yield* readRecordedRequest(deps, threadId, requestId);
+      const thread = yield* readThreadRecord(deps, threadId);
+      if (thread === undefined || thread.deletedAt !== null) {
+        // Nothing can be recorded in a deleted thread; its surface still gets its target back.
+        yield* releaseRequestsOf(threadId, thread, requestId);
+        return undefined;
+      }
+      const request = deriveUserActionRequests(thread.activities).find(
+        (candidate) => candidate.requestId === requestId,
+      );
       if (request === undefined || request.status !== "pending") return request;
       const createdAt = new Date(yield* Clock.currentTimeMillis).toISOString();
       const payload: UserActionResolvedActivityPayload = { requestId, outcome };
@@ -218,15 +211,18 @@ export const resolveUserActionRequest = (
           createdAt,
         })
         .pipe(Effect.mapError(() => new UserActionRequestError({ reason: "record-failed" })));
+      opened.delete(requestId);
       yield* notifySurface(threadId, request, outcome);
       return { ...request, status: outcome };
     }),
   );
 
 /** The wait before trying a failed expiry record again: doubling from this, up to ten minutes. */
-const EXPIRY_RETRY_MS = 5_000;
-const EXPIRY_RETRY_MAX_MS = 10 * 60 * 1_000;
-const scheduled = new Set<string>();
+const scheduleExpiry = makeExpiryScheduler<UserActionRequestError>({
+  retryMs: 5_000,
+  maxRetryMs: 10 * 60 * 1_000,
+  onFailure: () => Effect.logWarning("Could not record a user action request's expiry"),
+});
 
 /**
  * Ends the request as `timeout` when its time is up, trying again with backoff while the record
@@ -238,70 +234,166 @@ export const scheduleUserActionRequestExpiry = (
   threadId: ThreadId,
   request: Pick<UserActionRequestView, "requestId" | "expiresAt">,
 ) =>
-  Effect.gen(function* () {
-    const key = `${threadId}\u0000${request.requestId}`;
-    if (scheduled.has(key)) return;
-    scheduled.add(key);
-    const expiresAtMs = Date.parse(request.expiresAt);
-    const delayMs = Number.isFinite(expiresAtMs)
-      ? Math.max(0, expiresAtMs - (yield* Clock.currentTimeMillis))
-      : 0;
-    const attempt = (retryMs: number): Effect.Effect<void> =>
-      resolveUserActionRequest(deps, threadId, request.requestId, "timeout").pipe(
-        Effect.asVoid,
-        Effect.catch(() =>
-          Effect.logWarning("Could not record a user action request's expiry").pipe(
-            Effect.andThen(Effect.sleep(Duration.millis(retryMs))),
-            Effect.andThen(
-              Effect.suspend(() => attempt(Math.min(retryMs * 2, EXPIRY_RETRY_MAX_MS))),
-            ),
-          ),
-        ),
-      );
-    yield* Effect.sleep(Duration.millis(delayMs)).pipe(
-      Effect.andThen(attempt(EXPIRY_RETRY_MS)),
-      Effect.ensuring(Effect.sync(() => scheduled.delete(key))),
-      Effect.forkDetach,
-    );
-  });
+  scheduleExpiry(
+    `${threadId}\u0000${request.requestId}`,
+    request.expiresAt,
+    resolveUserActionRequest(deps, threadId, request.requestId, "timeout").pipe(Effect.asVoid),
+  );
 
-type RestartedThread = Pick<OrchestrationThread, "id" | "deletedAt" | "activities">;
+// ------------------------------------------------------------- deleted and archived threads
 
 /**
- * After a restart: expiry timers for every pending request. A surface's own watch (its
- * condition, its target closing) does not survive the restart; the user's answer and the expiry
- * still end the request.
+ * The surface and target of every request this process opened or found pending, until it ends:
+ * a thread deleted for good leaves no activities to read them from, and its surface must still
+ * get its target back.
+ */
+const opened = new Map<
+  string,
+  { readonly threadId: ThreadId; readonly request: UserActionRequestView }
+>();
+const released = new Set<string>();
+const remember = (threadId: ThreadId, request: UserActionRequestView) => {
+  if (request.status === "pending") opened.set(request.requestId, { threadId, request });
+};
+
+/**
+ * Gives the surfaces of a deleted or archived thread's pending requests their targets back
+ * (`cancelled`), and records the end where the thread can still take it (archived). Only
+ * `requestId`'s when given.
+ */
+const releaseRequestsOf = (
+  threadId: ThreadId,
+  thread: Pick<OrchestrationThread, "activities"> | undefined,
+  requestId?: string,
+) =>
+  Effect.gen(function* () {
+    const pending = new Map<string, UserActionRequestView>();
+    for (const entry of opened.values()) {
+      if (entry.threadId === threadId) pending.set(entry.request.requestId, entry.request);
+    }
+    if (thread !== undefined) {
+      for (const request of pendingUserActionRequests(thread.activities)) {
+        pending.set(request.requestId, request);
+      }
+    }
+    for (const request of pending.values()) {
+      if (requestId !== undefined && request.requestId !== requestId) continue;
+      opened.delete(request.requestId);
+      // A deleted thread keeps its requests pending for good: release each once.
+      if (released.has(request.requestId)) continue;
+      released.add(request.requestId);
+      if (released.size > 1_000) {
+        const oldest = released.values().next().value;
+        if (oldest !== undefined) released.delete(oldest);
+      }
+      yield* notifySurface(threadId, request, "cancelled");
+    }
+  });
+
+/** Ends the pending requests of a thread that was deleted or archived: see {@link releaseRequestsOf}. */
+export const releaseUserActionRequestsOfThread = (
+  deps: UserActionRequestDeps,
+  threadId: ThreadId,
+) =>
+  Effect.gen(function* () {
+    const thread = yield* readThreadRecord(deps, threadId);
+    if (thread !== undefined && thread.deletedAt === null) {
+      // Archived: the thread can still record how its requests ended (which releases them).
+      for (const request of pendingUserActionRequests(thread.activities)) {
+        yield* resolveUserActionRequest(deps, threadId, request.requestId, "cancelled").pipe(
+          Effect.ignore,
+        );
+      }
+    }
+    // What is still pending now (a record that failed, a thread deleted for good) is released
+    // without one, once.
+    yield* releaseRequestsOf(threadId, yield* readThreadRecord(deps, threadId));
+  });
+
+const isThreadRemoval = (event: OrchestrationEvent) =>
+  event.type === "thread.deleted" ||
+  event.type === "thread.trashed" ||
+  event.type === "thread.archived";
+
+let removalWatchStarted = false;
+
+export interface UserActionRemovalDeps extends UserActionRequestDeps {
+  readonly engine: UserActionRequestDeps["engine"] &
+    Pick<OrchestrationEngineShape, "subscribeDomainEvents">;
+}
+
+/**
+ * Started once per process, with the first request opened or restored: a thread deleted, moved to
+ * the trash or archived while it waits on the user gives its surfaces their targets back at once,
+ * instead of leaving a tab or terminal locked until the expiry.
+ */
+export const watchThreadRemovals = (deps: UserActionRemovalDeps) =>
+  Effect.gen(function* () {
+    if (removalWatchStarted) return;
+    removalWatchStarted = true;
+    const subscribed = yield* Deferred.make<void>();
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const events = yield* deps.engine.subscribeDomainEvents;
+        yield* Deferred.succeed(subscribed, undefined);
+        yield* Stream.runForEach(events, (event) =>
+          isThreadRemoval(event) && event.aggregateKind === "thread"
+            ? releaseUserActionRequestsOfThread(deps, event.aggregateId as ThreadId).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Could not release a removed thread's hand-offs", { cause }),
+                ),
+              )
+            : Effect.void,
+        );
+      }),
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          removalWatchStarted = false;
+        }),
+      ),
+      Effect.forkDetach,
+    );
+    // Returns once subscribed, so a removal right after the first wait is not missed.
+    yield* Deferred.await(subscribed).pipe(Effect.timeoutOption("2 seconds"));
+  });
+
+type RestartedThread = Pick<OrchestrationThread, "id" | "deletedAt" | "archivedAt" | "activities">;
+
+/**
+ * After a restart: expiry timers for every pending request, and the release of those whose thread
+ * was archived meanwhile. A surface's own watch (its condition, its target closing) does not
+ * survive the restart; the user's answer and the expiry still end the request.
  */
 export const reconcileUserActionRequestsAfterRestart = (
-  deps: UserActionRequestDeps,
+  deps: UserActionRemovalDeps,
   threads: ReadonlyArray<RestartedThread>,
 ) =>
-  Effect.forEach(
-    threads.filter((thread) => thread.deletedAt === null),
-    (thread) =>
-      Effect.forEach(
-        pendingUserActionRequests(thread.activities),
-        (request) => scheduleUserActionRequestExpiry(deps, thread.id, request),
-        { discard: true },
-      ),
-    { discard: true },
-  );
+  Effect.gen(function* () {
+    yield* watchThreadRemovals(deps);
+    yield* forEachPendingRequestAfterRestart(
+      threads,
+      (activities) => pendingUserActionRequests(activities),
+      (threadId, request) =>
+        Effect.gen(function* () {
+          remember(threadId, request);
+          yield* scheduleUserActionRequestExpiry(deps, threadId, request);
+        }),
+    );
+    for (const thread of threads) {
+      if (thread.deletedAt === null && thread.archivedAt === null) continue;
+      if (pendingUserActionRequests(thread.activities).length === 0) continue;
+      yield* releaseUserActionRequestsOfThread(deps, thread.id);
+    }
+  });
 
 // Requests one thread opens, one at a time in this process: the pending count and the record of a
 // new one cannot interleave with another call's.
-const openLocks = new Map<string, Semaphore.Semaphore>();
+const openLocks = makeKeyedSemaphore();
 const withThreadOpenLock = <A, E, R>(
   threadId: ThreadId,
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-  Effect.suspend(() => {
-    let lock = openLocks.get(threadId);
-    if (lock === undefined) {
-      lock = Semaphore.makeUnsafe(1);
-      openLocks.set(threadId, lock);
-    }
-    return lock.withPermits(1)(effect);
-  });
+): Effect.Effect<A, E, R> => openLocks.withPermit(threadId, effect);
 
 export interface OpenUserActionRequestInput {
   readonly threadId: ThreadId;
@@ -347,6 +439,7 @@ export const findUserActionRequest = (
         ),
       );
     }
+    if (existing !== undefined) remember(input.threadId, existing);
     return { requestId, existing, requests };
   });
 
@@ -372,14 +465,24 @@ export const openUserActionRequest = (
       }
       const nowMs = yield* Clock.currentTimeMillis;
       const createdAt = new Date(nowMs).toISOString();
+      const message = input.message.trim();
       const payload: UserActionRequestedActivityPayload = {
         requestId,
         surface: input.surface,
         need: input.need,
-        message: input.message,
+        message,
         ...(input.target === undefined ? {} : { target: input.target }),
         expiresAt: new Date(nowMs + clampUserActionTtlMs(input.ttlMs)).toISOString(),
       };
+      // Only a payload every reader accepts is recorded: one the derivation drops would leave the
+      // surface handed over with no card and nothing pending.
+      if (!isRequestedPayload(payload)) {
+        return yield* Effect.fail(
+          new UserActionRequestOpenError(
+            `The message must be 1 to ${USER_ACTION_REQUEST_MESSAGE_MAX_CHARS} characters, and the target at most ${USER_ACTION_REQUEST_TARGET_MAX_CHARS}.`,
+          ),
+        );
+      }
       yield* deps.engine
         .dispatch({
           type: "thread.activity.append",
@@ -406,13 +509,14 @@ export const openUserActionRequest = (
         requestId,
         surface: input.surface,
         need: input.need,
-        message: input.message,
+        message,
         target: input.target ?? null,
         requestedAt: createdAt,
         expiresAt: payload.expiresAt,
         turnId: input.turnId,
         status: "pending",
       };
+      remember(input.threadId, request);
       return { request, created: true };
     }),
   );
@@ -456,18 +560,21 @@ export const waitForUserActionRequest = (
     readonly waitMs: number;
   },
 ) =>
-  deps
-    .waitUntil({
-      sources: [deps.threadWakeSource(deps.engine, [input.threadId], isResolutionEvent)],
-      check: currentUserActionRequest(deps, input.threadId, input.requestId).pipe(
-        Effect.map((current) => ({
-          done: current === undefined || current.status !== "pending",
-          value: current,
-        })),
-      ),
-      timeoutMs: input.waitMs,
-    })
-    .pipe(Effect.map((outcome) => outcome.value));
+  watchThreadRemovals(deps).pipe(
+    Effect.andThen(
+      deps.waitUntil({
+        sources: [deps.threadWakeSource(deps.engine, [input.threadId], isResolutionEvent)],
+        check: currentUserActionRequest(deps, input.threadId, input.requestId).pipe(
+          Effect.map((current) => ({
+            done: current === undefined || current.status !== "pending",
+            value: current,
+          })),
+        ),
+        timeoutMs: input.waitMs,
+      }),
+    ),
+    Effect.map((outcome) => outcome.value),
+  );
 
 /**
  * A surface's watch of its own request: every `everyMs`, `check` says whether the request ended on
@@ -489,7 +596,15 @@ export const watchUserActionRequest = (
     if (watched.has(key)) return Effect.void;
     watched.add(key);
     const tick: Effect.Effect<void> = Effect.gen(function* () {
-      const request = yield* readRecordedRequest(deps, input.threadId, input.requestId);
+      const thread = yield* readThreadRecord(deps, input.threadId);
+      if (thread === undefined || thread.deletedAt !== null || thread.archivedAt !== null) {
+        // Removed while it waited (the removal watch may have missed it): release it here.
+        yield* releaseUserActionRequestsOfThread(deps, input.threadId);
+        return;
+      }
+      const request = deriveUserActionRequests(thread.activities).find(
+        (candidate) => candidate.requestId === input.requestId,
+      );
       if (request === undefined || request.status !== "pending") return;
       if (isUserActionRequestExpired(request, yield* Clock.currentTimeMillis)) {
         // The expiry timer records it; stop watching.

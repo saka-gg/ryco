@@ -530,6 +530,8 @@ describe("server boot import boundaries", () => {
     const userActionRequests = [
       "apps/server/src/userActionRequests/userActionRequests.ts",
       "packages/shared/src/userActionRequests.ts",
+      // Shared with secret requests: locks, expiry timers, restart rescheduling.
+      "apps/server/src/nodeRequests/nodeRequestLifecycle.ts",
     ];
     const boot = staticGraph("src/cliMain.ts").files;
     expect(userActionRequests.filter((file) => boot.includes(file))).toEqual([]);
