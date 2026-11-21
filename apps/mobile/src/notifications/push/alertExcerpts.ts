@@ -83,7 +83,9 @@ export function alertExcerptPrompts(input: {
       partial: false,
     };
   }
-  if (record.k !== "input") return null;
+  // A fixed label (a user action request's "Login required in browser") carries no card: the
+  // thread's live one shows once it loads.
+  if (record.k !== "input" || !("u" in record.x)) return null;
   const question = record.x.u;
   return {
     approvals: [],

@@ -140,6 +140,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   secretRequests: Schema.optionalKey(Schema.Boolean),
   /**
+   * `userActions.answerRequest`: Done or Won't do on an agent's user action request (a browser
+   * tab or terminal handed to the user). Absent on older servers, whose agents cannot hand one
+   * over.
+   */
+  userActionRequests: Schema.optionalKey(Schema.Boolean),
+  /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.
    */

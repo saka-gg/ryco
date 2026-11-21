@@ -47,6 +47,8 @@ enum PushAlertOpener {
   private static let maxRequestIdLength = 160
   /// `PUSH_ALERT_EXCERPT_MAX_BYTES`; a larger excerpt is not one a node sends.
   private static let maxExcerptBytes = 1_024
+  /// `PUSH_ALERT_LABEL_MAX_LENGTH`; a longer label is not one a node sends.
+  private static let maxLabelLength = 80
   /// The approval card's words for each request kind (`PendingApprovalCard`).
   static let requestKindLabels: [String: String] = [
     "command": "Run command",
@@ -163,8 +165,10 @@ enum PushAlertOpener {
     )
   }
 
-  /// An approval's or question's excerpt (`x`), checked key by key; anything else is ignored, so
-  /// the alert shows as it did before excerpts. Older builds never read `x` at all.
+  /// An approval's or question's excerpt (`x`), or an input alert's fixed label (`l`, such as
+  /// "Login required in browser" for a user action request), checked key by key; anything else
+  /// is ignored, so the alert shows as it did before excerpts. Older builds never read `x` at
+  /// all, and builds from before labels ignore `l`.
   static func excerpt(kind: String, value: Any?) -> (line: String, json: Data)? {
     guard let value = value as? [String: Any] else { return nil }
     var clean: [String: Any]
@@ -204,6 +208,13 @@ enum PushAlertOpener {
       if let cut = input["c"] { guard let flag = cut as? Bool, flag else { return nil }; fields["c"] = true }
       clean = ["u": fields]
       line = (questions[0]["q"] as? String) ?? ""
+    } else if kind == "input", let labelled = value["l"] as? [String: Any] {
+      guard let label = labelled["t"] as? String,
+        !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        label.count <= maxLabelLength
+      else { return nil }
+      clean = ["l": ["t": label]]
+      line = label
     } else {
       return nil
     }

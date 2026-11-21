@@ -91,6 +91,12 @@ const EXCERPT_CASES = [
       },
     },
   }),
+  // An input alert for a user action request: its fixed label only.
+  sealedCase("label", { k: "input", x: { l: { t: "Login required in browser", extra: 1 } } }),
+  sealedCase("label-on-approval", { k: "approval", rq: "a", x: { l: { t: "Login required" } } }),
+  sealedCase("label-blank", { k: "input", x: { l: { t: " " } } }),
+  sealedCase("label-long", { k: "input", x: { l: { t: "x".repeat(81) } } }),
+  sealedCase("label-not-text", { k: "input", x: { l: { t: 7 } } }),
   // An excerpt that does not match the alert's kind, or is malformed, is ignored: the alert
   // shows as it did before excerpts.
   sealedCase("mismatched", { k: "completed", x: { a: { k: "command", d: "ls" } } }),
@@ -232,6 +238,18 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           c: true,
         },
       });
+      expect(excerpts.label).toMatchObject({
+        kind: "input",
+        body: "Fix the login race",
+        excerptLine: "Login required in browser",
+      });
+      expect(JSON.parse(String(excerpts.label!.excerpt!))).toEqual({
+        l: { t: "Login required in browser" },
+      });
+      expect(JSON.parse(String(excerpts.label!.record!))).toMatchObject({
+        k: "input",
+        x: { l: { t: "Login required in browser" } },
+      });
       expect(excerpts["excerpt-and-badge"]).toMatchObject({
         excerptLine: "Change file: src/main.ts",
         badgeCount: 4,
@@ -250,7 +268,15 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
         badgeCount: 2,
       });
       expect(excerpts.approval).toMatchObject({ badgeCount: null });
-      for (const name of ["mismatched", "malformed", "none"]) {
+      for (const name of [
+        "mismatched",
+        "malformed",
+        "none",
+        "label-on-approval",
+        "label-blank",
+        "label-long",
+        "label-not-text",
+      ]) {
         expect(excerpts[name], name).toMatchObject({
           excerptLine: null,
           excerpt: null,

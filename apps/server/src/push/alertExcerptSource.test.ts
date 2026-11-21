@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { ThreadId } from "@ryco/contracts";
 import { Effect } from "effect";
+import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -177,6 +178,123 @@ describe("alert excerpt source", () => {
           },
         },
       );
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+
+  it.effect("names a pending user action request by its fixed label only", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse(at(30)));
+      const requestId = (letter: string) => `user-action-${letter.repeat(32)}`;
+      const requested = (row: {
+        readonly id: string;
+        readonly sequence: number;
+        readonly letter: string;
+        readonly surface: string;
+        readonly need: string;
+        readonly expiresAt?: string;
+        readonly thread?: string;
+      }) =>
+        activity({
+          id: row.id,
+          kind: "user-action.requested",
+          sequence: row.sequence,
+          ...(row.thread === undefined ? {} : { thread: row.thread }),
+          payload: {
+            requestId: requestId(row.letter),
+            surface: row.surface,
+            need: row.need,
+            message: "Sign in at https://example.test/login?token=SECRET",
+            target: "tab-1",
+            expiresAt: row.expiresAt ?? "2026-11-10T13:00:00.000Z",
+          },
+        });
+      const resolved = (id: string, sequence: number, letter: string) =>
+        activity({
+          id,
+          kind: "user-action.resolved",
+          sequence,
+          payload: { requestId: requestId(letter), outcome: "done" },
+        });
+      const read = readAlertExcerpt({ threadId, kind: "input", approvalRequestId: null });
+
+      expect(yield* read).toBeNull();
+      yield* requested({ id: "u1", sequence: 1, letter: "a", surface: "browser", need: "sign-in" });
+      expect(yield* read).toEqual({ l: { t: "Login required in browser" } });
+      // The newest unanswered one; an answered one never names the alert.
+      yield* requested({
+        id: "u2",
+        sequence: 2,
+        letter: "b",
+        surface: "terminal",
+        need: "verification",
+      });
+      expect(yield* read).toEqual({ l: { t: "Verification required in terminal" } });
+      yield* resolved("u2-done", 3, "b");
+      expect(yield* read).toEqual({ l: { t: "Login required in browser" } });
+      // An expired one, and another thread's, are left out.
+      yield* requested({
+        id: "u3",
+        sequence: 4,
+        letter: "c",
+        surface: "browser",
+        need: "captcha",
+        expiresAt: at(10),
+      });
+      yield* requested({
+        id: "u4",
+        sequence: 5,
+        letter: "d",
+        surface: "browser",
+        need: "consent",
+        thread: "thread-other",
+      });
+      expect(yield* read).toEqual({ l: { t: "Login required in browser" } });
+      // Nothing of the agent's message reaches the alert.
+      expect(JSON.stringify(yield* read)).not.toContain("example.test");
+      yield* resolved("u1-done", 6, "a");
+      expect(yield* read).toBeNull();
+      // Never for an approval alert.
+      yield* requested({ id: "u5", sequence: 7, letter: "e", surface: "browser", need: "sign-in" });
+      expect(
+        yield* readAlertExcerpt({ threadId, kind: "approval", approvalRequestId: null }),
+      ).toBeNull();
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+
+  it.effect("prefers an open question over a user action request", () =>
+    Effect.gen(function* () {
+      yield* activity({
+        id: "u1",
+        kind: "user-action.requested",
+        sequence: 1,
+        payload: {
+          requestId: `user-action-${"a".repeat(32)}`,
+          surface: "browser",
+          need: "sign-in",
+          message: "Sign in",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        },
+      });
+      yield* activity({
+        id: "q1",
+        kind: "user-input.requested",
+        sequence: 2,
+        payload: {
+          requestId: "question-1",
+          questions: [
+            {
+              id: "x",
+              header: "Pick",
+              question: "Which one?",
+              options: [{ label: "A", description: "First" }],
+            },
+          ],
+        },
+      });
+      yield* question({ requestId: "question-1", pending: true, second: 2 });
+      expect(
+        yield* readAlertExcerpt({ threadId, kind: "input", approvalRequestId: null }),
+      ).toMatchObject({ u: { rq: "question-1" } });
     }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
 });

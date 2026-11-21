@@ -85,6 +85,7 @@ export * from "./threadFork.ts";
 export * from "./threadForkCarried.ts";
 export * from "./threadLocalServers.ts";
 export * from "./secretRequest.ts";
+export * from "./userActionRequest.ts";
 export * from "./claudeCache.ts";
 
 export * from "./storage.ts";
