@@ -93,9 +93,17 @@ const HandoffArgs = Schema.Struct({
   cancel: Schema.optionalKey(Schema.Boolean),
 });
 
-const text = (value: string, structured: unknown, isError = false): AgentControlMcpToolResult => ({
+/**
+ * A result whose structured part repeats the sentences (`message`): some clients (Claude) show the
+ * model only `structuredContent` when it is there, and the sentences are what steers the agent.
+ */
+const text = (
+  value: string,
+  structured: Record<string, unknown> | undefined,
+  isError = false,
+): AgentControlMcpToolResult => ({
   content: [{ type: "text", text: value }],
-  ...(structured === undefined ? {} : { structuredContent: structured }),
+  ...(structured === undefined ? {} : { structuredContent: { ...structured, message: value } }),
   ...(isError ? { isError: true } : {}),
 });
 const refusal = (value: string) => text(value, undefined, true);

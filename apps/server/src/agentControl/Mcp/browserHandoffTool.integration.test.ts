@@ -223,6 +223,8 @@ layer("ryco_browser handoff", (it) => {
         });
         const ended = yield* Fiber.join(waiting);
         const words = textOf(ended);
+        // The structured result carries the same sentences: some clients show only it.
+        assert.strictEqual((ended.structuredContent as { message: string }).message, words);
         assert.match(words, /The user said they are done/);
         assert.match(words, /Page now: https:\/\/jira\.test\/dashboard — "Dashboard"/);
         assert.match(words, /a password or code field still on the page was emptied/);
