@@ -50,8 +50,14 @@ import {
   type SecretRequestView,
 } from "@ryco/shared/secretRequestState";
 import { Clock, Duration, Effect, Option } from "effect";
-import * as Semaphore from "effect/Semaphore";
 
+import {
+  forEachPendingRequestAfterRestart,
+  makeBusyGuard,
+  makeExpiryScheduler,
+  makeKeyedSemaphore,
+  readLiveThread,
+} from "../nodeRequests/nodeRequestLifecycle.ts";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { findThreadInArray } from "../orchestration/threadIndex.ts";
@@ -100,13 +106,7 @@ const requestedActivityId = (requestId: SecretRequestId) => `${requestId}:reques
 const resolvedActivityId = (requestId: SecretRequestId) => `${requestId}:resolved`;
 
 /** The thread as the engine holds it now (its command read model keeps the secret activities). */
-const readThread = (deps: SecretRequestDeps, threadId: ThreadId) =>
-  Effect.gen(function* () {
-    if (deps.engine.getReadModel === undefined) return undefined;
-    const model = yield* deps.engine.getReadModel();
-    const thread: OrchestrationThread | undefined = deps.findThreadInArray(model.threads, threadId);
-    return thread === undefined || thread.deletedAt !== null ? undefined : thread;
-  });
+const readThread = (deps: SecretRequestDeps, threadId: ThreadId) => readLiveThread(deps, threadId);
 
 /** Every request of the thread, with an unanswered request past its expiry read as `expired`. */
 export const readThreadSecretRequests = (deps: SecretRequestDeps, threadId: ThreadId) =>
@@ -138,19 +138,13 @@ export const threadCheckout = (deps: SecretRequestDeps, threadId: ThreadId) =>
   });
 
 // One answer, expiry or expiry check per request at a time in this process.
-const busy = new Set<string>();
+const busyGuard = makeBusyGuard(() => new SecretRequestError({ reason: "busy" }));
 const withRequestLock = <A, E, R>(
   threadId: ThreadId,
   requestId: SecretRequestId,
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | SecretRequestError, R> => {
-  const key = `${threadId}\u0000${requestId}`;
-  return Effect.suspend((): Effect.Effect<A, E | SecretRequestError, R> => {
-    if (busy.has(key)) return failWith("busy");
-    busy.add(key);
-    return effect.pipe(Effect.ensuring(Effect.sync(() => busy.delete(key))));
-  });
-};
+): Effect.Effect<A, E | SecretRequestError, R> =>
+  busyGuard(`${threadId}\u0000${requestId}`, effect);
 
 const RESOLVED_SUMMARY: Record<SecretRequestResolution, (key: string, file: string) => string> = {
   provided: (key, file) => `${key} saved to ${file}`,
@@ -225,7 +219,11 @@ export const expireSecretRequestIfDue = (
 export const SECRET_REQUEST_EXPIRY_RETRY_MS = 5_000;
 const SECRET_REQUEST_EXPIRY_RETRY_MAX_MS = 60 * 60 * 1_000;
 
-const scheduled = new Set<string>();
+const scheduleExpiry = makeExpiryScheduler<SecretRequestError>({
+  retryMs: SECRET_REQUEST_EXPIRY_RETRY_MS,
+  maxRetryMs: SECRET_REQUEST_EXPIRY_RETRY_MAX_MS,
+  onFailure: logExpiryFailure,
+});
 
 /**
  * Expires the request when its day is up, trying again with backoff while the record fails (or
@@ -238,33 +236,11 @@ export const scheduleSecretRequestExpiry = (
   threadId: ThreadId,
   request: Pick<SecretRequestView, "requestId" | "expiresAt">,
 ) =>
-  Effect.gen(function* () {
-    const key = `${threadId}\u0000${request.requestId}`;
-    if (scheduled.has(key)) return;
-    scheduled.add(key);
-    const expiresAtMs = Date.parse(request.expiresAt);
-    const delayMs = Number.isFinite(expiresAtMs)
-      ? Math.max(0, expiresAtMs - (yield* Clock.currentTimeMillis))
-      : 0;
-    const attempt = (retryMs: number): Effect.Effect<void> =>
-      recordExpiryIfDue(deps, threadId, request.requestId).pipe(
-        Effect.catch((error) =>
-          logExpiryFailure(error).pipe(
-            Effect.andThen(Effect.sleep(Duration.millis(retryMs))),
-            Effect.andThen(
-              Effect.suspend(() =>
-                attempt(Math.min(retryMs * 2, SECRET_REQUEST_EXPIRY_RETRY_MAX_MS)),
-              ),
-            ),
-          ),
-        ),
-      );
-    yield* Effect.sleep(Duration.millis(delayMs)).pipe(
-      Effect.andThen(attempt(SECRET_REQUEST_EXPIRY_RETRY_MS)),
-      Effect.ensuring(Effect.sync(() => scheduled.delete(key))),
-      Effect.forkDetach,
-    );
-  });
+  scheduleExpiry(
+    `${threadId}\u0000${request.requestId}`,
+    request.expiresAt,
+    recordExpiryIfDue(deps, threadId, request.requestId),
+  );
 
 type RestartedThread = Pick<OrchestrationThread, "id" | "deletedAt" | "activities">;
 
@@ -273,15 +249,10 @@ export const scheduleSecretRequestExpiries = (
   deps: SecretRequestDeps,
   threads: ReadonlyArray<RestartedThread>,
 ) =>
-  Effect.forEach(
-    threads.filter((thread) => thread.deletedAt === null),
-    (thread) =>
-      Effect.forEach(
-        pendingSecretRequests(thread.activities),
-        (request) => scheduleSecretRequestExpiry(deps, thread.id, request),
-        { discard: true },
-      ),
-    { discard: true },
+  forEachPendingRequestAfterRestart(
+    threads,
+    (activities) => pendingSecretRequests(activities),
+    (threadId, request) => scheduleSecretRequestExpiry(deps, threadId, request),
   );
 
 /**
@@ -334,19 +305,11 @@ export const reconcileSecretRequestsAfterRestart = (
 
 // Requests one thread opens, one at a time in this process: the count of pending requests and
 // the record of a new one cannot interleave with another call's.
-const openLocks = new Map<string, Semaphore.Semaphore>();
+const openLocks = makeKeyedSemaphore();
 const withThreadOpenLock = <A, E, R>(
   threadId: ThreadId,
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> =>
-  Effect.suspend(() => {
-    let lock = openLocks.get(threadId);
-    if (lock === undefined) {
-      lock = Semaphore.makeUnsafe(1);
-      openLocks.set(threadId, lock);
-    }
-    return lock.withPermits(1)(effect);
-  });
+): Effect.Effect<A, E, R> => openLocks.withPermit(threadId, effect);
 
 /** Why a request could not be opened, in words for the agent. */
 export class SecretRequestOpenError {

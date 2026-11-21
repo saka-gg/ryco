@@ -64,13 +64,31 @@ export const PushAlertInputExcerpt = Schema.Struct({
 });
 export type PushAlertInputExcerpt = typeof PushAlertInputExcerpt.Type;
 
+/** Longest fixed label (`PushAlertLabelExcerpt`) a sealed payload carries. */
+export const PUSH_ALERT_LABEL_MAX_LENGTH = 80;
+
 /**
- * The excerpt (`x`) of an approval or question alert (`docs/push-alerts.md`): sealed with the
- * rest, at most {@link PUSH_ALERT_EXCERPT_MAX_BYTES}. Older phones ignore it.
+ * A fixed label's excerpt: an input alert for something other than a question, such as a user
+ * action request ("Login required in browser", `userActionRequestLabel` in
+ * `@ryco/shared/userActionRequests`). Only the label, never the agent's message, a URL or what a
+ * page or terminal showed; it carries no card, so the app shows the thread's live one once it
+ * loads. Phones from before it ignore it (their extension reads only `a` and `u`) and show the
+ * alert as without an excerpt.
+ */
+export const PushAlertLabelExcerpt = Schema.Struct({
+  t: TrimmedNonEmptyString.check(Schema.isMaxLength(PUSH_ALERT_LABEL_MAX_LENGTH)),
+});
+export type PushAlertLabelExcerpt = typeof PushAlertLabelExcerpt.Type;
+
+/**
+ * The excerpt (`x`) of an approval or input alert (`docs/push-alerts.md`): sealed with the
+ * rest, at most {@link PUSH_ALERT_EXCERPT_MAX_BYTES}. Older phones ignore it, and a key they do
+ * not know.
  */
 export const PushAlertExcerpt = Schema.Union([
   Schema.Struct({ a: PushAlertApprovalExcerpt }),
   Schema.Struct({ u: PushAlertInputExcerpt }),
+  Schema.Struct({ l: PushAlertLabelExcerpt }),
 ]);
 export type PushAlertExcerpt = typeof PushAlertExcerpt.Type;
 

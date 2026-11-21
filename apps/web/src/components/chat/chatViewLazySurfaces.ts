@@ -54,6 +54,14 @@ export const LazySecretRequestCards = preloadableLazy(() =>
   import("./SecretRequestCards").then((module) => module.SecretRequestCards),
 );
 
+/**
+ * The cards for an agent's user action requests (a browser tab or terminal handed to the user).
+ * Only threads whose agent handed one over load it.
+ */
+export const LazyUserActionRequestCards = preloadableLazy(() =>
+  import("./UserActionRequestCards").then((module) => module.UserActionRequestCards),
+);
+
 /** The composer's stash list: loads on the first open of the stash badge. */
 export const LazyComposerStashPicker = preloadableLazy(() =>
   import("./ComposerStashPicker").then((module) => module.ComposerStashPicker),

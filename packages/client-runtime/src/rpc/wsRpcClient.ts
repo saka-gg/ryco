@@ -523,6 +523,8 @@ export interface WsRpcClient {
     readonly stopLocalServer: RpcUnaryMethod<typeof WS_METHODS.threadsStopLocalServer>;
     /** Only for nodes that advertise `secretRequests`; never retried (a repeat finds it answered). */
     readonly answerSecretRequest: RpcUnaryMethod<typeof WS_METHODS.secretsAnswerRequest>;
+    /** Only for nodes that advertise `userActionRequests`; never retried (a repeat finds it resolved). */
+    readonly answerUserActionRequest: RpcUnaryMethod<typeof WS_METHODS.userActionsAnswerRequest>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -1305,6 +1307,8 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.threadsStopLocalServer](input)),
       answerSecretRequest: (input) =>
         transport.request((client) => client[WS_METHODS.secretsAnswerRequest](input)),
+      answerUserActionRequest: (input) =>
+        transport.request((client) => client[WS_METHODS.userActionsAnswerRequest](input)),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),

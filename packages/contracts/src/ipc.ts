@@ -105,6 +105,7 @@ import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
 import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import type { SecretRequestAnswerInput, SecretRequestAnswerResult } from "./secretRequest.ts";
+import type { UserActionAnswerInput, UserActionAnswerResult } from "./userActionRequest.ts";
 import type { ThreadForkCarriedInput } from "./threadForkCarried.ts";
 import type {
   ThreadLocalServerList,
@@ -1933,6 +1934,11 @@ export interface EnvironmentApi {
      * advertise `secretRequests`. Never retried: a repeat finds the request already answered.
      */
     answerSecretRequest?: (input: SecretRequestAnswerInput) => Promise<SecretRequestAnswerResult>;
+    /**
+     * Done or Won't do on an agent's user action request (`userActions.answerRequest`), on nodes
+     * that advertise `userActionRequests`. Never retried: a repeat finds it already resolved.
+     */
+    answerUserActionRequest?: (input: UserActionAnswerInput) => Promise<UserActionAnswerResult>;
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;

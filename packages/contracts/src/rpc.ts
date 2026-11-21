@@ -68,6 +68,11 @@ import {
   SecretRequestError,
 } from "./secretRequest.ts";
 import {
+  UserActionAnswerInput,
+  UserActionAnswerResult,
+  UserActionRequestError,
+} from "./userActionRequest.ts";
+import {
   ProviderSignInError,
   ProviderSignInInput,
   ProviderSignInRespondInput,
@@ -584,6 +589,7 @@ export const WS_METHODS = {
   threadsSubscribeLocalServers: "threads.subscribeLocalServers",
   threadsStopLocalServer: "threads.stopLocalServer",
   secretsAnswerRequest: "secrets.answerRequest",
+  userActionsAnswerRequest: "userActions.answerRequest",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
   projectsPromoteChatPreview: "projects.promoteChatPreview",
@@ -2263,6 +2269,16 @@ export const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerReques
   error: Schema.Union([SecretRequestError, AuthRpcError]),
 });
 
+/**
+ * The user's Done or Won't do on an agent's user action request (a browser tab or terminal handed
+ * to them; owner only, on nodes that advertise `userActionRequests`).
+ */
+export const WsUserActionsAnswerRequestRpc = Rpc.make(WS_METHODS.userActionsAnswerRequest, {
+  payload: UserActionAnswerInput,
+  success: UserActionAnswerResult,
+  error: Schema.Union([UserActionRequestError, AuthRpcError]),
+});
+
 export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessages, {
   payload: SearchThreadMessagesInput,
   success: SearchThreadMessagesResult,
@@ -2995,6 +3011,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsThreadsSubscribeLocalServersRpc
   | typeof WsThreadsStopLocalServerRpc
   | typeof WsSecretsAnswerRequestRpc
+  | typeof WsUserActionsAnswerRequestRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
   | typeof WsWorktreesSetManualPositionRpc
@@ -3246,6 +3263,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsThreadsSubscribeLocalServersRpc,
   WsThreadsStopLocalServerRpc,
   WsSecretsAnswerRequestRpc,
+  WsUserActionsAnswerRequestRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
   WsWorktreesSetManualPositionRpc,
