@@ -76,6 +76,8 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "deleting a task waits for user approval. They are not the runs ryco_task_status reports. " +
   "Never ask for secrets (API keys, tokens, passwords) in chat; use ryco_request_secret, which " +
   "asks the user on a private card and writes the value to a Git-ignored .env file without showing it to you. " +
+  "When available, ryco_terminal runs commands in this thread's terminals, which the user sees and shares; " +
+  "when a command there waits for a password or a sign-in, the user types it in that terminal, never in chat. " +
   `${AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS} ` +
   "Respect local denials and verify results.";
 

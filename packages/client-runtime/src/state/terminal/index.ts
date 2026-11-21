@@ -1,4 +1,5 @@
 export * from "./admission.ts";
+export * from "./agentTerminals.ts";
 export * from "./activity.ts";
 export * from "./cleanup.ts";
 export * from "./historyMirror.ts";

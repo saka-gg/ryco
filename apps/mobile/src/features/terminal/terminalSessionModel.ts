@@ -1,3 +1,4 @@
+import { agentTerminalLabel } from "@ryco/client-runtime/state/terminal";
 import type { TerminalEvent, TerminalSessionStatus } from "@ryco/contracts";
 
 export const MAX_MOBILE_TERMINAL_SESSIONS = 8;
@@ -140,7 +141,7 @@ export function buildTerminalTabs(input: {
       terminalId,
       label: normalizeTerminalLabel(
         input.labelsByTerminalId?.[terminalId] ?? "",
-        defaultTerminalLabel(index + 1),
+        agentTerminalLabel(terminalId) ?? defaultTerminalLabel(index + 1),
       ),
       active: terminalId === input.activeTerminalId,
       status: summary.status,

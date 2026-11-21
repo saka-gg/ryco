@@ -106,6 +106,23 @@ describe("terminal store replay events", () => {
     expect(state.activeTerminalId).toBe("setup");
   });
 
+  it("registers a terminal the agent opened without opening or focusing it", () => {
+    const store = createTerminalStateStore();
+    store.getState().applyTerminalEvent(thread, started("default", 1));
+    store.getState().setTerminalOpen(thread, false);
+    store.getState().applyTerminalEvent(thread, started("agent-1", 2));
+
+    const state = terminalState(store);
+    expect(state.terminalOpen).toBe(false);
+    expect(state.terminalIds).toEqual(["default", "agent-1"]);
+    expect(state.activeTerminalId).toBe("default");
+
+    // A terminal the user starts still opens the drawer.
+    store.getState().applyTerminalEvent(thread, started("setup", 3));
+    expect(terminalState(store).terminalOpen).toBe(true);
+    expect(terminalState(store).activeTerminalId).toBe("setup");
+  });
+
   it("buffers a replay only when it proves output was missed", () => {
     const store = createTerminalStateStore();
     const entries = () =>

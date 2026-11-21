@@ -30,6 +30,8 @@ const BUNDLED_RUNTIME_PACKAGES = [
   "@opencode/protocol",
   "@opencode/schema",
   "mime",
+  // Agent terminal tools only, in their lazy chunk.
+  "@xterm/headless",
 ];
 
 const isBundledRuntimePackage = (id: string) =>

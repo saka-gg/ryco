@@ -10,6 +10,7 @@ import {
  * API constrained to store actions/selectors.
  */
 
+import { isAgentTerminalId } from "./agentTerminals.ts";
 import { type ScopedThreadRef, type TerminalEvent } from "@ryco/contracts";
 import { parseScopedThreadKey, scopedThreadKey } from "../../scoped.ts";
 import { create } from "zustand";
@@ -838,7 +839,10 @@ export function createTerminalStateStore(options?: {
               if (event.type === "started" || event.type === "restarted") {
                 const replay = isTerminalReplayEvent(event);
                 const quietPrefix = state.quietTerminalStartPrefixByThreadKey[threadKey];
-                const quiet = quietPrefix !== undefined && event.terminalId.startsWith(quietPrefix);
+                // A terminal the agent opened appears as a tab; the user opens it when they want.
+                const quiet =
+                  (quietPrefix !== undefined && event.terminalId.startsWith(quietPrefix)) ||
+                  isAgentTerminalId(event.terminalId);
                 nextTerminalStateByThreadKey = updateTerminalStateByThreadKey(
                   nextTerminalStateByThreadKey,
                   threadRef,

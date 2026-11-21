@@ -36,6 +36,7 @@
     "@github/keytar": "7.10.6",
     "@opencode-ai/sdk": "^1.18.29",
     "@pierre/diffs": "catalog:",
+    "@xterm/headless": "6.0.0",
     "effect": "catalog:",
     "mime": "4.1.0",
     "node-pty": "^1.1.0",

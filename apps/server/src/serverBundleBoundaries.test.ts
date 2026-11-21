@@ -543,6 +543,27 @@ describe("server boot import boundaries", () => {
     expect(secretRequests.filter((file) => reachable.includes(file))).toEqual(secretRequests);
   });
 
+  it("loads the agent terminal tool, its emulator and its runtime on first use, never at boot", () => {
+    // `ryco_terminal` loads through `withLazyAgentControlTools`; the headless xterm.js, the
+    // per-terminal mirrors and the activity rules load with it. The shell integration scripts
+    // load with the first spawn, the tty flag reader with the first activity check.
+    const terminalTools = [
+      "apps/server/src/terminal/shellIntegration.ts",
+      "apps/server/src/terminal/ttyInputMode.ts",
+      "apps/server/src/agentControl/Mcp/terminalTools.ts",
+      "apps/server/src/terminal/agent/AgentTerminals.ts",
+      "apps/server/src/terminal/agent/mirror.ts",
+      "apps/server/src/terminal/agent/activity.ts",
+      "apps/server/src/terminal/agent/render.ts",
+      "apps/server/src/terminal/agent/keys.ts",
+    ];
+    const graph = staticGraph("src/cliMain.ts");
+    expect(terminalTools.filter((file) => graph.files.includes(file))).toEqual([]);
+    expect(graph.externals).not.toContain("@xterm/headless");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(terminalTools.filter((file) => reachable.includes(file))).toEqual(terminalTools);
+  });
+
   it("loads the agents' usage limits read and its limit presentation on the first call", () => {
     const usageLimits = [
       "apps/server/src/agentControl/Mcp/usageLimits.ts",
