@@ -244,3 +244,16 @@ describe("TerminalMirror size", () => {
     expect(mirror.cols).toBe(MAX_COLS);
   });
 });
+
+describe("TerminalMirror skip marker", () => {
+  it("ignores a look-alike skip marker that output prints", async () => {
+    const mirror = makeMirror();
+    await write(mirror, "first\r\n");
+    const mark = mirror.mark();
+    await write(mirror, "\u001b]7772;start\u0007\u001b]7772;end\u0007second\r\n");
+    expect(mirror.skips).toBe(0);
+    const since = mirror.linesSince(mark);
+    expect(since.startLost).toBe(false);
+    expect(since.lines).toContain("second");
+  });
+});

@@ -66,6 +66,8 @@ import {
   TerminalManager,
   TerminalNotRunningError,
   TerminalSessionLookupError,
+  TerminalAgentWriteRefused,
+  type TerminalAgentOutput,
   type TerminalManagerShape,
 } from "../Services/Manager.ts";
 import {
@@ -79,6 +81,13 @@ import {
 } from "../historyBuffer.ts";
 import { TerminalHistoryCursorIndex } from "../historyCursorIndex.ts";
 import { createTerminalSpawnEnv } from "../terminalSpawnEnv.ts";
+import {
+  emptyShellMarkState,
+  isRycoMarkContent,
+  noteShellInput,
+  readShellMarks,
+  type ShellMarkState,
+} from "../shellMarks.ts";
 import {
   defaultShellResolver,
   formatShellCandidate,
@@ -243,8 +252,10 @@ interface TerminalSessionState {
    * without children: what the shell goes by when idle. Null until seen, and for each new PTY.
    */
   idleForegroundName: string | null;
-  /** The nonce in the shell's prompt and command marks, null for a shell without them. */
+  /** The nonce in the shell's prompt and command marks (one per spawn), null without marks. */
   markNonce: string | null;
+  /** What the shell's marks say: at its prompt, typed at since, the last command's end. */
+  shellMarks: ShellMarkState;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
@@ -317,7 +328,11 @@ type DrainProcessEventAction =
       terminalId: string;
       cursor: TerminalCursor;
       persistHistory: boolean;
+      /** Without Ryco's shell marks: what clients get. */
       data: string;
+      /** As the shell printed it, marks included: only for agent output listeners. */
+      rawData: string;
+      markNonce: string | null;
     }
   | {
       type: "exit";
@@ -1000,7 +1015,8 @@ function shouldStripOscSequence(content: string): boolean {
       data += content[index];
     }
   }
-  return /^(10|11|12);(?:\?|rgb:)/.test(data);
+  // Ryco's own shell marks carry the session's nonce: never stored (`shellMarks.ts`).
+  return /^(10|11|12);(?:\?|rgb:)/.test(data) || isRycoMarkContent(content);
 }
 
 interface StringSequenceEnd {
@@ -1371,9 +1387,6 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     // Loaded and written once, on the first spawn (never at boot). A directory that cannot be
     // written, or `RYCO_TERMINAL_SHELL_INTEGRATION=0`, leaves shells as they were, without marks.
     const shellIntegrationDir = options.shellIntegrationDir;
-    // One per server process: the shells this manager starts put it in their marks, and agent
-    // tools trust only marks that carry it (`terminal/agent/mirror.ts`).
-    const shellMarkNonce = randomBytes(16).toString("hex");
     const shellIntegration =
       shellIntegrationDir === undefined || platform === "win32"
         ? Effect.succeed(null)
@@ -1427,6 +1440,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     let terminalOutputRevision = 0;
     let lastTerminalOutputAtMs = 0;
     const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
+    /** Raw output, Ryco's shell marks included: agent terminal mirrors only. */
+    const agentOutputListeners = new Set<(output: TerminalAgentOutput) => void>();
     const workerScope = yield* Scope.make("sequential");
     yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
 
@@ -2094,6 +2109,17 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             0,
             session.pendingProcessOutputBytes - outputBytes,
           );
+          // Ryco's shell marks: read once here, then gone from what clients and the history
+          // get; only agent output listeners see them (`shellMarks.ts`).
+          let commandEnd: { readonly exitCode: number | null } | null = null;
+          const clientData = readShellMarks(
+            session.shellMarks,
+            outputData,
+            session.markNonce,
+            (exitCode) => {
+              commandEnd = { exitCode };
+            },
+          );
           const sanitized = sanitizeTerminalHistoryChunk(
             session.pendingHistoryControlSequence,
             outputData,
@@ -2121,13 +2147,22 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             );
           }
 
+          if (commandEnd !== null) {
+            session.shellMarks.lastEnd = {
+              exitCode: (commandEnd as { readonly exitCode: number | null }).exitCode,
+              sequence: cursor.sequence,
+            };
+          }
+
           return {
             type: "output",
             threadId: session.threadId,
             terminalId: session.terminalId,
             cursor,
             persistHistory: sanitized.visibleText.length > 0,
-            data: outputData,
+            data: clientData,
+            rawData: outputData,
+            markNonce: session.markNonce,
           } as const;
         }
 
@@ -2168,6 +2203,19 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           yield* queuePersist(session);
         }
 
+        for (const listener of agentOutputListeners) {
+          try {
+            listener({
+              threadId: action.threadId,
+              terminalId: action.terminalId,
+              data: action.rawData,
+              cursor: action.cursor,
+              markNonce: action.markNonce,
+            });
+          } catch {
+            // A listener's failure never stops the output.
+          }
+        }
         yield* publishEvent({
           type: "output",
           threadId: action.threadId,
@@ -2306,7 +2354,12 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       index = 0,
       lastError: PtySpawnError | null = null,
     ): Effect.fn.Return<
-      { process: PtyProcess; shellLabel: string; integrated: boolean },
+      {
+        process: PtyProcess;
+        shellLabel: string;
+        integrated: boolean;
+        markNonce: string | null;
+      },
       PtySpawnError
     > {
       if (index >= shellCandidates.length) {
@@ -2334,9 +2387,12 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
 
       const integrate = yield* shellIntegration;
+      // One per spawn: a nonce that leaked (a shell variable printed by hand) forges marks in
+      // this shell only, and only until it restarts.
+      const markNonce = randomBytes(16).toString("hex");
       const integrated =
         integrate !== null && shellIntegrationDir !== undefined
-          ? integrate(candidate, spawnEnv, shellIntegrationDir, platform, shellMarkNonce)
+          ? integrate(candidate, spawnEnv, shellIntegrationDir, platform, markNonce)
           : null;
       const attempt = yield* Effect.result(
         options.ptyAdapter.spawn(
@@ -2365,6 +2421,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           process: attempt.success,
           shellLabel: formatShellCandidate(candidate),
           integrated: integrated !== null,
+          markNonce: integrated === null ? null : markNonce,
         };
       }
 
@@ -2425,7 +2482,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
               ptyProcess = spawnResult.process;
               startedShell = spawnResult.shellLabel;
-              const markNonce = spawnResult.integrated ? shellMarkNonce : null;
+              const markNonce = spawnResult.markNonce;
 
               const processPid = ptyProcess.pid;
               const unsubscribeData = ptyProcess.onData((data) => {
@@ -2475,6 +2532,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 session.process = ptyProcess;
                 session.idleForegroundName = null;
                 session.markNonce = markNonce;
+                session.shellMarks = emptyShellMarkState();
                 session.pid = processPid;
                 session.status = "running";
                 advanceCursor(session);
@@ -2858,6 +2916,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               process: null,
               idleForegroundName: null,
               markNonce: null,
+              shellMarks: emptyShellMarkState(),
               unsubscribeData: null,
               unsubscribeExit: null,
               hasRunningSubprocess: false,
@@ -3081,6 +3140,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               // focus right before its write, so counting those reports would refuse that write.
               if (!isTerminalReportData(input.data)) {
                 session.lastInputAtMs = inputAtMs;
+                noteShellInput(session.shellMarks);
                 // Its echo should not wait for the output coalescing window.
                 session.releaseNextOutput = true;
               }
@@ -3181,6 +3241,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                   process: null,
                   idleForegroundName: null,
                   markNonce: null,
+                  shellMarks: emptyShellMarkState(),
                   unsubscribeData: null,
                   unsubscribeExit: null,
                   hasRunningSubprocess: false,
@@ -3272,7 +3333,17 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               ...(session.idleForegroundName === null
                 ? {}
                 : { idleForegroundName: session.idleForegroundName }),
-              ...(session.markNonce === null ? {} : { markNonce: session.markNonce }),
+              ...(session.markNonce === null
+                ? {}
+                : {
+                    markNonce: session.markNonce,
+                    shell: {
+                      promptSeen: session.shellMarks.promptSeen,
+                      atPrompt: session.shellMarks.atPrompt,
+                      inputSincePrompt: session.shellMarks.inputSincePrompt,
+                      lastEnd: session.shellMarks.lastEnd,
+                    },
+                  }),
             };
           }),
         ),
@@ -3306,9 +3377,98 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         }),
       );
 
+    const historySince: NonNullable<TerminalManagerShape["historySince"]> = (ref, sequence) =>
+      sessionFor(ref).pipe(
+        Effect.map(
+          Option.map((session) =>
+            sequence > session.cursor.sequence
+              ? null
+              : session.historyIndex.since(sequence, session.historyState.history),
+          ),
+        ),
+      );
+
+    const subscribeAgentOutput: NonNullable<TerminalManagerShape["subscribeAgentOutput"]> = (
+      listener,
+    ) =>
+      Effect.sync(() => {
+        agentOutputListeners.add(listener);
+        return () => {
+          agentOutputListeners.delete(listener);
+        };
+      });
+
+    /**
+     * An agent's input. Every check and the write share the thread's lock, so nothing (the
+     * user's typing, a prompt that turned echo off) can change between the check and the write.
+     * The tty's flags are read where the PTY can tell; where it supports the read and the read
+     * fails, nothing is typed.
+     */
+    const agentWrite: NonNullable<TerminalManagerShape["agentWrite"]> = (input) =>
+      withThreadLock(
+        input.ref.threadId,
+        Effect.gen(function* () {
+          const refuse = (reason: TerminalAgentWriteRefused["reason"]) =>
+            Effect.fail(new TerminalAgentWriteRefused(reason));
+          const found = yield* sessionFor(input.ref);
+          if (Option.isNone(found)) return yield* refuse("not-running");
+          const session = found.value;
+          if (session.status !== "running" || session.process === null) {
+            return yield* refuse("not-running");
+          }
+          if (input.checks.prompt === true && session.markNonce !== null) {
+            if (!session.shellMarks.promptSeen) return yield* refuse("starting");
+            if (!session.shellMarks.atPrompt) return yield* refuse("running");
+            if (session.shellMarks.inputSincePrompt) return yield* refuse("user-typing");
+          }
+          if (input.checks.idle === true) {
+            yield* verifySessionIdle(session).pipe(
+              Effect.mapError(
+                (busy) =>
+                  new TerminalAgentWriteRefused(
+                    busy.reason === "inputRaced" ? "input-raced" : busy.reason,
+                  ),
+              ),
+            );
+          }
+          let inputModeChecked = false;
+          const reader = session.process;
+          if (
+            input.checks.visibleInput === true &&
+            platform !== "win32" &&
+            reader?.readInputMode !== undefined
+          ) {
+            const mode = yield* Effect.promise(
+              () => reader.readInputMode?.() ?? Promise.resolve(undefined),
+            );
+            if (mode === undefined) return yield* refuse("input-mode-unknown");
+            if (!mode.echo && mode.canonical) return yield* refuse("hidden-input");
+            inputModeChecked = true;
+          }
+          // The reads above may have yielded: the shell must still be the one checked.
+          const process = session.process;
+          if (process === null || process !== reader || session.status !== "running") {
+            return yield* refuse("not-running");
+          }
+          const inputAtMs = yield* Clock.currentTimeMillis;
+          session.hasReceivedInput = true;
+          if (!isTerminalReportData(input.data)) {
+            session.lastInputAtMs = inputAtMs;
+            noteShellInput(session.shellMarks);
+            session.releaseNextOutput = true;
+          }
+          process.write(input.data);
+          noteTerminalIo();
+          return { inputModeChecked };
+        }),
+      );
+
     return {
       open,
       write,
+      historySince,
+      subscribeAgentOutput,
+      agentWrite,
       resize,
       clear,
       restart,

@@ -448,14 +448,22 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   terminal, follow its output events off the output path, keep 2,000 lines of at most 250
   columns (about 4 MB for a busy 120-column terminal, 7.4 MB at most), and are dropped after 10
   minutes without an agent call, also while a command runs (8 at most; a timer sweeps them, and
-  the next call rebuilds one from the history).
+  the next call rebuilds one from the history; never one a wait or a hand-off holds, and when
+  all are held a new one is refused, naming them). Read positions and the agent's commands are
+  kept as output cursors outside the mirror, so after a rebuild `new` output, a command's output
+  and its exit code are still right.
 - **Command ends and exit codes.** zsh and bash terminals start with startup files that mark
   prompts, command starts and command ends (OSC 133, `terminal/shellIntegration.ts`) and then
   source the user's own (`$ZDOTDIR` or `~` for zsh, `/etc/bash.bashrc` and `~/.bashrc` for bash).
-  Every mark carries a nonce the server makes at start (`ryco=<nonce>`, handed over in
-  `RYCO_SHELL_MARK_NONCE` and unset before any user file runs); only marks carrying it count, so
-  output that prints a look-alike mark (a file, a test, a remote host, iTerm2's or VS Code's own
-  integration) never ends a command. The files are safe under `setopt nounset` and `set -u`.
+  Every mark carries a nonce made for that shell's spawn (`ryco=<nonce>`, handed over in
+  `RYCO_SHELL_MARK_NONCE` and unset before any user file runs; afterwards it lives only in the
+  body of the one function that prints the marks, which `typeset -f` / `declare -f` typed in that
+  shell still shows). Only marks carrying it count, so output that prints a look-alike mark (a
+  file, a test, a remote host, iTerm2's or VS Code's own integration) never ends a command. The
+  terminal manager reads the marks (at the prompt, typed at since, the last exit code) and
+  removes them from the history it stores and from what clients receive: the nonce is never in a
+  history file, `ryco_inspect_thread` or a client. Only the agent mirror gets the raw stream. The
+  files are safe under `setopt nounset` and `set -u`.
   Other shells, or `RYCO_TERMINAL_SHELL_INTEGRATION=0` in the node's environment, fall back to a
   guess: the output went quiet at something that looks like a shell prompt and the process table
   shows the shell idle again; the exit code is then unknown, and results say so.
@@ -467,6 +475,12 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   `stty` on the pty device, a few milliseconds, only when a waiting command's output paused);
   otherwise from a secret word at the end of the cursor's own line. `run` and `wait` stop early
   when new output leaves the command waiting for input.
+- **Every agent write is checked first,** in the terminal manager under the thread's lock, so
+  nothing changes between the check and the write. `run` types only once the shell drew its
+  prompt (with marks; a shell whose startup files wait for a key passphrase is refused), when no
+  command runs, when nobody typed at that prompt since (a half-typed line is never extended), and
+  never into hidden input. Where the platform can read the tty's flags and the read fails,
+  nothing is typed; where it cannot (Windows), the screen is the only sign and results say so.
 - **Secrets.** `send` reads the tty's flags on every call and refuses to type text or characters
   while a hidden-input prompt shows, also right after it appeared or when no command seems to run (keys
   such as Ctrl+C and Escape still go through), and the tool tells the agent never to type a

@@ -3,7 +3,13 @@ import { Effect, Option } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { TerminalSessionInspection } from "../Services/Manager.ts";
-import { MAX_MIRRORS, MIRROR_IDLE_MS, makeAgentTerminals } from "./AgentTerminals.ts";
+import type { TerminalAgentOutput } from "../Services/Manager.ts";
+import {
+  MAX_MIRRORS,
+  MIRROR_IDLE_MS,
+  MirrorLimitError,
+  makeAgentTerminals,
+} from "./AgentTerminals.ts";
 
 const inspection = (ref: TerminalRef): TerminalSessionInspection => ({
   snapshot: {
@@ -66,6 +72,139 @@ describe("AgentTerminals mirror eviction", () => {
       expect(rt.mirrorCount()).toBe(MAX_MIRRORS);
       expect(rt.find({ threadId: "t", terminalId: "agent-1" })).toBeUndefined();
       expect(rt.find({ threadId: "t", terminalId: `agent-${MAX_MIRRORS + 2}` })).toBeDefined();
+    } finally {
+      rt.close();
+    }
+  });
+});
+
+/** A terminal whose output arrives in numbered chunks, with the manager's history reads. */
+function fakeShell() {
+  const chunks: Array<{ readonly sequence: number; readonly data: string }> = [];
+  const listeners = new Set<(output: TerminalAgentOutput) => void>();
+  let sequence = 0;
+  const ref = { threadId: "t", terminalId: "agent-1" };
+  const history = () => chunks.map((chunk) => chunk.data).join("");
+  const terminals = {
+    subscribe: () => Effect.succeed(() => undefined),
+    inspect: () =>
+      Effect.succeed(
+        Option.some({
+          ...inspection(ref),
+          snapshot: {
+            ...inspection(ref).snapshot,
+            history: history(),
+            cursor: { generation: "g", sequence },
+          },
+        }),
+      ),
+    historySince: (_ref: TerminalRef, since: number) =>
+      Effect.succeed(
+        Option.some(
+          chunks
+            .filter((chunk) => chunk.sequence > since)
+            .map((chunk) => chunk.data)
+            .join(""),
+        ),
+      ),
+    subscribeAgentOutput: (listener: (output: TerminalAgentOutput) => void) =>
+      Effect.sync(() => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }),
+  };
+  const print = (data: string) => {
+    sequence += 1;
+    chunks.push({ sequence, data });
+    for (const listener of listeners) {
+      listener({ ...ref, data, cursor: { generation: "g", sequence }, markNonce: null });
+    }
+  };
+  return { ref, terminals, print };
+}
+
+describe("AgentTerminals after a mirror rebuild", () => {
+  it("keeps each thread's read position: new output is only what came after it", async () => {
+    let clock = 1_000;
+    const shell = fakeShell();
+    shell.print("old line 1\r\nold line 2\r\n");
+    const rt = await Effect.runPromise(
+      makeAgentTerminals({ terminals: shell.terminals, now: () => clock }),
+    );
+    try {
+      const first = Option.getOrThrow(await Effect.runPromise(rt.track(shell.ref)));
+      rt.readNew(first, "thread-a");
+      shell.print("seen before the drop\r\n");
+      await Effect.runPromise(rt.track(shell.ref));
+      expect(rt.readNew(first, "thread-a").lines).toEqual(["seen before the drop"]);
+
+      // Unused for a while: the mirror is dropped while output goes on.
+      clock += MIRROR_IDLE_MS + 1;
+      await Effect.runPromise(rt.track({ threadId: "t", terminalId: "agent-2" }));
+      expect(rt.find(shell.ref)).toBeUndefined();
+      shell.print("while nobody watched\r\n");
+
+      const rebuilt = Option.getOrThrow(await Effect.runPromise(rt.track(shell.ref)));
+      const fresh = rt.readNew(rebuilt, "thread-a");
+      expect(fresh.lines).toEqual(["while nobody watched"]);
+      expect(fresh.startLost).toBe(false);
+    } finally {
+      rt.close();
+    }
+  });
+
+  it("keeps the agent's command, its line and its output across the rebuild", async () => {
+    let clock = 1_000;
+    const shell = fakeShell();
+    shell.print("$ ");
+    const rt = await Effect.runPromise(
+      makeAgentTerminals({ terminals: shell.terminals, now: () => clock }),
+    );
+    try {
+      const t = Option.getOrThrow(await Effect.runPromise(rt.track(shell.ref)));
+      rt.beginExecution(t, "npm test");
+      shell.print("npm test\r\nrunning 1\r\n");
+      clock += MIRROR_IDLE_MS + 1;
+      await Effect.runPromise(rt.track({ threadId: "t", terminalId: "agent-2" }));
+      shell.print("running 2\r\n");
+
+      const rebuilt = Option.getOrThrow(await Effect.runPromise(rt.track(shell.ref)));
+      const current = rebuilt.current;
+      expect(current?.commandLine).toBe("npm test");
+      expect(current?.startedBy).toBe("agent");
+      expect(rt.outputOf(rebuilt, current!).lines).toEqual(["npm test", "running 1", "running 2"]);
+    } finally {
+      rt.close();
+    }
+  });
+});
+
+describe("AgentTerminals pins", () => {
+  it("never drops a mirror a wait or hand-off holds, and says which hold the limit", async () => {
+    let clock = 1_000;
+    const rt = await Effect.runPromise(
+      makeAgentTerminals({ terminals: fakeTerminals, now: () => clock }),
+    );
+    try {
+      const releases: Array<() => void> = [];
+      for (let index = 1; index <= MAX_MIRRORS; index += 1) {
+        const ref = { threadId: "t", terminalId: `agent-${index}` };
+        await Effect.runPromise(rt.track(ref));
+        releases.push(rt.pin(ref));
+      }
+      clock += MIRROR_IDLE_MS + 1;
+      const refused = await Effect.runPromise(
+        Effect.flip(rt.track({ threadId: "t", terminalId: "agent-99" })),
+      );
+      expect(refused).toBeInstanceOf(MirrorLimitError);
+      expect(refused.held).toContain("agent-1");
+      expect(rt.find({ threadId: "t", terminalId: "agent-1" })).toBeDefined();
+
+      releases[0]!();
+      expect(
+        Option.isSome(await Effect.runPromise(rt.track({ threadId: "t", terminalId: "agent-99" }))),
+      ).toBe(true);
+      expect(rt.find({ threadId: "t", terminalId: "agent-1" })).toBeUndefined();
     } finally {
       rt.close();
     }

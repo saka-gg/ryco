@@ -4,10 +4,14 @@
  * last read it.
  *
  * Only terminals an agent touches get a mirror: it starts from the terminal's retained history
- * and then follows its output events. The terminal manager's output path does not change; for
- * every other terminal its event costs one map lookup here. A mirror parses off that path, in
- * slices, and is dropped after {@link MIRROR_IDLE_MS} without use (at most
- * {@link MAX_MIRRORS} at once).
+ * and then follows its raw output (Ryco's shell marks included, which clients and the history
+ * never get). For every other terminal an output chunk costs one map lookup here. A mirror parses
+ * off the output path, in slices, and is dropped after {@link MIRROR_IDLE_MS} without use (at
+ * most {@link MAX_MIRRORS} at once), never while a wait or a hand-off holds it.
+ *
+ * What a thread read last and the agent's commands are kept as output cursor positions, outside
+ * the mirror: a mirror rebuilt from the history puts them back at the same output, so `new`
+ * output and a command's output survive the rebuild.
  *
  * Commands end when the shell marks it (OSC 133;D, with the exit code), or, in a shell without
  * marks, when the output went quiet at a shell prompt and the process table shows the shell
@@ -20,7 +24,11 @@
 import type { TerminalEvent, TerminalRef } from "@ryco/contracts";
 import { Effect, Option } from "effect";
 
-import type { TerminalManagerShape, TerminalSessionInspection } from "../Services/Manager.ts";
+import type {
+  TerminalAgentOutput,
+  TerminalManagerShape,
+  TerminalSessionInspection,
+} from "../Services/Manager.ts";
 import {
   assessActivity,
   looksLikeShellPrompt,
@@ -53,46 +61,87 @@ export interface Execution {
   readonly commandLine: string | undefined;
   readonly startedBy: "agent" | "user";
   readonly startedAt: number;
+  /** The output cursor when it started: where its output begins, also after a rebuild. */
+  readonly startSequence: number;
   /** Where the screen was when it started: its output when the shell marks no start. */
-  readonly startMark: Mark;
+  startMark: Mark;
+  /** Its start is not in the mirror (it began before the history the mirror holds). */
+  startLost: boolean;
   region: Region | undefined;
   ended: boolean;
   endedAt: number | undefined;
   exitCode: number | undefined;
   /** How the end is known: the shell's mark, a guess, or the shell exited. */
   endedBy: "mark" | "guess" | "exit" | undefined;
+  /** The output cursor when it ended. */
+  endSequence: number | undefined;
+  endMark: Mark | undefined;
+}
+
+/** What outlives a mirror: commands and read positions as output cursors. */
+interface TerminalRecord {
+  current: Execution | undefined;
+  last: Execution | undefined;
+  /** Each thread's read position, as the output cursor it had read up to. */
+  readonly readSequences: Map<string, number>;
+  /** The last execution each thread was told has ended. */
+  readonly reportedEnd: Map<string, number>;
+  /** Waits and hand-offs holding the mirror: it is never dropped while held. */
+  pins: number;
 }
 
 export interface TrackedTerminal {
   readonly ref: TerminalRef;
   readonly key: string;
   readonly mirror: TerminalMirror;
-  /** Hydrating: history is being parsed; live events wait in `pending`. */
+  /** Hydrating: history is being parsed; live input waits in `pending`. */
   state: "hydrating" | "live" | "disposed";
-  pending: Array<TerminalEvent>;
-  /** Output events at or before this cursor sequence are already in the replayed history. */
+  pending: Array<PendingInput>;
+  /** Output at or before this cursor sequence is already in the replayed history. */
   baseSequence: number;
-  current: Execution | undefined;
-  last: Execution | undefined;
-  /** Where each thread last read this terminal: `new` output is what follows. */
+  /** The cursor of the last output the mirror got. */
+  lastSequence: number;
+  readonly record: TerminalRecord;
+  /** The record's running command and last one (they outlive the mirror). */
+  readonly current: Execution | undefined;
+  readonly last: Execution | undefined;
+  /** Where each thread last read this terminal in this mirror: `new` output is what follows. */
   readonly marks: Map<string, Mark>;
-  /** The last execution each thread was told has ended. */
-  readonly reportedEnd: Map<string, number>;
   lastUsedAt: number;
   exited: boolean;
   hasRunningSubprocess: boolean;
   readonly wakers: Set<() => void>;
 }
 
+type PendingInput =
+  | { readonly kind: "event"; readonly event: TerminalEvent }
+  | { readonly kind: "output"; readonly output: TerminalAgentOutput };
+
+/** The mirror limit is reached and every mirror is held by a wait or a hand-off. */
+export class MirrorLimitError {
+  readonly _tag = "MirrorLimitError";
+  readonly held: ReadonlyArray<string>;
+  constructor(held: ReadonlyArray<string>) {
+    this.held = held;
+  }
+}
+
 export interface AgentTerminalsDeps {
   readonly terminals: Pick<
     TerminalManagerShape,
-    "subscribe" | "inspect" | "verifyIdle" | "readInputMode"
+    | "subscribe"
+    | "inspect"
+    | "verifyIdle"
+    | "readInputMode"
+    | "historySince"
+    | "subscribeAgentOutput"
   >;
   readonly now?: () => number;
 }
 
 const keyOf = (ref: TerminalRef) => `${ref.threadId}\u0000${ref.terminalId}`;
+/** Records of terminals without a mirror kept at once (commands and read positions). */
+const MAX_RECORDS = 256;
 
 export interface OutputLines {
   readonly lines: ReadonlyArray<string>;
@@ -105,7 +154,34 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
   Effect.gen(function* () {
     const now = deps.now ?? Date.now;
     const tracked = new Map<string, TrackedTerminal>();
+    const records = new Map<string, TerminalRecord>();
     let nextExecutionId = 1;
+    const rawOutput = deps.terminals.subscribeAgentOutput !== undefined;
+
+    const recordFor = (key: string): TerminalRecord => {
+      let record = records.get(key);
+      if (record === undefined) {
+        record = {
+          current: undefined,
+          last: undefined,
+          readSequences: new Map(),
+          reportedEnd: new Map(),
+          pins: 0,
+        };
+      } else {
+        records.delete(key);
+      }
+      // Re-inserted so the map's order is least recently used first.
+      records.set(key, record);
+      while (records.size > MAX_RECORDS) {
+        const oldest = [...records].find(
+          ([candidate, entry]) => entry.pins === 0 && !tracked.has(candidate),
+        );
+        if (oldest === undefined) break;
+        records.delete(oldest[0]);
+      }
+      return record;
+    };
 
     const wake = (t: TrackedTerminal) => {
       for (const waker of t.wakers) waker();
@@ -122,40 +198,58 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       execution.endedAt = now();
       execution.exitCode = exitCode;
       execution.endedBy = endedBy;
-      if (t.current === execution) {
-        t.current = undefined;
-        t.last = execution;
+      execution.endSequence = t.lastSequence;
+      execution.endMark = t.mirror.mark({ exact: true });
+      if (t.record.current === execution) {
+        t.record.current = undefined;
+        t.record.last = execution;
       }
       wake(t);
+    };
+
+    const writeOutput = (t: TrackedTerminal, output: TerminalAgentOutput) => {
+      if (output.cursor.sequence <= t.baseSequence) return;
+      // A restarted shell marks with its new spawn's nonce.
+      t.mirror.setMarkNonce(output.markNonce ?? undefined);
+      t.mirror.write(output.data);
+      t.lastSequence = output.cursor.sequence;
     };
 
     const handleEvent = (t: TrackedTerminal, event: TerminalEvent) => {
       switch (event.type) {
         case "output":
+          // Without the raw channel (older managers, tests), events carry the output.
+          if (rawOutput) return;
           if (event.cursor !== undefined && event.cursor.sequence <= t.baseSequence) return;
           t.mirror.write(event.data);
+          if (event.cursor !== undefined) t.lastSequence = event.cursor.sequence;
           return;
         case "started":
         case "restarted":
-          if (t.current !== undefined) endExecution(t, t.current, undefined, "exit");
+          if (t.record.current !== undefined) {
+            endExecution(t, t.record.current, undefined, "exit");
+          }
           t.exited = false;
           t.mirror.reset();
           t.marks.clear();
+          t.record.readSequences.clear();
           if (event.snapshot.history.length > 0) t.mirror.replay(event.snapshot.history, false);
           t.baseSequence = event.snapshot.cursor?.sequence ?? event.cursor?.sequence ?? 0;
+          t.lastSequence = t.baseSequence;
           wake(t);
           return;
         case "cleared":
           t.mirror.reset();
           t.marks.clear();
-          if (t.current !== undefined) t.current.region = undefined;
+          if (t.record.current !== undefined) t.record.current.region = undefined;
           wake(t);
           return;
         case "exited":
           t.exited = true;
           t.hasRunningSubprocess = false;
-          if (t.current !== undefined)
-            endExecution(t, t.current, event.exitCode ?? undefined, "exit");
+          if (t.record.current !== undefined) {
+            endExecution(t, t.record.current, event.exitCode ?? undefined, "exit");
+          }
           t.mirror.closeOpenRegion();
           wake(t);
           return;
@@ -169,23 +263,34 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       }
     };
 
+    const route = (key: string, input: PendingInput) => {
+      const t = tracked.get(key);
+      if (t === undefined) return;
+      if (t.state === "hydrating") {
+        t.pending.push(input);
+        return;
+      }
+      if (t.state !== "live") return;
+      if (input.kind === "output") writeOutput(t, input.output);
+      else handleEvent(t, input.event);
+    };
+
     const unsubscribe = yield* deps.terminals.subscribe((event) =>
-      Effect.sync(() => {
-        const t = tracked.get(keyOf(event));
-        if (t === undefined) return;
-        if (t.state === "hydrating") {
-          t.pending.push(event);
-          return;
-        }
-        if (t.state === "live") handleEvent(t, event);
-      }),
+      Effect.sync(() => route(keyOf(event), { kind: "event", event })),
     );
+    const unsubscribeOutput =
+      deps.terminals.subscribeAgentOutput === undefined
+        ? () => undefined
+        : yield* deps.terminals.subscribeAgentOutput((output) =>
+            route(keyOf(output), { kind: "output", output }),
+          );
     const sweepTimer = setInterval(() => sweep(), SWEEP_EVERY_MS);
     sweepTimer.unref?.();
 
     const close = () => {
       clearInterval(sweepTimer);
       unsubscribe();
+      unsubscribeOutput();
       for (const t of tracked.values()) dispose(t);
       tracked.clear();
     };
@@ -197,37 +302,64 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       t.wakers.clear();
     };
 
+    const evict = (t: TrackedTerminal) => {
+      tracked.delete(t.key);
+      dispose(t);
+    };
+
+    /** Drops mirrors unused for a while; never one a wait or hand-off holds. */
     const sweep = () => {
       const at = now();
-      for (const [key, t] of tracked) {
-        if (at - t.lastUsedAt > MIRROR_IDLE_MS) {
-          tracked.delete(key);
-          dispose(t);
-        }
-      }
-      if (tracked.size <= MAX_MIRRORS) return;
-      const byAge = [...tracked.values()].toSorted((a, b) => a.lastUsedAt - b.lastUsedAt);
-      for (const t of byAge.slice(0, tracked.size - MAX_MIRRORS)) {
-        tracked.delete(t.key);
-        dispose(t);
+      for (const t of [...tracked.values()]) {
+        if (t.record.pins === 0 && at - t.lastUsedAt > MIRROR_IDLE_MS) evict(t);
       }
     };
+
+    /** Room for one more mirror: the least recently used free one goes, or the limit holds. */
+    const makeRoom = (): Effect.Effect<void, MirrorLimitError> =>
+      Effect.suspend(() => {
+        if (tracked.size < MAX_MIRRORS) return Effect.void;
+        const free = [...tracked.values()]
+          .filter((t) => t.record.pins === 0)
+          .toSorted((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+        if (free !== undefined) {
+          evict(free);
+          return Effect.void;
+        }
+        return Effect.fail(
+          new MirrorLimitError([...tracked.values()].map((t) => t.ref.terminalId)),
+        );
+      });
 
     const inspect = (ref: TerminalRef): Effect.Effect<Option.Option<TerminalSessionInspection>> =>
       deps.terminals.inspect === undefined
         ? Effect.succeed(Option.none())
         : deps.terminals.inspect(ref);
 
+    /** Where output cursor `sequence` falls in `history` (a character offset); undefined when lost. */
+    const offsetOf = (ref: TerminalRef, history: string, sequence: number) =>
+      Effect.gen(function* () {
+        if (deps.terminals.historySince === undefined) return undefined;
+        const since = yield* deps.terminals.historySince(ref, sequence);
+        if (Option.isNone(since) || since.value === null) return undefined;
+        const offset = history.length - since.value.length;
+        return offset >= 0 && history.endsWith(since.value) ? offset : undefined;
+      });
+
     /**
-     * The terminal's mirror, built from its retained history on first use; `none` for a terminal
+     * The terminal's mirror, built from its retained history on first use (or after it was
+     * dropped, with the record's read positions and commands put back); `none` for a terminal
      * the manager does not know.
      */
-    const track = (ref: TerminalRef): Effect.Effect<Option.Option<TrackedTerminal>> =>
+    const track = (
+      ref: TerminalRef,
+    ): Effect.Effect<Option.Option<TrackedTerminal>, MirrorLimitError> =>
       Effect.gen(function* () {
         const key = keyOf(ref);
         const existing = tracked.get(key);
         if (existing !== undefined && existing.state !== "disposed") {
           existing.lastUsedAt = now();
+          sweep();
           // The user may have resized the terminal since; output after a resize wraps anew.
           const current = yield* inspect(ref);
           if (Option.isSome(current)) {
@@ -239,7 +371,10 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
         }
         const inspection = yield* inspect(ref);
         if (Option.isNone(inspection)) return Option.none();
+        sweep();
+        yield* makeRoom();
         const { snapshot } = inspection.value;
+        const record = recordFor(key);
         const t: TrackedTerminal = {
           ref,
           key,
@@ -253,87 +388,173 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
           state: "hydrating",
           pending: [],
           baseSequence: snapshot.cursor?.sequence ?? 0,
-          current: undefined,
-          last: undefined,
+          lastSequence: snapshot.cursor?.sequence ?? 0,
+          record,
+          get current() {
+            return record.current;
+          },
+          get last() {
+            return record.last;
+          },
           marks: new Map(),
-          reportedEnd: new Map(),
           lastUsedAt: now(),
           exited: snapshot.status === "exited" || snapshot.status === "error",
           hasRunningSubprocess: inspection.value.hasRunningSubprocess,
           wakers: new Set(),
         };
-        // Registered before the history is read back, so no event falls between the two.
+        // Registered before the history is read back, so no output falls between the two.
         tracked.set(key, t);
         t.mirror.listen({
           onRegionStart: (region) => {
             if (t.state !== "live") return;
-            const current = t.current;
+            const current = t.record.current;
             if (current !== undefined && !current.ended) {
-              if (current.startedBy === "agent" && current.region === undefined)
+              if (current.startedBy === "agent" && current.region === undefined) {
                 current.region = region;
+              }
               return;
             }
-            t.current = {
-              id: nextExecutionId++,
-              commandLine: region.commandLine,
-              startedBy: "user",
-              startedAt: now(),
-              startMark: t.mirror.mark(),
-              region,
-              ended: false,
-              endedAt: undefined,
-              exitCode: undefined,
-              endedBy: undefined,
-            };
+            t.record.current = newExecution(t, undefined, "user", region);
             wake(t);
           },
           onCommandEnd: (exitCode, region) => {
             if (t.state !== "live") return;
-            const current = t.current;
+            const current = t.record.current;
             if (current === undefined || current.ended) return;
-            if (region !== undefined && current.region !== undefined && current.region !== region)
+            if (region !== undefined && current.region !== undefined && current.region !== region) {
               return;
+            }
             endExecution(t, current, exitCode, "mark");
           },
           onParsed: () => wake(t),
         });
-        // Fresh, so the inspection's history matches its cursor.
-        const fresh = yield* inspect(ref);
-        const history = Option.isSome(fresh) ? fresh.value.snapshot.history : snapshot.history;
-        t.baseSequence = Option.isSome(fresh)
-          ? (fresh.value.snapshot.cursor?.sequence ?? t.baseSequence)
-          : t.baseSequence;
-        if (history.length > 0) t.mirror.replay(history, false);
-        yield* Effect.promise(() => t.mirror.flush());
-        // A command open at the end of the history (a mark without its end) is the user's, or
-        // ended without a mark the history kept: only a running subprocess says which.
-        const open = t.mirror.currentRegion;
-        if (open !== undefined && !open.ended) {
-          if (t.hasRunningSubprocess) {
-            t.current = {
-              id: nextExecutionId++,
-              commandLine: open.commandLine,
-              startedBy: "user",
-              startedAt: now(),
-              startMark: t.mirror.mark(),
-              region: open,
-              ended: false,
-              endedAt: undefined,
-              exitCode: undefined,
-              endedBy: undefined,
-            };
-          } else {
-            t.mirror.closeOpenRegion();
-          }
-        }
+        // Fresh, so the history matches its cursor. Ryco's marks are not in it (the manager
+        // never stores them): what ran while there was no mirror comes from the shell's state.
+        const fresh = Option.getOrElse(yield* inspect(ref), () => inspection.value);
+        const history = fresh.snapshot.history;
+        t.baseSequence = fresh.snapshot.cursor?.sequence ?? t.baseSequence;
+        t.lastSequence = t.baseSequence;
+        yield* replayWithPositions(t, history);
+        restoreCommands(t, fresh);
         t.state = "live";
         const pending = t.pending;
         t.pending = [];
-        for (const event of pending) handleEvent(t, event);
+        for (const input of pending) {
+          if (input.kind === "output") writeOutput(t, input.output);
+          else handleEvent(t, input.event);
+        }
         yield* Effect.promise(() => t.mirror.flush());
-        sweep();
         return Option.some(t);
       });
+
+    /**
+     * Replays `history` into a new mirror, putting a mark at every output cursor the record
+     * needs (each thread's read position, the commands' starts and ends).
+     */
+    const replayWithPositions = (t: TrackedTerminal, history: string) =>
+      Effect.gen(function* () {
+        const record = t.record;
+        const wanted = new Set<number>();
+        for (const sequence of record.readSequences.values()) wanted.add(sequence);
+        for (const execution of [record.current, record.last]) {
+          if (execution === undefined) continue;
+          wanted.add(execution.startSequence);
+          if (execution.endSequence !== undefined) wanted.add(execution.endSequence);
+        }
+        const offsets = new Map<number, number>();
+        for (const sequence of wanted) {
+          const offset = yield* offsetOf(t.ref, history, sequence);
+          if (offset !== undefined) offsets.set(sequence, offset);
+        }
+        const marksAt = new Map<number, Mark>();
+        let at = 0;
+        for (const offset of [...new Set(offsets.values())].toSorted((a, b) => a - b)) {
+          if (offset > at) t.mirror.replay(history.slice(at, offset), false);
+          at = offset;
+          yield* Effect.promise(() => t.mirror.flush());
+          marksAt.set(offset, t.mirror.mark({ exact: true }));
+        }
+        if (at < history.length) t.mirror.replay(history.slice(at), false);
+        yield* Effect.promise(() => t.mirror.flush());
+        const markOf = (sequence: number): Mark | undefined => {
+          const offset = offsets.get(sequence);
+          return offset === undefined ? undefined : marksAt.get(offset);
+        };
+        for (const [threadId, sequence] of record.readSequences) {
+          // A position the history no longer reaches: everything shown counts as new, its
+          // start reported lost.
+          t.marks.set(threadId, markOf(sequence) ?? LOST_MARK);
+        }
+        for (const execution of [record.current, record.last]) {
+          if (execution === undefined) continue;
+          const start = markOf(execution.startSequence);
+          execution.startMark = start ?? LOST_MARK;
+          execution.startLost = execution.startLost || start === undefined;
+          execution.region = undefined;
+          if (execution.endSequence !== undefined) {
+            execution.endMark = markOf(execution.endSequence);
+          }
+        }
+      });
+
+    /** After a rebuild: how the record's command fared meanwhile, from the shell's marks. */
+    const restoreCommands = (t: TrackedTerminal, inspection: TerminalSessionInspection) => {
+      const shell = inspection.shell;
+      const current = t.record.current;
+      if (current !== undefined && !current.ended && shell !== undefined) {
+        if (shell.lastEnd !== null && shell.lastEnd.sequence > current.startSequence) {
+          endExecution(t, current, shell.lastEnd.exitCode ?? undefined, "mark");
+          current.endSequence = shell.lastEnd.sequence;
+        } else if (shell.atPrompt) {
+          endExecution(t, current, undefined, "mark");
+        }
+      }
+      // A command the user started before this mirror: its start is not here.
+      if (
+        t.record.current === undefined &&
+        shell !== undefined &&
+        shell.promptSeen &&
+        !shell.atPrompt
+      ) {
+        const execution = newExecution(t, undefined, "user", undefined);
+        execution.startLost = true;
+        t.record.current = execution;
+      }
+    };
+
+    const newExecution = (
+      t: TrackedTerminal,
+      commandLine: string | undefined,
+      startedBy: Execution["startedBy"],
+      region: Region | undefined,
+    ): Execution => ({
+      id: nextExecutionId++,
+      commandLine: commandLine ?? region?.commandLine,
+      startedBy,
+      startedAt: now(),
+      startSequence: t.lastSequence,
+      startMark: t.mirror.mark({ exact: startedBy === "agent" }),
+      startLost: false,
+      region,
+      ended: false,
+      endedAt: undefined,
+      exitCode: undefined,
+      endedBy: undefined,
+      endSequence: undefined,
+      endMark: undefined,
+    });
+
+    /** Keeps `ref`'s mirror (and record) from being dropped until the returned release runs. */
+    const pin = (ref: TerminalRef): (() => void) => {
+      const record = recordFor(keyOf(ref));
+      record.pins += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        record.pins = Math.max(0, record.pins - 1);
+      };
+    };
 
     /** Wakes when `t` changes (parsed output, a command's end, process activity). */
     const changed = (t: TrackedTerminal) =>
@@ -345,26 +566,34 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
         });
       });
 
-    /** Runs `check` on every change and at least every {@link WAIT_POLL_MS} until true or timeout. */
+    /**
+     * Runs `check` on every change and at least every {@link WAIT_POLL_MS} until true or
+     * timeout. The mirror is held for the whole wait.
+     */
     const waitUntil = <E, R>(
       t: TrackedTerminal,
       check: Effect.Effect<boolean, E, R>,
       timeoutMs: number,
     ): Effect.Effect<boolean, E, R> =>
-      Effect.gen(function* () {
-        const deadline = now() + Math.max(0, timeoutMs);
-        while (true) {
-          if (t.state === "disposed") return false;
-          yield* Effect.promise(() => t.mirror.flush());
-          if (yield* check) return true;
-          const left = deadline - now();
-          if (left <= 0) return false;
-          yield* Effect.raceFirst(Effect.sleep(Math.min(WAIT_POLL_MS, left)), changed(t));
-        }
-      });
+      Effect.acquireUseRelease(
+        Effect.sync(() => pin(t.ref)),
+        () =>
+          Effect.gen(function* () {
+            const deadline = now() + Math.max(0, timeoutMs);
+            while (true) {
+              if (t.state === "disposed") return false;
+              yield* Effect.promise(() => t.mirror.flush());
+              if (yield* check) return true;
+              const left = deadline - now();
+              if (left <= 0) return false;
+              yield* Effect.raceFirst(Effect.sleep(Math.min(WAIT_POLL_MS, left)), changed(t));
+            }
+          }),
+        (release) => Effect.sync(release),
+      );
 
     const isRunning = (t: TrackedTerminal) =>
-      (t.current !== undefined && !t.current.ended) ||
+      (t.record.current !== undefined && !t.record.current.ended) ||
       (!t.mirror.shellIntegration && t.hasRunningSubprocess);
 
     const quietMs = (t: TrackedTerminal) => now() - t.mirror.lastWriteAt;
@@ -381,7 +610,7 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
         const quiet = quietMs(t);
         const inputMode = running && quiet >= 300 ? yield* readInputMode(t) : undefined;
         const { beforeCursor, afterCursor } = t.mirror.cursorLine();
-        const execution = t.current;
+        const execution = t.record.current;
         // Only what the running command printed: an earlier command's prompt, link or code still
         // on screen is not this one's. Without a tracked command, the screen.
         const tail =
@@ -419,61 +648,65 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
 
     /** Starts tracking an agent command typed now. */
     const beginExecution = (t: TrackedTerminal, commandLine: string): Execution => {
-      const execution: Execution = {
-        id: nextExecutionId++,
-        commandLine,
-        startedBy: "agent",
-        startedAt: now(),
-        startMark: t.mirror.mark({ exact: true }),
-        region: undefined,
-        ended: false,
-        endedAt: undefined,
-        exitCode: undefined,
-        endedBy: undefined,
-      };
-      if (t.current !== undefined && !t.current.ended)
-        endExecution(t, t.current, undefined, "guess");
-      t.current = execution;
+      const execution = newExecution(t, commandLine, "agent", undefined);
+      if (t.record.current !== undefined && !t.record.current.ended) {
+        endExecution(t, t.record.current, undefined, "guess");
+      }
+      t.record.current = execution;
       return execution;
     };
 
     /** Withdraws an execution whose command never reached the shell. */
     const abandonExecution = (t: TrackedTerminal, execution: Execution) => {
-      if (t.current === execution) t.current = undefined;
+      if (t.record.current === execution) t.record.current = undefined;
     };
 
-    const outputOf = (t: TrackedTerminal, execution: Execution): OutputLines =>
-      execution.region !== undefined
-        ? t.mirror.regionLines(execution.region)
-        : t.mirror.linesSince(execution.startMark);
+    const outputOf = (t: TrackedTerminal, execution: Execution): OutputLines => {
+      if (execution.region !== undefined) {
+        const result = t.mirror.regionLines(execution.region);
+        return execution.startLost ? { ...result, startLost: true } : result;
+      }
+      const result = t.mirror.linesBetween(
+        execution.startLost ? undefined : execution.startMark,
+        execution.ended ? execution.endMark : undefined,
+      );
+      return execution.startLost ? { ...result, startLost: true } : result;
+    };
 
     const readNew = (t: TrackedTerminal, threadId: string): OutputLines => {
       const result = t.mirror.linesSince(t.marks.get(threadId));
       t.marks.set(threadId, t.mirror.mark());
+      t.record.readSequences.set(threadId, t.lastSequence);
       return result;
     };
 
     /** After a thread read an execution's output: what follows it is new. */
     const markRead = (t: TrackedTerminal, threadId: string, execution: Execution | undefined) => {
-      t.marks.set(
-        threadId,
+      const afterRegion =
         execution?.ended === true && execution.region !== undefined
           ? t.mirror.markAfter(execution.region)
-          : t.mirror.mark(),
+          : undefined;
+      t.marks.set(threadId, afterRegion ?? t.mirror.mark());
+      t.record.readSequences.set(
+        threadId,
+        execution?.ended === true && execution.endSequence !== undefined
+          ? execution.endSequence
+          : t.lastSequence,
       );
     };
 
     /** A finished execution `threadId` has not been told about; claims it. */
     const takeUnreportedEnd = (t: TrackedTerminal, threadId: string): Execution | undefined => {
-      const last = t.last;
-      if (last === undefined || !last.ended || t.reportedEnd.get(threadId) === last.id)
+      const last = t.record.last;
+      if (last === undefined || !last.ended || t.record.reportedEnd.get(threadId) === last.id) {
         return undefined;
-      t.reportedEnd.set(threadId, last.id);
+      }
+      t.record.reportedEnd.set(threadId, last.id);
       return last;
     };
 
     const noteReported = (t: TrackedTerminal, threadId: string, execution: Execution) => {
-      if (execution.ended) t.reportedEnd.set(threadId, execution.id);
+      if (execution.ended) t.record.reportedEnd.set(threadId, execution.id);
     };
 
     const find = (ref: TerminalRef): TrackedTerminal | undefined => {
@@ -481,18 +714,20 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       return t?.state === "live" ? t : undefined;
     };
 
-    /** Drops a terminal's mirror (its session closed). */
+    /** Drops a terminal's mirror and record (its session closed). */
     const forget = (ref: TerminalRef) => {
-      const t = tracked.get(keyOf(ref));
+      const key = keyOf(ref);
+      records.delete(key);
+      const t = tracked.get(key);
       if (t === undefined) return;
-      tracked.delete(t.key);
-      dispose(t);
+      evict(t);
     };
 
     return {
       track,
       find,
       forget,
+      pin,
       waitUntil,
       isRunning,
       quietMs,
@@ -512,3 +747,6 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       mirrorCount: () => tracked.size,
     };
   });
+
+/** A read position the history no longer reaches. */
+const LOST_MARK: Mark = { marker: undefined, col: 0, alternate: false, skips: 0 };

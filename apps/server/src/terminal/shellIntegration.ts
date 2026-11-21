@@ -24,7 +24,7 @@ import path from "node:path";
 import type { ShellCandidate } from "./terminalShell.ts";
 
 /** Bumped when a script changes, so a running older server's files are never rewritten. */
-export const SHELL_INTEGRATION_VERSION = "v2";
+export const SHELL_INTEGRATION_VERSION = "v3";
 
 const ZSH_ENV_SHIM = (
   file: string,
@@ -62,18 +62,21 @@ builtin unset RYCO_ZDOTDIR RYCO_USER_ZDOTDIR
 if [[ -z "\${__ryco_shell_integration-}" ]]; then
   typeset -g __ryco_shell_integration=1
   typeset -g __ryco_prompted=0
-  typeset -g __ryco_nonce="\${__ryco_nonce-}"
+  # The nonce lives on only in this one function's body: not in the environment, a variable or
+  # a prompt string (\`typeset -f __ryco_mark\` typed in this shell still shows it).
+  builtin eval "__ryco_mark() { builtin printf '\\\\e]133;%s;ryco=\${__ryco_nonce-}\\\\a' \\"\\$1\\"; }"
+  builtin unset __ryco_nonce
   __ryco_precmd() {
     local ret=$?
     if (( __ryco_prompted )); then
-      builtin printf '\\e]133;D;%s;ryco=%s\\a' "$ret" "$__ryco_nonce"
+      __ryco_mark "D;$ret"
     fi
     __ryco_prompted=1
-    builtin printf '\\e]133;A;ryco=%s\\a' "$__ryco_nonce"
+    __ryco_mark A
     return $ret
   }
   __ryco_preexec() {
-    builtin printf '\\e]133;C;ryco=%s\\a' "$__ryco_nonce"
+    __ryco_mark C
   }
   typeset -ga precmd_functions preexec_functions
   # First, so it sees the command's exit status; last, so C comes right before the output.
@@ -95,13 +98,17 @@ fi
 if [ -z "\${__ryco_shell_integration-}" ]; then
   __ryco_shell_integration=1
   __ryco_prompted=0
+  # The nonce lives on only in this one function's body: not in the environment, a variable or
+  # PS0 (\`declare -f __ryco_mark\` typed in this shell still shows it).
+  builtin eval "__ryco_mark() { builtin printf '\\\\033]133;%s;ryco=\${__ryco_nonce-}\\\\007' \\"\\$1\\"; }"
+  builtin unset __ryco_nonce
   __ryco_precmd() {
     local ret=$?
     if [ "$__ryco_prompted" = 1 ]; then
-      builtin printf '\\033]133;D;%s;ryco=%s\\007' "$ret" "$__ryco_nonce"
+      __ryco_mark "D;$ret"
     fi
     __ryco_prompted=1
-    builtin printf '\\033]133;A;ryco=%s\\007' "$__ryco_nonce"
+    __ryco_mark A
     return $ret
   }
   if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
@@ -112,7 +119,9 @@ $PROMPT_COMMAND}"
   fi
   # PS0 (bash 4.4+) prints after a command line is read, before it runs.
   if [ "\${BASH_VERSINFO[0]}" -gt 4 ] || { [ "\${BASH_VERSINFO[0]}" -eq 4 ] && [ "\${BASH_VERSINFO[1]}" -ge 4 ]; }; then
-    PS0="\${PS0-}\\e]133;C;ryco=\${__ryco_nonce}\\a"
+    # A command substitution: the mark is printed, the nonce is not in PS0.
+    PS0="\${PS0-}"'$(__ryco_mark C)'
+
   fi
 fi
 `;

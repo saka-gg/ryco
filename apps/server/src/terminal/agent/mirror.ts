@@ -18,6 +18,8 @@
  *
  * @module terminal/agent/mirror
  */
+import { randomBytes } from "node:crypto";
+
 import * as xtermModule from "@xterm/headless";
 import type { IBuffer, IMarker, Terminal as XtermTerminal } from "@xterm/headless";
 
@@ -117,7 +119,9 @@ export class TerminalMirror {
   private readonly xterm: XtermTerminal;
   private readonly now: () => number;
   private readonly scrollback: number;
-  private readonly markNonce: string | undefined;
+  private markNonce: string | undefined;
+  /** Private to this mirror: output that prints a look-alike skip marker is ignored. */
+  private readonly skipToken = randomBytes(8).toString("hex");
   private readonly listeners = new Set<MirrorListener>();
   private nextRegionId = 1;
   private openRegion: Region | undefined;
@@ -160,7 +164,8 @@ export class TerminalMirror {
     this.xterm.parser.registerOscHandler(133, onMark);
     this.xterm.parser.registerOscHandler(633, onMark);
     this.xterm.parser.registerOscHandler(SKIP_OSC, (data) => {
-      this.inSkipped = data === "start";
+      if (data !== `start;${this.skipToken}` && data !== `end;${this.skipToken}`) return true;
+      this.inSkipped = data === `start;${this.skipToken}`;
       if (this.inSkipped) {
         this.skips += 1;
         if (this.openRegion !== undefined && !this.openRegion.ended) {
@@ -219,9 +224,7 @@ export class TerminalMirror {
    */
   replay(data: string, truncated: boolean): void {
     if (this.disposed) return;
-    this.enqueue(
-      truncated ? `\u001b]${SKIP_OSC};start\u0007\u001b]${SKIP_OSC};end\u0007${data}` : data,
-    );
+    this.enqueue(truncated ? `${this.skipMarker("start")}${this.skipMarker("end")}${data}` : data);
   }
 
   /** Resolves once everything written so far has been parsed. */
@@ -291,6 +294,29 @@ export class TerminalMirror {
     return {
       lines: tidy(readLines(buffer, mark.marker.line, mark.col, endLine, undefined)),
       startLost: this.skips > mark.skips,
+    };
+  }
+
+  /**
+   * The output between two marks (`to` absent: up to the cursor). A missing or scrolled-out
+   * `from` reads from the top and reports the start lost.
+   */
+  linesBetween(from: Mark | undefined, to: Mark | undefined): LinesResult {
+    const buffer = this.xterm.buffer.normal;
+    const usable = (mark: Mark | undefined): mark is Mark & { readonly marker: IMarker } =>
+      mark !== undefined && !mark.alternate && mark.marker !== undefined && mark.marker.line >= 0;
+    const start = usable(from) ? from : undefined;
+    const end = usable(to) ? to : undefined;
+    const lines = readLines(
+      buffer,
+      start?.marker.line ?? 0,
+      start?.col ?? 0,
+      end?.marker.line ?? buffer.baseY + buffer.cursorY,
+      end?.col,
+    );
+    return {
+      lines: tidy(lines),
+      startLost: start === undefined || (from !== undefined && this.skips > from.skips),
     };
   }
 
@@ -409,11 +435,20 @@ export class TerminalMirror {
     }
     const skipped = all.slice(0, cut + 1);
     const kept = skipped.match(KEPT_SEQUENCES)?.join("") ?? "";
-    const data = `\u001b]${SKIP_OSC};start\u0007${kept}\u001b]${SKIP_OSC};end\u0007\r\n${all.slice(cut + 1)}`;
+    const data = `${this.skipMarker("start")}${kept}${this.skipMarker("end")}\r\n${all.slice(cut + 1)}`;
     const seq = this.queue[this.queue.length - 1]!.seq;
     this.queue.length = 0;
     this.queue.push({ data, seq });
     this.queuedChars = data.length;
+  }
+
+  private skipMarker(kind: "start" | "end"): string {
+    return `\u001b]${SKIP_OSC};${kind};${this.skipToken}\u0007`;
+  }
+
+  /** A restarted shell marks with its new spawn's nonce. */
+  setMarkNonce(nonce: string | undefined): void {
+    this.markNonce = nonce;
   }
 
   private onShellMark(data: string): void {

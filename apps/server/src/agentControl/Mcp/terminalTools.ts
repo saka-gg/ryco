@@ -32,7 +32,11 @@ import { encodeTerminalPaste } from "@ryco/shared/terminalPaste";
 import { Effect, Option, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
+import type {
+  TerminalAgentWriteChecks,
+  TerminalAgentWriteRefused,
+  TerminalManagerShape,
+} from "../../terminal/Services/Manager.ts";
 import {
   CONSENT_REFUSAL_COOLDOWN_MS,
   decideTerminalAccess,
@@ -43,7 +47,9 @@ import {
 } from "../../terminal/agent/access.ts";
 import type { Activity } from "../../terminal/agent/activity.ts";
 import {
+  MAX_MIRRORS,
   MIRROR_SCROLLBACK,
+  MirrorLimitError,
   makeAgentTerminals,
   type AgentTerminals,
   type Execution,
@@ -92,6 +98,8 @@ const MAX_SEND_WAIT_SECONDS = 10;
 const INTERRUPT_WAIT_MS = 5_000;
 /** A new shell gets this long to draw its first prompt. */
 const SHELL_READY_MS = 10_000;
+/** How long `run` waits for a shell that just finished a command to draw its prompt. */
+const PROMPT_SETTLE_MS = 2_000;
 /** Activity checks (which may read the tty) during a wait, at most this often. */
 const ACTIVITY_CHECK_MS = 1_000;
 const MAX_COMMAND_CHARS = 16_000;
@@ -642,16 +650,36 @@ export function withTerminalTools(
       return t;
     });
 
+  /** Until the shell drew its first prompt (with marks: its prompt mark, nothing else). */
   const waitForShell = (rt: AgentTerminals, t: TrackedTerminal) =>
     rt.waitUntil(
       t,
-      Effect.sync(() => {
+      Effect.gen(function* () {
         if (t.mirror.lastPromptAt > 0) return true;
+        const inspection = yield* rt.inspect(t.ref);
+        const shell = Option.isSome(inspection) ? inspection.value.shell : undefined;
+        if (shell !== undefined) return shell.promptSeen;
         if (t.mirror.received === 0 || rt.quietMs(t) < 700) return false;
         const { beforeCursor } = t.mirror.cursorLine();
         return beforeCursor.trim() !== "";
       }),
       SHELL_READY_MS,
+    );
+
+  /**
+   * With marks: until the shell draws its prompt (after a command, or once its startup files
+   * are done); bounded, and the write checks again.
+   */
+  const waitForPrompt = (rt: AgentTerminals, t: TrackedTerminal) =>
+    rt.waitUntil(
+      t,
+      rt.inspect(t.ref).pipe(
+        Effect.map((inspection) => {
+          const shell = Option.isSome(inspection) ? inspection.value.shell : undefined;
+          return shell === undefined || (shell.promptSeen && shell.atPrompt);
+        }),
+      ),
+      PROMPT_SETTLE_MS,
     );
 
   const trackOrFail = (rt: AgentTerminals, ref: TerminalRef) =>
@@ -736,7 +764,8 @@ export function withTerminalTools(
           yield* startOwnTerminal(session, terminalId);
         }
         const t = yield* trackOrFail(rt, { threadId: session.threadId, terminalId });
-        if (status === "exited" || status === "error") yield* waitForShell(rt, t);
+        // A shell that has not drawn its first prompt yet (just opened, or restarted): bounded.
+        yield* waitForShell(rt, t);
         if (isBusy(rt, t)) return yield* Effect.fail(busyFailure(rt, t));
         currentByThread.set(session.threadId, terminalId);
         return { t, note: undefined as string | undefined };
@@ -790,6 +819,49 @@ export function withTerminalTools(
       data,
       ...(requireIdle ? { requireIdle: true as const } : {}),
     });
+
+  const refusalText = (id: string, reason: TerminalAgentWriteRefused["reason"]) => {
+    switch (reason) {
+      case "running":
+        return `Nothing was typed: ${id} is running a command. Wait for it (${call({ action: "wait", terminal: id })}), or omit \`terminal\` to run in a free terminal of your own.`;
+      case "input-raced":
+      case "unverified":
+        return `Nothing was typed: whether ${id} is idle could not be told just now (someone typed a moment ago, or its processes could not be read). Try again in a moment, or omit \`terminal\` to use a terminal of your own.`;
+      case "starting":
+        return `Nothing was typed: ${id}'s shell has not drawn its prompt yet; its startup files still run or wait for input (a key passphrase, a question). Read it (${call({ action: "read", terminal: id, what: "screen" })}); if it asks for something only the user knows, tell them in chat.`;
+      case "user-typing":
+        return `Nothing was typed: someone typed at ${id}'s prompt and has not run it, so your command would be added to their line. Ask the user in chat, or omit \`terminal\` to use a terminal of your own.`;
+      case "hidden-input":
+        return `Nothing was typed: ${id} waits for hidden input (echo is off: a password or passphrase prompt). Never type a password, token or code you were not given, and never ask for one in chat; tell the user in chat that terminal ${id} needs them to type it there, then ${call({ action: "wait", terminal: id })}. Keys such as Ctrl+C or Escape still go through.`;
+      case "input-mode-unknown":
+        return `Nothing was typed: whether ${id} hides input right now (its tty's echo flag) could not be read, so Ryco typed nothing. Try again in a moment.`;
+      case "not-running":
+        return `Nothing was typed: ${id}'s shell is not running.`;
+    }
+  };
+
+  /**
+   * An agent's input through the terminal manager's guarded write: the checks and the write
+   * share the thread's lock. Retried once when idleness could not be told.
+   */
+  const guardedWrite = (t: TrackedTerminal, data: string, checks: TerminalAgentWriteChecks) => {
+    const agentWrite = deps.terminals.agentWrite;
+    if (agentWrite === undefined) {
+      return write(t, data, checks.idle === true).pipe(
+        Effect.as({ inputModeChecked: false }),
+        Effect.mapError((error) => new ToolFailure(`Nothing was typed: ${error.message}`)),
+      );
+    }
+    const once = agentWrite({ ref: t.ref, data, checks });
+    return once.pipe(
+      Effect.catch((refused) =>
+        refused.reason === "input-raced" || refused.reason === "unverified"
+          ? Effect.sleep(600).pipe(Effect.andThen(once))
+          : Effect.fail(refused),
+      ),
+      Effect.mapError((refused) => new ToolFailure(refusalText(t.ref.terminalId, refused.reason))),
+    );
+  };
 
   /** The bytes that run `command` at the prompt as one command line. */
   const commandBytes = (t: TrackedTerminal, command: string) => {
@@ -850,32 +922,12 @@ export function withTerminalTools(
       const { t, note } = yield* forCommand(rt, session, authority, input.terminal);
       const execution = rt.beginExecution(t, command);
       const data = commandBytes(t, command);
-      const sent = yield* write(t, data, true).pipe(
-        Effect.as("sent" as const),
-        // Someone typed a moment ago, or the process table could not be read: one more try.
-        Effect.catch((error) =>
-          isBusyError(error) && (error.reason === "inputRaced" || error.reason === "unverified")
-            ? Effect.sleep(600).pipe(
-                Effect.andThen(write(t, data, true)),
-                Effect.as("sent" as const),
-                Effect.catch((retry) => Effect.succeed(retry)),
-              )
-            : Effect.succeed(error),
-        ),
+      // A command that just ended: its shell draws the prompt a moment later.
+      yield* waitForPrompt(rt, t);
+      // Typed only at an idle prompt nobody is typing at, never into hidden input.
+      yield* guardedWrite(t, data, { idle: true, prompt: true, visibleInput: true }).pipe(
+        Effect.tapError(() => Effect.sync(() => rt.abandonExecution(t, execution))),
       );
-      if (sent !== "sent") {
-        rt.abandonExecution(t, execution);
-        if (isBusyError(sent) && sent.reason !== "unverified") {
-          return yield* Effect.fail(
-            new ToolFailure(
-              sent.reason === "running"
-                ? `Nothing was typed: ${t.ref.terminalId} is running a command. Wait for it (${call({ action: "wait", terminal: t.ref.terminalId })}), or omit \`terminal\` to run in a free terminal of your own.`
-                : `Nothing was typed: someone is typing in ${t.ref.terminalId} right now. Try again in a moment, or omit \`terminal\` to use a terminal of your own.`,
-            ),
-          );
-        }
-        return yield* Effect.fail(new ToolFailure(`Nothing was typed: ${sent.message}`));
-      }
       const timeoutMs = waitMs(input.timeout_seconds, DEFAULT_RUN_TIMEOUT_SECONDS);
       const stoppedAt = yield* awaitExecution(rt, t, execution, timeoutMs, execution.startedAt);
       const block = outputBlock(rt, t, execution, input.max_chars);
@@ -1046,13 +1098,11 @@ export function withTerminalTools(
       // The tty's flags are read on every send, whatever the screen shows and whether a command
       // seems to run: a prompt that just appeared, or a sudo the user started in a shell without
       // marks, turns echo off before any quiet period or process poll would tell.
+      // The tty is read in the guarded write below (inside the terminal's lock); the screen is
+      // the only sign where the platform cannot read it.
+      const types = typed.length > 0 || keys.some((key) => key.printable);
       const activity = yield* rt.activityOf(t);
-      const mode = yield* rt.readInputMode(t);
-      const hiddenInput = mode !== undefined && !mode.echo && mode.canonical;
-      if (
-        (activity.secret || hiddenInput) &&
-        (typed.length > 0 || keys.some((key) => key.printable))
-      ) {
+      if (activity.secret && types) {
         return yield* Effect.fail(
           new ToolFailure(
             `Nothing was sent: ${t.ref.terminalId} waits for hidden input${activity.prompt === undefined ? "" : ` ("${activity.prompt}")`}. Never type a password, token or code you were not given, and never ask for one in chat. Tell the user in chat that terminal ${t.ref.terminalId} needs them to type it there, then ${call({ action: "wait", terminal: t.ref.terminalId })}. Keys such as Ctrl+C or Escape still go through.`,
@@ -1062,9 +1112,7 @@ export function withTerminalTools(
       if (!t.marks.has(session.threadId)) t.marks.set(session.threadId, t.mirror.mark());
       const before = t.mirror.received;
       const sentAt = now();
-      yield* write(t, data, false).pipe(
-        Effect.mapError((error) => new ToolFailure(`Nothing was sent: ${error.message}`)),
-      );
+      const written = yield* guardedWrite(t, data, types ? { visibleInput: true } : {});
       const limitMs = Math.round(
         Math.min(MAX_SEND_WAIT_SECONDS, input.wait_seconds ?? DEFAULT_SEND_WAIT_SECONDS) * 1000,
       );
@@ -1080,7 +1128,11 @@ export function withTerminalTools(
       const after = yield* rt.activityOf(t);
       return text(
         join([
-          `Sent ${describeInput(input.text, input.keys)} to ${t.ref.terminalId}.`,
+          `Sent ${describeInput(input.text, input.keys)} to ${t.ref.terminalId}.${
+            types && !written.inputModeChecked
+              ? " (This platform cannot tell whether the terminal hides input; only the screen was checked.)"
+              : ""
+          }`,
           "Output since your last look:",
           newOutputBlock(rt, t, session.threadId, input.max_chars),
           statusOf(rt, t, after),
@@ -1099,9 +1151,7 @@ export function withTerminalTools(
       if (t.exited) return yield* Effect.fail(new ToolFailure(statusOf(rt, t, undefined)));
       const execution = t.current;
       const wasRunning = rt.isRunning(t);
-      yield* write(t, "\u0003", false).pipe(
-        Effect.mapError((error) => new ToolFailure(`Nothing was sent: ${error.message}`)),
-      );
+      yield* guardedWrite(t, "\u0003", {});
       const interruptedAt = now();
       if (execution !== undefined) {
         yield* awaitExecution(rt, t, execution, INTERRUPT_WAIT_MS, undefined);
@@ -1261,7 +1311,11 @@ export function withTerminalTools(
             Effect.catch((error) =>
               Effect.succeed(
                 errorText(
-                  error instanceof ToolFailure ? error.reason : "The terminal action failed.",
+                  error instanceof ToolFailure
+                    ? error.reason
+                    : error instanceof MirrorLimitError
+                      ? `Ryco follows at most ${MAX_MIRRORS} terminals for agents at once, and every one is held by a wait or a hand-off (${error.held.join(", ")}). Let one finish (or cancel a hand-off), or close a terminal you no longer need, then try again.`
+                      : "The terminal action failed.",
                 ),
               ),
             ),

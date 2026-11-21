@@ -9,6 +9,7 @@ import { Deferred, Effect } from "effect";
 import {
   type PtyAdapterShape,
   type PtyExitEvent,
+  type PtyInputMode,
   type PtyProcess,
   type PtySpawnInput,
   PtySpawnError,
@@ -28,6 +29,8 @@ export class FakePtyProcess implements PtyProcess {
   exitOnKill = false;
   /** Present only on PTYs that can name their foreground process. */
   foregroundProcessName?: () => string | undefined;
+  /** Present only on PTYs that can read their tty's echo and line-mode flags. */
+  readInputMode?: () => Promise<PtyInputMode | undefined>;
 
   constructor(pid: number) {
     this.pid = pid;

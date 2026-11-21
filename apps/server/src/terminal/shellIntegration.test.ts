@@ -46,7 +46,7 @@ describe("withShellIntegration", () => {
   it("ignores a ZDOTDIR inherited from a Ryco terminal", () => {
     for (const inherited of [
       "/other/state/shell-integration/v1/zsh",
-      "/other/state/shell-integration/v2/zsh/",
+      "/other/state/shell-integration/v3/zsh/",
       "",
     ]) {
       const spawn = withShellIntegration({ shell: "zsh" }, { ZDOTDIR: inherited }, DIR, "darwin");
@@ -93,17 +93,18 @@ describe("shellIntegrationFiles", () => {
   it("writes the zsh startup files and the bash init file under the version", () => {
     const files = shellIntegrationFiles();
     expect(files.map((file) => file.path)).toEqual([
-      path.join("v2", "zsh", ".zshenv"),
-      path.join("v2", "zsh", ".zprofile"),
-      path.join("v2", "zsh", ".zshrc"),
-      path.join("v2", "bash", "ryco.bash"),
+      path.join("v3", "zsh", ".zshenv"),
+      path.join("v3", "zsh", ".zprofile"),
+      path.join("v3", "zsh", ".zshrc"),
+      path.join("v3", "bash", "ryco.bash"),
     ]);
     const byName = new Map(files.map((file) => [path.basename(file.path), file.content]));
     expect(byName.get(".zshenv")).toContain('builtin source "$ZDOTDIR/.zshenv"');
-    expect(byName.get(".zshrc")).toContain("\\e]133;D;%s;ryco=%s\\a");
-    expect(byName.get(".zshrc")).toContain("\\e]133;C;ryco=%s\\a");
+    expect(byName.get(".zshrc")).toContain("133;%s;ryco=");
+    expect(byName.get(".zshrc")).toContain('__ryco_mark "D;$ret"');
     expect(byName.get("ryco.bash")).toContain('. "$HOME/.bashrc"');
-    expect(byName.get("ryco.bash")).toContain("\\033]133;A;ryco=%s\\007");
+    expect(byName.get("ryco.bash")).toContain("133;%s;ryco=");
+    expect(byName.get("ryco.bash")).toContain("$(__ryco_mark C)");
   });
 
   it("matches what withShellIntegration points at", () => {
@@ -122,11 +123,13 @@ describe("shell marks' nonce", () => {
     expect(withShellIntegration({ shell: "/bin/bash" }, {}, "/state", "linux")?.env).toEqual({});
   });
 
-  it("is in every mark and leaves the environment before user files run", () => {
+  it("is in every mark, printed by one function the nonce lives in", () => {
     for (const file of shellIntegrationFiles()) {
-      for (const mark of file.content.matchAll(/133;([ACD])[^'"\n]*/g)) {
+      for (const mark of file.content.matchAll(/133;[^'"\n]*/g)) {
         expect(mark[0]).toContain("ryco=");
       }
+      // Never a literal or variable in a prompt string.
+      expect(file.content).not.toMatch(/PS0="[^\n]*ryco=/);
     }
   });
 });
@@ -174,7 +177,12 @@ describe.runIf(realShellCases.length > 0)("startup files under nounset", () => {
         )!;
         const result = spawnSync(
           spawn.shell,
-          [...spawn.args, "-i", "-c", `${hooks}; echo "nonce=\${${SHELL_MARK_NONCE_ENV}-gone}"`],
+          [
+            ...spawn.args,
+            "-i",
+            "-c",
+            `${hooks}; echo "nonce=\${${SHELL_MARK_NONCE_ENV}-gone} nonce-var=\${__ryco_nonce-gone} ps0=[\${PS0-}]"`,
+          ],
           {
             env: spawn.env,
             cwd: home,
@@ -183,9 +191,12 @@ describe.runIf(realShellCases.length > 0)("startup files under nounset", () => {
           },
         );
         const output = `${result.stdout}${result.stderr}`;
-        expect(output).not.toMatch(/ryco\.bash.*(unbound|not set)|v2\/zsh.*(unbound|not set)/);
+        expect(output).not.toMatch(/ryco\.bash.*(unbound|not set)|v3\/zsh.*(unbound|not set)/);
         expect(output).toContain("__ryco_precmd");
         expect(output).toContain("nonce=gone");
+        expect(output).toContain("nonce-var=gone");
+        // bash's PS0 calls the mark function; it never holds the nonce itself.
+        expect(/ps0=\[[^\]]*\]/.exec(output)?.[0]).not.toContain("n0nce");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

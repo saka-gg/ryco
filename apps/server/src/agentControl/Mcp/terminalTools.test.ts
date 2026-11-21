@@ -131,6 +131,36 @@ const outputShows = (terminals: TerminalManagerShape, terminalId: string, text: 
     });
   });
 
+/** Tools on `terminals` for a thread whose checkout is `<root>/work` (agent terminals only). */
+const toolsForRoot = (terminals: TerminalManagerShape, root: string) => {
+  const tools = withTerminalTools(baseTools, {
+    policy,
+    registry: { getTurnAuthority: () => Effect.succeed(Option.some(authority)) },
+    proposals: { getProposal: () => Effect.succeed(Option.none()) },
+    submitMutation: () => Effect.die("agent terminals never ask for consent"),
+    projections: {
+      getThreadShellById: () => Effect.sync(() => Option.some(threadShell("approval-required"))),
+      getThreadCheckpointContext: () =>
+        Effect.succeed(
+          Option.some({
+            threadId: THREAD,
+            projectId: ProjectId.make("project-1"),
+            workspaceRoot: path.join(root, "work"),
+            worktreePath: null,
+            checkpoints: [],
+          }),
+        ),
+    },
+    terminals,
+  });
+  return async (args: Record<string, unknown>) => {
+    const result = await Effect.runPromise(
+      tools.callTool(session, AGENT_CONTROL_TERMINAL_MCP_TOOL, args),
+    );
+    return { body: textOf(result), isError: result.isError === true };
+  };
+};
+
 // Real shells in real PTYs: POSIX only.
 const posix = process.platform !== "win32";
 
@@ -146,16 +176,16 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
   const byRequest = new Map<string, string>();
   const seen: Array<string> = [];
 
-  const makeManager = (integration: boolean) =>
+  const makeManager = (integration: boolean, home = "home") =>
     Effect.gen(function* () {
       const ptyAdapter = yield* PtyAdapter;
       return yield* makeTerminalManagerWithOptions({
-        logsDir: path.join(root, integration ? "logs" : "logs-plain"),
+        logsDir: path.join(root, integration ? `logs-${home}` : "logs-plain"),
         ptyAdapter,
         shellResolver: () => "/bin/bash",
         env: {
           ...process.env,
-          HOME: path.join(root, "home"),
+          HOME: path.join(root, home),
           PS1: "$ ",
           BASH_SILENCE_DEPRECATION_WARNING: "1",
         },
@@ -437,4 +467,118 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
     expect(result.body).toContain("real-end");
     expect(result.body).toContain("exited with code 1");
   }, 30_000);
+
+  it("never stores the marks' nonce in the terminal's history files", async () => {
+    const dir = path.join(root, "logs-home");
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const logs = readdirSync(dir).map((file) => readFileSync(path.join(dir, file), "utf8"));
+    expect(logs.length).toBeGreaterThan(0);
+    for (const log of logs) expect(log).not.toContain("ryco=");
+    const history = Option.getOrThrow(
+      await Effect.runPromise(manager.inspect!({ threadId: THREAD, terminalId: "agent-1" })),
+    ).snapshot.history;
+    expect(history).toContain("real-end");
+    expect(history).not.toContain("ryco=");
+  }, 30_000);
+
+  it("does not add the agent's command to a line the user is typing", async () => {
+    const created = await call({ action: "create" });
+    const terminalId = /Opened (agent-\d+)/.exec(created.body)![1]!;
+    await Effect.runPromise(
+      manager.write({ threadId: THREAD, terminalId, data: "echo half-typed" }),
+    );
+    const refused = await call({ action: "run", terminal: terminalId, command: "echo agent" });
+    expect(refused.isError).toBe(true);
+    expect(refused.body).toContain("someone typed at");
+    // The user runs their line; then the prompt is free again.
+    const ranTheirs = outputShows(manager, terminalId, "\nhalf-typed");
+    await Effect.runPromise(manager.write({ threadId: THREAD, terminalId, data: "\r" }));
+    await ranTheirs;
+    const ran = await call({
+      action: "run",
+      terminal: terminalId,
+      command: "echo agent-after",
+      timeout_seconds: 15,
+    });
+    expect(ran.isError).toBe(false);
+    expect(ran.body).toContain("agent-after");
+  }, 30_000);
+
+  it("never types into a hidden-input builtin, also after its mirror was rebuilt", async () => {
+    const created = await call({ action: "create" });
+    const terminalId = /Opened (agent-\d+)/.exec(created.body)![1]!;
+    const prompted = outputShows(manager, terminalId, "secretvar");
+    await Effect.runPromise(
+      manager.write({ threadId: THREAD, terminalId, data: "read -r -s secretvar\r" }),
+    );
+    await prompted;
+    // A fresh tool runtime builds its mirror from the history: no subprocess, no open region.
+    const rebuilt = toolsFor(manager);
+    const sent = await rebuilt({
+      action: "send",
+      terminal: terminalId,
+      text: "guess",
+      keys: ["Enter"],
+    });
+    expect(sent.isError).toBe(true);
+    expect(sent.body).toMatch(/hidden input|someone typed/);
+    const ran = await rebuilt({ action: "run", terminal: terminalId, command: "echo nope" });
+    expect(ran.isError).toBe(true);
+    await Effect.runPromise(manager.write({ threadId: THREAD, terminalId, data: "x\r" }));
+  }, 30_000);
+});
+
+describe.runIf(posix)("ryco_terminal while a shell's startup files wait for input", () => {
+  it("does not type into a passphrase prompt from the user's startup files", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "ryco-terminal-startup-"));
+    const scope = await Effect.runPromise(Scope.make());
+    try {
+      const { mkdirSync } = await import("node:fs");
+      mkdirSync(path.join(root, "home"));
+      mkdirSync(path.join(root, "work"));
+      writeFileSync(
+        path.join(root, "home", ".bashrc"),
+        'read -r -s -p "Enter passphrase for key: " startup_pass\necho\n',
+      );
+      const startupManager = await Effect.runPromise(
+        Effect.gen(function* () {
+          const ptyAdapter = yield* PtyAdapter;
+          return yield* makeTerminalManagerWithOptions({
+            logsDir: path.join(root, "logs"),
+            ptyAdapter,
+            shellResolver: () => "/bin/bash",
+            env: {
+              ...process.env,
+              HOME: path.join(root, "home"),
+              PS1: "$ ",
+              BASH_SILENCE_DEPRECATION_WARNING: "1",
+            },
+            processKillGraceMs: 0,
+            historyPersistDebounceMs: 40,
+            shellIntegrationDir: path.join(root, "shell-integration"),
+          });
+        }).pipe(
+          Effect.provide(NodePTY.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+          Scope.provide(scope),
+        ),
+      );
+      const startupCall = toolsForRoot(startupManager, root);
+      const refused = await startupCall({ action: "run", command: "echo should-not-run" });
+      expect(refused.isError).toBe(true);
+      expect(refused.body).toMatch(/has not drawn its prompt|hidden input/);
+      await Effect.runPromise(
+        startupManager.write({ threadId: THREAD, terminalId: "agent-1", data: "pass\r" }),
+      );
+      const ran = await startupCall({
+        action: "run",
+        command: "echo now-it-runs",
+        timeout_seconds: 15,
+      });
+      expect(ran.body).toContain("now-it-runs");
+      expect(ran.body).not.toContain("should-not-run");
+    } finally {
+      await Effect.runPromise(Scope.close(scope, Exit.void));
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
