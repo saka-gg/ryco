@@ -467,6 +467,22 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
         }),
       );
 
+    it("refuses a blank message before starting anything", async () => {
+      const refused = await handoffCall({
+        action: "handoff",
+        requestId: "blank",
+        message: "   ",
+        command: "echo should-not-run",
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.body).toContain("Nothing was started");
+      const requests = await runEngine(readThreadUserActionRequests(userActions, THREAD));
+      expect(requests?.some((r) => r.requestId === userActionRequestIdFor(THREAD, "blank"))).toBe(
+        false,
+      );
+      for (const body of seen) expect(body).not.toContain("should-not-run\n");
+    });
+
     it("hands a password prompt to the user, refuses input meanwhile and ends with the command", async () => {
       const opened = await handoffCall({
         action: "handoff",

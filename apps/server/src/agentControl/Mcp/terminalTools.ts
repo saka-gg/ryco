@@ -1560,10 +1560,13 @@ export function withTerminalTools(
 
       let note: string | undefined;
       if (request === undefined) {
-        if (input.message === undefined) {
+        // Checked before anything starts or is handed over: a request the node refuses must
+        // never leave a command running for a hand-off that does not exist.
+        const message = input.message?.trim() ?? "";
+        if (message.length === 0 || message.length > USER_ACTION_REQUEST_MESSAGE_MAX_CHARS) {
           return yield* Effect.fail(
             new ToolFailure(
-              "The first handoff call needs `message`: one or two sentences for the user (at most 300 characters).",
+              `The first handoff call needs \`message\`: one or two sentences for the user (1 to ${USER_ACTION_REQUEST_MESSAGE_MAX_CHARS} characters, not only spaces). Nothing was started.`,
             ),
           );
         }
@@ -1587,16 +1590,23 @@ export function withTerminalTools(
           callerRequestId: input.requestId,
           surface: "terminal",
           need: input.need ?? (activity.signIn !== undefined ? "sign-in" : "input"),
-          message: input.message,
+          message,
           target: t.ref.terminalId,
           ttlMs: (input.expires_in_seconds ?? 600) * 1_000,
           maxPending: USER_ACTION_REQUEST_MAX_PENDING_PER_THREAD,
         }).pipe(
-          Effect.mapError((error) =>
-            error instanceof UserActionRequestOpenError
-              ? new ToolFailure(error.text)
-              : new ToolFailure("The hand-off could not be opened."),
-          ),
+          Effect.mapError((error) => {
+            const reason =
+              error instanceof UserActionRequestOpenError
+                ? error.text
+                : "The hand-off could not be opened.";
+            // The terminal was never handed over (nothing pending), but a started command runs on.
+            return new ToolFailure(
+              execution !== undefined && input.command !== undefined
+                ? `${reason} \`${shortCommand(input.command)}\` was started in ${t.ref.terminalId} and keeps running; ${call({ action: "interrupt", terminal: t.ref.terminalId })} stops it.`
+                : reason,
+            );
+          }),
         );
         request = opened.request;
         if (opened.created) {
