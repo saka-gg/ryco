@@ -1,6 +1,8 @@
 import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 
 const MAX_ROUTE_ID_LENGTH = 256;
+/** The node's terminal id limit. */
+const MAX_TERMINAL_ID_LENGTH = 128;
 
 function safeRouteId(value: unknown): string | null {
   const candidate = Array.isArray(value) ? value[0] : value;
@@ -14,6 +16,8 @@ function safeRouteId(value: unknown): string | null {
 export interface TerminalRouteParams {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  /** The terminal to show (a hand-off card's Show); absent, the thread's active one. */
+  readonly terminalId: string | null;
 }
 
 export function parseTerminalRouteParams(value: unknown): TerminalRouteParams | null {
@@ -22,5 +26,11 @@ export function parseTerminalRouteParams(value: unknown): TerminalRouteParams | 
   const environmentId = safeRouteId(params.environmentId);
   const threadId = safeRouteId(params.threadId);
   if (!environmentId || !threadId) return null;
-  return { environmentId: EnvironmentId.make(environmentId), threadId: ThreadId.make(threadId) };
+  const terminalId = safeRouteId(params.terminalId);
+  return {
+    environmentId: EnvironmentId.make(environmentId),
+    threadId: ThreadId.make(threadId),
+    terminalId:
+      terminalId !== null && terminalId.length <= MAX_TERMINAL_ID_LENGTH ? terminalId : null,
+  };
 }

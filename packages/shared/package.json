@@ -553,6 +553,18 @@
       "types": "./src/secretRequestState.ts",
       "import": "./src/secretRequestState.ts"
     },
+    "./userActionRequests": {
+      "types": "./src/userActionRequests.ts",
+      "import": "./src/userActionRequests.ts"
+    },
+    "./userActionRequestState": {
+      "types": "./src/userActionRequestState.ts",
+      "import": "./src/userActionRequestState.ts"
+    },
+    "./userActionHints": {
+      "types": "./src/userActionHints.ts",
+      "import": "./src/userActionHints.ts"
+    },
     "./pendingThreadRequests": {
       "types": "./src/pendingThreadRequests.ts",
       "import": "./src/pendingThreadRequests.ts"

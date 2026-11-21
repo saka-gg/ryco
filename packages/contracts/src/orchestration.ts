@@ -1035,6 +1035,9 @@ export const ThreadActivityKind = /* @__PURE__ */ Schema.Literals([
   "user-input.response.submitted",
   "secret.requested",
   "secret.resolved",
+  "user-action.requested",
+  "user-action.resolved",
+  "user-action.hint",
   // Provider task, tool and subagent lifecycle.
   "task.started",
   "task.progress",

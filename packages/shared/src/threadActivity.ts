@@ -11,6 +11,10 @@ import {
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
 } from "@ryco/contracts/secret-request";
+import {
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_RESOLVED_ACTIVITY_KIND,
+} from "@ryco/contracts/user-action-request";
 import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
 import {
@@ -100,7 +104,10 @@ export function isThreadActivityMilestone(
     // Rare, small and long-lived (a request waits up to a day): the cap never drops a pending
     // secret request's card or the answer that closed it.
     hasActivityKind(activity, SECRET_REQUESTED_ACTIVITY_KIND) ||
-    hasActivityKind(activity, SECRET_RESOLVED_ACTIVITY_KIND)
+    hasActivityKind(activity, SECRET_RESOLVED_ACTIVITY_KIND) ||
+    // The same for a hand-off of a browser tab or terminal (up to an hour).
+    hasActivityKind(activity, USER_ACTION_REQUESTED_ACTIVITY_KIND) ||
+    hasActivityKind(activity, USER_ACTION_RESOLVED_ACTIVITY_KIND)
   );
 }
 
@@ -159,7 +166,7 @@ function openOptionalQuestionActivityIds(
 
 /**
  * The activity kinds `derivePendingThreadRequests` (`@ryco/shared/pendingThreadRequests`) reads:
- * they open, resolve or clear a pending approval, user-input or secret request.
+ * they open, resolve or clear a pending approval, user-input, secret or user action request.
  */
 export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "approval.requested",
@@ -170,6 +177,8 @@ export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "provider.user-input.respond.failed",
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_RESOLVED_ACTIVITY_KIND,
 ] as const satisfies ReadonlyArray<ThreadActivityKind>;
 
 function nonEmptyRequestId(
@@ -278,7 +287,9 @@ export function pendingRequestActivityInOrchestrationOrder(
     activity.kind.startsWith("user-input.") ||
     hasActivityKind(activity, "provider.user-input.respond.failed") ||
     hasActivityKind(activity, SECRET_REQUESTED_ACTIVITY_KIND) ||
-    hasActivityKind(activity, SECRET_RESOLVED_ACTIVITY_KIND)
+    hasActivityKind(activity, SECRET_RESOLVED_ACTIVITY_KIND) ||
+    hasActivityKind(activity, USER_ACTION_REQUESTED_ACTIVITY_KIND) ||
+    hasActivityKind(activity, USER_ACTION_RESOLVED_ACTIVITY_KIND)
     ? { ...activity, sequence }
     : activity;
 }
@@ -613,4 +624,48 @@ export function retainTurnItemsAfterRevert<
       isForkBaseItemId(threadId, item.id) ||
       keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
   );
+}
+
+/**
+ * The targets (tab or terminal ids) of the user action requests in these activities that still
+ * wait: requested, not resolved, not past their expiry, on `surface` when given. Reads only ids,
+ * surface, target and the expiry string, so views on the boot path can ask without the payload
+ * schemas (`@ryco/shared/userActionRequestState` derives the requests properly for the card). A
+ * pending request without a target counts as `""`.
+ */
+export function pendingUserActionTargets(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>,
+  nowMs: number,
+  surface?: string,
+): ReadonlyArray<string> {
+  const resolved = new Set<unknown>();
+  for (const activity of activities) {
+    if (hasActivityKind(activity, USER_ACTION_RESOLVED_ACTIVITY_KIND)) {
+      resolved.add((activity.payload as { requestId?: unknown } | null)?.requestId);
+    }
+  }
+  const targets = new Set<string>();
+  for (const activity of activities) {
+    if (!hasActivityKind(activity, USER_ACTION_REQUESTED_ACTIVITY_KIND)) continue;
+    const payload = activity.payload as {
+      requestId?: unknown;
+      expiresAt?: unknown;
+      surface?: unknown;
+      target?: unknown;
+    } | null;
+    if (typeof payload?.requestId !== "string" || resolved.has(payload.requestId)) continue;
+    if (surface !== undefined && payload.surface !== surface) continue;
+    const expiresAt = typeof payload.expiresAt === "string" ? Date.parse(payload.expiresAt) : NaN;
+    if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) continue;
+    targets.add(typeof payload.target === "string" ? payload.target : "");
+  }
+  return [...targets];
+}
+
+/** Whether a user action request (a browser tab or terminal handed to the user) still waits. */
+export function hasPendingUserActionRequest(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>,
+  nowMs: number,
+): boolean {
+  return pendingUserActionTargets(activities, nowMs).length > 0;
 }

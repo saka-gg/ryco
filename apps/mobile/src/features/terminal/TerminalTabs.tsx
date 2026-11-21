@@ -4,14 +4,19 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import type { TerminalTabModel } from "./terminalSessionModel";
 
-function statusColor(tab: TerminalTabModel): string {
+/** Amber: an agent handed this terminal to the user and waits for them. */
+const WAITING_COLOR = "#f59e0b";
+
+function statusColor(tab: TerminalTabModel, waiting: boolean): string {
+  if (waiting) return WAITING_COLOR;
   if (tab.hasRunningSubprocess) return "#34d399";
   if (tab.status === "error") return "#fb7185";
   if (tab.status === "exited") return "#737985";
   return "#60a5fa";
 }
 
-function statusCopy(tab: TerminalTabModel): string {
+function statusCopy(tab: TerminalTabModel, waiting: boolean): string {
+  if (waiting) return "waiting for you";
   if (tab.status === "exited") {
     return tab.exitCode === null ? "exited" : `exited with code ${tab.exitCode}`;
   }
@@ -22,6 +27,8 @@ function statusCopy(tab: TerminalTabModel): string {
 /** One tab per session; tabs scroll, they never split the screen. */
 export function TerminalTabs(props: {
   readonly tabs: readonly TerminalTabModel[];
+  /** Terminals that wait for the user (an agent's hand-off). */
+  readonly waitingTerminalIds?: ReadonlyArray<string>;
   readonly canAdd: boolean;
   readonly onSelect: (terminalId: string) => void;
   readonly onAdd: () => void;
@@ -39,13 +46,21 @@ export function TerminalTabs(props: {
             key={tab.terminalId}
             accessibilityRole="tab"
             accessibilityState={{ selected: tab.active }}
-            accessibilityLabel={`${tab.label}. ${statusCopy(tab)}.`}
+            accessibilityLabel={`${tab.label}. ${statusCopy(tab, props.waitingTerminalIds?.includes(tab.terminalId) === true)}.`}
             onPress={() => props.onSelect(tab.terminalId)}
             className={`min-h-11 min-w-24 flex-row items-center gap-2 border-r border-white/10 px-3 ${
               tab.active ? "bg-white/10" : "active:bg-white/5"
             }`}
           >
-            <View className="h-2 w-2 rounded-full" style={{ backgroundColor: statusColor(tab) }} />
+            <View
+              className="h-2 w-2 rounded-full"
+              style={{
+                backgroundColor: statusColor(
+                  tab,
+                  props.waitingTerminalIds?.includes(tab.terminalId) === true,
+                ),
+              }}
+            />
             <Text
               numberOfLines={1}
               className={`max-w-32 text-xs font-ryco-medium ${

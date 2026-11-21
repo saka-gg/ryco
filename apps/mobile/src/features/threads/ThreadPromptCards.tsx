@@ -9,11 +9,14 @@ import { PendingApprovalCard } from "./PendingApprovalCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { SecretRequestCard } from "./SecretRequestCard";
 import type { MobileSecretRequestCards } from "./secretRequestCardModel";
+import { UserActionRequestCard } from "./UserActionRequestCard";
+import type { MobileUserActionRequestCards } from "./userActionRequestCardModel";
 
 /**
  * What waits on the reader, over the composer: approvals and questions (the live ones, and the
- * ones a background alert described until the live detail loads), secret requests and Agent
- * Control proposals. The screen decides whether any show.
+ * ones a background alert described until the live detail loads), secret requests, user action
+ * requests (a tab or terminal handed to the user) and Agent Control proposals. The screen decides
+ * whether any show.
  */
 export function ThreadPromptCards(props: {
   readonly environmentId: EnvironmentId;
@@ -34,6 +37,9 @@ export function ThreadPromptCards(props: {
   /** Cards from a saved body or a cached thread are shown, not answered. */
   readonly promptsDisabled: boolean;
   readonly secretRequests: MobileSecretRequestCards;
+  readonly userActionRequests: MobileUserActionRequestCards;
+  /** Opens one of the thread's terminals (a terminal hand-off's Show). */
+  readonly onShowTerminal?: ((terminalId: string) => void) | undefined;
   readonly agentControlProposals: ReadonlyArray<AgentControlProposalView>;
   readonly agentControlDisabled: boolean;
 }) {
@@ -90,6 +96,23 @@ export function ThreadPromptCards(props: {
           threadId={threadId}
           request={request}
           disabledReason={props.secretRequests.access.reason}
+        />
+      ))}
+      {props.userActionRequests.requests.map((request) => (
+        <UserActionRequestCard
+          key={request.requestId}
+          environmentId={environmentId}
+          threadId={threadId}
+          request={request}
+          disabledReason={props.userActionRequests.access.reason}
+          hint={props.userActionRequests.hints.get(request.requestId)}
+          onShow={
+            request.surface === "terminal" &&
+            request.target !== null &&
+            props.onShowTerminal !== undefined
+              ? () => props.onShowTerminal?.(request.target ?? "")
+              : undefined
+          }
         />
       ))}
       {props.agentControlProposals.map((proposal) => (

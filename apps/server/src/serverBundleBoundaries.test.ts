@@ -523,6 +523,25 @@ describe("server boot import boundaries", () => {
     expect(monitor.filter((file) => reachable.includes(file))).toEqual(monitor);
   });
 
+  it("loads user action requests (open, answer, wait, expiry) on first use, never at boot", () => {
+    // A surface's tool and the owner's answer load the module through import(); the boot path
+    // keeps the activity kinds, the derivation the pending-input count reads and the surfaces'
+    // tiny hook registry.
+    const userActionRequests = [
+      "apps/server/src/userActionRequests/userActionRequests.ts",
+      "packages/shared/src/userActionRequests.ts",
+      // Shared with secret requests: locks, expiry timers, restart rescheduling.
+      "apps/server/src/nodeRequests/nodeRequestLifecycle.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(userActionRequests.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/ws/userActionRequestRpc.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(userActionRequests.filter((file) => reachable.includes(file))).toEqual(
+      userActionRequests,
+    );
+  });
+
   it("loads secret requests (tool, answer, dotenv writer) on first use, never at boot", () => {
     // `ryco_request_secret` loads through `withLazyAgentControlTools`, the owner's answer and the
     // restart's expiry timers through import(); the boot path keeps the activity kinds and the
@@ -867,7 +886,14 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // subcommands' requests and output, with their view schemas, now load through import() when
     // one runs (e2eeRun.ts, -22.1 KB); e2eeCommand.ts keeps the flags and subcommands and hands
     // the shared CLI helpers in, since importing them would split boot modules into extra chunks.
-    expect(bytes).toBeLessThan(7_335_000);
+    // 7.345 MB on 2026-11-21 for the Copane port (measured 7.341064 MB with all three, over
+    // main's 7.322070 MB): user action requests (+8.4 KB: the request and answer schemas, the RPC,
+    // the surface hooks, pending-input and alert reads), agent terminal tools (+9.9 KB: the
+    // per-task terminal consent plan through validator, executor, audit and presentation, the
+    // terminal manager's read-only inspection and tty flag read) and the terminal hand-off's
+    // hint activity kind and schema (+0.5 KB). Each fits 7.335 MB alone; the tools, emulator,
+    // shell scripts and tty reader already load through import().
+    expect(bytes).toBeLessThan(7_345_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

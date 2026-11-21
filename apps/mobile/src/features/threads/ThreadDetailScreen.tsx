@@ -259,6 +259,7 @@ import { ThreadPromptCards } from "./ThreadPromptCards";
 import { useAlertExcerptPrompts } from "../../notifications/push/useAlertExcerptPrompts";
 import { sendOptionalAnswerAsMessage } from "@ryco/client-runtime/state/user-input";
 import { mobileSecretRequestCards } from "./secretRequestCardModel";
+import { useUserActionRequestCards } from "./useUserActionRequestCards";
 import { resolveThreadSendAction, sendThreadTurn } from "./sendThreadTurn";
 import { startOptimisticDispatch } from "./optimisticSend";
 import { useFailedSendRestore } from "./useFailedSendRestore";
@@ -1121,6 +1122,14 @@ export function ThreadDetailScreen(props: {
       threadActivities,
     ],
   );
+  // A browser tab or terminal an agent handed to the reader; the hook re-reads expiry itself.
+  const userActionRequests = useUserActionRequestCards(
+    threadActivities,
+    environmentServerConfig?.environment.capabilities.userActionRequests === true,
+    environmentRow?.role,
+    environmentRow?.mutationReady ?? false,
+    cachedView.promptsDisabled,
+  );
   const pillFastEnabled = modelPicker?.pillFastEnabled === true;
   const fastModeNotice = useMemo(
     () =>
@@ -1574,6 +1583,15 @@ export function ThreadDetailScreen(props: {
       navigation.navigate("ThreadTerminal", {
         environmentId,
         threadId,
+      }),
+    [environmentId, navigation, threadId],
+  );
+  const openTerminalAt = useCallback(
+    (terminalId: string) =>
+      navigation.navigate("ThreadTerminal", {
+        environmentId,
+        threadId,
+        terminalId,
       }),
     [environmentId, navigation, threadId],
   );
@@ -2609,6 +2627,7 @@ export function ThreadDetailScreen(props: {
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
     secretRequests.requests.length > 0 ||
+    userActionRequests.requests.length > 0 ||
     pendingAgentControlProposals.length > 0;
   // While approvals wait on a turn this message could steer, a send declines them and
   // redirects it: the same decision the send makes, from the composer's current selection.
@@ -2652,6 +2671,7 @@ export function ThreadDetailScreen(props: {
     agentControlProposals: pendingAgentControlProposals.length,
     userInputs: pendingUserInputs.length,
     secretRequests: secretRequests.requests.length,
+    userActionRequests: userActionRequests.requests.length,
   });
 
   // ── Header: the title pill, its context sheet, and one ⋯ menu ─────────────────────────────
@@ -3370,6 +3390,8 @@ export function ThreadDetailScreen(props: {
           onSendAsMessage={sendOptionalAnswer}
           promptsDisabled={promptsDisabled}
           secretRequests={secretRequests}
+          userActionRequests={userActionRequests}
+          onShowTerminal={openTerminalAt}
           agentControlProposals={pendingAgentControlProposals}
           agentControlDisabled={cachedView.promptsDisabled}
         />

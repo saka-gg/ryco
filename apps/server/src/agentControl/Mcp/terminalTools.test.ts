@@ -14,12 +14,13 @@ import {
   RuntimeSessionId,
   ThreadId,
   TurnId,
+  CommandId,
   type AgentControlCapability,
   type AgentControlProposal,
   type AgentControlProposalStatus,
   type RuntimeMode,
 } from "@ryco/contracts";
-import { Effect, Exit, Layer, Option, Schema, Scope } from "effect";
+import { Effect, Exit, Layer, ManagedRuntime, Option, Schema, Scope } from "effect";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
 import * as NodePTY from "../../terminal/Layers/NodePTY.ts";
@@ -34,6 +35,27 @@ import type {
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
 import { withTerminalTools } from "./terminalTools.ts";
+import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
+import { ServerConfig } from "../../config.ts";
+import { OrchestrationEngineLive } from "../../orchestration/Layers/OrchestrationEngine.ts";
+import { OrchestrationProjectionPipelineLive } from "../../orchestration/Layers/ProjectionPipeline.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "../../orchestration/Layers/ProjectionSnapshotQuery.ts";
+import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadBackgroundLiveness from "../../orchestration/ThreadBackgroundLiveness.ts";
+import { findThreadInArray } from "../../orchestration/threadIndex.ts";
+import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
+import {
+  answerUserActionRequest,
+  readThreadUserActionRequests,
+  userActionRequestIdFor,
+  type UserActionWaitDeps,
+} from "../../userActionRequests/userActionRequests.ts";
+import { userActionRequestHints } from "@ryco/shared/userActionHints";
 import {
   submitAgentControlMutation,
   type AgentControlMcpToolDeps,
@@ -148,7 +170,7 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
       Scope.provide(scope),
     );
 
-  const toolsFor = (terminals: TerminalManagerShape) => {
+  const toolsFor = (terminals: TerminalManagerShape, userActions?: UserActionWaitDeps) => {
     const mutationDeps: Pick<AgentControlMcpToolDeps, "validator" | "proposals"> = {
       validator: {
         validateOwnerAutomation: () => Effect.die("unused"),
@@ -212,6 +234,7 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
           ),
       },
       terminals,
+      ...(userActions === undefined ? {} : { userActions }),
     });
     return async (args: Record<string, unknown>) => {
       const result = await Effect.runPromise(
@@ -372,6 +395,175 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
     expect(closing.isError).toBe(true);
     expect(closing.body).toContain("only the user closes it");
   }, 30_000);
+
+  describe("handoff", () => {
+    const engineRuntime = ManagedRuntime.make(
+      OrchestrationEngineLive.pipe(
+        Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
+        Layer.provide(ThreadBackgroundLiveness.layer),
+        Layer.provideMerge(OrchestrationProjectionPipelineLive),
+        Layer.provide(
+          Layer.succeed(ProjectAvatarStore, {
+            write: () => Effect.die("unused"),
+            read: () => Effect.succeed(null),
+            remove: () => Effect.void,
+          }),
+        ),
+        Layer.provide(OrchestrationEventStoreLive),
+        Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+        Layer.provide(RepositoryIdentityResolverLive),
+        Layer.provideMerge(SqlitePersistenceMemory),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "ryco-terminal-handoff-" }),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    );
+    let userActions: UserActionWaitDeps;
+    let handoffCall: ReturnType<typeof toolsFor>;
+    const runEngine = <A, E>(effect: Effect.Effect<A, E, OrchestrationEngineService>) =>
+      engineRuntime.runPromise(effect);
+
+    beforeAll(async () => {
+      const engine = await runEngine(Effect.service(OrchestrationEngineService));
+      const createdAt = new Date().toISOString();
+      await runEngine(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-project-handoff"),
+          projectId: ProjectId.make("project-1"),
+          title: "Hand-offs",
+          workspaceRoot: path.join(root, "work"),
+          defaultModelSelection: null,
+          createdAt,
+        }),
+      );
+      await runEngine(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-handoff"),
+          threadId: THREAD,
+          projectId: ProjectId.make("project-1"),
+          title: "Hand-offs",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      userActions = { engine, findThreadInArray, waitUntil, threadWakeSource };
+      handoffCall = toolsFor(manager, userActions);
+    });
+    afterAll(() => engineRuntime.dispose());
+
+    const answer = (callerRequestId: string, value: "done" | "declined") =>
+      runEngine(
+        answerUserActionRequest(userActions, {
+          threadId: THREAD,
+          requestId: userActionRequestIdFor(THREAD, callerRequestId),
+          answer: value,
+        }),
+      );
+
+    it("refuses a blank message before starting anything", async () => {
+      const refused = await handoffCall({
+        action: "handoff",
+        requestId: "blank",
+        message: "   ",
+        command: "echo should-not-run",
+      });
+      expect(refused.isError).toBe(true);
+      expect(refused.body).toContain("Nothing was started");
+      const requests = await runEngine(readThreadUserActionRequests(userActions, THREAD));
+      expect(requests?.some((r) => r.requestId === userActionRequestIdFor(THREAD, "blank"))).toBe(
+        false,
+      );
+      for (const body of seen) expect(body).not.toContain("should-not-run\n");
+    });
+
+    it("hands a password prompt to the user, refuses input meanwhile and ends with the command", async () => {
+      const opened = await handoffCall({
+        action: "handoff",
+        requestId: "pw",
+        message: "Enter the test password.",
+        command: "bash secret.sh",
+        timeout_seconds: 2,
+      });
+      expect(opened.isError).toBe(false);
+      expect(opened.body).toContain("The user has agent-");
+      const terminalId = /The user has (agent-\d+)/.exec(opened.body)![1]!;
+
+      const typed = await handoffCall({ action: "send", terminal: terminalId, text: "x" });
+      expect(typed.isError).toBe(true);
+      expect(typed.body).toContain("is with the user");
+      const ran = await handoffCall({ action: "run", terminal: terminalId, command: "echo hi" });
+      expect(ran.isError).toBe(true);
+
+      await Effect.runPromise(manager.write({ threadId: THREAD, terminalId, data: `${SECRET}\r` }));
+      const ended = await handoffCall({ action: "handoff", requestId: "pw", timeout_seconds: 15 });
+      expect(ended.body).toContain("exited with code 0");
+      expect(ended.body).toContain("with the user at the terminal");
+      expect(ended.body).toContain(`length=${SECRET.length}`);
+      for (const body of seen) expect(body).not.toContain(SECRET);
+    }, 40_000);
+
+    it("shows a device code on the card and steers the agent after Won't do", async () => {
+      const opened = await handoffCall({
+        action: "handoff",
+        requestId: "login",
+        message: "Sign in to GitHub in your browser.",
+        need: "sign-in",
+        command: "bash device.sh",
+        timeout_seconds: 3,
+      });
+      expect(opened.body).toContain("has not finished");
+      const projections = await engineRuntime.runPromise(Effect.service(ProjectionSnapshotQuery));
+      const thread = Option.getOrThrow(
+        await engineRuntime.runPromise(projections.getThreadDetailById(THREAD)),
+      );
+      const hint = userActionRequestHints(thread.activities).get(
+        userActionRequestIdFor(THREAD, "login"),
+      );
+      expect(hint?.codes).toContain("ABCD-1234");
+      expect(hint?.links).toContain("https://github.com/login/device");
+      const requests = await runEngine(readThreadUserActionRequests(userActions, THREAD));
+      expect(
+        requests?.find((r) => r.requestId === userActionRequestIdFor(THREAD, "login"))?.need,
+      ).toBe("sign-in");
+
+      await answer("login", "declined");
+      const ended = await handoffCall({
+        action: "handoff",
+        requestId: "login",
+        timeout_seconds: 5,
+      });
+      expect(ended.body).toContain("Do not ask again");
+      expect(ended.body).toContain("is still running");
+      const stopped = await handoffCall({ action: "interrupt" });
+      expect(stopped.isError).toBe(false);
+
+      // The next hand-off in that terminal starts clean: the earlier code on screen is not its own.
+      const next = await handoffCall({
+        action: "handoff",
+        requestId: "pw-after-login",
+        message: "Enter the test password.",
+        command: "bash secret.sh",
+        timeout_seconds: 3,
+      });
+      expect(next.body).toContain("has not finished");
+      const later = Option.getOrThrow(
+        await engineRuntime.runPromise(projections.getThreadDetailById(THREAD)),
+      );
+      expect(
+        userActionRequestHints(later.activities).get(
+          userActionRequestIdFor(THREAD, "pw-after-login"),
+        ),
+      ).toBeUndefined();
+      await handoffCall({ action: "handoff", requestId: "pw-after-login", cancel: true });
+    }, 40_000);
+  });
 
   it("guesses command ends in a shell without marks, without an exit code", async () => {
     const plain = await Effect.runPromise(makeManager(false));

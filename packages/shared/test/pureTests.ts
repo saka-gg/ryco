@@ -93,6 +93,8 @@ export const SHARED_PURE_TEST_FILES = [
   "src/storageRetention.test.ts",
   "src/taskClassification.test.ts",
   "src/threadActivity.test.ts",
+  "src/userActionRequests.test.ts",
+  "src/userActionHints.test.ts",
   "src/threadArtifacts.test.ts",
   "src/threadExport.test.ts",
   "src/threadFork.test.ts",

@@ -311,6 +311,9 @@ export const RPC_ACCESS_POLICY = {
   // Carries a secret the owner types for an agent's request and writes it into the thread's
   // checkout: owners only, like the account and integration tokens they save.
   [WS_METHODS.secretsAnswerRequest]: "owner",
+  // Ends an agent's hand-off of a browser tab or terminal of the node: the owner's, like the
+  // sign-ins it is usually for.
+  [WS_METHODS.userActionsAnswerRequest]: "owner",
   // Starts the provider process a send by the same operator would start.
   [WS_METHODS.providerPrewarmSession]: "operator",
   // Starts the provider's CLI in the directory (project settings and hooks apply), as a send does.
@@ -645,6 +648,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.threadsStopLocalServer]: "mutation",
   // Writes a file and closes the request: never replayed (a repeat finds it answered).
   [WS_METHODS.secretsAnswerRequest]: "mutation",
+  // Closes the request: never replayed (a repeat finds it resolved).
+  [WS_METHODS.userActionsAnswerRequest]: "mutation",
   // Idempotent per thread: a repeat finds the session it already started.
   [WS_METHODS.providerPrewarmSession]: "read",
   [WS_METHODS.providerReadProjectCommands]: "read",

@@ -348,6 +348,37 @@ handoff would start from.
   `note` tells the agent to end its turn. Calling again with the same `requestId` answers with
   that request's receipt, also once the chat has moved.
 
+## User action requests
+
+Some steps only the user may take: a sign-in with a real account, a one-time code, a passkey, a
+captcha, a consent screen. A surface hands its target to the user for them and waits: the browser
+(`ryco_browser` action `handoff`, a Ryco browser tab) and the terminal. The request is
+node-owned, like a secret request, and the same for every surface
+(`apps/server/src/userActionRequests/userActionRequests.ts`):
+
+- **Recorded.** `user-action.requested` (surface, a fixed `need`: `sign-in`, `verification`,
+  `captcha`, `consent` or `input`, the agent's message of at most 300 characters, an optional
+  target such as a tab or terminal id, and the expiry) and one `user-action.resolved` (outcome:
+  `done`, `declined`, `timeout`, `cancelled`, `closed` or `condition-met`). Ids derive from the
+  thread and the caller's own `requestId`, so a repeated call finds the same request; the first
+  outcome wins. A thread holds at most 3 pending requests. They expire after 10 minutes by default
+  (a surface may ask for 10 s to 1 h); the node records the expiry, also after a restart.
+- **Pending input.** A pending request counts as pending user input, like a question: it holds
+  settlement, queued wakes and restart continuation, and the phone's "input" alert names it by a
+  fixed label only ("Login required in browser"), never the agent's message, a URL or page text.
+- **The card.** Done and Won't do (`userActions.answerRequest`, owner only, never replayed), and
+  Show where the client can show the surface (the desktop app for its own browser tabs). Other
+  clients say "Continue on your desktop". The web phone tier shows no card.
+- **Waiting.** A surface's tool waits at most 45 s per call (every Agent Control call is cut at
+  60 s) and answers pending; the agent calls again with the same `requestId`. The surface may also
+  watch its own condition (`watchUserActionRequest`, for example the browser's `done_when`), and
+  every end, however it came, runs the surface's hook (`surfaceHooks.ts`), which gives the tab or
+  terminal back.
+- **Hints.** A surface may record `user-action.hint` activities for a pending request: links
+  (http and https only) and one-time codes it found, at most 3 of each and 4 updates per request,
+  the newest replacing earlier ones. The card shows them with Open and Copy. They are never a
+  timeline row, never in an alert, and their summary never carries the text.
+
 ## Secret requests
 
 An agent that needs a secret calls `ryco_request_secret` with an environment variable name
@@ -474,6 +505,21 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   terminals. The `terminals.control` grant, exact active-turn authority, private sessions only.
 - **Clients.** A terminal an agent opens appears as an "Agent <n>" tab without opening or
   focusing the drawer, on the web and on the phone.
+- **Hand-off.** `handoff` gives a terminal to the user for what the agent must not or cannot do: a
+  password or sudo prompt, a 2FA code, `gh auth login` or another device-code or browser sign-in,
+  a decision. It is a user action request (surface `terminal`, target the terminal id; see
+  [User action requests](#user-action-requests)) with the agent's `requestId` and `message`, an
+  optional `need` (default `sign-in` when the screen shows a sign-in, else `input`), optional
+  `command` to start first and `expires_in_seconds` (30 to 3600, default 600). It ends when that
+  command (or the one already running) finishes (`condition-met`, with its exit code), the user
+  clicks Done or Won't do, it expires, the terminal closes or exits, or the agent cancels. While it
+  waits, `run`, `send` and `interrupt` on that terminal are refused, read from the thread's own
+  record, so also after a restart; `read` and `wait` still work. The node watches the terminal
+  every second and records the sign-in links and device codes it shows as hints for the card. The
+  result steers the agent (declined: do not ask again; timeout: ask in chat first) and carries the
+  rendered output since the hand-off. The card's Show opens the terminal: the web drawer on that
+  tab, the phone's terminal screen through the `terminalId` route parameter. The terminal's tab
+  shows an amber marker while it waits.
 
 ## Tasks
 

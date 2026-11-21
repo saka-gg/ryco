@@ -11,6 +11,8 @@ import {
   resolveOptionalAnswerRoute,
 } from "@ryco/client-runtime/state/user-input";
 import type { PendingUserInput } from "@ryco/client-runtime/state/session";
+import { terminalsWaitingForUser } from "@ryco/client-runtime/state/terminal";
+import type { UserActionRequestView } from "@ryco/shared/userActionRequestState";
 import { ResumeFallbackHandoffIcon } from "./chat/ContextHandoffMarkerRow";
 import { useIsLocalComputerEnvironment } from "../computerUse/localComputer";
 import {
@@ -21,6 +23,7 @@ import {
 import { noteComputerSetupMissingOnce } from "../computerUse/computerSetupNotice";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
+import { hasPendingUserActionRequest } from "@ryco/shared/threadActivity";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { taskDraftSend } from "./tasks/taskDraft";
 import {
@@ -108,6 +111,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   SECRET_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
   WS_METHODS,
 } from "@ryco/contracts";
 import {
@@ -386,6 +390,7 @@ import { threadMoveCheckpointFloor } from "@ryco/shared/threadMove";
 import {
   LazyAgentControlApprovals,
   LazySecretRequestCards,
+  LazyUserActionRequestCards,
   LazyChatOverviewPanel,
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
@@ -7108,6 +7113,50 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error, retry) => notifySurfaceLoadFailure("secret requests", error, retry),
     },
   );
+  // An agent's hand-offs of a browser tab or terminal: a card per request with Done / Won't do,
+  // loaded only for threads that handed one over, and off the frozen phone tier.
+  // Terminals an agent handed to the user: their drawer tab shows a marker until the hand-off
+  // ends (re-read with the thread's activities; the node records an expiry as an end too).
+  const terminalsWaitingForYou = useMemo(
+    () => terminalsWaitingForUser(threadActivities, Date.now()),
+    [threadActivities],
+  );
+  // Show on a hand-off card, per surface: null when this window cannot show it (the card then
+  // says where to continue). A terminal opens in the drawer on that terminal.
+  const showUserActionTerminal = (request: UserActionRequestView) => {
+    const terminalId = request.target;
+    if (terminalId === null || !activeThreadRef || !terminalCapability.allowed) return null;
+    return () => {
+      storeSetActiveTerminal(activeThreadRef, terminalId);
+      storeSetTerminalOpen(activeThreadRef, true);
+      setTerminalFocusRequestId((value) => value + 1);
+    };
+  };
+  const userActionShowHandler = (request: UserActionRequestView) => {
+    switch (request.surface) {
+      case "terminal":
+        return showUserActionTerminal(request);
+      default:
+        return null;
+    }
+  };
+  const showUserActionRequests =
+    presentationTier !== "phone" &&
+    threadActivities.some((activity) => activity.kind === USER_ACTION_REQUESTED_ACTIVITY_KIND);
+  // While a hand-off card waits for the user, the crown's floating workspace preview collapses:
+  // it would cover the card (and its Won't do) at narrower widths. Cheap on purpose (no payload
+  // schemas on the chat route): requested ids without a resolution, not yet past their expiry.
+  const userActionCardPending = useMemo(
+    () => showUserActionRequests && hasPendingUserActionRequest(threadActivities, Date.now()),
+    [showUserActionRequests, threadActivities],
+  );
+  const userActionRequestCardsReady = useLazyComponentReady(
+    LazyUserActionRequestCards,
+    showUserActionRequests,
+    {
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("hand-off requests", error, retry),
+    },
+  );
   // Agent Control approvals stay off the frozen phone tier (apps/mobile owns
   // the native surface).
   const agentControlApprovalsReady = useLazyComponentReady(
@@ -7287,7 +7336,9 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const workspacePreview =
-    !isPhoneTier && isLocalComputerEnvironment(activeThread.environmentId) ? (
+    !isPhoneTier &&
+    !userActionCardPending &&
+    isLocalComputerEnvironment(activeThread.environmentId) ? (
       <>
         {computerBetaPreviewReady ? (
           <LazyComputerBetaPreview key={activeThread.id} threadId={activeThread.id} inline />
@@ -7799,6 +7850,19 @@ export default function ChatView(props: ChatViewProps) {
                   }
                 />
               ) : null}
+              {showUserActionRequests && userActionRequestCardsReady && activeThread ? (
+                <LazyUserActionRequestCards
+                  environmentId={environmentId}
+                  threadId={activeThread.id}
+                  activities={threadActivities}
+                  showHandler={userActionShowHandler}
+                  disabledReason={
+                    activeEnvironmentUnavailable || sideChatConnection.phase !== "connected"
+                      ? (mutationUnavailableReason ?? "Connect to the node to answer.")
+                      : null
+                  }
+                />
+              ) : null}
               <ComposerBannerStack className="relative z-0" items={composerBannerStackItems} />
               {/* External integrations' Agent Control approvals: this thread's
                   own live in the composer's delegation dock. Both stay off the
@@ -8209,6 +8273,9 @@ export default function ChatView(props: ChatViewProps) {
             mountedThreadKey === activeThreadKey ? (activeTerminalLaunchContext ?? null) : null
           }
           focusRequestId={mountedThreadKey === activeThreadKey ? terminalFocusRequestId : 0}
+          {...(mountedThreadKey === activeThreadKey && terminalsWaitingForYou.length > 0
+            ? { waitingTerminalIds: terminalsWaitingForYou }
+            : {})}
           splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
           newShortcutLabel={newTerminalShortcutLabel ?? undefined}
           closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}

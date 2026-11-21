@@ -12,6 +12,8 @@ import {
   ApprovalResponseState,
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_RESOLVED_ACTIVITY_KIND,
 } from "@ryco/contracts";
 import { matchesApprovalAttempt, sameApprovalIdentity } from "../approvalResponses.ts";
 import {
@@ -1322,12 +1324,15 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             pendingApprovalDelta: attachmentSideEffects.pendingApprovalDelta,
             pendingUserInputDelta: attachmentSideEffects.pendingUserInputDelta,
           });
-          // A secret request opens or closes: rare, so the pending count is recounted from the
-          // thread's activities (`derivePendingThreadRequestState` counts it as user input).
+          // A secret or user action request opens or closes: rare, so the pending count is
+          // recounted from the thread's activities (`derivePendingThreadRequestState` counts it
+          // as user input).
           if (
             event.type === "thread.activity-appended" &&
             (event.payload.activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
-              event.payload.activity.kind === SECRET_RESOLVED_ACTIVITY_KIND)
+              event.payload.activity.kind === SECRET_RESOLVED_ACTIVITY_KIND ||
+              event.payload.activity.kind === USER_ACTION_REQUESTED_ACTIVITY_KIND ||
+              event.payload.activity.kind === USER_ACTION_RESOLVED_ACTIVITY_KIND)
           ) {
             yield* recomputeThreadShellSummary(
               event.payload.threadId,
