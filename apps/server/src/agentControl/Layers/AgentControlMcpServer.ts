@@ -51,6 +51,7 @@ import {
   AGENT_CONTROL_QUEUE_MCP_TOOLS,
   AGENT_CONTROL_WORKTREE_MCP_TOOLS,
   AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
+  AGENT_CONTROL_TERMINAL_MCP_TOOL,
 } from "@ryco/contracts";
 import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
@@ -389,7 +390,37 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     AGENT_CONTROL_CAPABILITIES.importProject,
     AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
   ]);
-  const projectCopyTools = withLazyAgentControlTools(secretTools, {
+  // `ryco_terminal`: the caller's thread's terminals, rendered by a headless emulator. Its module
+  // (and the emulator) loads the first time a session that may use terminals lists or calls
+  // tools, never at boot.
+  const terminalTools =
+    Option.isSome(terminals) && terminals.value.inspect !== undefined
+      ? withLazyAgentControlTools(secretTools, {
+          names: [AGENT_CONTROL_TERMINAL_MCP_TOOL],
+          writeNames: [AGENT_CONTROL_TERMINAL_MCP_TOOL],
+          mayUse: (session) =>
+            session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlTerminals),
+          load: () =>
+            import("../Mcp/terminalTools.ts").then((module) =>
+              module.withTerminalTools(secretTools, {
+                policy,
+                registry,
+                proposals,
+                submitMutation: (input) =>
+                  submitAgentControlMutation(
+                    {
+                      proposals,
+                      ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+                    },
+                    input,
+                  ),
+                projections,
+                terminals: terminals.value,
+              }),
+            ),
+        })
+      : secretTools;
+  const projectCopyTools = withLazyAgentControlTools(terminalTools, {
     names: Object.values(AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS),
     writeNames: [
       AGENT_CONTROL_PROJECT_COPY_MCP_TOOLS.proposeImport,
@@ -399,7 +430,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
       session.grantedCapabilities.some((capability) => projectCopyCapabilities.has(capability)),
     load: () =>
       import("../Mcp/projectCopyTools.ts").then((module) =>
-        module.withProjectCopyTools(secretTools, {
+        module.withProjectCopyTools(terminalTools, {
           policy,
           registry,
           proposals,

@@ -520,6 +520,47 @@ it("asks once per task for routine device input, saying what it opens up", () =>
   ]);
 });
 
+it("asks once per task to type in a terminal the user opened, saying what it opens up", () => {
+  const model = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: {
+        kind: "terminalControlConsent",
+        threadId: ThreadId.make("thread-caller-1234"),
+        projectId: ProjectId.make("project-1"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        terminalId: "default",
+      },
+      riskTags: [
+        AgentControlRiskTag.make("terminal-input"),
+        AgentControlRiskTag.make("runs-commands"),
+      ],
+      promptSummary: "Allow the agent to type in terminal default for this task",
+    }),
+    () => "Coordinator",
+  );
+  expect(model.actionLabel).toBe("Allow terminal for this task");
+  expect(model.targetLabel).toBe("terminal default");
+  expect(model.runtimeLabel).toBe("this task only");
+  expect(model.isPending).toBe(true);
+  expect(model.isDestructive).toBe(false);
+  expect(model.detailSections).toEqual([
+    {
+      heading: "Terminal input until this response ends",
+      lines: [
+        "The agent may run commands, type, press keys and interrupt programs in this terminal you opened.",
+        "It can see what the terminal shows.",
+        "Closing the terminal stays yours.",
+        "Use Stop in chat to end the task. The next task asks again.",
+        "Terminal: default",
+        "Thread: thread-caller-1234",
+        "Project: project-1",
+        "Provider instance: codex",
+        "Nothing the agent types is stored with this request.",
+      ],
+    },
+  ]);
+});
+
 it("says which created thread starts a task's chat", () => {
   const model = buildAgentControlProposalCardModel(
     makeProposal({

@@ -16,13 +16,31 @@ import {
   TerminalHistoryError,
   TerminalNotRunningError,
   TerminalOpenInput,
+  type TerminalRef,
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
   TerminalSessionLookupError,
   TerminalWriteInput,
 } from "@ryco/contracts";
-import { Effect, Context } from "effect";
+import { Effect, Context, type Option } from "effect";
+
+import type { PtyInputMode } from "./PTY.ts";
+
+/** One session as agent terminal tools read it; nothing here starts or changes it. */
+export interface TerminalSessionInspection {
+  /** With the retained (sanitized) history. */
+  readonly snapshot: TerminalSessionSnapshot;
+  readonly hasRunningSubprocess: boolean;
+  readonly cols: number;
+  readonly rows: number;
+  /** The tty's foreground process name where the platform tells it cheaply (macOS node-pty). */
+  readonly foregroundProcessName?: string;
+  /** What the foreground process is called while the shell is idle, once seen. */
+  readonly idleForegroundName?: string;
+  /** The nonce in the shell's prompt and command marks; absent for a shell without them. */
+  readonly markNonce?: string;
+}
 
 export {
   TerminalCwdError,
@@ -101,6 +119,18 @@ export interface TerminalManagerShape {
    * state before live events continue.
    */
   readonly listSessions: Effect.Effect<ReadonlyArray<TerminalSessionSnapshot>>;
+
+  /** One session with its history and process state; `none` for an unknown terminal. */
+  readonly inspect?: (ref: TerminalRef) => Effect.Effect<Option.Option<TerminalSessionInspection>>;
+
+  /**
+   * Whether the shell is idle at this moment (no command running), by the same fresh
+   * process-table read a `requireIdle` write makes; false when busy or it cannot tell.
+   */
+  readonly verifyIdle?: (ref: TerminalRef) => Effect.Effect<boolean>;
+
+  /** The tty's echo and line-mode flags now, when the PTY adapter can read them. */
+  readonly readInputMode?: (ref: TerminalRef) => Effect.Effect<Option.Option<PtyInputMode>>;
 }
 
 /**

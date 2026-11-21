@@ -22,6 +22,14 @@ export interface PtyExitEvent {
   signal: number | null;
 }
 
+/** The tty's line discipline as the program reading it set it up. */
+export interface PtyInputMode {
+  /** Typed characters are echoed; off at hidden prompts (passwords) and in raw-mode programs. */
+  readonly echo: boolean;
+  /** Line-buffered input (ICANON); off in raw mode: line editors, full-screen programs. */
+  readonly canonical: boolean;
+}
+
 export interface PtyProcess {
   readonly pid: number;
   write(data: string): void;
@@ -36,6 +44,12 @@ export interface PtyProcess {
    * by the shell's name, shows as the shell.
    */
   readonly foregroundProcessName?: () => string | undefined;
+  /**
+   * The tty's current echo and canonical flags (termios `c_lflag`), when the adapter can read
+   * them; `undefined` when it cannot. Never rejects. Cheap enough for an occasional check, not
+   * for every chunk of output.
+   */
+  readonly readInputMode?: () => Promise<PtyInputMode | undefined>;
 }
 
 export interface PtySpawnInput {

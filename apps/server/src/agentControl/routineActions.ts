@@ -55,6 +55,8 @@ export const isRoutineAgentControlAction = (
     default:
       // Includes `deviceControlConsent`: the user grants routine device input for a task,
       // never the agent itself (a Full access chat never asks for it in `ryco_device`).
+      // Includes `terminalControlConsent`: the user lets the agent type in a terminal they
+      // opened, for one task; the agent's own terminals never need it.
       return false;
   }
 };

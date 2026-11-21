@@ -6,7 +6,7 @@ import {
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { restoreChatFolder } from "../../project/chatFolderRestore.ts";
 
 import {
@@ -17,6 +17,7 @@ import {
   type DiagnosticsTerminalProcess,
   type TerminalEvent,
   type TerminalCursor,
+  type TerminalRef,
   type TerminalSessionSnapshot,
   type TerminalSessionStatus,
 } from "@ryco/contracts";
@@ -242,6 +243,8 @@ interface TerminalSessionState {
    * without children: what the shell goes by when idle. Null until seen, and for each new PTY.
    */
   idleForegroundName: string | null;
+  /** The nonce in the shell's prompt and command marks, null for a shell without them. */
+  markNonce: string | null;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
@@ -1262,16 +1265,22 @@ interface TerminalManagerOptions {
    */
   outputCoalesceMs?: number;
   workspaceAccessPolicy?: WorkspaceAccessPolicyShape;
+  /**
+   * Where zsh and bash startup files that mark prompts and command ends (OSC 133) are written
+   * on the first spawn (`shellIntegration.ts`); omitted, shells start without them.
+   */
+  shellIntegrationDir?: string;
 }
 
 const makeTerminalManager = Effect.fn("makeTerminalManager")(function* () {
-  const { terminalLogsDir } = yield* ServerConfig;
+  const { terminalLogsDir, stateDir } = yield* ServerConfig;
   const ptyAdapter = yield* PtyAdapter;
   const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
   return yield* makeTerminalManagerWithOptions({
     logsDir: terminalLogsDir,
     ptyAdapter,
     workspaceAccessPolicy,
+    shellIntegrationDir: path.join(stateDir, "shell-integration"),
   });
 });
 
@@ -1358,6 +1367,39 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     const clock = yield* Clock.Clock;
 
     yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
+
+    // Loaded and written once, on the first spawn (never at boot). A directory that cannot be
+    // written, or `RYCO_TERMINAL_SHELL_INTEGRATION=0`, leaves shells as they were, without marks.
+    const shellIntegrationDir = options.shellIntegrationDir;
+    // One per server process: the shells this manager starts put it in their marks, and agent
+    // tools trust only marks that carry it (`terminal/agent/mirror.ts`).
+    const shellMarkNonce = randomBytes(16).toString("hex");
+    const shellIntegration =
+      shellIntegrationDir === undefined || platform === "win32"
+        ? Effect.succeed(null)
+        : yield* Effect.cached(
+            Effect.gen(function* () {
+              const module = yield* Effect.promise(() => import("../shellIntegration.ts"));
+              if (module.shellIntegrationDisabled(process.env)) return null;
+              yield* Effect.forEach(
+                module.shellIntegrationFiles(),
+                (file) =>
+                  Effect.gen(function* () {
+                    const target = path.join(shellIntegrationDir, file.path);
+                    yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true });
+                    yield* fileSystem.writeFileString(target, file.content);
+                  }),
+                { discard: true },
+              );
+              return module.withShellIntegration;
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("terminal shell integration unavailable", { cause }).pipe(
+                  Effect.as(null),
+                ),
+              ),
+            ),
+          );
 
     const managerStateRef = yield* SynchronizedRef.make<TerminalManagerState>({
       sessions: new Map(),
@@ -2263,7 +2305,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       session: TerminalSessionState,
       index = 0,
       lastError: PtySpawnError | null = null,
-    ): Effect.fn.Return<{ process: PtyProcess; shellLabel: string }, PtySpawnError> {
+    ): Effect.fn.Return<
+      { process: PtyProcess; shellLabel: string; integrated: boolean },
+      PtySpawnError
+    > {
       if (index >= shellCandidates.length) {
         const detail = lastError?.message ?? "Failed to spawn PTY process";
         const tried =
@@ -2288,21 +2333,38 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         );
       }
 
+      const integrate = yield* shellIntegration;
+      const integrated =
+        integrate !== null && shellIntegrationDir !== undefined
+          ? integrate(candidate, spawnEnv, shellIntegrationDir, platform, shellMarkNonce)
+          : null;
       const attempt = yield* Effect.result(
-        options.ptyAdapter.spawn({
-          shell: candidate.shell,
-          ...(candidate.args ? { args: candidate.args } : {}),
-          cwd: session.cwd,
-          cols: session.cols,
-          rows: session.rows,
-          env: spawnEnv,
-        }),
+        options.ptyAdapter.spawn(
+          integrated === null
+            ? {
+                shell: candidate.shell,
+                ...(candidate.args ? { args: candidate.args } : {}),
+                cwd: session.cwd,
+                cols: session.cols,
+                rows: session.rows,
+                env: spawnEnv,
+              }
+            : {
+                shell: integrated.shell,
+                args: [...integrated.args],
+                cwd: session.cwd,
+                cols: session.cols,
+                rows: session.rows,
+                env: integrated.env,
+              },
+        ),
       );
 
       if (attempt._tag === "Success") {
         return {
           process: attempt.success,
           shellLabel: formatShellCandidate(candidate),
+          integrated: integrated !== null,
         };
       }
 
@@ -2363,6 +2425,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
               ptyProcess = spawnResult.process;
               startedShell = spawnResult.shellLabel;
+              const markNonce = spawnResult.integrated ? shellMarkNonce : null;
 
               const processPid = ptyProcess.pid;
               const unsubscribeData = ptyProcess.onData((data) => {
@@ -2411,6 +2474,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               yield* modifyManagerState((state) => {
                 session.process = ptyProcess;
                 session.idleForegroundName = null;
+                session.markNonce = markNonce;
                 session.pid = processPid;
                 session.status = "running";
                 advanceCursor(session);
@@ -2793,6 +2857,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               rows,
               process: null,
               idleForegroundName: null,
+              markNonce: null,
               unsubscribeData: null,
               unsubscribeExit: null,
               hasRunningSubprocess: false,
@@ -3115,6 +3180,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                   rows: input.rows,
                   process: null,
                   idleForegroundName: null,
+                  markNonce: null,
                   unsubscribeData: null,
                   unsubscribeExit: null,
                   hasRunningSubprocess: false,
@@ -3185,6 +3251,61 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       ),
     );
 
+    const sessionFor = (ref: TerminalRef) =>
+      SynchronizedRef.get(managerStateRef).pipe(
+        Effect.map((state) =>
+          Option.fromNullishOr(state.sessions.get(toSessionKey(ref.threadId, ref.terminalId))),
+        ),
+      );
+
+    const inspect: NonNullable<TerminalManagerShape["inspect"]> = (ref) =>
+      sessionFor(ref).pipe(
+        Effect.map(
+          Option.map((session) => {
+            const foreground = readForegroundName(session);
+            return {
+              snapshot: snapshot(session),
+              hasRunningSubprocess: session.hasRunningSubprocess,
+              cols: session.cols,
+              rows: session.rows,
+              ...(foreground === undefined ? {} : { foregroundProcessName: foreground }),
+              ...(session.idleForegroundName === null
+                ? {}
+                : { idleForegroundName: session.idleForegroundName }),
+              ...(session.markNonce === null ? {} : { markNonce: session.markNonce }),
+            };
+          }),
+        ),
+      );
+
+    const verifyIdle: NonNullable<TerminalManagerShape["verifyIdle"]> = (ref) =>
+      withThreadLock(
+        ref.threadId,
+        sessionFor(ref).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed(false),
+              onSome: (session) =>
+                verifySessionIdle(session).pipe(
+                  Effect.as(true),
+                  Effect.catch(() => Effect.succeed(false)),
+                ),
+            }),
+          ),
+        ),
+      );
+
+    const readInputMode: NonNullable<TerminalManagerShape["readInputMode"]> = (ref) =>
+      sessionFor(ref).pipe(
+        Effect.flatMap((session) => {
+          const process = Option.getOrUndefined(session)?.process;
+          if (process?.readInputMode === undefined) return Effect.succeed(Option.none());
+          return Effect.promise(() => process.readInputMode?.() ?? Promise.resolve(undefined)).pipe(
+            Effect.map(Option.fromNullishOr),
+          );
+        }),
+      );
+
     return {
       open,
       write,
@@ -3192,6 +3313,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       clear,
       restart,
       close,
+      inspect,
+      verifyIdle,
+      readInputMode,
       listDiagnostics: SynchronizedRef.get(managerStateRef).pipe(
         Effect.map((state) =>
           [...state.sessions.values()]

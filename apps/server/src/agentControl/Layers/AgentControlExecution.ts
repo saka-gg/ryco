@@ -854,6 +854,23 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           return operation;
         }
 
+        if (proposal.plan.kind === "terminalControlConsent") {
+          const plan = proposal.plan;
+          yield* checkpoint({
+            ...operation.state,
+            resources: {
+              ...operation.state.resources,
+              threadIds: unique([...operation.state.resources.threadIds, plan.threadId]),
+              projectIds: unique([...(operation.state.resources.projectIds ?? []), plan.projectId]),
+            },
+          });
+          yield* validator.revalidateExecution(proposal);
+          // The user's consent is the whole effect: the input it allows runs directly through
+          // ryco_terminal. Nothing touches the terminal here.
+          yield* checkpoint(appendStep(operation.state, "terminal-consent-granted"));
+          return operation;
+        }
+
         if (
           isAgentControlDevicePlan(proposal.plan) ||
           proposal.plan.kind === "deviceControlConsent"
@@ -2037,6 +2054,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               executing.plan.kind === "changeSettings" ||
               executing.plan.kind === "deleteLocalTask" ||
               executing.plan.kind === "deviceControlConsent" ||
+              executing.plan.kind === "terminalControlConsent" ||
               executing.plan.kind === "createAutomation" ||
               executing.plan.kind === "updateAutomation" ||
               executing.plan.kind === "cancelAutomation"

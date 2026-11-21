@@ -106,6 +106,8 @@ export const agentControlRiskTagsForPlan = (
     case "devicePressButton":
     case "deviceControlConsent":
       return [AGENT_CONTROL_RISK_TAGS.deviceMutation];
+    case "terminalControlConsent":
+      return [AGENT_CONTROL_RISK_TAGS.terminalInput, AGENT_CONTROL_RISK_TAGS.runsCommands];
     case "importProject":
       return [AGENT_CONTROL_RISK_TAGS.createsProject, ...projectSetupRiskTags(plan)];
     case "copyProjectToNode":
@@ -191,6 +193,8 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
       return plan.executionSummary;
     case "deviceControlConsent":
       return `Allow routine input on device ${plan.udid} for this task`;
+    case "terminalControlConsent":
+      return `Allow the agent to type in terminal ${plan.terminalId} for this task`;
     // Titles only: repository URLs, paths and node labels stay out of audit rows.
     case "importProject":
       return `Set up project ${plan.title.slice(0, 200)} from a repository on this node`;

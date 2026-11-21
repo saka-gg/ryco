@@ -628,6 +628,48 @@ enabledLayer("AgentControlProposalStore", (it) => {
       });
     }),
   );
+
+  it.effect("records a terminal consent in audit rows by its terminal and ids only", () =>
+    Effect.gen(function* () {
+      const store = yield* AgentControlProposalStore;
+      const audit = yield* AgentControlAuditRepository;
+      const { proposal } = yield* store.submit({
+        principal,
+        requestId: AgentControlRequestId.make("request-terminal-consent"),
+        plan: {
+          kind: "terminalControlConsent",
+          threadId: ThreadId.make("thread-1"),
+          projectId: ProjectId.make("project-1"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          terminalId: "default",
+        },
+        riskTags: [
+          AgentControlRiskTag.make("terminal-input"),
+          AgentControlRiskTag.make("runs-commands"),
+        ],
+        promptSummary: "Allow the agent to type in terminal default for this task",
+        expiresAt: "2026-08-17T01:00:00.000Z",
+        now: "2026-08-17T00:00:00.000Z",
+      });
+      const [submitted] = yield* audit.listByProposalId({ proposalId: proposal.proposalId });
+      // Exactly these keys: a later change that spreads the plan or adds a field fails here.
+      assert.deepStrictEqual(submitted?.metadata, {
+        requestId: "request-terminal-consent",
+        actionKind: "terminalControlConsent",
+        planDigest: proposal.planDigest,
+        principalKind: "provider-session",
+        expiresAt: "2026-08-17T01:00:00.000Z",
+        terminalId: "default",
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        terminalThreadId: "thread-1",
+        riskClass: "terminal-control",
+        sensitivePayloadsExcluded: "true",
+        threadId: "thread-1",
+        authorization: "user-approval-required",
+      });
+    }),
+  );
 });
 
 enabledLayer("private routine authorization", (it) => {

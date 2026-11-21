@@ -6,6 +6,7 @@ import {
   PtySpawnError,
   type PtyAdapterShape,
   type PtyExitEvent,
+  type PtyInputMode,
   type PtyProcess,
 } from "../Services/PTY.ts";
 
@@ -107,6 +108,23 @@ export class NodePtyProcess implements PtyProcess {
     return () => {
       disposable.dispose();
     };
+  }
+
+  /**
+   * node-pty exposes no termios: `stty` reads the slave device (a few ms, one process). POSIX
+   * only; Windows' ConPTY has no such flags.
+   */
+  readInputMode(): Promise<PtyInputMode | undefined> {
+    if (this.platform === "win32") return Promise.resolve(undefined);
+    const ptsName = (this.process as { readonly ptsName?: unknown }).ptsName;
+    if (typeof ptsName !== "string" || !ptsName.startsWith("/dev/")) {
+      return Promise.resolve(undefined);
+    }
+    const platform = this.platform;
+    return import("../ttyInputMode.ts").then(
+      (module) => module.readInputModeWithStty(ptsName, platform),
+      () => undefined,
+    );
   }
 
   /**

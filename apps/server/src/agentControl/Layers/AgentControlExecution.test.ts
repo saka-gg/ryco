@@ -700,6 +700,95 @@ it.effect("a device consent approved after its task ended fails with the reason"
   }),
 );
 
+it.effect("an accepted terminal consent completes without touching the terminal", () =>
+  Effect.gen(function* () {
+    const consentPlan = {
+      kind: "terminalControlConsent" as const,
+      threadId: ThreadId.make("thread-origin"),
+      projectId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      terminalId: "default",
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-terminal-consent"),
+      requestId: AgentControlRequestId.make("request-terminal-consent"),
+      plan: consentPlan,
+      planDigest: computeAgentControlPlanDigest(consentPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    let revalidations = 0;
+    // No terminal service, command application or projection is reached.
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      commandApplication: {},
+      projections: {},
+      validator: {
+        validateSubmission: () => Effect.die("unused"),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () => Effect.sync(() => void (revalidations += 1)),
+      },
+    });
+
+    yield* execution.executeApproved(proposal.proposalId);
+    yield* execution.executeApproved(proposal.proposalId);
+
+    assert.isAtLeast(revalidations, 2);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.include(operation.state.completedSteps, "terminal-consent-granted");
+    assert.include(operation.state.resources.threadIds, ThreadId.make("thread-origin"));
+    assert.isUndefined(operation.state.device);
+  }),
+);
+
+it.effect("a terminal consent approved after its task ended fails with the reason", () =>
+  Effect.gen(function* () {
+    const consentPlan = {
+      kind: "terminalControlConsent" as const,
+      threadId: ThreadId.make("thread-origin"),
+      projectId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      terminalId: "default",
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-stale-terminal-consent"),
+      requestId: AgentControlRequestId.make("request-stale-terminal-consent"),
+      plan: consentPlan,
+      planDigest: computeAgentControlPlanDigest(consentPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      commandApplication: {},
+      projections: {},
+      validator: {
+        validateSubmission: () => Effect.die("unused"),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () =>
+          Effect.fail(
+            new AgentControlPlanValidationError({
+              reason: "caller-stale",
+              detail: "The task that asked has ended.",
+            }),
+          ),
+      },
+    });
+
+    yield* execution.executeApproved(proposal.proposalId);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    if (settled.result?.outcome === "failed") {
+      assert.notStrictEqual(settled.result.error.code, "device.stale-state");
+      assert.include(settled.result.error.message, "The task that asked has ended.");
+    } else assert.fail("expected a failed consent");
+  }),
+);
+
 it.effect("executes one accepted proposal exactly once under concurrent retries", () =>
   Effect.gen(function* () {
     const proposalRef = yield* Ref.make(approvedProposal);

@@ -4,6 +4,13 @@ import { ForwardCompatibleUnion, TrimmedNonEmptyString } from "./baseSchemas.ts"
 
 export const DEFAULT_TERMINAL_ID = "default";
 
+/**
+ * Ids of terminals an agent opens through `ryco_terminal` (`agent-1`, `agent-2`, ...). Clients
+ * name theirs `default`, `terminal-<uuid>` and `mobile-<uuid>`; the prefix tells agent terminals
+ * apart everywhere (their starts never pop a drawer open, their tabs read "Agent N").
+ */
+export const AGENT_TERMINAL_ID_PREFIX = "agent-";
+
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const TerminalColsSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(
   Schema.isLessThanOrEqualTo(1000),
@@ -12,6 +19,9 @@ const TerminalRowsSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).ch
   Schema.isLessThanOrEqualTo(500),
 );
 const TerminalIdSchema = TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(128));
+/** A terminal's id within its thread. */
+export const TerminalId = TerminalIdSchema;
+export type TerminalId = typeof TerminalId.Type;
 const TerminalEnvKeySchema = Schema.String.check(
   Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/),
 ).check(Schema.isMaxLength(128));

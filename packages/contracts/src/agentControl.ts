@@ -81,6 +81,7 @@ import {
   DEVICE_SWIPE_DURATION_MIN_MS,
 } from "./device.ts";
 import { LocalTaskId, LocalTaskTitle } from "./localTasks.ts";
+import { TerminalId } from "./terminal.ts";
 
 // ── Identifiers ───────────────────────────────────────────────────────
 
@@ -242,6 +243,11 @@ export const AGENT_CONTROL_CAPABILITIES = {
   controlDevices: AgentControlCapability.make("devices.control"),
   controlComputer: AgentControlCapability.make("computer.control"),
   controlBrowser: AgentControlCapability.make("browser.control"),
+  /**
+   * Use the caller's own thread's terminals through `ryco_terminal`: run commands, read, type;
+   * terminals the user opened need a per-task consent.
+   */
+  controlTerminals: AgentControlCapability.make("terminals.control"),
   /** Read the node's Tasks (the user's to-do list, not delegated runs). */
   readLocalTasks: AgentControlCapability.make("local-tasks.read"),
   /** Create, edit, complete, delete (with approval) Tasks and start their chats. */
@@ -312,6 +318,7 @@ export const AgentControlActionKind = Schema.Literals([
   "worktreeHandoff",
   "importProject",
   "copyProjectToNode",
+  "terminalControlConsent",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
 
@@ -416,6 +423,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   worktreeHandoff: AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
   importProject: AGENT_CONTROL_CAPABILITIES.importProject,
   copyProjectToNode: AGENT_CONTROL_CAPABILITIES.copyProjectToNode,
+  terminalControlConsent: AGENT_CONTROL_CAPABILITIES.controlTerminals,
 };
 
 export const AGENT_CONTROL_PLAN_VERSION = 1;
@@ -1040,6 +1048,25 @@ export const AgentControlDeviceControlConsentPlan = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlDeviceControlConsentPlan = typeof AgentControlDeviceControlConsentPlan.Type;
 
+/** The private-session tool that runs commands in, reads and types into the caller's terminals. */
+export const AGENT_CONTROL_TERMINAL_MCP_TOOL = "ryco_terminal";
+
+/**
+ * One user consent for input (run commands, type, send keys, interrupt) into one terminal the
+ * user opened in the requesting thread, for the exact provider turn that asked. Terminals the
+ * agent opened itself never need it. Carries no command text, keys or output: what it allows
+ * runs directly and is never persisted. Approving it changes nothing in the terminal.
+ */
+export const AgentControlTerminalControlConsentPlan = Schema.Struct({
+  kind: Schema.Literal("terminalControlConsent"),
+  threadId: ThreadId,
+  projectId: ProjectId,
+  providerInstanceId: ProviderInstanceId,
+  terminalId: TerminalId,
+}).pipe(rejectExcessProperties);
+export type AgentControlTerminalControlConsentPlan =
+  typeof AgentControlTerminalControlConsentPlan.Type;
+
 /**
  * Deletes one of the node's Tasks with its files and its record of started chats
  * (the chats themselves stay). Always approved by the user.
@@ -1240,6 +1267,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlAutomationRunPlan,
   AgentControlDeviceActionPlan,
   AgentControlDeviceControlConsentPlan,
+  AgentControlTerminalControlConsentPlan,
   AgentControlDeleteLocalTaskPlan,
   AgentControlPullRequestWatchPlan,
   AgentControlWorktreeHandoffPlan,
@@ -1280,6 +1308,8 @@ export const AGENT_CONTROL_RISK_TAGS = {
   deviceMutation: /* @__PURE__ */ AgentControlRiskTag.make("device-mutation"),
   deviceLifecycle: /* @__PURE__ */ AgentControlRiskTag.make("device-lifecycle"),
   deviceOpenWorld: /* @__PURE__ */ AgentControlRiskTag.make("device-open-world"),
+  /** The agent may type into, run commands in and interrupt a terminal the user opened. */
+  terminalInput: /* @__PURE__ */ AgentControlRiskTag.make("terminal-input"),
   removesLocalTask: /* @__PURE__ */ AgentControlRiskTag.make("removes-local-task"),
   /** The action changes another node than the one the agent runs on. */
   crossNode: /* @__PURE__ */ AgentControlRiskTag.make("cross-node"),
