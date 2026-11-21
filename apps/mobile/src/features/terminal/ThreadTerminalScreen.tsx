@@ -76,7 +76,7 @@ export function ThreadTerminalScreen(props: {
     (state) =>
       selectThreadByRef(state, scopeThreadRef(props.environmentId, props.threadId))?.activities,
   );
-  const waitingTerminalIds = terminalsWaitingForUser(activities ?? [], 0);
+  const waitingTerminalIds = terminalsWaitingForUser(activities ?? [], Date.now());
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const iconColor = String(useThemeColor("--color-icon"));
   const placeholderColor = String(useThemeColor("--color-placeholder"));

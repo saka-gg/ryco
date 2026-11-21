@@ -7116,9 +7116,9 @@ export default function ChatView(props: ChatViewProps) {
   // An agent's hand-offs of a browser tab or terminal: a card per request with Done / Won't do,
   // loaded only for threads that handed one over, and off the frozen phone tier.
   // Terminals an agent handed to the user: their drawer tab shows a marker until the hand-off
-  // ends (the node records an expiry as its end, so the expiry is not re-read here).
+  // ends (re-read with the thread's activities; the node records an expiry as an end too).
   const terminalsWaitingForYou = useMemo(
-    () => terminalsWaitingForUser(threadActivities, 0),
+    () => terminalsWaitingForUser(threadActivities, Date.now()),
     [threadActivities],
   );
   // Show on a terminal hand-off's card: the drawer opens on that terminal.

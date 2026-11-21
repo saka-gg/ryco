@@ -886,7 +886,7 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // subcommands' requests and output, with their view schemas, now load through import() when
     // one runs (e2eeRun.ts, -22.1 KB); e2eeCommand.ts keeps the flags and subcommands and hands
     // the shared CLI helpers in, since importing them would split boot modules into extra chunks.
-    // 7.345 MB on 2026-11-21 for the Copane port (measured 7.340901 MB with all three, over
+    // 7.345 MB on 2026-11-21 for the Copane port (measured 7.341064 MB with all three, over
     // main's 7.322070 MB): user action requests (+8.4 KB: the request and answer schemas, the RPC,
     // the surface hooks, pending-input and alert reads), agent terminal tools (+9.9 KB: the
     // per-task terminal consent plan through validator, executor, audit and presentation, the
