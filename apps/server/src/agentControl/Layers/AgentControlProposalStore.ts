@@ -194,6 +194,16 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           riskClass: "device-control",
           sensitivePayloadsExcluded: "true",
         };
+      case "terminalControlConsent":
+        // Commands, keys and output the consent allows run directly and are never recorded here.
+        return {
+          terminalId: proposal.plan.terminalId,
+          projectId: proposal.plan.projectId,
+          providerInstanceId: proposal.plan.providerInstanceId,
+          terminalThreadId: proposal.plan.threadId,
+          riskClass: "terminal-control",
+          sensitivePayloadsExcluded: "true",
+        };
       default:
         return {};
     }

@@ -5,6 +5,7 @@ import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_ACTION_CAPABILITIES,
   AGENT_CONTROL_DEVICE_ACTION_KINDS,
+  AGENT_CONTROL_LEGACY_PLAN_KINDS,
   AGENT_CONTROL_PLAN_VERSION,
   AgentControlActionPlan,
   AgentControlCapability,
@@ -253,6 +254,26 @@ describe("AgentControlActionPlan", () => {
     expect(AGENT_CONTROL_DEVICE_ACTION_KINDS).not.toContain("deviceControlConsent");
   });
 
+  it("carries only the scope of a terminal-control consent, never what the agent types", () => {
+    const consent = {
+      kind: "terminalControlConsent",
+      threadId: "thread-1",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      terminalId: "default",
+    };
+    expect(decodePlan(consent)).toEqual(consent);
+    // Commands, keys and output run directly and are never persisted.
+    for (const content of [{ command: "rm -rf /" }, { keys: ["C-c"] }, { output: "secret" }]) {
+      expect(() => decodePlan({ ...consent, ...content })).toThrow();
+    }
+    expect(() => decodePlan({ ...consent, terminalId: "" })).toThrow();
+    expect(() => decodePlan({ ...consent, terminalId: "t".repeat(129) })).toThrow();
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.terminalControlConsent).toBe("terminals.control");
+    // New kinds reach only tolerant subscribers.
+    expect(AGENT_CONTROL_LEGACY_PLAN_KINDS).not.toContain("terminalControlConsent");
+  });
+
   it("rejects unknown action kinds", () => {
     expect(() => decodePlan({ kind: "runShellCommand", command: "rm -rf /" })).toThrow();
   });
@@ -423,6 +444,7 @@ describe("forward compatibility (additive extension)", () => {
       "pullRequestWatch",
       "removeProject",
       "sendMessage",
+      "terminalControlConsent",
       "updateAutomation",
       "updateProject",
       "updateThread",

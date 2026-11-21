@@ -173,6 +173,8 @@ describe("tolerant proposal views", () => {
         ...AGENT_CONTROL_LEGACY_PLAN_KINDS,
         ...AGENT_CONTROL_CLIENT_EXECUTED_PLAN_KINDS,
         "importProject",
+        // Added after the cross-node kinds: tolerant subscribers only, like them.
+        "terminalControlConsent",
       ].toSorted(),
     ).toEqual([...AgentControlActionKind.literals].toSorted());
   });

@@ -55,12 +55,11 @@ import {
   type DeviceGuideNames,
 } from "../../providerTools/deviceToolGuidance.ts";
 import {
-  DEVICE_CONSENT_MAX_ATTEMPTS,
   DeviceControlConsents,
   deviceConsentRequestId,
-  deviceConsentStateFor,
   type DeviceConsentKey,
 } from "../deviceControlConsent.ts";
+import { askForTaskConsent, type TaskConsentAnswer } from "../taskConsent.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlProposalServiceShape } from "../Services/AgentControlProposalService.ts";
 import type {
@@ -193,10 +192,7 @@ interface RoutineInput {
   readonly rest: Readonly<Record<string, unknown>>;
 }
 
-type ConsentAnswer =
-  | { readonly kind: "granted" }
-  | { readonly kind: "pending"; readonly proposalId: AgentControlProposalId }
-  | { readonly kind: "declined" | "unanswered" };
+type ConsentAnswer = TaskConsentAnswer;
 
 /** Every answer in words is an error: nothing ran, so the agent never assumes it did. */
 const errorResult = (texts: ReadonlyArray<string>): AgentControlMcpToolResult => ({
@@ -316,57 +312,35 @@ export function withDeviceRoutineTools(
         runtimeSessionId: session.runtimeSessionId,
         udid,
       };
-      const entry = consents.lookup(key);
-      // A decision binds the task: declined (or never approved) is not asked again.
-      if (entry?.outcome === "granted") return { kind: "granted" } as const;
-      if (entry?.outcome === "denied") return { kind: "declined" } as const;
-      if (entry?.outcome === "unanswered") return { kind: "unanswered" } as const;
-
-      let attempt = 1;
-      if (entry !== undefined) {
-        const proposal = yield* deps.proposals
-          .getProposal(entry.proposalId)
-          .pipe(Effect.mapError(consentUnavailable));
-        const state = Option.isSome(proposal)
-          ? deviceConsentStateFor(proposal.value.status)
-          : "ask-again";
-        if (state === "granted" || state === "denied") {
-          consents.settle(key, state);
-          return { kind: state === "granted" ? "granted" : "declined" } as const;
-        }
-        if (state === "pending") return { kind: "pending", proposalId: entry.proposalId } as const;
-        attempt = entry.attempt + 1;
-      }
-
-      // A request id already used answers with its proposal as it stands now.
-      for (; attempt <= DEVICE_CONSENT_MAX_ATTEMPTS; attempt += 1) {
-        const submitted = yield* deps.submitMutation({
-          session,
-          authority,
-          requestId: AgentControlRequestId.make(deviceConsentRequestId(key, attempt)),
-          plan: {
-            kind: "deviceControlConsent",
-            threadId: session.threadId,
-            projectId: thread.value.projectId,
-            providerInstanceId: session.providerInstanceId,
-            udid,
-          },
-        });
-        const proposalId = submitted.receipt.proposalId as AgentControlProposalId;
-        const state = deviceConsentStateFor(submitted.receipt.status);
-        if (state === "pending") {
-          consents.record(key, proposalId, attempt);
-          return { kind: "pending", proposalId } as const;
-        }
-        if (state !== "ask-again") {
-          consents.record(key, proposalId, attempt, state);
-          return { kind: state === "granted" ? "granted" : "declined" } as const;
-        }
-        consents.record(key, proposalId, attempt);
-      }
-      // Never approved: like a decline, it binds the task.
-      consents.settle(key, "unanswered");
-      return { kind: "unanswered" } as const;
+      return yield* askForTaskConsent({
+        consents,
+        key,
+        proposalStatus: (proposalId) =>
+          deps.proposals.getProposal(proposalId).pipe(
+            Effect.mapError(consentUnavailable),
+            Effect.map((proposal) => (Option.isSome(proposal) ? proposal.value.status : undefined)),
+          ),
+        submit: (attempt) =>
+          deps
+            .submitMutation({
+              session,
+              authority,
+              requestId: AgentControlRequestId.make(deviceConsentRequestId(key, attempt)),
+              plan: {
+                kind: "deviceControlConsent",
+                threadId: session.threadId,
+                projectId: thread.value.projectId,
+                providerInstanceId: session.providerInstanceId,
+                udid,
+              },
+            })
+            .pipe(
+              Effect.map((submitted) => ({
+                proposalId: submitted.receipt.proposalId as AgentControlProposalId,
+                status: submitted.receipt.status,
+              })),
+            ),
+      });
     });
 
   const run = (

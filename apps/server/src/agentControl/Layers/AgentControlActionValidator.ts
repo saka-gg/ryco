@@ -5,6 +5,7 @@ import type {
   AgentControlDeviceActionPlan,
   AgentControlDeviceControlConsentPlan,
   AgentControlProviderSessionPrincipal,
+  AgentControlTerminalControlConsentPlan,
   AgentControlProposal,
   EnvironmentId,
   ModelSelection,
@@ -42,6 +43,7 @@ import {
   readScopedShellSnapshot,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceService, type DeviceServiceShape } from "../../device/Services/DeviceService.ts";
+import { isAgentTerminalId } from "../../terminal/agent/access.ts";
 import { runtimeModePrivilegeRank } from "../../orchestration/serverWake.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
@@ -144,6 +146,7 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
     case "interruptThread":
     case "updateThread":
     case "deviceControlConsent":
+    case "terminalControlConsent":
     case "pullRequestWatch":
     case "worktreeHandoff":
       return [plan.threadId];
@@ -258,6 +261,37 @@ const validateDevicePlanScope = (
             detail: "The approved URL does not meet device-control policy.",
           }),
       });
+    }
+  });
+
+/**
+ * A terminal consent stays in the exact thread, project and provider instance that asked, for a
+ * terminal the user opened: the agent's own terminals never need one.
+ */
+const validateTerminalConsentScope = (
+  plan: AgentControlTerminalControlConsentPlan,
+  input: {
+    readonly originThreadId: string;
+    readonly originProjectId: string;
+    readonly originProviderInstanceId: string;
+  },
+) =>
+  Effect.gen(function* () {
+    if (
+      plan.threadId !== input.originThreadId ||
+      plan.projectId !== input.originProjectId ||
+      plan.providerInstanceId !== input.originProviderInstanceId
+    ) {
+      return yield* fail(
+        "project-scope",
+        "Terminal control must remain in the exact originating thread, project, and provider instance.",
+      );
+    }
+    if (isAgentTerminalId(plan.terminalId)) {
+      return yield* fail(
+        "invalid-plan",
+        "Terminals the agent opened need no consent; only a terminal the user opened does.",
+      );
     }
   });
 
@@ -1083,6 +1117,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           originProjectId: caller.projectId,
           originProviderInstanceId: input.session.providerInstanceId,
         });
+      } else if (input.plan.kind === "terminalControlConsent") {
+        // Scope only: whether the terminal is open is checked by ryco_terminal before it asks.
+        yield* validateTerminalConsentScope(input.plan, {
+          originThreadId: caller.id,
+          originProjectId: caller.projectId,
+          originProviderInstanceId: input.session.providerInstanceId,
+        });
       } else if (isAutomationLifecyclePlan(input.plan)) {
         if (deps.automations === undefined) {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
@@ -1257,6 +1298,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail(
             "privilege-escalation",
             "External integrations cannot control devices.",
+          );
+        }
+        if (input.plan.kind === "terminalControlConsent") {
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot control terminals.",
           );
         }
         if (isAutomationLifecyclePlan(input.plan)) {
@@ -1543,6 +1590,11 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         );
       } else if (proposal.plan.kind === "deviceControlConsent") {
         return yield* fail("privilege-escalation", "External integrations cannot control devices.");
+      } else if (proposal.plan.kind === "terminalControlConsent") {
+        return yield* fail(
+          "privilege-escalation",
+          "External integrations cannot control terminals.",
+        );
       } else if (handsOverArtifacts(proposal.plan)) {
         return yield* fail(
           "privilege-escalation",
@@ -1633,6 +1685,34 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       }
       if (proposal.plan.kind === "worktreeHandoff" && principal.kind === "provider-session") {
         yield* validateWorktreeHandoff(proposal.plan, principal.threadId);
+        return;
+      }
+      if (proposal.plan.kind === "terminalControlConsent") {
+        if (principal.kind !== "provider-session") {
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot control terminals.",
+          );
+        }
+        const origin = snapshot.threads.find((thread) => thread.id === principal.threadId);
+        // Consent belongs to the exact task (turn) and runtime that asked: approving a card
+        // after that task ended grants nothing.
+        if (
+          !origin ||
+          principal.turnId === undefined ||
+          principal.runtimeSessionId === undefined ||
+          origin.session?.status !== "running" ||
+          origin.session.activeTurnId !== principal.turnId ||
+          origin.session.runtimeSessionId !== principal.runtimeSessionId ||
+          origin.session.providerInstanceId !== principal.providerInstanceId
+        ) {
+          return yield* fail("caller-stale", "The task that asked has ended.");
+        }
+        yield* validateTerminalConsentScope(proposal.plan, {
+          originThreadId: principal.threadId,
+          originProjectId,
+          originProviderInstanceId: principal.providerInstanceId,
+        });
         return;
       }
       if (
