@@ -10,6 +10,7 @@ import {
   ArrowRightIcon,
   ExternalLinkIcon,
   GlobeIcon,
+  HandIcon,
   LoaderCircleIcon,
   PlusIcon,
   RotateCwIcon,
@@ -21,6 +22,7 @@ import { appLocalStorage } from "../hooks/useLocalStorage";
 import { useComposerContextIntakeAvailable } from "../composerContextIntake";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { useBrowserElementPicker } from "./BrowserElementPicker";
+import { BrowserHandoffBanner } from "./BrowserHandoffBanner";
 import { BrowserSurface } from "./BrowserSurface";
 import type { BrowserSide } from "./browserMode";
 import {
@@ -244,13 +246,16 @@ function ProjectBrowserPanel({
                 setNewTab(false);
               }}
             >
-              {tab.loading ? (
+              {tab.handoff ? (
+                <HandIcon aria-hidden className="size-3 shrink-0 text-primary" />
+              ) : tab.loading ? (
                 <LoaderCircleIcon className="size-3 shrink-0 animate-spin" />
               ) : (
                 <GlobeIcon className="size-3 shrink-0" />
               )}
               <span className="truncate">{tab.title || tab.url || "Loading…"}</span>
               {tab.suspended ? <span className="sr-only">, suspended</span> : null}
+              {tab.handoff ? <span className="sr-only">, waiting for you</span> : null}
             </button>
             <button
               type="button"
@@ -450,6 +455,9 @@ function ProjectBrowserPanel({
         <p role="alert" className="border-b p-2 text-xs text-destructive">
           {error ?? active?.error}
         </p>
+      ) : null}
+      {api && active?.handoff ? (
+        <BrowserHandoffBanner environmentId={environmentId} handoff={active.handoff} />
       ) : null}
       {/* One slot, always here, so opening the note never moves or remounts the surface below:
           a new surface owner would detach the page and end the pick. */}

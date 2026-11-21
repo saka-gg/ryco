@@ -52,6 +52,10 @@ interface TabEntry {
    */
   live: LivePage | null;
   project: string;
+  /** The thread whose agent opened the tab (BrowserTransport.recordOpener), when one did. */
+  thread: string | null;
+  /** The user has the tab for an agent's request (browserHandoffs.ts); the tab stays live. */
+  handoff: NonNullable<ProjectBrowserTab["handoff"]> | null;
   presentation: "background" | "panel" | "window";
   error: string | null;
   requestedUrl: string;
@@ -188,6 +192,10 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   state(): ProjectBrowserState {
     return {
       tabs: [...this.entries].map(([id, entry]) => {
+        const owner = {
+          ...(entry.thread === null ? {} : { thread: entry.thread }),
+          ...(entry.handoff === null ? {} : { handoff: entry.handoff }),
+        };
         if (!entry.live)
           return {
             id,
@@ -202,6 +210,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
             error: entry.error,
             signInPopup: "idle",
             suspended: true,
+            ...owner,
           };
         const wc = this.liveOf(entry).view.webContents;
         const tab: Mutable<ProjectBrowserTab> = {
@@ -216,6 +225,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           presentation: entry.presentation,
           error: entry.error,
           signInPopup: this.signIn.state(id),
+          ...owner,
         };
         const picker = this.picker.state(id);
         if (picker) tab.picker = picker;
@@ -241,6 +251,71 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       if (suspended) tab.suspended = true;
       return tab;
     });
+  }
+  /** Records the thread whose agent opened `tab` (BrowserTransport). */
+  recordOpener(tab: string, thread: string): void {
+    const entry = this.entries.get(tab);
+    if (!entry || entry.thread === thread) return;
+    entry.thread = thread;
+    this.publish();
+  }
+  /** Whether the tab is open (live or suspended). */
+  hasTab(tab: string): boolean {
+    return this.entries.has(tab);
+  }
+  /** The tab's address as the user sees it. */
+  tabUrl(tab: string): string {
+    const entry = this.entries.get(tab);
+    if (!entry) return "about:blank";
+    const wc = entry.live?.view.webContents;
+    return wc && !wc.isDestroyed() ? wc.getURL() || entry.requestedUrl : entry.requestedUrl;
+  }
+  /**
+   * Marks the tab as handed to the user (or gives it back with null). A handed-off tab stays live
+   * (the budget never suspends it) and the Browser panel shows the request on it.
+   */
+  setHandoff(tab: string, handoff: NonNullable<ProjectBrowserTab["handoff"]> | null): void {
+    const entry = this.entries.get(tab);
+    if (!entry) return;
+    entry.handoff = handoff;
+    this.publish();
+    this.scheduleBudget();
+  }
+  /**
+   * Evaluates `code` in the tab's main world, outside the agent's CDP session and its guards: the
+   * hand-off's own probe and scrub, which must work while the user types in the tab. With
+   * `allFrames`, also in every subframe (cross-origin ones included), each on its own. Returns one
+   * value per frame; a frame that failed or timed out gives undefined. A suspended tab gives [].
+   */
+  async evaluateInFrames(
+    tab: string,
+    code: string,
+    options: { allFrames: boolean; timeoutMs: number },
+  ): Promise<unknown[]> {
+    const wc = this.entries.get(tab)?.live?.view.webContents;
+    if (!wc || wc.isDestroyed()) return [];
+    const main = wc.mainFrame;
+    const frames = options.allFrames
+      ? [main, ...main.framesInSubtree.filter((f) => f !== main)]
+      : [main];
+    return Promise.all(
+      frames.map(
+        (frame) =>
+          new Promise<unknown>((resolve) => {
+            const timer = setTimeout(() => resolve(undefined), options.timeoutMs);
+            frame.executeJavaScript(code).then(
+              (value: unknown) => {
+                clearTimeout(timer);
+                resolve(value);
+              },
+              () => {
+                clearTimeout(timer);
+                resolve(undefined);
+              },
+            );
+          }),
+      ),
+    );
   }
   /** The tab's dialogs, diagnostics, human-input guard and emulation (BrowserTransport). */
   automation(tab: string): EmbeddedTabAutomation | undefined {
@@ -431,6 +506,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const entry: TabEntry = {
       live: null,
       project,
+      thread: null,
+      handoff: null,
       presentation: "background",
       error: null,
       requestedUrl: target,
@@ -1046,7 +1123,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       this.lastShown === id ||
       entry.presentation === "window" ||
       entry.busy > 0 ||
-      entry.agentBusy > 0
+      entry.agentBusy > 0 ||
+      entry.handoff !== null
     )
       return true;
     const signIn = this.signIn.state(id);

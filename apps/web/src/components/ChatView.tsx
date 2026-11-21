@@ -22,6 +22,9 @@ import { noteComputerSetupMissingOnce } from "../computerUse/computerSetupNotice
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
 import { hasPendingUserActionRequest } from "@ryco/shared/threadActivity";
+import { projectBrowserKey, showProjectBrowserTab } from "../browser/browserState";
+import { isDesktopOwnBackend } from "../browser/useBrowserMode";
+import type { UserActionRequestView } from "@ryco/shared/userActionRequestState";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { taskDraftSend } from "./tasks/taskDraft";
 import {
@@ -7130,6 +7133,18 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error, retry) => notifySurfaceLoadFailure("hand-off requests", error, retry),
     },
   );
+  // Show on a card: a browser hand-off's tab opens in this workspace's Browser panel, when this
+  // window has it (the desktop app's own tabs); otherwise the card says to continue there.
+  const userActionShowHandler = (request: UserActionRequestView) => {
+    const tab = request.target;
+    if (request.surface !== "browser" || tab === null || !isDesktopOwnBackend(environmentId)) {
+      return null;
+    }
+    const project = projectBrowserKey(environmentId, activeWorkspaceRoot ?? null);
+    return () => {
+      if (onOpenBrowserPanel) showProjectBrowserTab(project, tab, onOpenBrowserPanel);
+    };
+  };
   // Agent Control approvals stay off the frozen phone tier (apps/mobile owns
   // the native surface).
   const agentControlApprovalsReady = useLazyComponentReady(
@@ -7828,6 +7843,7 @@ export default function ChatView(props: ChatViewProps) {
                   environmentId={environmentId}
                   threadId={activeThread.id}
                   activities={threadActivities}
+                  showHandler={userActionShowHandler}
                   disabledReason={
                     activeEnvironmentUnavailable || sideChatConnection.phase !== "connected"
                       ? (mutationUnavailableReason ?? "Connect to the node to answer.")

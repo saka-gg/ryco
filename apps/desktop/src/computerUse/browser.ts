@@ -8,6 +8,14 @@ import {
   DIAGNOSTICS_MAX_LIMIT,
   type BrowserDiagnosticsRead,
 } from "./browserDiagnostics.ts";
+import {
+  BROWSER_SECRET_FIELD_SELECTOR,
+  BROWSER_SIGN_IN_PROBE,
+  browserSignInHint,
+  browserSignInNeed,
+  parseBrowserSignInSignals,
+  type BrowserSignInSignals,
+} from "@ryco/shared/browserHandoff";
 
 export const BROWSER_NAMES = {
   ryco: "Ryco Browser",
@@ -28,6 +36,8 @@ export interface BrowserTab {
   userActive?: boolean;
   /** Ryco only: the agent opened this tab (it belongs to no project). */
   agentTab?: boolean;
+  /** Ryco only: an agent handed this tab to the user; no agent can use it until they are done. */
+  withUser?: boolean;
 }
 
 export type BrowserDialogDecision = "accept" | "dismiss";
@@ -162,6 +172,15 @@ export interface BrowserTransport {
   wake?(tab: string, signal: AbortSignal): Promise<BrowserTabRevival>;
   /** The tab's dialogs, diagnostics, human-input guard and emulation. Only the Ryco browser has it. */
   automation?(tab: string): BrowserTabAutomation | undefined;
+  /** Records the thread whose agent opened `tab`. Only the Ryco browser keeps it. */
+  recordOpener?(tab: string, thread: string): void;
+}
+
+/** Tabs an agent handed to the user (browserHandoffs.ts), as the driver checks them. */
+export interface BrowserHandoffGate {
+  /** Why an action of `threadId`'s agent on `tab` is refused, or null when the tab is not with the user. */
+  refusal(tab: string, threadId: string): string | null;
+  isHandedOff(tab: string): boolean;
 }
 
 /**
@@ -187,6 +206,9 @@ export const BROWSER_MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "appearance",
   "upload",
 ]);
+
+/** Actions whose result may carry the sign-in hint (Ryco tabs; `open` adds it itself). */
+const SIGN_IN_HINT_ACTIONS: ReadonlySet<string> = new Set(["navigate", "observe", "click"]);
 
 /** Actions that act on an observed element or the focused one: a reloaded page needs a new observation first. */
 const BROWSER_INTERACTIONS: ReadonlySet<string> = new Set([
@@ -320,6 +342,11 @@ function withFileChooser(
         : "Call upload with paths and no ref to answer it.",
   });
   return { ...value, content: [...value.content, { type: "text", text }] };
+}
+
+/** What a result says was typed into a password or code field: only its length. */
+function secretTyped(text: string): string {
+  return `${[...text].length} characters (not shown: a password or code field)`;
 }
 
 export function browserUrl(value: string): string {
@@ -468,12 +495,17 @@ export class BrowserComputerDriver {
   private readonly uploads: () => BrowserUploads | null;
   /** Dialogs that failed actions in a paired browser's tab answered, for that tab's next result. */
   private readonly pageDialogs = new Map<string, BrowserHandledDialog[]>();
+  /** Ryco tabs handed to the user: refused to every agent until they are done. */
+  private readonly handoffs: BrowserHandoffGate | null;
+  /** Per Ryco tab: the page (document and route) the sign-in hint last spoke about. */
+  private readonly signInTold = new Map<string, string>();
   constructor(
     transports: Map<ComputerBrowser, BrowserTransport>,
-    options: { uploads?: () => BrowserUploads | null } = {},
+    options: { uploads?: () => BrowserUploads | null; handoffs?: BrowserHandoffGate } = {},
   ) {
     this.transports = transports;
     this.uploads = options.uploads ?? (() => null);
+    this.handoffs = options.handoffs ?? null;
   }
 
   private async evaluate(
@@ -500,12 +532,39 @@ export class BrowserComputerDriver {
     context: ComputerOperationContext,
     browser: ComputerBrowser,
   ): Promise<ComputerUseResult> {
+    const output = await this.run(context, browser);
+    // After the action and its mutation bracket: the hint is a read of the page as it is now.
+    const { action, tab } = context.request.args;
+    const transport = this.transports.get(browser);
+    if (
+      transport === undefined ||
+      typeof action !== "string" ||
+      typeof tab !== "string" ||
+      !SIGN_IN_HINT_ACTIONS.has(action)
+    )
+      return output;
+    return this.withSignInHint(browser, transport, tab, output, context.signal);
+  }
+
+  private async run(
+    context: ComputerOperationContext,
+    browser: ComputerBrowser,
+  ): Promise<ComputerUseResult> {
     const transport = this.transports.get(browser);
     if (!transport)
       throw new Error("This browser is not connected. Pair it in Computer use settings.");
     const args = context.request.args;
     const action = textArg(args, "action");
-    if (action === "tabs") return result(await transport.tabs(context.signal));
+    if (action === "tabs") {
+      const tabs = await transport.tabs(context.signal);
+      return result(
+        browser === "ryco" && this.handoffs
+          ? tabs.map((tab) =>
+              this.handoffs?.isHandedOff(tab.id) ? { ...tab, withUser: true } : tab,
+            )
+          : tabs,
+      );
+    }
     const visible =
       browser !== "ryco" && (action === "show" || (action === "open" && args.visible === true));
     // Showing an external tab changes the user's selected tab; even an inactive
@@ -518,19 +577,24 @@ export class BrowserComputerDriver {
         context.signal,
       );
       context.claim(`browser:${browser}:${tab.id}`);
+      transport.recordOpener?.(tab.id, context.request.threadId);
       await context.activity({
         target: browser,
         app: BROWSER_NAMES[browser],
         mode: visible ? "foreground" : "background",
         action,
       });
-      return result(tab);
+      return this.withSignInHint(browser, transport, tab.id, result(tab), context.signal);
     }
     const tab = textArg(args, "tab");
     const tabs = await transport.tabs(context.signal);
     this.forgetClosedTabDialogs(browser, tabs);
     const target = tabs.find((item) => item.id === tab);
     if (!target) throw new Error("Tab is no longer available. List tabs again.");
+    // A tab the user has for a hand-off is theirs: no agent reads or uses it, its opener included.
+    const withUser =
+      browser === "ryco" ? this.handoffs?.refusal(tab, context.request.threadId) : null;
+    if (withUser) throw new Error(withUser);
     if (target.url !== "about:blank") browserUrl(target.url);
     // Refusals that need no claim: the target stays free for the user and other turns.
     // The capability belongs to the transport, not to the page: a tab whose page is not live yet
@@ -633,6 +697,48 @@ export class BrowserComputerDriver {
         // The bracket's end only lifts the transport's own restrictions; the action's outcome stands.
       }
     }
+  }
+
+  /**
+   * Appends the sign-in hint once per page (document and route) of a Ryco tab: one cheap probe for
+   * password, one-time-code and passkey fields, captchas, sign-in dialogs, identity providers and
+   * login routes. A hint only: agents may sign in to apps they were given test credentials for, so
+   * nothing is handed over by itself. A failed probe adds nothing.
+   */
+  private async withSignInHint(
+    browser: ComputerBrowser,
+    transport: BrowserTransport,
+    tab: string,
+    output: ComputerUseResult,
+    signal: AbortSignal,
+  ): Promise<ComputerUseResult> {
+    if (browser !== "ryco" || output.isError) return output;
+    let signals: BrowserSignInSignals | undefined;
+    try {
+      const response = record(
+        await transport.send(
+          tab,
+          "Runtime.evaluate",
+          { expression: BROWSER_SIGN_IN_PROBE, returnByValue: true },
+          signal,
+        ),
+      );
+      signals = parseBrowserSignInSignals(record(response.result).value);
+    } catch {
+      return output;
+    }
+    if (!signals) return output;
+    const need = browserSignInNeed(signals);
+    if (need === null || this.signInTold.get(tab) === signals.page) return output;
+    this.signInTold.set(tab, signals.page);
+    if (this.signInTold.size > 256) {
+      const oldest = this.signInTold.keys().next().value;
+      if (oldest !== undefined) this.signInTold.delete(oldest);
+    }
+    return {
+      ...output,
+      content: [...output.content, { type: "text", text: browserSignInHint(tab, need) }],
+    };
   }
 
   /** Kept records of tabs the browser no longer lists (the user closed them, a session ended). */
@@ -889,6 +995,7 @@ export class BrowserComputerDriver {
         throw new Error(HUMAN_CHANGED);
       }
     };
+    let secretField = false;
     if (action === "click" || action === "fill" || action === "select" || action === "hover") {
       const value =
         action === "fill" || action === "select"
@@ -914,13 +1021,15 @@ export class BrowserComputerDriver {
       if (action === "fill" || action === "select") {
         assertHumanUnchanged();
         // Do not click a select first: its native popup can intercept later input.
-        await evaluate(`(() => { ${validate}
+        secretField =
+          (await evaluate(`(() => { ${validate}
           el.focus({preventScroll:true});
           if(!el.isConnected || el.matches(':disabled') || el.readOnly) throw Error('state changed');
           if(el instanceof HTMLSelectElement) el.value=${JSON.stringify(value)};
           else if(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) { const proto=el instanceof HTMLInputElement?HTMLInputElement.prototype:HTMLTextAreaElement.prototype; Object.getOwnPropertyDescriptor(proto,'value').set.call(el,${JSON.stringify(value)}); }
           else el.textContent=${JSON.stringify(value)};
-          el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`);
+          el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return el.matches(${JSON.stringify(BROWSER_SECRET_FIELD_SELECTOR)}); })()`)) ===
+          true;
       } else {
         await evaluate(`(() => { ${validate} return true; })()`);
         if (action === "hover") return result({ delivered: "background" });
@@ -949,7 +1058,11 @@ export class BrowserComputerDriver {
           release?.();
         }
       }
-      return result({ delivered: "background", verify: "Observe the page to verify the result." });
+      return result({
+        delivered: "background",
+        ...(secretField && value !== undefined ? { typed: secretTyped(value) } : {}),
+        verify: "Observe the page to verify the result.",
+      });
     }
     if (action === "scroll") {
       const x = args.x === undefined ? 400 : numberArg(args, "x");
@@ -978,8 +1091,14 @@ export class BrowserComputerDriver {
     }
     if (action === "type") {
       const text = textArg(args, "text", 20_000);
+      // What a secret field holds is never repeated: the result says only how much was typed.
+      const secret =
+        (await evaluate(
+          `(() => { let el = document.activeElement; while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; return !!el && el.matches(${JSON.stringify(BROWSER_SECRET_FIELD_SELECTOR)}); })()`,
+        )) === true;
       assertHumanUnchanged();
-      return result(await transport.send(tab, "Input.insertText", { text }, context.signal));
+      const sent = await transport.send(tab, "Input.insertText", { text }, context.signal);
+      return secret ? result({ delivered: "background", typed: secretTyped(text) }) : result(sent);
     }
     if (action === "key") {
       const keys: Record<string, number> = {

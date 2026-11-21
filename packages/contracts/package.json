@@ -336,6 +336,11 @@
       "import": "./src/secretRequestDetails.ts",
       "require": "./src/secretRequestDetails.ts"
     },
+    "./browser-handoff": {
+      "types": "./src/browserHandoff.ts",
+      "import": "./src/browserHandoff.ts",
+      "require": "./src/browserHandoff.ts"
+    },
     "./user-action-request": {
       "types": "./src/userActionRequest.ts",
       "import": "./src/userActionRequest.ts",
