@@ -20,6 +20,8 @@ import {
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
   THREAD_FORKED_ACTIVITY_KIND,
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_RESOLVED_ACTIVITY_KIND,
   THREAD_MOVED_ACTIVITY_KIND,
   type OrchestrationCheckpointSummary,
   type OrchestrationMessage,
@@ -37,7 +39,8 @@ export const COMMAND_MODEL_OMITTED_PLAN_MARKDOWN = "(not loaded in the command r
  * - turn starts that ended before dispatch (`hasActionableContextHandoff`);
  * - the checkpoint revert journal (`isCheckpointRevertPending`, the decider's turn-start guard);
  * - secret requests (`derivePendingThreadRequests`, settlement, restart continuation, and the
- *   node's answer and expiry in `secretRequests/secretRequests.ts`);
+ *   node's answer and expiry in `secretRequests/secretRequests.ts`), and user action requests
+ *   the same way (`userActionRequests/userActionRequests.ts`);
  * - project moves (`threadMoveCheckpointFloor`: the decider refuses reverts to checkpoints
  *   captured in the old checkout).
  *
@@ -60,6 +63,8 @@ export const COMMAND_READ_MODEL_ACTIVITY_KINDS = [
   CHECKPOINT_REVERT_ACTIVITY_KIND,
   SECRET_REQUESTED_ACTIVITY_KIND,
   SECRET_RESOLVED_ACTIVITY_KIND,
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_RESOLVED_ACTIVITY_KIND,
   THREAD_MOVED_ACTIVITY_KIND,
 ] as const;
 

@@ -108,6 +108,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   SECRET_REQUESTED_ACTIVITY_KIND,
+  USER_ACTION_REQUESTED_ACTIVITY_KIND,
   WS_METHODS,
 } from "@ryco/contracts";
 import {
@@ -386,6 +387,7 @@ import { threadMoveCheckpointFloor } from "@ryco/shared/threadMove";
 import {
   LazyAgentControlApprovals,
   LazySecretRequestCards,
+  LazyUserActionRequestCards,
   LazyChatOverviewPanel,
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
@@ -7108,6 +7110,18 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error, retry) => notifySurfaceLoadFailure("secret requests", error, retry),
     },
   );
+  // An agent's hand-offs of a browser tab or terminal: a card per request with Done / Won't do,
+  // loaded only for threads that handed one over, and off the frozen phone tier.
+  const showUserActionRequests =
+    presentationTier !== "phone" &&
+    threadActivities.some((activity) => activity.kind === USER_ACTION_REQUESTED_ACTIVITY_KIND);
+  const userActionRequestCardsReady = useLazyComponentReady(
+    LazyUserActionRequestCards,
+    showUserActionRequests,
+    {
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("hand-off requests", error, retry),
+    },
+  );
   // Agent Control approvals stay off the frozen phone tier (apps/mobile owns
   // the native surface).
   const agentControlApprovalsReady = useLazyComponentReady(
@@ -7789,6 +7803,18 @@ export default function ChatView(props: ChatViewProps) {
                 : null}
               {showSecretRequests && secretRequestCardsReady && activeThread ? (
                 <LazySecretRequestCards
+                  environmentId={environmentId}
+                  threadId={activeThread.id}
+                  activities={threadActivities}
+                  disabledReason={
+                    activeEnvironmentUnavailable || sideChatConnection.phase !== "connected"
+                      ? (mutationUnavailableReason ?? "Connect to the node to answer.")
+                      : null
+                  }
+                />
+              ) : null}
+              {showUserActionRequests && userActionRequestCardsReady && activeThread ? (
+                <LazyUserActionRequestCards
                   environmentId={environmentId}
                   threadId={activeThread.id}
                   activities={threadActivities}

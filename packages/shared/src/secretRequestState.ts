@@ -23,7 +23,7 @@ import {
 import * as Schema from "effect/Schema";
 
 import {
-  comparePendingRequestActivities,
+  foldResolvableRequests,
   type PendingThreadRequestActivity,
 } from "./pendingRequestOrder.ts";
 
@@ -82,48 +82,32 @@ export function deriveSecretRequests(
   nowMs?: number,
 ): ReadonlyArray<SecretRequestView> {
   const guards = secretPayloads();
-  const requests = new Map<string, SecretRequestView>();
-  const earlyResolutions = new Map<string, SecretRequestResolution>();
-  for (const activity of activities
-    .filter((candidate) => isSecretRequestActivityKind(candidate.kind))
-    .toSorted(comparePendingRequestActivities)) {
-    if (activity.kind === SECRET_REQUESTED_ACTIVITY_KIND) {
-      if (!guards.requested(activity.payload) || requests.has(activity.payload.requestId)) {
-        continue;
-      }
-      const { payload } = activity;
-      requests.set(payload.requestId, {
-        requestId: payload.requestId,
-        key: payload.key,
-        purpose: payload.purpose,
-        file: payload.file,
-        requestedAt: activity.createdAt,
-        expiresAt: payload.expiresAt,
-        checkoutId: payload.checkoutId,
-        turnId: activity.turnId ?? null,
-        status: earlyResolutions.get(payload.requestId) ?? "pending",
-      });
-      continue;
-    }
-    if (!guards.resolved(activity.payload)) continue;
-    const { requestId, status } = activity.payload;
-    const request = requests.get(requestId);
-    if (request === undefined) {
-      if (!earlyResolutions.has(requestId)) earlyResolutions.set(requestId, status);
-      continue;
-    }
-    if (request.status !== "pending") continue;
-    requests.set(requestId, { ...request, status });
-  }
-  const views: SecretRequestView[] = [];
-  for (const request of requests.values()) {
-    views.push(
-      nowMs !== undefined && request.status === "pending" && isSecretRequestExpired(request, nowMs)
-        ? { ...request, status: "expired" }
-        : request,
-    );
-  }
-  return views;
+  const requests = foldResolvableRequests(activities, {
+    requestedKind: SECRET_REQUESTED_ACTIVITY_KIND,
+    resolvedKind: SECRET_RESOLVED_ACTIVITY_KIND,
+    isRequested: guards.requested,
+    readResolution: (payload): { requestId: string; value: SecretRequestResolution } | null =>
+      guards.resolved(payload) ? { requestId: payload.requestId, value: payload.status } : null,
+    view: (payload, activity, resolution): SecretRequestView => ({
+      requestId: payload.requestId,
+      key: payload.key,
+      purpose: payload.purpose,
+      file: payload.file,
+      requestedAt: activity.createdAt,
+      expiresAt: payload.expiresAt,
+      checkoutId: payload.checkoutId,
+      turnId: activity.turnId ?? null,
+      status: resolution ?? "pending",
+    }),
+    resolve: (request, status) => ({ ...request, status }),
+    isPending: (request) => request.status === "pending",
+  });
+  if (nowMs === undefined) return requests;
+  return requests.map((request) =>
+    request.status === "pending" && isSecretRequestExpired(request, nowMs)
+      ? { ...request, status: "expired" }
+      : request,
+  );
 }
 
 /** The secret requests still waiting for an answer, oldest first. */
