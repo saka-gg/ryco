@@ -28,6 +28,7 @@ import {
   BROWSER_SCRUB_SCRIPT,
   BROWSER_TRACK_SECRET_FIELDS_SCRIPT,
   browserDoneWhenHolds,
+  browserTabLabelAtStart,
   browserProbeExpression,
   parseBrowserProbe,
   validateBrowserDoneWhen,
@@ -101,9 +102,9 @@ export class BrowserHandoffs {
     const handoff = this.byTab.get(tab);
     if (!handoff) return null;
     if (handoff.threadId === threadId) {
-      return `${tab} is with the user for your request ("${clip(handoff.message, 80)}"). Do not use it meanwhile: call ryco_browser action "handoff" again with the same requestId to wait until they are done. Your other tabs still work.`;
+      return `${browserTabLabelAtStart(tab)} is with the user for your request ("${clip(handoff.message, 80)}"). Do not use it meanwhile: call ryco_browser action "handoff" again with the same requestId to wait until they are done. Your other tabs still work.`;
     }
-    return `${tab} is with the user for another thread's request, so no agent can read or use it until they are done. Open your own tab (action "open") or try later.`;
+    return `${browserTabLabelAtStart(tab)} is with the user for another thread's request, so no agent can read or use it until they are done. Open your own tab (action "open") or try later.`;
   }
 
   /** Whether `tab` is with the user now (the tab list marks it). */

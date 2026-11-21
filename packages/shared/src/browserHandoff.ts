@@ -322,6 +322,17 @@ export function browserSignInNeed(signals: BrowserSignInSignals): UserActionNeed
   return null;
 }
 
+/** How sentences name a tab: "tab 8" for a bare id (the Ryco browser's), the id itself otherwise. */
+export function browserTabLabel(tab: string): string {
+  return /^tab\b/iu.test(tab) ? tab : `tab ${tab}`;
+}
+
+/** {@link browserTabLabel} at the start of a sentence. */
+export function browserTabLabelAtStart(tab: string): string {
+  const label = browserTabLabel(tab);
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 const NEED_WORDS: Record<UserActionNeed, string> = {
   "sign-in": "a sign-in page",
   verification: "a verification step (one-time code or passkey)",
@@ -335,7 +346,7 @@ const NEED_WORDS: Record<UserActionNeed, string> = {
  * test credentials you were given, and never ask for credentials in chat.
  */
 export function browserSignInHint(tab: string, need: UserActionNeed): string {
-  return `${tab} shows ${NEED_WORDS[need]}. If you were given test credentials for this app (a local dev app, a test account), go ahead. Otherwise do not sign in yourself and never ask for passwords or codes in chat: hand the tab to the user with ryco_browser action "handoff" (tab, requestId, message, need:"${need}", done_when such as {url:"/dashboard"} for what you expect after it), then keep calling it with the same requestId until it ends.`;
+  return `${browserTabLabelAtStart(tab)} shows ${NEED_WORDS[need]}. If you were given test credentials for this app (a local dev app, a test account), go ahead. Otherwise do not sign in yourself and never ask for passwords or codes in chat: hand the tab to the user with ryco_browser action "handoff" (tab, requestId, message, need:"${need}", done_when such as {url:"/dashboard"} for what you expect after it), then keep calling it with the same requestId until it ends.`;
 }
 
 // -------------------------------------------------------------------------------- the result
@@ -358,17 +369,17 @@ export function describeBrowserHandoffOutcome(
   const after = formatWaited(waitedMs);
   switch (outcome) {
     case "condition-met":
-      return `done_when matched after ${after}: the user finished in ${tab}, which is yours again.`;
+      return `done_when matched after ${after}: the user finished in ${browserTabLabel(tab)}, which is yours again.`;
     case "done":
-      return `The user said they are done (after ${after}); ${tab} is yours again. Observe it before you continue.`;
+      return `The user said they are done (after ${after}); ${browserTabLabel(tab)} is yours again. Observe it before you continue.`;
     case "declined":
-      return `The user declined ("Won't do") after ${after}; ${tab} is yours again. Do not ask again: continue without it, or ask the user in chat what they would prefer.`;
+      return `The user declined ("Won't do") after ${after}; ${browserTabLabel(tab)} is yours again. Do not ask again: continue without it, or ask the user in chat what they would prefer.`;
     case "timeout":
-      return `No answer from the user within ${after}; the request was withdrawn and ${tab} is yours again. Ask the user in chat before you hand it over again.`;
+      return `No answer from the user within ${after}; the request was withdrawn and ${browserTabLabel(tab)} is yours again. Ask the user in chat before you hand it over again.`;
     case "closed":
-      return `${tab} was closed (after ${after}). Open a new tab if you still need the page.`;
+      return `${browserTabLabelAtStart(tab)} was closed (after ${after}). Open a new tab if you still need the page.`;
     case "cancelled":
-      return `The hand-off of ${tab} was withdrawn; the tab is yours again.`;
+      return `The hand-off of ${browserTabLabel(tab)} was withdrawn; the tab is yours again.`;
   }
 }
 

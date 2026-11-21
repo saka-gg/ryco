@@ -34,6 +34,7 @@ import {
 import {
   describeBrowserHandoffOutcome,
   describeBrowserHandoffPrivacy,
+  browserTabLabel,
   describeBrowserPage,
   validateBrowserDoneWhen,
 } from "@ryco/shared/browserHandoff";
@@ -116,7 +117,7 @@ const text = (
 const refusal = (value: string) => text(value, undefined, true);
 
 const PENDING_NOTE = (tab: string, requestId: string) =>
-  `The user has ${tab} now and has not finished. Call ryco_browser action "handoff" again with requestId "${requestId}" (the same tab) to keep waiting, or end your turn and tell the user the card is waiting. Do not use ${tab} meanwhile; your other tabs still work. Never ask for the password or code in chat.`;
+  `The user has ${browserTabLabel(tab)} now and has not finished. Call ryco_browser action "handoff" again with requestId "${requestId}" (the same tab) to keep waiting, or end your turn and tell the user the card is waiting. Do not use ${browserTabLabel(tab)} meanwhile; your other tabs still work. Never ask for the password or code in chat.`;
 
 /** Watches a pending hand-off's tab from the node: its condition and whether it closed. */
 const watchTab = (
@@ -167,7 +168,7 @@ const endedResult = (
       if (privacy) lines.push(privacy);
       if (ended.stillPaused) {
         lines.push(
-          `${tab} stays with the user: its password fields could not be emptied, so it is not handed back. Ask the user in chat to close the tab or sign in again, then open a new tab.`,
+          `${browserTabLabel(tab)} stays with the user: its password fields could not be emptied, so it is not handed back. Ask the user in chat to close the tab or sign in again, then open a new tab.`,
         );
       }
     }
@@ -259,7 +260,7 @@ export const handOffRycoBrowserTab = (input: {
       if (begun.status === "refused") return refusal(begun.text);
       if (begun.status === "already-met") {
         return text(
-          `done_when already holds in ${args.tab}, so nothing was handed to the user. ${describeBrowserPage(begun.page, begun.page.href, "condition-met")}`,
+          `done_when already holds in ${browserTabLabel(args.tab)}, so nothing was handed to the user. ${describeBrowserPage(begun.page, begun.page.href, "condition-met")}`,
           { requestId: args.requestId, tab: args.tab, status: "already-met", url: begun.page.href },
         );
       }
