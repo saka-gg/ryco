@@ -920,10 +920,11 @@ export function withTerminalTools(
         return yield* Effect.fail(new ToolFailure("run needs `command`."));
       const command = input.command;
       const { t, note } = yield* forCommand(rt, session, authority, input.terminal);
-      const execution = rt.beginExecution(t, command);
       const data = commandBytes(t, command);
-      // A command that just ended: its shell draws the prompt a moment later.
+      // A command that just ended: its shell draws the prompt a moment later. Only then does
+      // this command begin, so the end of the one before it never counts as this one's.
       yield* waitForPrompt(rt, t);
+      const execution = rt.beginExecution(t, command);
       // Typed only at an idle prompt nobody is typing at, never into hidden input.
       yield* guardedWrite(t, data, { idle: true, prompt: true, visibleInput: true }).pipe(
         Effect.tapError(() => Effect.sync(() => rt.abandonExecution(t, execution))),

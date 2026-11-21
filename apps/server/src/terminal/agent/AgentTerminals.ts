@@ -421,9 +421,9 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
             if (t.state !== "live") return;
             const current = t.record.current;
             if (current === undefined || current.ended) return;
-            if (region !== undefined && current.region !== undefined && current.region !== region) {
-              return;
-            }
+            // A region this execution never took started before it: the end of the command
+            // before, not of this one.
+            if (region !== undefined && current.region !== region) return;
             endExecution(t, current, exitCode, "mark");
           },
           onParsed: () => wake(t),

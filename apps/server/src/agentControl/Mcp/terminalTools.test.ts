@@ -485,13 +485,14 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
     const created = await call({ action: "create" });
     const terminalId = /Opened (agent-\d+)/.exec(created.body)![1]!;
     await Effect.runPromise(
-      manager.write({ threadId: THREAD, terminalId, data: "echo half-typed" }),
+      manager.write({ threadId: THREAD, terminalId, data: "echo half-typed | tr a-z A-Z" }),
     );
     const refused = await call({ action: "run", terminal: terminalId, command: "echo agent" });
     expect(refused.isError).toBe(true);
     expect(refused.body).toContain("someone typed at");
-    // The user runs their line; then the prompt is free again.
-    const ranTheirs = outputShows(manager, terminalId, "\nhalf-typed");
+    // The user runs their line; then the prompt is free again. (What only the command prints:
+    // bash 5 writes escapes between the echoed line and the output.)
+    const ranTheirs = outputShows(manager, terminalId, "HALF-TYPED");
     await Effect.runPromise(manager.write({ threadId: THREAD, terminalId, data: "\r" }));
     await ranTheirs;
     const ran = await call({

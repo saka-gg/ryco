@@ -79,7 +79,7 @@ describe("AgentTerminals mirror eviction", () => {
 });
 
 /** A terminal whose output arrives in numbered chunks, with the manager's history reads. */
-function fakeShell() {
+function fakeShell(markNonce: string | null = null) {
   const chunks: Array<{ readonly sequence: number; readonly data: string }> = [];
   const listeners = new Set<(output: TerminalAgentOutput) => void>();
   let sequence = 0;
@@ -91,6 +91,7 @@ function fakeShell() {
       Effect.succeed(
         Option.some({
           ...inspection(ref),
+          ...(markNonce === null ? {} : { markNonce }),
           snapshot: {
             ...inspection(ref).snapshot,
             history: history(),
@@ -117,7 +118,7 @@ function fakeShell() {
     sequence += 1;
     chunks.push({ sequence, data });
     for (const listener of listeners) {
-      listener({ ...ref, data, cursor: { generation: "g", sequence }, markNonce: null });
+      listener({ ...ref, data, cursor: { generation: "g", sequence }, markNonce });
     }
   };
   return { ref, terminals, print };
@@ -173,6 +174,33 @@ describe("AgentTerminals after a mirror rebuild", () => {
       expect(current?.commandLine).toBe("npm test");
       expect(current?.startedBy).toBe("agent");
       expect(rt.outputOf(rebuilt, current!).lines).toEqual(["npm test", "running 1", "running 2"]);
+    } finally {
+      rt.close();
+    }
+  });
+});
+
+describe("AgentTerminals command ends", () => {
+  it("never ends the agent's command at the end of the command before it", async () => {
+    const shell = fakeShell("n0nce");
+    const mark = (kind: string) => `\u001b]133;${kind};ryco=n0nce\u0007`;
+    shell.print(`${mark("A")}$ `);
+    const rt = await Effect.runPromise(makeAgentTerminals({ terminals: shell.terminals }));
+    try {
+      const t = Option.getOrThrow(await Effect.runPromise(rt.track(shell.ref)));
+      // The user's command starts (bash 5 prints C from PS0) ...
+      shell.print(`echo theirs\r\n${mark("C")}theirs\r\n`);
+      await t.mirror.flush();
+      const agents = rt.beginExecution(t, "echo mine");
+      // ... and ends only after the agent's command began.
+      shell.print(`${mark("D;0")}${mark("A")}$ `);
+      await t.mirror.flush();
+      expect(agents.ended).toBe(false);
+
+      shell.print(`echo mine\r\n${mark("C")}mine\r\n${mark("D;3")}${mark("A")}$ `);
+      await t.mirror.flush();
+      expect(agents.ended).toBe(true);
+      expect(agents.exitCode).toBe(3);
     } finally {
       rt.close();
     }
