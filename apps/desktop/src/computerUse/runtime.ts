@@ -17,6 +17,7 @@ import {
   type ComputerUseState,
 } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
+import { BrowserHandoffBridgeRequest } from "@ryco/contracts/browser-handoff";
 import { ComputerPolicyController, DEFAULT_COMPUTER_POLICY } from "./policy.ts";
 import { ComputerNativeHelper } from "./helper.ts";
 import { ComputerPermissionMonitor } from "./permissions.ts";
@@ -25,6 +26,7 @@ import { NativeComputerDriver, record } from "./native.ts";
 import { BROWSER_NAMES, BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
 import { BrowserUploadStore, settleBrowserUpload } from "./browserUploads.ts";
 import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
+import { BrowserHandoffs } from "./browserHandoffs.ts";
 import { ExternalComputerBrowser } from "./externalBrowser.ts";
 import { ComputerUseOverlay } from "./overlay.ts";
 import { ComputerActivityIndicator } from "./activityIndicator.ts";
@@ -42,10 +44,13 @@ export class DesktopComputerUseRuntime {
   private readonly transports = new Map<ComputerBrowser, BrowserTransport>();
   readonly beta: DesktopComputerBeta;
   readonly embedded = new EmbeddedComputerBrowser();
+  /** Ryco tabs agents handed to the user (`POST /handoff`, outside the action queue). */
+  private readonly handoffs = new BrowserHandoffs(this.embedded);
   /** Private directory for browser uploads; null until start() (or when it could not be made). */
   private uploads: BrowserUploadStore | null = null;
   private readonly browser = new BrowserComputerDriver(this.transports, {
     uploads: () => this.uploads,
+    handoffs: this.handoffs,
   });
   private readonly native: NativeComputerDriver;
   private readonly overlay: ComputerUseOverlay;
@@ -176,7 +181,7 @@ export class DesktopComputerUseRuntime {
         response.setHeader("cache-control", "no-store");
         if (
           request.method !== "POST" ||
-          (request.url !== "/control" && request.url !== "/beta") ||
+          (request.url !== "/control" && request.url !== "/beta" && request.url !== "/handoff") ||
           request.headers.origin !== undefined ||
           !equalSecret(request.headers.authorization ?? "", `Bearer ${this.token}`)
         ) {
@@ -217,6 +222,26 @@ export class DesktopComputerUseRuntime {
               }),
             );
           }
+          return;
+        }
+        if (request.url === "/handoff") {
+          // A hand-off waits on a person: it never enters the action queue, so other threads'
+          // browser use goes on. Giving a tab to the user needs the Ryco browser enabled; giving
+          // it back and probing it never do.
+          const handoff = Schema.decodeUnknownSync(BrowserHandoffBridgeRequest)(
+            JSON.parse(Buffer.concat(chunks).toString("utf8")),
+          );
+          const value =
+            handoff.op === "begin" &&
+            (!this.policyController.policy.enabled ||
+              !this.policyController.policy.browsers.includes("ryco"))
+              ? {
+                  status: "refused" as const,
+                  text: "The Ryco browser is disabled in Computer use settings.",
+                }
+              : await this.handoffs.handle(handoff);
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify(value));
           return;
         }
         const input = Schema.decodeUnknownSync(ComputerUseRequest)(
@@ -462,6 +487,7 @@ export class DesktopComputerUseRuntime {
     void this.beta.dispose();
     this.overlay.dispose();
     this.indicator.dispose();
+    this.handoffs.dispose();
     this.embedded.dispose();
     this.uploads?.dispose();
     this.sockets.close();

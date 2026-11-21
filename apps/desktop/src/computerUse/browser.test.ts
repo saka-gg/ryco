@@ -1,5 +1,6 @@
 import { TurnId, ThreadId } from "@ryco/contracts";
 import type { ComputerUseResult } from "@ryco/contracts";
+import { BROWSER_SIGN_IN_PROBE, browserSignInHint } from "@ryco/shared/browserHandoff";
 import { describe, expect, it, vi } from "vitest";
 import {
   BROWSER_DIALOG_SCOPE_SLACK_MS,
@@ -12,6 +13,7 @@ import {
   type BrowserDialogPolicy,
   type BrowserFileChooser,
   type BrowserHandledDialog,
+  type BrowserHandoffGate,
   type BrowserPendingDialog,
   type BrowserTabAutomation,
   type BrowserTabRevival,
@@ -241,7 +243,8 @@ it("brackets mutating actions with beginAgentMutation and leaves reads alone", a
   };
 
   await run({ action: "navigate", url: tab.url });
-  expect(log).toEqual(["activity", "begin", "Page.navigate", "end"]);
+  // The sign-in hint's probe reads the page after the bracket ends.
+  expect(log).toEqual(["activity", "begin", "Page.navigate", "end", "Runtime.evaluate"]);
   expect(transport.beginAgentMutation).toHaveBeenCalledWith("1", context.signal);
 
   failNavigate = true;
@@ -249,10 +252,12 @@ it("brackets mutating actions with beginAgentMutation and leaves reads alone", a
   expect(log).toEqual(["activity", "begin", "Page.navigate", "end"]);
 
   await run({ action: "observe" });
+  // The snapshot, then the sign-in hint's probe; no bracket around either.
   expect(log).toEqual([
     "activity",
     "Page.getFrameTree",
     "Page.createIsolatedWorld",
+    "Runtime.evaluate",
     "Runtime.evaluate",
   ]);
   await run({ action: "screenshot" });
@@ -507,7 +512,7 @@ interface RycoState {
 /** A Ryco-like transport whose automation is a controllable stub; `evaluate` answers Runtime.evaluate. */
 function rycoFixture(
   evaluate: (expression: string, state: RycoState) => unknown = () => true,
-  options: { automation?: boolean; uploads?: boolean } = {},
+  options: { automation?: boolean; uploads?: boolean; handoffs?: BrowserHandoffGate } = {},
 ) {
   const state: RycoState = {
     epoch: 0,
@@ -634,10 +639,10 @@ function rycoFixture(
     claim: vi.fn(),
     activity: vi.fn(),
   };
-  const driver = new BrowserComputerDriver(
-    new Map([["ryco", transport]]),
-    options.uploads === false ? {} : { uploads: () => uploads },
-  );
+  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]), {
+    ...(options.uploads === false ? {} : { uploads: () => uploads }),
+    ...(options.handoffs ? { handoffs: options.handoffs } : {}),
+  });
   const run = (args: Record<string, unknown>) =>
     driver.execute(
       { ...context, request: { ...context.request, args: { tab: "1", ...args } } },
@@ -978,8 +983,12 @@ describe("dialogs", () => {
     sent.length = 0;
     const clicked = await run({ action: "click", ref: "e1", dialog: "accept" });
     // A main-world shim (no isolated world) goes in before the input and is finished after it.
+    // The sign-in hint's own main-world probe runs after the action; it is no dialog shim.
     const shim = sent.filter(
-      ({ method, params }) => method === "Runtime.evaluate" && params.contextId === undefined,
+      ({ method, params }) =>
+        method === "Runtime.evaluate" &&
+        params.contextId === undefined &&
+        params.expression !== BROWSER_SIGN_IN_PROBE,
     );
     expect(shim).toHaveLength(2);
     const install = String(shim[0]!.params.expression);
@@ -1424,5 +1433,252 @@ describe("upload", () => {
     expect(expressions).toEqual([BROWSER_SNAPSHOT_SCRIPT]);
     expect(BROWSER_SNAPSHOT_SCRIPT).not.toContain("type: 'file'");
     expect(BROWSER_SNAPSHOT_SCRIPT).toContain("if (!visible(el) ||");
+  });
+});
+
+describe("hand-off", () => {
+  const twoTabs = [
+    { id: "1", url: "https://example.com/login", title: "Sign in" },
+    { id: "2", url: "https://example.com/", title: "Home" },
+  ];
+  const gate = () => ({
+    refusal: vi.fn((tab: string, _threadId: string) =>
+      tab === "1" ? "Tab 1 is with the user for a hand-off." : null,
+    ),
+    isHandedOff: vi.fn((tab: string) => tab === "1"),
+  });
+
+  it("refuses every action on a tab the user has, before any command or claim", async () => {
+    const handoffs = gate();
+    const { run, sent, context, transport } = rycoFixture(page, { handoffs });
+    vi.mocked(transport.tabs).mockResolvedValue(twoTabs);
+    for (const args of [
+      { action: "observe" },
+      { action: "screenshot" },
+      { action: "click", ref: "e1" },
+      { action: "type", text: "x" },
+      { action: "navigate", url: "https://example.com/" },
+      { action: "console" },
+      { action: "close" },
+    ])
+      await expect(run(args)).rejects.toThrow("Tab 1 is with the user for a hand-off.");
+    expect(sent).toEqual([]);
+    expect(context.claim).not.toHaveBeenCalled();
+    expect(context.activity).not.toHaveBeenCalled();
+    expect(transport.close).not.toHaveBeenCalled();
+    expect(handoffs.refusal).toHaveBeenCalledWith("1", "t");
+    // Other tabs still work.
+    await expect(run({ action: "observe", tab: "2" })).resolves.toBeDefined();
+    expect(context.claim).toHaveBeenCalledWith("browser:ryco:2");
+  });
+
+  it("lists the tab the user has by id only, without its URL or title", async () => {
+    const { run, transport } = rycoFixture(page, { handoffs: gate() });
+    // An OAuth code in the query, a fragment, an account name in the title: none may leak.
+    const signingIn = [
+      {
+        id: "1",
+        url: "https://example.com/callback?code=one-time-code#state=x",
+        title: "Signed in as someone@example.com",
+      },
+      twoTabs[1]!,
+    ];
+    vi.mocked(transport.tabs).mockResolvedValue(signingIn);
+    const listed = texts(await run({ action: "tabs" }));
+    expect(listed).toEqual([[{ id: "1", withUser: true }, twoTabs[1]]]);
+    expect(JSON.stringify(listed)).not.toMatch(/one-time-code|someone@example\.com|state=x/);
+  });
+
+  it("records the thread whose agent opened a tab", async () => {
+    const { run, transport } = rycoFixture(page);
+    const recordOpener = vi.fn();
+    transport.recordOpener = recordOpener;
+    vi.mocked(transport.open).mockResolvedValue(twoTabs[1]!);
+    await run({ action: "open", url: "https://example.com/" });
+    expect(recordOpener).toHaveBeenCalledWith("2", "t");
+  });
+});
+
+describe("sign-in hint", () => {
+  interface Signals {
+    href: string;
+    page: string;
+    passwords: number;
+    oneTimeCodes: number;
+    webauthn: number;
+    captcha: boolean;
+    loginModal: boolean;
+  }
+  const signIn = (): Signals => ({
+    href: "https://example.com/account",
+    page: "1700000000000.5/account",
+    passwords: 1,
+    oneTimeCodes: 0,
+    webauthn: 0,
+    captcha: false,
+    loginModal: false,
+  });
+  /** The page answers the probe with `probe.signals` (or throws `probe.error`). */
+  function hinted() {
+    const probe: { signals: Signals; error: Error | null } = { signals: signIn(), error: null };
+    const fixture = rycoFixture((expression) => {
+      if (expression !== BROWSER_SIGN_IN_PROBE) return page(expression);
+      if (probe.error) throw probe.error;
+      return JSON.stringify(probe.signals);
+    });
+    const probes = () =>
+      fixture.sent.filter(
+        ({ method, params }) =>
+          method === "Runtime.evaluate" && params.expression === BROWSER_SIGN_IN_PROBE,
+      ).length;
+    return { ...fixture, probe, probes };
+  }
+  const hintOf = (value: ComputerUseResult) =>
+    value.content.flatMap((part) =>
+      part.type === "text" && part.text.includes("hand the tab to the user") ? [part.text] : [],
+    );
+
+  it("tells the agent once per page after open, navigate, observe and click", async () => {
+    const { run, probe, probes, transport } = hinted();
+    vi.mocked(transport.open).mockResolvedValue({
+      id: "1",
+      url: "https://example.com/account",
+      title: "Account",
+    });
+    const opened = await run({ action: "open", url: "https://example.com/account" });
+    expect(opened.content).toHaveLength(2);
+    expect(opened.content[1]).toEqual({ type: "text", text: browserSignInHint("1", "sign-in") });
+    expect(probes()).toBe(1);
+    // The same page: probed again, told once.
+    expect(hintOf(await run({ action: "observe" }))).toEqual([]);
+    expect(hintOf(await run({ action: "click", ref: "e1" }))).toEqual([]);
+    expect(probes()).toBe(3);
+    // A same-document route change is a new page.
+    probe.signals = { ...signIn(), page: "1700000000000.5/account/verify", oneTimeCodes: 1 };
+    expect(hintOf(await run({ action: "observe" }))).toEqual([
+      browserSignInHint("1", "verification"),
+    ]);
+    // A new document with a captcha, after navigate.
+    probe.signals = { ...signIn(), page: "1700000009999.1/account", captcha: true };
+    const navigated = await run({ action: "navigate", url: "https://example.com/account" });
+    expect(navigated.content.at(-1)).toEqual({
+      type: "text",
+      text: browserSignInHint("1", "captcha"),
+    });
+  });
+
+  it("says nothing on pages without a sign-in, after other actions, or when the probe fails", async () => {
+    const { run, probe, probes } = hinted();
+    probe.signals = { ...signIn(), passwords: 0 };
+    expect((await run({ action: "observe" })).content).toHaveLength(1);
+    expect(probes()).toBe(1);
+    // Only open, navigate, observe and click look.
+    probe.signals = signIn();
+    await run({ action: "screenshot" });
+    await run({ action: "type", text: "x" });
+    await run({ action: "scroll", scrollY: 100 });
+    expect(probes()).toBe(1);
+    probe.error = new Error("Execution context was destroyed.");
+    const failed = await run({ action: "observe" });
+    expect(failed.content).toHaveLength(1);
+    expect(probes()).toBe(2);
+    // The failed probe told nothing, so the page is still new to the hint.
+    probe.error = null;
+    expect(hintOf(await run({ action: "click", ref: "e1" }))).toEqual([
+      browserSignInHint("1", "sign-in"),
+    ]);
+  });
+
+  it("never probes a paired browser", async () => {
+    const expressions: string[] = [];
+    const tab = { id: "1", url: "https://example.com/login", title: "Sign in" };
+    const chrome: BrowserTransport = {
+      tabs: vi.fn(async () => [tab]),
+      open: vi.fn(async () => tab),
+      show: vi.fn(),
+      close: vi.fn(),
+      stop: vi.fn(),
+      send: vi.fn(async (_tab: string, method: string, params: Record<string, unknown>) => {
+        if (method === "Page.getFrameTree")
+          return { frameTree: { frame: { id: "frame", loaderId: "doc" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+        if (method !== "Runtime.evaluate") return {};
+        const expression = String(params.expression);
+        expressions.push(expression);
+        if (expression === BROWSER_SIGN_IN_PROBE)
+          return { result: { value: JSON.stringify(signIn()) } };
+        return { result: { value: page(expression) } };
+      }),
+    };
+    const driver = new BrowserComputerDriver(new Map([["chrome", chrome]]));
+    const run = (args: Record<string, unknown>) =>
+      driver.execute(
+        {
+          request: {
+            sessionId: "s",
+            threadId: ThreadId.make("t"),
+            turnId: TurnId.make("u"),
+            tool: "browser",
+            args: { tab: "1", ...args },
+          },
+          signal: new AbortController().signal,
+          check: vi.fn(),
+          authorizeApp: vi.fn(),
+          authorizeForeground: vi.fn(),
+          claim: vi.fn(),
+          activity: vi.fn(),
+        },
+        "chrome",
+      );
+    for (const args of [
+      { action: "open", url: tab.url },
+      { action: "observe" },
+      { action: "click", ref: "e1" },
+      { action: "navigate", url: tab.url },
+    ])
+      expect((await run(args)).content.filter((part) => part.type === "text")).toHaveLength(1);
+    expect(expressions).not.toContain(BROWSER_SIGN_IN_PROBE);
+  });
+});
+
+describe("secret fields", () => {
+  const FILL = "el.dispatchEvent(new Event('change',{bubbles:true})); return el.matches(";
+  const FOCUSED = "let el = document.activeElement;";
+  function fields(secret: { fill: boolean; focused: boolean }) {
+    return rycoFixture((expression) => {
+      if (expression.includes(FILL)) return secret.fill;
+      if (expression.includes(FOCUSED)) return secret.focused;
+      return page(expression);
+    });
+  }
+  const secretText = "pässwörd-42";
+
+  it("reports only how much was filled into or typed in a password or code field", async () => {
+    const { run, sent } = fields({ fill: true, focused: true });
+    await run({ action: "observe" });
+    const filled = await run({ action: "fill", ref: "e1", text: secretText });
+    expect(texts(filled)).toEqual([
+      {
+        delivered: "background",
+        typed: "11 characters (not shown: a password or code field)",
+        verify: "Observe the page to verify the result.",
+      },
+    ]);
+    const typed = await run({ action: "type", text: secretText });
+    expect(texts(typed)).toEqual([
+      { delivered: "background", typed: "11 characters (not shown: a password or code field)" },
+    ]);
+    for (const value of [filled, typed]) expect(JSON.stringify(value)).not.toContain("pässwörd");
+    // The text still reaches the page.
+    expect(sent).toContainEqual({ method: "Input.insertText", params: { text: secretText } });
+  });
+
+  it("leaves results of other fields as they were", async () => {
+    const { run } = fields({ fill: false, focused: false });
+    await run({ action: "observe" });
+    expect(texts(await run({ action: "fill", ref: "e1", text: "hello" }))).toEqual([
+      { delivered: "background", verify: "Observe the page to verify the result." },
+    ]);
+    expect(texts(await run({ action: "type", text: "hello" }))).toEqual([{}]);
   });
 });

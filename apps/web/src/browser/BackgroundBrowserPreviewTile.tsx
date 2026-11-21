@@ -100,7 +100,13 @@ export function BackgroundBrowserPreviewTile({
       <span className="flex items-center gap-2 px-3 py-2 text-xs">
         <GlobeIcon className="size-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate">{selected.title || selected.url}</span>
-        <span className="text-muted-foreground">Browser</span>
+        {selected.handoff ? (
+          <span className="shrink-0 rounded bg-primary px-1.5 py-0.5 text-primary-foreground">
+            Waiting for you
+          </span>
+        ) : (
+          <span className="text-muted-foreground">Browser</span>
+        )}
       </span>
       {frame && frame.tab === tab ? (
         <img src={frame.src} alt="Browser preview" className="max-h-44 w-full object-contain" />

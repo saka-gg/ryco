@@ -561,6 +561,10 @@
       "types": "./src/userActionRequestState.ts",
       "import": "./src/userActionRequestState.ts"
     },
+    "./browserHandoff": {
+      "types": "./src/browserHandoff.ts",
+      "import": "./src/browserHandoff.ts"
+    },
     "./pendingThreadRequests": {
       "types": "./src/pendingThreadRequests.ts",
       "import": "./src/pendingThreadRequests.ts"
