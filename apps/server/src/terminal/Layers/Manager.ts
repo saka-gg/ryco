@@ -6,7 +6,7 @@ import {
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { restoreChatFolder } from "../../project/chatFolderRestore.ts";
 
 import {
@@ -243,6 +243,8 @@ interface TerminalSessionState {
    * without children: what the shell goes by when idle. Null until seen, and for each new PTY.
    */
   idleForegroundName: string | null;
+  /** The nonce in the shell's prompt and command marks, null for a shell without them. */
+  markNonce: string | null;
   unsubscribeData: (() => void) | null;
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
@@ -1369,6 +1371,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
     // Loaded and written once, on the first spawn (never at boot). A directory that cannot be
     // written, or `RYCO_TERMINAL_SHELL_INTEGRATION=0`, leaves shells as they were, without marks.
     const shellIntegrationDir = options.shellIntegrationDir;
+    // One per server process: the shells this manager starts put it in their marks, and agent
+    // tools trust only marks that carry it (`terminal/agent/mirror.ts`).
+    const shellMarkNonce = randomBytes(16).toString("hex");
     const shellIntegration =
       shellIntegrationDir === undefined || platform === "win32"
         ? Effect.succeed(null)
@@ -2300,7 +2305,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       session: TerminalSessionState,
       index = 0,
       lastError: PtySpawnError | null = null,
-    ): Effect.fn.Return<{ process: PtyProcess; shellLabel: string }, PtySpawnError> {
+    ): Effect.fn.Return<
+      { process: PtyProcess; shellLabel: string; integrated: boolean },
+      PtySpawnError
+    > {
       if (index >= shellCandidates.length) {
         const detail = lastError?.message ?? "Failed to spawn PTY process";
         const tried =
@@ -2328,7 +2336,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       const integrate = yield* shellIntegration;
       const integrated =
         integrate !== null && shellIntegrationDir !== undefined
-          ? integrate(candidate, spawnEnv, shellIntegrationDir, platform)
+          ? integrate(candidate, spawnEnv, shellIntegrationDir, platform, shellMarkNonce)
           : null;
       const attempt = yield* Effect.result(
         options.ptyAdapter.spawn(
@@ -2356,6 +2364,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         return {
           process: attempt.success,
           shellLabel: formatShellCandidate(candidate),
+          integrated: integrated !== null,
         };
       }
 
@@ -2416,6 +2425,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
               ptyProcess = spawnResult.process;
               startedShell = spawnResult.shellLabel;
+              const markNonce = spawnResult.integrated ? shellMarkNonce : null;
 
               const processPid = ptyProcess.pid;
               const unsubscribeData = ptyProcess.onData((data) => {
@@ -2464,6 +2474,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               yield* modifyManagerState((state) => {
                 session.process = ptyProcess;
                 session.idleForegroundName = null;
+                session.markNonce = markNonce;
                 session.pid = processPid;
                 session.status = "running";
                 advanceCursor(session);
@@ -2846,6 +2857,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               rows,
               process: null,
               idleForegroundName: null,
+              markNonce: null,
               unsubscribeData: null,
               unsubscribeExit: null,
               hasRunningSubprocess: false,
@@ -3168,6 +3180,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                   rows: input.rows,
                   process: null,
                   idleForegroundName: null,
+                  markNonce: null,
                   unsubscribeData: null,
                   unsubscribeExit: null,
                   hasRunningSubprocess: false,
@@ -3259,6 +3272,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               ...(session.idleForegroundName === null
                 ? {}
                 : { idleForegroundName: session.idleForegroundName }),
+              ...(session.markNonce === null ? {} : { markNonce: session.markNonce }),
             };
           }),
         ),

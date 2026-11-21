@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { type Region, TerminalMirror, decodeOscValue } from "./mirror.ts";
+import { MAX_COLS, type Region, TerminalMirror, decodeOscValue } from "./mirror.ts";
 
-const A = "\u001b]133;A\u0007";
-const C = "\u001b]133;C\u0007";
-const D = (code?: number) => `\u001b]133;D${code === undefined ? "" : `;${code}`}\u0007`;
+const NONCE = "f00d";
+const A = `\u001b]133;A;ryco=${NONCE}\u0007`;
+const C = `\u001b]133;C;ryco=${NONCE}\u0007`;
+const D = (code?: number) =>
+  `\u001b]133;D${code === undefined ? "" : `;${code}`};ryco=${NONCE}\u0007`;
 
 const mirrors: Array<TerminalMirror> = [];
 const makeMirror = (options: { scrollback?: number; now?: () => number } = {}) => {
@@ -12,6 +14,7 @@ const makeMirror = (options: { scrollback?: number; now?: () => number } = {}) =
     cols: 80,
     rows: 24,
     scrollback: options.scrollback ?? 1_000,
+    markNonce: NONCE,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   mirrors.push(mirror);
@@ -92,9 +95,11 @@ describe("TerminalMirror", () => {
     expect(mirror.regionLines(region).lines).toEqual(["building", "step 2"]);
   });
 
-  it("takes the command line from OSC 633;E", async () => {
+  it("takes a command line (E) only from a mark with this session's nonce", async () => {
     const mirror = makeMirror();
-    await write(mirror, `\u001b]633;E;ls\\x3b -la\u0007${C}`);
+    await write(mirror, `\u001b]633;E;rm -rf\u0007${C}`);
+    expect(mirror.currentRegion?.commandLine).toBeUndefined();
+    await write(mirror, `${D(0)}${A}\u001b]133;E;ls\\x3b -la;ryco=${NONCE}\u0007${C}`);
     expect(mirror.currentRegion?.commandLine).toBe("ls; -la");
     expect(decodeOscValue("a\\\\b\\x41")).toBe("a\\bA");
   });
@@ -183,5 +188,59 @@ describe("TerminalMirror", () => {
     const flushed = mirror.flush();
     mirror.dispose();
     await expect(flushed).resolves.toBe(undefined);
+  });
+});
+
+describe("TerminalMirror trusts only its shell's own marks", () => {
+  it("ignores marks without this session's nonce: printed files, other integrations, a remote host", async () => {
+    const mirror = makeMirror();
+    const ends: Array<number | undefined> = [];
+    mirror.listen({ onCommandEnd: (code) => ends.push(code) });
+    await write(mirror, `${A}$ ${C}`);
+    // A cat'ed file or a test prints a plain mark, another one carries a foreign nonce, and
+    // VS Code's own integration prints OSC 633.
+    await write(mirror, "\u001b]133;D;0\u0007forged\r\n");
+    await write(mirror, "\u001b]133;D;0;ryco=other\u0007");
+    await write(mirror, "\u001b]633;D;0\u0007\u001b]633;C\u0007");
+    expect(ends).toEqual([]);
+    expect(mirror.currentRegion?.ended).toBe(false);
+    await write(mirror, `real end\r\n${D(3)}`);
+    expect(ends).toEqual([3]);
+  });
+
+  it("trusts no mark at all without a nonce", async () => {
+    const mirror = new TerminalMirror({ cols: 80, rows: 24, scrollback: 100 });
+    mirrors.push(mirror);
+    await write(mirror, `${A}$ ${C}out\r\n${D(0)}`);
+    expect(mirror.shellIntegration).toBe(false);
+    expect(mirror.currentRegion).toBeUndefined();
+  });
+
+  it("keeps a command's region when a second start arrives with nothing printed between", async () => {
+    const mirror = makeMirror();
+    const starts: Array<Region> = [];
+    const ends: Array<number | undefined> = [];
+    mirror.listen({
+      onRegionStart: (region) => starts.push(region),
+      onCommandEnd: (code) => ends.push(code),
+    });
+    await write(mirror, `${A}$ ${C}${C}`);
+    expect(starts).toHaveLength(1);
+    expect(ends).toEqual([]);
+    await write(mirror, `out\r\n${D(0)}`);
+    expect(ends).toEqual([0]);
+    expect(mirror.regionLines(starts[0]!).lines).toEqual(["out"]);
+  });
+});
+
+describe("TerminalMirror size", () => {
+  it(`keeps at most ${MAX_COLS} columns, also after a resize`, () => {
+    const mirror = new TerminalMirror({ cols: 900, rows: 24, scrollback: 100 });
+    mirrors.push(mirror);
+    expect(mirror.cols).toBe(MAX_COLS);
+    mirror.resize(80, 24);
+    expect(mirror.cols).toBe(80);
+    mirror.resize(1_000, 24);
+    expect(mirror.cols).toBe(MAX_COLS);
   });
 });

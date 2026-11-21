@@ -26,6 +26,11 @@ const Xterm: typeof xtermModule.Terminal =
   (xtermModule as { readonly Terminal?: typeof xtermModule.Terminal }).Terminal ??
   (xtermModule as unknown as { readonly default: typeof xtermModule }).default.Terminal;
 
+/**
+ * Widest mirror: memory grows with columns times scrollback (measured with 12,000 long lines:
+ * 31 MB at 500 x 5,000, 7.4 MB at 250 x 2,000). Wider terminals wrap a little earlier here.
+ */
+export const MAX_COLS = 250;
 /** Private OSC around the marks kept from skipped output (see `compact`). */
 const SKIP_OSC = 7772;
 /** Characters handed to xterm.js at a time. */
@@ -97,6 +102,12 @@ export interface MirrorOptions {
   readonly rows: number;
   readonly scrollback: number;
   readonly now?: () => number;
+  /**
+   * The nonce Ryco's shell integration puts in every mark it prints (`ryco=<nonce>`). Only marks
+   * carrying it count; without one, no mark does. Output that prints a look-alike mark (a file,
+   * a test, a remote host, another integration such as iTerm2's or VS Code's) is ignored.
+   */
+  readonly markNonce?: string | undefined;
 }
 
 const clamp = (value: number, min: number, max: number) =>
@@ -106,6 +117,7 @@ export class TerminalMirror {
   private readonly xterm: XtermTerminal;
   private readonly now: () => number;
   private readonly scrollback: number;
+  private readonly markNonce: string | undefined;
   private readonly listeners = new Set<MirrorListener>();
   private nextRegionId = 1;
   private openRegion: Region | undefined;
@@ -133,8 +145,9 @@ export class TerminalMirror {
   constructor(options: MirrorOptions) {
     this.now = options.now ?? Date.now;
     this.scrollback = options.scrollback;
+    this.markNonce = options.markNonce;
     this.xterm = new Xterm({
-      cols: clamp(options.cols, 20, 500),
+      cols: clamp(options.cols, 20, MAX_COLS),
       rows: clamp(options.rows, 5, 200),
       scrollback: this.scrollback,
       allowProposedApi: true,
@@ -219,7 +232,7 @@ export class TerminalMirror {
   }
 
   resize(cols: number, rows: number): void {
-    const c = clamp(cols, 20, 500);
+    const c = clamp(cols, 20, MAX_COLS);
     const r = clamp(rows, 5, 200);
     if (c !== this.xterm.cols || r !== this.xterm.rows) this.xterm.resize(c, r);
   }
@@ -404,11 +417,26 @@ export class TerminalMirror {
   }
 
   private onShellMark(data: string): void {
-    const [kind, ...rest] = data.split(";");
+    const [kind, ...params] = data.split(";");
+    // Only Ryco's own marks, recognised by this session's nonce.
+    if (this.markNonce === undefined || !params.includes(`ryco=${this.markNonce}`)) return;
+    const rest = params.filter((param) => !param.startsWith("ryco="));
     this.shellIntegration = true;
     if (kind === "C") {
-      if (this.openRegion !== undefined && !this.openRegion.ended) this.closeRegion(undefined);
+      const open = this.openRegion;
       const buffer = this.xterm.buffer.normal;
+      // A second start with nothing printed since the first (the cursor has not moved) is the
+      // same command, not a new one.
+      if (
+        open !== undefined &&
+        !open.ended &&
+        open.start !== undefined &&
+        open.start.line === buffer.baseY + buffer.cursorY &&
+        open.startCol === buffer.cursorX
+      ) {
+        return;
+      }
+      if (open !== undefined && !open.ended) this.closeRegion(undefined);
       const region: Region = {
         id: this.nextRegionId++,
         start: this.alternate ? undefined : this.xterm.registerMarker(0),

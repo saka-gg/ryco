@@ -29,11 +29,19 @@ import {
 } from "./activity.ts";
 import { TerminalMirror, type Mark, type Region } from "./mirror.ts";
 
-/** A mirror unused this long is dropped (and rebuilt from history on next use). */
-export const MIRROR_IDLE_MS = 15 * 60_000;
-export const MAX_MIRRORS = 16;
-/** Scrollback of a mirror: the lines the terminal manager retains by default. */
-export const MIRROR_SCROLLBACK = 5_000;
+/**
+ * A mirror the agent has not used this long is dropped, also while a command runs (it would
+ * otherwise parse that command's output for good); the next call rebuilds it from the history.
+ */
+export const MIRROR_IDLE_MS = 10 * 60_000;
+export const MAX_MIRRORS = 8;
+/** How often idle mirrors are looked for, besides on every use. */
+const SWEEP_EVERY_MS = 60_000;
+/**
+ * Scrollback of a mirror. The terminal manager keeps more history (5,000 lines); paging a
+ * longer output says its start is gone. About 4 MB per busy 120-column mirror, 7.4 MB at most.
+ */
+export const MIRROR_SCROLLBACK = 2_000;
 /** Output quiet this long at a shell prompt ends a command in a shell without marks. */
 const FALLBACK_QUIET_MS = 500;
 /** A wait re-checks at least this often without a wake. */
@@ -172,7 +180,11 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
         if (t.state === "live") handleEvent(t, event);
       }),
     );
+    const sweepTimer = setInterval(() => sweep(), SWEEP_EVERY_MS);
+    sweepTimer.unref?.();
+
     const close = () => {
+      clearInterval(sweepTimer);
       unsubscribe();
       for (const t of tracked.values()) dispose(t);
       tracked.clear();
@@ -188,8 +200,7 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
     const sweep = () => {
       const at = now();
       for (const [key, t] of tracked) {
-        const busy = t.current !== undefined && !t.current.ended;
-        if (!busy && at - t.lastUsedAt > MIRROR_IDLE_MS) {
+        if (at - t.lastUsedAt > MIRROR_IDLE_MS) {
           tracked.delete(key);
           dispose(t);
         }
@@ -237,6 +248,7 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
             rows: inspection.value.rows,
             scrollback: MIRROR_SCROLLBACK,
             now,
+            markNonce: inspection.value.markNonce,
           }),
           state: "hydrating",
           pending: [],
@@ -487,6 +499,7 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       takeUnreportedEnd,
       noteReported,
       inspect,
+      readInputMode,
       close,
       mirrorCount: () => tracked.size,
     };

@@ -43,6 +43,7 @@ import {
 } from "../../terminal/agent/access.ts";
 import type { Activity } from "../../terminal/agent/activity.ts";
 import {
+  MIRROR_SCROLLBACK,
   makeAgentTerminals,
   type AgentTerminals,
   type Execution,
@@ -565,7 +566,7 @@ export function withTerminalTools(
     const { lines, startLost } = rt.outputOf(t, execution);
     return formatClip(clipLines(lines, { maxChars, fromLine }), (from) => readCall(t, from), {
       startLost,
-      historyLines: 5_000,
+      historyLines: MIRROR_SCROLLBACK,
     });
   };
 
@@ -1041,8 +1042,16 @@ export function withTerminalTools(
         return yield* Effect.fail(new ToolFailure("Nothing to send: pass `text`, `keys` or both."));
       }
       // Never type into a prompt for a secret: only keys that cancel or confirm nothing typed.
+      // The tty's flags are read on every send, whatever the screen shows and whether a command
+      // seems to run: a prompt that just appeared, or a sudo the user started in a shell without
+      // marks, turns echo off before any quiet period or process poll would tell.
       const activity = yield* rt.activityOf(t);
-      if (activity.secret && (typed.length > 0 || keys.some((key) => key.printable))) {
+      const mode = yield* rt.readInputMode(t);
+      const hiddenInput = mode !== undefined && !mode.echo && mode.canonical;
+      if (
+        (activity.secret || hiddenInput) &&
+        (typed.length > 0 || keys.some((key) => key.printable))
+      ) {
         return yield* Effect.fail(
           new ToolFailure(
             `Nothing was sent: ${t.ref.terminalId} waits for hidden input${activity.prompt === undefined ? "" : ` ("${activity.prompt}")`}. Never type a password, token or code you were not given, and never ask for one in chat. Tell the user in chat that terminal ${t.ref.terminalId} needs them to type it there, then ${call({ action: "wait", terminal: t.ref.terminalId })}. Keys such as Ctrl+C or Escape still go through.`,

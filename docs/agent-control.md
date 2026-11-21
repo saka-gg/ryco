@@ -445,11 +445,17 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   cut to `max_chars` (default 20,000, at most 60,000) keeping the end, a very long line is cut in
   its middle, and every cut names the exact call that reads the rest. Each thread has its own read
   position per terminal. Mirrors start from the retained history the first time an agent uses a
-  terminal, follow its output events off the output path, and are dropped after 15 minutes
-  unused (16 at most).
+  terminal, follow its output events off the output path, keep 2,000 lines of at most 250
+  columns (about 4 MB for a busy 120-column terminal, 7.4 MB at most), and are dropped after 10
+  minutes without an agent call, also while a command runs (8 at most; a timer sweeps them, and
+  the next call rebuilds one from the history).
 - **Command ends and exit codes.** zsh and bash terminals start with startup files that mark
   prompts, command starts and command ends (OSC 133, `terminal/shellIntegration.ts`) and then
   source the user's own (`$ZDOTDIR` or `~` for zsh, `/etc/bash.bashrc` and `~/.bashrc` for bash).
+  Every mark carries a nonce the server makes at start (`ryco=<nonce>`, handed over in
+  `RYCO_SHELL_MARK_NONCE` and unset before any user file runs); only marks carrying it count, so
+  output that prints a look-alike mark (a file, a test, a remote host, iTerm2's or VS Code's own
+  integration) never ends a command. The files are safe under `setopt nounset` and `set -u`.
   Other shells, or `RYCO_TERMINAL_SHELL_INTEGRATION=0` in the node's environment, fall back to a
   guess: the output went quiet at something that looks like a shell prompt and the process table
   shows the shell idle again; the exit code is then unknown, and results say so.
@@ -461,7 +467,8 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   `stty` on the pty device, a few milliseconds, only when a waiting command's output paused);
   otherwise from a secret word at the end of the cursor's own line. `run` and `wait` stop early
   when new output leaves the command waiting for input.
-- **Secrets.** `send` refuses to type text or characters while a hidden-input prompt shows (keys
+- **Secrets.** `send` reads the tty's flags on every call and refuses to type text or characters
+  while a hidden-input prompt shows, also right after it appeared or when no command seems to run (keys
   such as Ctrl+C and Escape still go through), and the tool tells the agent never to type a
   secret it was not given and never to ask for one in chat. What anyone types at a hidden prompt
   is never echoed, so it never reaches the mirror or the agent. Text the terminal displays does,

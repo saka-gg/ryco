@@ -24,11 +24,19 @@ import path from "node:path";
 import type { ShellCandidate } from "./terminalShell.ts";
 
 /** Bumped when a script changes, so a running older server's files are never rewritten. */
-export const SHELL_INTEGRATION_VERSION = "v1";
+export const SHELL_INTEGRATION_VERSION = "v2";
 
 const ZSH_ENV_SHIM = (
   file: string,
-) => `# Ryco shell integration: runs the user's ${file} with their own ZDOTDIR.
+  takeNonce: boolean,
+) => `# Ryco shell integration: runs the user's ${file} with their own ZDOTDIR.${
+  takeNonce
+    ? `
+# The marks' nonce leaves the environment before any startup file or program can read it.
+typeset -g __ryco_nonce="\${RYCO_SHELL_MARK_NONCE-}"
+builtin unset RYCO_SHELL_MARK_NONCE`
+    : ""
+}
 if [[ -f "\${RYCO_USER_ZDOTDIR:-$HOME}/${file}" ]]; then
   RYCO_ZDOTDIR=$ZDOTDIR
   ZDOTDIR=\${RYCO_USER_ZDOTDIR:-$HOME}
@@ -39,10 +47,12 @@ fi
 `;
 
 const ZSH_RC = `# Ryco shell integration: the user's .zshrc, then prompt and command marks (OSC 133).
+# Every mark carries this session's nonce (ryco=...), so output that prints a look-alike mark
+# (a file, a remote host) is never taken for one. Safe under \`setopt nounset\`.
 RYCO_ZDOTDIR=$ZDOTDIR
 ZDOTDIR=\${RYCO_USER_ZDOTDIR:-$HOME}
 # /etc/zshrc (macOS) derived HISTFILE from Ryco's ZDOTDIR before this file ran.
-if [[ "$HISTFILE" == "$RYCO_ZDOTDIR/.zsh_history" ]]; then
+if [[ "\${HISTFILE-}" == "$RYCO_ZDOTDIR/.zsh_history" ]]; then
   HISTFILE=$ZDOTDIR/.zsh_history
 fi
 if [[ -f "$ZDOTDIR/.zshrc" ]]; then
@@ -52,25 +62,30 @@ builtin unset RYCO_ZDOTDIR RYCO_USER_ZDOTDIR
 if [[ -z "\${__ryco_shell_integration-}" ]]; then
   typeset -g __ryco_shell_integration=1
   typeset -g __ryco_prompted=0
+  typeset -g __ryco_nonce="\${__ryco_nonce-}"
   __ryco_precmd() {
     local ret=$?
     if (( __ryco_prompted )); then
-      builtin printf '\\e]133;D;%s\\a' "$ret"
+      builtin printf '\\e]133;D;%s;ryco=%s\\a' "$ret" "$__ryco_nonce"
     fi
     __ryco_prompted=1
-    builtin printf '\\e]133;A\\a'
+    builtin printf '\\e]133;A;ryco=%s\\a' "$__ryco_nonce"
     return $ret
   }
   __ryco_preexec() {
-    builtin printf '\\e]133;C\\a'
+    builtin printf '\\e]133;C;ryco=%s\\a' "$__ryco_nonce"
   }
+  typeset -ga precmd_functions preexec_functions
   # First, so it sees the command's exit status; last, so C comes right before the output.
-  precmd_functions=(__ryco_precmd \${precmd_functions[@]})
+  precmd_functions=(__ryco_precmd "\${precmd_functions[@]}")
   preexec_functions+=(__ryco_preexec)
 fi
 `;
 
 const BASH_RC = `# Ryco shell integration: the user's startup files, then prompt and command marks (OSC 133).
+# Every mark carries this session's nonce (ryco=...); safe under \`set -u\`.
+__ryco_nonce="\${RYCO_SHELL_MARK_NONCE-}"
+builtin unset RYCO_SHELL_MARK_NONCE
 if [ -r /etc/bash.bashrc ]; then
   . /etc/bash.bashrc
 fi
@@ -83,10 +98,10 @@ if [ -z "\${__ryco_shell_integration-}" ]; then
   __ryco_precmd() {
     local ret=$?
     if [ "$__ryco_prompted" = 1 ]; then
-      builtin printf '\\033]133;D;%s\\007' "$ret"
+      builtin printf '\\033]133;D;%s;ryco=%s\\007' "$ret" "$__ryco_nonce"
     fi
     __ryco_prompted=1
-    builtin printf '\\033]133;A\\007'
+    builtin printf '\\033]133;A;ryco=%s\\007' "$__ryco_nonce"
     return $ret
   }
   if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
@@ -97,7 +112,7 @@ $PROMPT_COMMAND}"
   fi
   # PS0 (bash 4.4+) prints after a command line is read, before it runs.
   if [ "\${BASH_VERSINFO[0]}" -gt 4 ] || { [ "\${BASH_VERSINFO[0]}" -eq 4 ] && [ "\${BASH_VERSINFO[1]}" -ge 4 ]; }; then
-    PS0="\${PS0-}\\e]133;C\\a"
+    PS0="\${PS0-}\\e]133;C;ryco=\${__ryco_nonce}\\a"
   fi
 fi
 `;
@@ -109,11 +124,11 @@ export const shellIntegrationFiles = (): ReadonlyArray<{
 }> => [
   {
     path: path.join(SHELL_INTEGRATION_VERSION, "zsh", ".zshenv"),
-    content: ZSH_ENV_SHIM(".zshenv"),
+    content: ZSH_ENV_SHIM(".zshenv", true),
   },
   {
     path: path.join(SHELL_INTEGRATION_VERSION, "zsh", ".zprofile"),
-    content: ZSH_ENV_SHIM(".zprofile"),
+    content: ZSH_ENV_SHIM(".zprofile", false),
   },
   { path: path.join(SHELL_INTEGRATION_VERSION, "zsh", ".zshrc"), content: ZSH_RC },
   { path: path.join(SHELL_INTEGRATION_VERSION, "bash", "ryco.bash"), content: BASH_RC },
@@ -132,16 +147,21 @@ export interface ShellSpawn {
 
 const shellBaseName = (shell: string) => path.posix.basename(shell).toLowerCase();
 
+/** The variable that hands a shell its marks' nonce; the startup files unset it at once. */
+export const SHELL_MARK_NONCE_ENV = "RYCO_SHELL_MARK_NONCE";
+
 /**
  * How to start `candidate` with integration from `dir` (already written), or `null` when the
  * shell is not one Ryco integrates (only zsh and bash, never on Windows) or its arguments
- * already choose startup files.
+ * already choose startup files. `markNonce` goes into every mark the shell prints, so a reader
+ * trusts only marks that carry it.
  */
 export function withShellIntegration(
   candidate: ShellCandidate,
   env: NodeJS.ProcessEnv,
   dir: string,
   platform: NodeJS.Platform = process.platform,
+  markNonce?: string,
 ): ShellSpawn | null {
   if (platform === "win32") return null;
   const name = shellBaseName(candidate.shell);
@@ -160,6 +180,7 @@ export function withShellIntegration(
       args,
       env: {
         ...env,
+        ...(markNonce === undefined ? {} : { [SHELL_MARK_NONCE_ENV]: markNonce }),
         ZDOTDIR: zdotdir,
         ...(userZdotdir === undefined ? {} : { RYCO_USER_ZDOTDIR: userZdotdir }),
       },
@@ -171,7 +192,7 @@ export function withShellIntegration(
     return {
       shell: candidate.shell,
       args: [...args, "--init-file", path.join(root, "bash", "ryco.bash")],
-      env,
+      env: markNonce === undefined ? env : { ...env, [SHELL_MARK_NONCE_ENV]: markNonce },
     };
   }
   return null;

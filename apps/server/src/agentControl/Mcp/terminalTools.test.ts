@@ -111,6 +111,26 @@ const textOf = (result: AgentControlMcpToolResult) =>
 
 const SECRET = "hunter2-very-private";
 
+/** Resolves once the terminal's output shows `text` (its output events, not a timer). */
+const outputShows = (terminals: TerminalManagerShape, terminalId: string, text: string) =>
+  new Promise<void>((resolve) => {
+    let seen = "";
+    let stop: (() => void) | undefined;
+    void Effect.runPromise(
+      terminals.subscribe((event) =>
+        Effect.sync(() => {
+          if (event.type !== "output" || event.terminalId !== terminalId) return;
+          seen = (seen + event.data).slice(-4_000);
+          if (!seen.includes(text)) return;
+          stop?.();
+          resolve();
+        }),
+      ),
+    ).then((unsubscribe) => {
+      stop = unsubscribe;
+    });
+  });
+
 // Real shells in real PTYs: POSIX only.
 const posix = process.platform !== "win32";
 
@@ -383,5 +403,31 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
     });
     expect(result.body).toContain("plain-shell");
     expect(result.body).toContain("exit code unknown");
+
+    // A sudo-style prompt the user started: no marks, the process poll has not seen it yet, the
+    // screen rule waits for quiet. The tty's echo flag still refuses the agent's typing.
+    const prompted = outputShows(plain, "agent-1", "Password:");
+    await Effect.runPromise(
+      plain.write({ threadId: THREAD, terminalId: "agent-1", data: "bash secret.sh\r" }),
+    );
+    await prompted;
+    const typed = await plainCall({ action: "send", text: "guess", keys: ["Enter"] });
+    expect(typed.isError).toBe(true);
+    expect(typed.body).toContain("waits for hidden input");
+    await Effect.runPromise(
+      plain.write({ threadId: THREAD, terminalId: "agent-1", data: "\u0003" }),
+    );
+  }, 30_000);
+
+  it("does not take a mark printed by the command for the command's end", async () => {
+    // What a cat'ed file, a test or a remote host could print: Ryco's own marks look the same
+    // apart from this session's nonce.
+    const result = await call({
+      action: "run",
+      command: "printf '\\033]133;D;0\\007\\033]133;C\\007'; sleep 1.5; echo real-end; false",
+      timeout_seconds: 15,
+    });
+    expect(result.body).toContain("real-end");
+    expect(result.body).toContain("exited with code 1");
   }, 30_000);
 });

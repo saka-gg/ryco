@@ -38,6 +38,8 @@ export interface TerminalSessionInspection {
   readonly foregroundProcessName?: string;
   /** What the foreground process is called while the shell is idle, once seen. */
   readonly idleForegroundName?: string;
+  /** The nonce in the shell's prompt and command marks; absent for a shell without them. */
+  readonly markNonce?: string;
 }
 
 export {
