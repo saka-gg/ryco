@@ -21,6 +21,7 @@ import {
 import { noteComputerSetupMissingOnce } from "../computerUse/computerSetupNotice";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
+import { hasPendingUserActionRequest } from "@ryco/shared/threadActivity";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { taskDraftSend } from "./tasks/taskDraft";
 import {
@@ -7115,6 +7116,13 @@ export default function ChatView(props: ChatViewProps) {
   const showUserActionRequests =
     presentationTier !== "phone" &&
     threadActivities.some((activity) => activity.kind === USER_ACTION_REQUESTED_ACTIVITY_KIND);
+  // While a hand-off card waits for the user, the crown's floating workspace preview collapses:
+  // it would cover the card (and its Won't do) at narrower widths. Cheap on purpose (no payload
+  // schemas on the chat route): requested ids without a resolution, not yet past their expiry.
+  const userActionCardPending = useMemo(
+    () => showUserActionRequests && hasPendingUserActionRequest(threadActivities, Date.now()),
+    [showUserActionRequests, threadActivities],
+  );
   const userActionRequestCardsReady = useLazyComponentReady(
     LazyUserActionRequestCards,
     showUserActionRequests,
@@ -7301,7 +7309,9 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const workspacePreview =
-    !isPhoneTier && isLocalComputerEnvironment(activeThread.environmentId) ? (
+    !isPhoneTier &&
+    !userActionCardPending &&
+    isLocalComputerEnvironment(activeThread.environmentId) ? (
       <>
         {computerBetaPreviewReady ? (
           <LazyComputerBetaPreview key={activeThread.id} threadId={activeThread.id} inline />

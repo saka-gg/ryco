@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { UserActionRequestId } from "@ryco/contracts/user-action-request";
 
 import { derivePendingThreadRequestState } from "./pendingThreadRequests.ts";
-import { isThreadActivityMilestone } from "./threadActivity.ts";
+import { hasPendingUserActionRequest, isThreadActivityMilestone } from "./threadActivity.ts";
 import { userActionRequestLabel } from "./userActionRequests.ts";
 import { deriveUserActionRequests, pendingUserActionRequests } from "./userActionRequestState.ts";
 
@@ -113,5 +113,15 @@ describe("userActionRequestLabel", () => {
     expect(userActionRequestLabel({ surface: "terminal", need: "input" })).toBe(
       "Your input needed in terminal",
     );
+  });
+});
+
+describe("hasPendingUserActionRequest", () => {
+  it("is true while a request waits and false once it ended or expired", () => {
+    const now = Date.parse("2026-11-21T12:01:00.000Z");
+    expect(hasPendingUserActionRequest([requested()], now)).toBe(true);
+    expect(hasPendingUserActionRequest([requested(), resolved("declined")], now)).toBe(false);
+    expect(hasPendingUserActionRequest([requested()], Date.parse(expiresAt))).toBe(false);
+    expect(hasPendingUserActionRequest([{ kind: "tool.completed", payload: {} }], now)).toBe(false);
   });
 });

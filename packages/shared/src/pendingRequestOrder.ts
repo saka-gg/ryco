@@ -86,3 +86,12 @@ export function foldResolvableRequests<
   }
   return Array.from(requests.values());
 }
+
+/**
+ * Whether a node-owned request with this expiry is past it. An unreadable expiry fails closed:
+ * the request can no longer be answered.
+ */
+export function isNodeRequestExpired(expiresAt: string, nowMs: number): boolean {
+  const expiresAtMs = Date.parse(expiresAt);
+  return !Number.isFinite(expiresAtMs) || nowMs >= expiresAtMs;
+}

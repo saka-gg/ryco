@@ -2,13 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   TurnId,
   type UserActionOutcome,
 } from "@ryco/contracts";
-import { Effect, Fiber, Layer, Option, Ref } from "effect";
+import { Effect, Fiber, Layer, Option, Queue, Ref } from "effect";
 import * as TestClock from "effect/testing/TestClock";
 
 import { threadWakeSource, waitUntil } from "../agentControl/eventDrivenWait.ts";
@@ -31,6 +32,7 @@ import {
   openUserActionRequest,
   readThreadUserActionRequests,
   reconcileUserActionRequestsAfterRestart,
+  releaseUserActionRequestsOfThread,
   resolveUserActionRequest,
   userActionRequestIdFor,
   waitForUserActionRequest,
@@ -163,6 +165,94 @@ layer("user action requests", (it) => {
         const late = yield* resolveUserActionRequest(deps, threadId, requestId, "closed");
         assert.strictEqual(late?.status, "done");
         assert.lengthOf(yield* Ref.get(ended), 1);
+      } finally {
+        unregister();
+      }
+    }),
+  );
+
+  it.effect("records a trimmed message and refuses one no reader could read back", () =>
+    Effect.gen(function* () {
+      const { threadId, deps } = yield* setup("message");
+      // Leading and trailing spaces would make the payload unreadable: the base trims them.
+      const { request } = yield* open(deps, threadId, "spaces", { message: "  Sign in.  " });
+      assert.strictEqual(request.message, "Sign in.");
+      const recorded = yield* readThreadUserActionRequests(deps, threadId);
+      assert.deepEqual(
+        recorded?.map((candidate) => [candidate.message, candidate.status]),
+        [["Sign in.", "pending"]],
+      );
+      // Nothing to read back: refused, and nothing recorded.
+      const blank = yield* Effect.flip(open(deps, threadId, "blank", { message: "   " }));
+      assert.match(blank.text, /The message must be 1 to 300 characters/);
+      const long = yield* Effect.flip(
+        open(deps, threadId, "long", { target: "tab-9", message: "x".repeat(301) }),
+      );
+      assert.match(long.text, /The message must be/);
+      assert.lengthOf((yield* readThreadUserActionRequests(deps, threadId)) ?? [], 1);
+    }),
+  );
+
+  it.effect("gives the surface its target back when the thread is archived or deleted", () =>
+    Effect.gen(function* () {
+      const { engine, threadId, deps } = yield* setup("removed");
+      // The removal is handled on a detached fiber: the hook reports into a queue the test takes.
+      const ended = yield* Queue.unbounded<UserActionSurfaceEnded>();
+      const unregister = registerUserActionSurfaceHook("browser", (event) =>
+        Queue.offer(ended, event).pipe(Effect.asVoid),
+      );
+      try {
+        const { request } = yield* open(deps, threadId, "archived");
+        // The removal watch starts with the first wait.
+        yield* waitForUserActionRequest(deps, {
+          threadId,
+          requestId: request.requestId,
+          waitMs: 0,
+        });
+        // A thread can be archived once a message was sent.
+        yield* engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-removed"),
+          threadId,
+          message: {
+            messageId: MessageId.make("message-removed"),
+            role: "user",
+            text: "Go",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: new Date().toISOString(),
+        });
+        yield* engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("cmd-archive-removed"),
+          threadId,
+        });
+        assert.deepEqual(yield* Queue.take(ended), {
+          threadId,
+          requestId: request.requestId,
+          target: "tab-1",
+          outcome: "cancelled",
+        });
+        // Archived: the thread still records how the request ended.
+        const recorded = yield* readThreadUserActionRequests(deps, threadId);
+        assert.strictEqual(recorded?.[0]?.status, "cancelled");
+
+        // Deleted: nothing can be recorded, the surface is released all the same, once.
+        const other = yield* setup("deleted");
+        const { request: second } = yield* open(other.deps, other.threadId, "deleted");
+        yield* other.engine.dispatch({
+          type: "thread.trash",
+          commandId: CommandId.make("cmd-trash-deleted"),
+          threadId: other.threadId,
+        });
+        assert.deepInclude((yield* Queue.take(ended)) as object, {
+          requestId: second.requestId,
+          outcome: "cancelled",
+        });
+        yield* releaseUserActionRequestsOfThread(other.deps, other.threadId);
+        assert.strictEqual(yield* Queue.size(ended), 0);
       } finally {
         unregister();
       }
