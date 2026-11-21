@@ -56,11 +56,21 @@ describe("failed turn notice and error banner", () => {
 });
 
 describe("floatingThreadAttention", () => {
-  const none = { approvals: 0, agentControlProposals: 0, userInputs: 0, secretRequests: 0 };
+  const none = {
+    approvals: 0,
+    agentControlProposals: 0,
+    userInputs: 0,
+    secretRequests: 0,
+    userActionRequests: 0,
+  };
 
-  it("puts approvals and proposals before questions and secret requests", () => {
+  it("puts approvals and proposals before questions, secret and user action requests", () => {
     expect(floatingThreadAttention(none)).toBeNull();
     expect(floatingThreadAttention({ ...none, secretRequests: 1 })).toBe("question");
+    expect(floatingThreadAttention({ ...none, userActionRequests: 1 })).toBe("question");
+    expect(floatingThreadAttention({ ...none, userActionRequests: 1, approvals: 1 })).toBe(
+      "approval",
+    );
     expect(floatingThreadAttention({ ...none, userInputs: 1 })).toBe("question");
     expect(floatingThreadAttention({ ...none, userInputs: 1, agentControlProposals: 1 })).toBe(
       "approval",

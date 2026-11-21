@@ -1,7 +1,8 @@
 /**
  * alertExcerpt - The excerpt an approval or question alert carries (`docs/push-alerts.md`): what
- * the agent asks to do, or what it asks the person, sealed with the rest of the payload so the
- * phone can show it on the Lock Screen and open the thread with its card already there.
+ * the agent asks to do, or what it asks the person (for a user action request, only its fixed
+ * label), sealed with the rest of the payload so the phone can show it on the Lock Screen and
+ * open the thread with its card already there.
  *
  * Pure: it takes the open request the clients' own `derivePendingApprovals` /
  * `derivePendingUserInputs` derive, and fits the sealed plaintext to what the Hub takes. Text cut
@@ -13,6 +14,7 @@
 import type { PendingApproval, PendingUserInput } from "@ryco/client-runtime/state/session";
 import {
   PUSH_ALERT_EXCERPT_MAX_BYTES,
+  PUSH_ALERT_LABEL_MAX_LENGTH,
   type PushAlertExcerpt,
   type PushAlertInputExcerpt,
   type PushAlertPlaintext,
@@ -108,8 +110,23 @@ export function inputExcerpt(
   };
 }
 
+/**
+ * The excerpt of an input alert that is not a question (a user action request): its fixed label
+ * only, such as "Login required in browser". Null for a blank one.
+ */
+export function labelExcerpt(label: string): PushAlertExcerpt | null {
+  const text = clip(label, PUSH_ALERT_LABEL_MAX_LENGTH);
+  // `clip` counts code points, the schema UTF-16 units: a label of astral characters is cut more.
+  return text === "" || text.length > PUSH_ALERT_LABEL_MAX_LENGTH ? null : { l: { t: text } };
+}
+
 /** Shorter forms of an excerpt, longest first; each is tried until one fits. */
 function* shorterExcerpts(excerpt: PushAlertExcerpt): Generator<PushAlertExcerpt> {
+  // A fixed label is short by construction: it goes whole or not at all.
+  if ("l" in excerpt) {
+    yield excerpt;
+    return;
+  }
   if ("a" in excerpt) {
     const { k, d, r } = excerpt.a;
     yield excerpt;

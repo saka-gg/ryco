@@ -216,6 +216,7 @@ layer("user action requests", (it) => {
         Date.parse(clamped.expiresAt) - Date.parse(clamped.requestedAt),
         60 * 60 * 1_000,
       );
+      if (engine.getReadModel === undefined) return assert.fail("The engine has no read model.");
       const model = yield* engine.getReadModel();
       yield* reconcileUserActionRequestsAfterRestart(deps, model.threads);
       const requests = yield* readThreadUserActionRequests(deps, threadId);
