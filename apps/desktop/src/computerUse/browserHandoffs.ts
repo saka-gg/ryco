@@ -25,7 +25,8 @@ import type {
 import type { ProjectBrowserTab, UserActionNeed, UserActionOutcome } from "@ryco/contracts";
 import {
   BROWSER_HANDOFF_SETTLE_MS,
-  BROWSER_SECRET_FIELD_SELECTOR,
+  BROWSER_SCRUB_SCRIPT,
+  BROWSER_TRACK_SECRET_FIELDS_SCRIPT,
   browserDoneWhenHolds,
   browserProbeExpression,
   parseBrowserProbe,
@@ -43,34 +44,13 @@ export interface BrowserHandoffHost {
     code: string,
     options: { allFrames: boolean; timeoutMs: number },
   ): Promise<unknown[]>;
-  automation(
-    tab: string,
-  ):
-    | { beginWithholding(): void; endWithholding(): { requests: number; messages: number } }
-    | undefined;
+  /** Withholds what the tab logs and sends, on every page it gets, until `endWithholding`. */
+  beginWithholding(tab: string): void;
+  endWithholding(tab: string): { requests: number; messages: number };
 }
 
-/** Empties secret fields the way typing would, in a document and its open shadow roots. */
-export const BROWSER_SCRUB_SCRIPT = `(() => {
-  const SEL = ${JSON.stringify(BROWSER_SECRET_FIELD_SELECTOR)};
-  let cleared = 0;
-  const visit = root => {
-    for (const el of root.querySelectorAll(SEL)) {
-      if (el.value) {
-        cleared++;
-        try { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, ''); } catch { el.value = ''; }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      if (el.getAttribute('value')) el.setAttribute('value', '');
-    }
-    for (const host of root.querySelectorAll('*')) if (host.shadowRoot) visit(host.shadowRoot);
-  };
-  visit(document);
-  return cleared;
-})()`;
-
 const PROBE_TIMEOUT_MS = 2_000;
+const TRACK_TIMEOUT_MS = 1_000;
 const SCRUB_TIMEOUT_MS = 3_000;
 /** How long `end` lets a page that the user just finished on load before describing it. */
 const END_LOAD_WAIT_MS = 3_000;
@@ -199,7 +179,8 @@ export class BrowserHandoffs {
     (handoff.safety as { unref?: () => void }).unref?.();
     this.byTab.set(request.tab, handoff);
     this.byRequest.set(request.requestId, handoff);
-    this.host.automation(request.tab)?.beginWithholding();
+    this.host.beginWithholding(request.tab);
+    await this.trackSecretFields(request.tab);
     this.host.setHandoff(request.tab, {
       thread: request.threadId,
       request: request.requestId,
@@ -217,6 +198,8 @@ export class BrowserHandoffs {
     }
     if (handoff.ending) return { status: "active", met: false };
     if (!this.host.hasTab(handoff.tab)) return { status: "closed" };
+    // New documents and frames since the last tick get their secret fields marked too.
+    await this.trackSecretFields(handoff.tab);
     if (!handoff.doneWhen) return { status: "active", met: false };
     const probe = await this.probeOnce(handoff.tab, handoff.doneWhen, false);
     const now = this.now();
@@ -273,12 +256,9 @@ export class BrowserHandoffs {
       if (values.length > 0 && typeof values[0] !== "number") scrubFailed = true;
       for (const value of values) if (typeof value === "number") scrubbed += value;
     }
-    const withheld = open
-      ? (this.host.automation(tab)?.endWithholding() ?? { requests: 0, messages: 0 })
-      : { requests: 0, messages: 0 };
     if (scrubFailed) {
       // Stays with the user; withholding goes on until a later end succeeds.
-      this.host.automation(tab)?.beginWithholding();
+      const withheld = { requests: 0, messages: 0 };
       handoff.stuck = true;
       return {
         status: "ended",
@@ -291,6 +271,7 @@ export class BrowserHandoffs {
         waitedMs: this.now() - handoff.since,
       };
     }
+    const withheld = open ? this.host.endWithholding(tab) : { requests: 0, messages: 0 };
     clearTimeout(handoff.safety);
     this.byTab.delete(tab);
     this.byRequest.delete(handoff.requestId);
@@ -321,6 +302,13 @@ export class BrowserHandoffs {
       if (oldest !== undefined) this.ended.delete(oldest);
     }
     return response;
+  }
+
+  private async trackSecretFields(tab: string): Promise<void> {
+    await this.host.evaluateInFrames(tab, BROWSER_TRACK_SECRET_FIELDS_SCRIPT, {
+      allFrames: true,
+      timeoutMs: TRACK_TIMEOUT_MS,
+    });
   }
 
   private async probeOnce(

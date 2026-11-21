@@ -12,6 +12,7 @@ import {
   fakeTab,
   resetFakeElectron,
 } from "./embeddedBrowser.fixtures.ts";
+import { EmbeddedTabAutomation } from "./browserTabAutomation.ts";
 import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
 import {
   BROWSER_IDLE_SUSPEND_MS,
@@ -566,6 +567,47 @@ describe("agent automation", () => {
     expect(automationOf(browser, tab.id)).not.toBe(first);
     await browser.close(tab.id, signal());
     expect(browser.automation(tab.id)).toBeUndefined();
+  });
+
+  it("withholds on every page a handed-off tab gets, and counts them all", async () => {
+    const begin = vi.spyOn(EmbeddedTabAutomation.prototype, "beginWithholding");
+    const end = vi
+      .spyOn(EmbeddedTabAutomation.prototype, "endWithholding")
+      .mockReturnValueOnce({ requests: 2, messages: 1 })
+      .mockReturnValueOnce({ requests: 1, messages: 0 });
+    try {
+      const browser = newBrowser();
+      const tab = await browser.open("https://example.com/", false, signal());
+      const inner = internals(browser);
+      const entry = inner.entries.get(tab.id)!;
+      // Suspended when it is handed over: no page yet, the tab still withholds.
+      const first = entry.live!;
+      entry.live = null;
+      inner.teardownPage(tab.id, first);
+      browser.beginWithholding(tab.id);
+      expect(begin).not.toHaveBeenCalled();
+      // Revived on Show: the new page withholds from its first entry.
+      entry.live = inner.createPage(entry, tab.id).page;
+      expect(begin).toHaveBeenCalledTimes(1);
+      // Its renderer crashes and the tab gets another page: that one withholds too, and what
+      // the torn-down page withheld still counts.
+      const second = entry.live;
+      entry.live = null;
+      inner.teardownPage(tab.id, second);
+      entry.live = inner.createPage(entry, tab.id).page;
+      expect(begin).toHaveBeenCalledTimes(2);
+      expect(browser.endWithholding(tab.id)).toEqual({ requests: 3, messages: 1 });
+      // Ended: a later page does not withhold.
+      const third = entry.live;
+      entry.live = null;
+      inner.teardownPage(tab.id, third);
+      entry.live = inner.createPage(entry, tab.id).page;
+      expect(begin).toHaveBeenCalledTimes(2);
+      expect(end).toHaveBeenCalledTimes(2);
+    } finally {
+      begin.mockRestore();
+      end.mockRestore();
+    }
   });
 
   it("opens agent tabs whose page answers CDP only once it starts loading", async () => {

@@ -272,6 +272,22 @@ layer("ryco_browser handoff", (it) => {
     }),
   );
 
+  it.effect("trims the message, and refuses one the card could not show before handing over", () =>
+    Effect.gen(function* () {
+      const { threadId, desktop, call } = yield* setup("message");
+      // Only spaces: refused before the desktop is asked, so the tab is never locked.
+      const blank = yield* call({ message: "   ", waitMs: 0 });
+      assert.isTrue(blank.isError);
+      assert.match(textOf(blank), /needs a message for the user: 1 to 300 characters/);
+      assert.lengthOf(desktop.state.requests, 0);
+      // Spaces around a real message: trimmed, recorded, and the card shows it.
+      const spaced = yield* call({ message: "  Sign in to Acme.  ", waitMs: 0 });
+      assert.deepInclude(spaced.structuredContent as object, { status: "pending" });
+      assert.deepInclude(desktop.state.requests[0] as object, { message: "Sign in to Acme." });
+      assert.isTrue(yield* hasPendingUserInput(threadId));
+    }),
+  );
+
   it.effect("lets the agent withdraw its hand-off", () =>
     Effect.gen(function* () {
       const { threadId, call } = yield* setup("cancel");

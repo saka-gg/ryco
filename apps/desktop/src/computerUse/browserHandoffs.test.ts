@@ -1,11 +1,9 @@
 import type { ProjectBrowserTab } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  BROWSER_SCRUB_SCRIPT,
-  BrowserHandoffs,
-  type BrowserHandoffHost,
-} from "./browserHandoffs.ts";
+import { BROWSER_SCRUB_SCRIPT } from "@ryco/shared/browserHandoff";
+
+import { BrowserHandoffs, type BrowserHandoffHost } from "./browserHandoffs.ts";
 
 interface FakePage {
   href: string;
@@ -28,15 +26,13 @@ function fakeHost(page: FakePage) {
     setHandoff: (_tab, handoff) => {
       marks.push(handoff);
     },
-    automation: () => ({
-      beginWithholding: () => {
-        withholding.begun += 1;
-      },
-      endWithholding: () => {
-        withholding.ended += 1;
-        return { requests: 2, messages: 1 };
-      },
-    }),
+    beginWithholding: () => {
+      withholding.begun += 1;
+    },
+    endWithholding: () => {
+      withholding.ended += 1;
+      return { requests: 2, messages: 1 };
+    },
     evaluateInFrames: async (_tab, code, options) => {
       if (code === BROWSER_SCRUB_SCRIPT) {
         const cleared = page.frames.map((count) => count);
@@ -189,7 +185,7 @@ describe("BrowserHandoffs", () => {
     expect(ended).toMatchObject({ status: "ended", stillPaused: true });
     expect(handoffs.isHandedOff("tab-1")).toBe(true);
     // Withholding goes on until a later end succeeds.
-    expect(withholding.begun).toBe(2);
+    expect(withholding).toEqual({ begun: 1, ended: 0 });
     expect(marks.at(-1)).not.toBeNull();
     page.scrubFails = false;
     expect(

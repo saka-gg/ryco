@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   browserDoneWhenHolds,
+  browserGlobMatches,
+  selectorReadsFieldValues,
   browserProbeExpression,
   browserSignInHint,
   browserSignInNeed,
@@ -27,12 +29,26 @@ const signals = (overrides: Partial<BrowserSignInSignals> = {}): BrowserSignInSi
 });
 
 describe("done_when", () => {
-  it("matches the URL without query and fragment, unless it is a regex", () => {
+  it("matches the URL without query and fragment, as a substring or a whole * glob", () => {
     const href = "https://jira.example.com/secure/Dashboard.jspa?next=%2Flogin#top";
     expect(browserUrlHolds("/secure/Dashboard", href)).toBe(true);
     expect(browserUrlHolds("login", href)).toBe(false);
     expect(browserUrlHolds("https://jira.example.com/*/Dashboard.jspa", href)).toBe(true);
-    expect(browserUrlHolds("/next=%2Flogin/", href)).toBe(true);
+    expect(browserUrlHolds("*/Dashboard", href)).toBe(false);
+    // A path that looks like /…/ is a plain substring, never a regular expression.
+    expect(browserUrlHolds("/secure/", href)).toBe(true);
+  });
+
+  it("matches globs without catastrophic backtracking", () => {
+    expect(browserGlobMatches("a*b*c", "axxbyyc")).toBe(true);
+    expect(browserGlobMatches("a*b*c", "axxbyy")).toBe(false);
+    expect(browserGlobMatches("*", "")).toBe(true);
+    // The pattern that makes a backtracking regex engine take forever: here it is quick.
+    const pattern = `${"a*".repeat(200)}b`;
+    const text = "a".repeat(8_000);
+    const started = performance.now();
+    expect(browserGlobMatches(pattern, text)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 
   it("needs every given part", () => {
@@ -53,12 +69,30 @@ describe("done_when", () => {
     expect(validateBrowserDoneWhen(undefined)).toBeUndefined();
     expect(validateBrowserDoneWhen({ url: "/home" })).toBeUndefined();
     expect(validateBrowserDoneWhen({})).toMatch(/at least one/);
-    expect(validateBrowserDoneWhen({ url: "/(/" })).toMatch(/regular expression/);
+    expect(validateBrowserDoneWhen({ url: "/(a+)+$/" })).toMatch(/not a regular expression/);
+    expect(validateBrowserDoneWhen({ url: "/dashboard/" })).toBeUndefined();
     expect(validateBrowserDoneWhen({ selector: 'input[value^="a"]' })).toMatch(/field values/);
     expect(validateBrowserDoneWhen({ selector: "input:placeholder-shown" })).toMatch(
       /field values/,
     );
     expect(validateBrowserDoneWhen({ text: "x".repeat(513) })).toMatch(/longer than/);
+  });
+
+  it("refuses every attribute selector on value, in any namespace or spelling", () => {
+    for (const selector of [
+      "input[value]",
+      'input[*|value^="a"]',
+      'input[ns|value|="a"]',
+      "input[ VALUE ]",
+      "input[v\\61lue]",
+      "input:placeholder-shown",
+      "input:checked",
+    ]) {
+      expect(selectorReadsFieldValues(selector), selector).toBe(true);
+    }
+    for (const selector of ["nav.account", "[data-state=open]", "[aria-valuenow]", "#app main"]) {
+      expect(selectorReadsFieldValues(selector), selector).toBe(false);
+    }
   });
 
   it("builds a probe that reads no field values", () => {

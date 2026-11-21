@@ -37,6 +37,10 @@ import {
   describeBrowserPage,
   validateBrowserDoneWhen,
 } from "@ryco/shared/browserHandoff";
+import {
+  UserActionRequestMessage,
+  UserActionRequestTarget,
+} from "@ryco/contracts/user-action-request-details";
 import type { UserActionRequestView } from "@ryco/shared/userActionRequestState";
 import { Effect, Schema } from "effect";
 
@@ -50,6 +54,9 @@ import {
   type UserActionWaitDeps,
 } from "../../userActionRequests/userActionRequests.ts";
 import type { AgentControlMcpToolResult } from "./tools.ts";
+
+const isRequestMessage = Schema.is(UserActionRequestMessage);
+const isRequestTarget = Schema.is(UserActionRequestTarget);
 
 /** How often the node probes a pending hand-off's tab (done_when, closed). */
 const PROBE_EVERY_MS = 1_000;
@@ -220,10 +227,16 @@ export const handOffRycoBrowserTab = (input: {
     }
 
     if (request === undefined) {
-      if (args.message === undefined) {
+      // Checked as the record will be read back, before the tab is handed over: a message or tab
+      // the card could not show must never leave the tab locked with no card.
+      const message = args.message?.trim();
+      if (message === undefined || !isRequestMessage(message)) {
         return refusal(
-          "The first handoff call needs a message for the user (at most 300 characters).",
+          `The first handoff call needs a message for the user: 1 to ${USER_ACTION_REQUEST_MESSAGE_MAX_CHARS} characters.`,
         );
+      }
+      if (!isRequestTarget(args.tab)) {
+        return refusal("tab must be a tab id from tabs, without spaces around it.");
       }
       const ttlMs =
         args.timeout_seconds === undefined
@@ -235,7 +248,7 @@ export const handOffRycoBrowserTab = (input: {
         requestId: found.requestId,
         threadId,
         tab: args.tab,
-        message: args.message,
+        message,
         need,
         ...(args.done_when === undefined ? {} : { doneWhen: args.done_when }),
         ttlMs,
@@ -259,7 +272,7 @@ export const handOffRycoBrowserTab = (input: {
         callerRequestId: args.requestId,
         surface: "browser",
         need,
-        message: args.message,
+        message,
         target: args.tab,
         ttlMs,
         maxPending: USER_ACTION_REQUEST_MAX_PENDING_PER_THREAD,

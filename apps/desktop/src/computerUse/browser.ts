@@ -344,6 +344,11 @@ function withFileChooser(
   return { ...value, content: [...value.content, { type: "text", text }] };
 }
 
+/** How `tabs` lists a tab the user has: its id and that it is theirs, nothing of its page. */
+function withUserTab(id: string): { readonly id: string; readonly withUser: true } {
+  return { id, withUser: true };
+}
+
 /** What a result says was typed into a password or code field: only its length. */
 function secretTyped(text: string): string {
   return `${[...text].length} characters (not shown: a password or code field)`;
@@ -557,11 +562,11 @@ export class BrowserComputerDriver {
     const action = textArg(args, "action");
     if (action === "tabs") {
       const tabs = await transport.tabs(context.signal);
+      // A tab with the user shows only that it is: its URL and title can carry what they type
+      // or receive while signing in (an OAuth code, a fragment, an account name).
       return result(
         browser === "ryco" && this.handoffs
-          ? tabs.map((tab) =>
-              this.handoffs?.isHandedOff(tab.id) ? { ...tab, withUser: true } : tab,
-            )
+          ? tabs.map((tab) => (this.handoffs?.isHandedOff(tab.id) ? withUserTab(tab.id) : tab))
           : tabs,
       );
     }

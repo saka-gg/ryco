@@ -1472,12 +1472,21 @@ describe("hand-off", () => {
     expect(context.claim).toHaveBeenCalledWith("browser:ryco:2");
   });
 
-  it("marks the tab the user has in the tab list", async () => {
+  it("lists the tab the user has by id only, without its URL or title", async () => {
     const { run, transport } = rycoFixture(page, { handoffs: gate() });
-    vi.mocked(transport.tabs).mockResolvedValue(twoTabs);
-    expect(texts(await run({ action: "tabs" }))).toEqual([
-      [{ ...twoTabs[0], withUser: true }, twoTabs[1]],
-    ]);
+    // An OAuth code in the query, a fragment, an account name in the title: none may leak.
+    const signingIn = [
+      {
+        id: "1",
+        url: "https://example.com/callback?code=one-time-code#state=x",
+        title: "Signed in as someone@example.com",
+      },
+      twoTabs[1]!,
+    ];
+    vi.mocked(transport.tabs).mockResolvedValue(signingIn);
+    const listed = texts(await run({ action: "tabs" }));
+    expect(listed).toEqual([[{ id: "1", withUser: true }, twoTabs[1]]]);
+    expect(JSON.stringify(listed)).not.toMatch(/one-time-code|someone@example\.com|state=x/);
   });
 
   it("records the thread whose agent opened a tab", async () => {

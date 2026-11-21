@@ -56,6 +56,12 @@ interface TabEntry {
   thread: string | null;
   /** The user has the tab for an agent's request (browserHandoffs.ts); the tab stays live. */
   handoff: NonNullable<ProjectBrowserTab["handoff"]> | null;
+  /**
+   * What the page logs and sends is withheld from agents (a hand-off). Kept on the tab, not on its
+   * page: every page the tab gets meanwhile (a revival, a reload after a crash) withholds from its
+   * first entry, and the counts of pages torn down meanwhile carry over.
+   */
+  withholding: { requests: number; messages: number } | null;
   presentation: "background" | "panel" | "window";
   error: string | null;
   requestedUrl: string;
@@ -281,6 +287,25 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     this.publish();
     this.scheduleBudget();
   }
+  /** Starts withholding what the tab's pages log and send, for this page and every later one. */
+  beginWithholding(tab: string): void {
+    const entry = this.entries.get(tab);
+    if (!entry) return;
+    entry.withholding ??= { requests: 0, messages: 0 };
+    entry.live?.automation.beginWithholding();
+  }
+  /** Stops withholding; returns what was withheld since it began, across every page meanwhile. */
+  endWithholding(tab: string): { requests: number; messages: number } {
+    const entry = this.entries.get(tab);
+    if (!entry || entry.withholding === null) return { requests: 0, messages: 0 };
+    const carried = entry.withholding;
+    entry.withholding = null;
+    const live = entry.live?.automation.endWithholding() ?? { requests: 0, messages: 0 };
+    return {
+      requests: carried.requests + live.requests,
+      messages: carried.messages + live.messages,
+    };
+  }
   /**
    * Evaluates `code` in the tab's main world, outside the agent's CDP session and its guards: the
    * hand-off's own probe and scrub, which must work while the user types in the tab. With
@@ -375,6 +400,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       attach: (signal) => this.withAgentCdp(id, signal, async () => undefined),
       send: (method, params, signal) => this.send(id, method, params, signal),
     });
+    // A page made while the tab is with the user withholds from its first entry.
+    if (entry.withholding !== null) automation.beginWithholding();
     const page: LivePage = { view, host, cdp, focusEmulation: false, automation };
     // Only the tab's current page may change the tab. Electron destroys contents asynchronously, so
     // a page that was torn down (closed, or replaced when the tab gets a new page) can still emit
@@ -508,6 +535,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       project,
       thread: null,
       handoff: null,
+      withholding: null,
       presentation: "background",
       error: null,
       requestedUrl: target,
@@ -733,6 +761,13 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    * debugger session, then the page itself. `destroyed` names the side Electron already destroyed.
    */
   private teardownPage(id: string, page: LivePage, destroyed?: "guest" | "host"): void {
+    // What this page withheld still counts for the tab's hand-off.
+    const withholding = this.entries.get(id)?.withholding;
+    if (withholding) {
+      const counts = page.automation.endWithholding();
+      withholding.requests += counts.requests;
+      withholding.messages += counts.messages;
+    }
     // Settles a pending pick before the session it runs on goes away.
     void this.picker.end(id, "destroyed");
     page.automation.dispose();

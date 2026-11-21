@@ -11,9 +11,10 @@ import type { UserActionNeed, UserActionOutcome } from "@ryco/contracts/user-act
 /** Ends the hand-off by itself once every given part holds. */
 export interface BrowserDoneWhen {
   /**
-   * The tab's URL without query and fragment contains this or matches this glob (`*`), or the
-   * full URL matches `/regex/flags`. Without the query, because sign-in URLs carry the address to
-   * return to.
+   * The tab's URL without query and fragment contains this, or matches this glob (`*` for any
+   * characters, the whole URL). Without the query, because sign-in URLs carry the address to
+   * return to. No regular expressions: an agent's pattern is matched on the desktop's main
+   * process every second, so matching must stay linear.
    */
   readonly url?: string | undefined;
   /** This text is visible on the page (case-insensitive). */
@@ -42,32 +43,45 @@ export interface BrowserPageProbe {
   readonly secretFields?: number;
 }
 
-const isRegexPattern = (pattern: string) => /^\/.+\/[a-z]*$/u.test(pattern);
-
-/** A matcher for `BrowserDoneWhen.url`: substring, glob (`*`) or `/regex/flags`. Throws on a bad regex. */
-export function browserUrlMatcher(pattern: string): (url: string) => boolean {
-  const regex = /^\/(.+)\/([a-z]*)$/u.exec(pattern);
-  if (regex) {
-    const compiled = new RegExp(regex[1] ?? "", regex[2]);
-    return (url) => compiled.test(url);
+/**
+ * Whether `text` matches `pattern` as a whole, `*` standing for any characters. Linear in practice
+ * and O(text × pattern) at worst (the single-backtrack wildcard match), never exponential: no
+ * agent-supplied pattern can stall the desktop.
+ */
+export function browserGlobMatches(pattern: string, text: string): boolean {
+  let p = 0;
+  let t = 0;
+  let star = -1;
+  let resume = 0;
+  while (t < text.length) {
+    if (p < pattern.length && pattern[p] !== "*" && pattern[p] === text[t]) {
+      p += 1;
+      t += 1;
+    } else if (p < pattern.length && pattern[p] === "*") {
+      star = p;
+      resume = t;
+      p += 1;
+    } else if (star !== -1) {
+      p = star + 1;
+      resume += 1;
+      t = resume;
+    } else {
+      return false;
+    }
   }
-  if (pattern.includes("*")) {
-    const compiled = new RegExp(
-      `^${pattern
-        .split("*")
-        .map((part) => part.replace(/[.+?^${}()|[\]\\]/gu, "\\$&"))
-        .join(".*")}$`,
-      "u",
-    );
-    return (url) => compiled.test(url);
-  }
-  return (url) => url.includes(pattern);
+  while (p < pattern.length && pattern[p] === "*") p += 1;
+  return p === pattern.length;
 }
 
-/** See `BrowserDoneWhen.url`. */
+/** See `BrowserDoneWhen.url`: a substring of the URL without query, or a whole-URL `*` glob. */
 export function browserUrlHolds(pattern: string, href: string): boolean {
-  return browserUrlMatcher(pattern)(isRegexPattern(pattern) ? href : href.replace(/[?#].*$/u, ""));
+  const url = href.replace(/[?#].*$/u, "");
+  return pattern.includes("*") ? browserGlobMatches(pattern, url) : url.includes(pattern);
 }
+
+/** A `/…/` pattern written as a regular expression (metacharacters inside), which is not taken. */
+const looksLikeRegex = (pattern: string) =>
+  /^\/.+\/[a-z]*$/u.test(pattern) && /[\\^$|()[\]{}+?]/u.test(pattern);
 
 /**
  * Checks the condition before anything is handed over. Returns a message for the agent, or
@@ -88,24 +102,35 @@ export function validateBrowserDoneWhen(
       return `done_when.${key} is longer than ${BROWSER_DONE_WHEN_MAX_CHARS} characters.`;
     }
   }
-  if (condition.url) {
-    try {
-      browserUrlMatcher(condition.url);
-    } catch (error) {
-      return `done_when.url is not a valid regular expression: ${error instanceof Error ? error.message : String(error)}`;
-    }
+  if (condition.url && looksLikeRegex(condition.url)) {
+    return "done_when.url takes a part of the URL (without query) or a * glob such as https://app.example.com/*/home, not a regular expression.";
   }
   // Attribute selectors on `value` (or pseudo-classes that read input state) could test what the
   // user types: frameworks mirror it into the attribute.
-  if (
-    condition.selector &&
-    /\[\s*value\b|:(?:placeholder-shown|valid|invalid|user-valid|user-invalid|in-range|out-of-range|blank|autofill|-webkit-autofill)\b/iu.test(
-      condition.selector,
-    )
-  ) {
+  if (condition.selector && selectorReadsFieldValues(condition.selector)) {
     return "done_when.selector cannot test field values: what the user types stays private. Test for an element of the page after sign-in instead.";
   }
   return undefined;
+}
+
+/** Pseudo-classes whose match depends on what a field holds. */
+const VALUE_PSEUDO_CLASSES =
+  /:(?:placeholder-shown|valid|invalid|user-valid|user-invalid|in-range|out-of-range|blank|autofill|-webkit-autofill|checked|indeterminate)\b/iu;
+
+/**
+ * Whether a selector could tell what a field holds: an attribute selector on `value` in any
+ * namespace (`[value]`, `[*|value^="a"]`, `[ns|value|="a"]`; frameworks mirror what the user types
+ * into it), a pseudo-class that matches on the field's state, or a CSS escape, which could spell
+ * either.
+ */
+export function selectorReadsFieldValues(selector: string): boolean {
+  if (selector.includes("\\") || VALUE_PSEUDO_CLASSES.test(selector)) return true;
+  for (const match of selector.matchAll(/\[([^\]]*)\]/gu)) {
+    const name = (match[1] ?? "").split(/[~|^$*]?=/u)[0] ?? "";
+    const local = name.split("|").at(-1)?.trim().toLowerCase();
+    if (local === "value") return true;
+  }
+  return false;
 }
 
 /** True when the probe says every given part of the condition holds. */
@@ -123,6 +148,63 @@ export function browserDoneWhenHolds(
 /** Password, one-time-code and payment-secret fields: never echoed, emptied after a hand-off. */
 export const BROWSER_SECRET_FIELD_SELECTOR =
   'input[type=password i], input[autocomplete~="current-password" i], input[autocomplete~="new-password" i], input[autocomplete~="one-time-code" i], input[autocomplete~="cc-number" i], input[autocomplete~="cc-csc" i]';
+
+/** The mark a field gets once it was a secret field during a hand-off (a non-enumerable symbol). */
+const SECRET_MARK = "Symbol.for('ryco.handoff.secretField')";
+
+/**
+ * Marks every field that is a secret field now, in a document and its open shadow roots, and
+ * (once per document) watches for fields that stop being one: a password field the user switched
+ * to visible (type=text) keeps its mark, so the scrub still empties it. Run at the hand-off's start
+ * and on every probe, so documents and frames that load meanwhile are marked too.
+ */
+export const BROWSER_TRACK_SECRET_FIELDS_SCRIPT = `(() => {
+  const SEL = ${JSON.stringify(BROWSER_SECRET_FIELD_SELECTOR)};
+  const MARK = ${SECRET_MARK};
+  const mark = el => { try { Object.defineProperty(el, MARK, { value: true, configurable: true }); } catch {} };
+  const visit = root => {
+    for (const el of root.querySelectorAll(SEL)) mark(el);
+    for (const host of root.querySelectorAll('*')) if (host.shadowRoot) visit(host.shadowRoot);
+  };
+  visit(document);
+  if (!document[MARK]) {
+    Object.defineProperty(document, MARK, { value: true, configurable: true });
+    new MutationObserver(records => {
+      for (const record of records) {
+        const el = record.target;
+        if (record.type === 'attributes' && record.oldValue && /^password$/i.test(record.oldValue)) mark(el);
+        if (el instanceof Element && el.matches && el.matches(SEL)) mark(el);
+      }
+    }).observe(document, { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['type', 'autocomplete'] });
+  }
+  return true;
+})()`;
+
+/**
+ * Empties secret fields the way typing would, in a document and its open shadow roots: those that
+ * are one now, and those marked as one during the hand-off (switched to visible since).
+ */
+export const BROWSER_SCRUB_SCRIPT = `(() => {
+  const SEL = ${JSON.stringify(BROWSER_SECRET_FIELD_SELECTOR)};
+  const MARK = ${SECRET_MARK};
+  let cleared = 0;
+  const visit = root => {
+    for (const el of root.querySelectorAll('input, textarea')) {
+      if (!el.matches(SEL) && el[MARK] !== true) continue;
+      if (el.value) {
+        cleared++;
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        try { Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ''); } catch { el.value = ''; }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      if (el.getAttribute('value')) el.setAttribute('value', '');
+    }
+    for (const host of root.querySelectorAll('*')) if (host.shadowRoot) visit(host.shadowRoot);
+  };
+  visit(document);
+  return cleared;
+})()`;
 
 /**
  * An expression that reports the page's state as a JSON string (`BrowserPageProbe`): always URL,
