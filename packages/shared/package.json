@@ -569,6 +569,10 @@
       "types": "./src/browserHandoff.ts",
       "import": "./src/browserHandoff.ts"
     },
+    "./nodeBrowserInputCdp": {
+      "types": "./src/nodeBrowserInputCdp.ts",
+      "import": "./src/nodeBrowserInputCdp.ts"
+    },
     "./pendingThreadRequests": {
       "types": "./src/pendingThreadRequests.ts",
       "import": "./src/pendingThreadRequests.ts"

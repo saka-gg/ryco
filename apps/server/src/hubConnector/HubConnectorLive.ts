@@ -797,20 +797,28 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
             void runPromise(Effect.logDebug("relay E2EE channel terminated", value));
           },
         });
-        // Device frame streams tunnelled through this channel; the host and the
-        // device viewer load with the first tunnel message.
+        // Device frame streams, and handed-off browser tabs, tunnelled through
+        // this channel; the host and the device viewer load with the first
+        // tunnel message.
         const frameTunnel = makeLazyRelayFrameTunnel(
           async () => {
-            const [{ makeRelayFrameTunnelHost }, devices] = await Promise.all([
-              import("./relayFrameTunnelHost.ts"),
-              runPromise(Effect.serviceOption(DeviceService)),
-            ]);
+            const [{ makeRelayFrameTunnelHost }, devices, { serveHandoffTunnelViewer }] =
+              await Promise.all([
+                import("./relayFrameTunnelHost.ts"),
+                runPromise(Effect.serviceOption(DeviceService)),
+                // Its socket close events stay off the boot path with the host.
+                import("../nodeBrowser/handoffTunnelViewer.ts"),
+              ]);
+            // The device input RPC's rule, read from the principal this
+            // channel's device RPCs use: owner sessions only.
+            const owner = relayFrameTunnelCanDrive(relayRpcPrincipal(effectiveRole, channelId));
             return makeRelayFrameTunnelHost({
               emit: (bytes) => e2ee.emit(bytes),
-              // The device input RPC's rule, read from the principal this
-              // channel's device RPCs use.
-              canDrive: relayFrameTunnelCanDrive(relayRpcPrincipal(effectiveRole, channelId)),
+              canDrive: owner,
               devices: Option.getOrNull(devices),
+              // A handed-off desktop tab is the owner's to watch and drive, as
+              // on the direct frame socket (`nodeBrowser/handoffTabs`).
+              nodeBrowserFrames: { canView: owner, serve: serveHandoffTunnelViewer },
             });
           },
           {

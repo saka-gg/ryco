@@ -641,6 +641,8 @@ export interface WsRpcClient {
   /**
    * Browser tabs that run on the node (`ServerConfig.nodeBrowser`); operator sessions only.
    * `openFrameSource` exists on direct connections, whose clients can open the frame socket.
+   * `openHandoffFrameSource` streams a handed-off desktop tab (`handoff-<32 hex>`, owner only)
+   * on direct and hosted connections alike: the frame socket, or the relay frame tunnel.
    */
   readonly nodeBrowser: {
     readonly read: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.read>;
@@ -648,6 +650,14 @@ export interface WsRpcClient {
     readonly input: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.input>;
     readonly subscribe: RpcStreamMethod<typeof NODE_BROWSER_WS_METHODS.subscribe>;
     readonly openFrameSource?: (
+      request: NodeBrowserFrameRequest,
+      handlers: NodeBrowserFrameSourceHandlers,
+    ) => NodeBrowserFrameSource;
+    /**
+     * Only for `handoff-` tab ids; never used for ordinary node tabs, which stay on
+     * `openFrameSource` (and so stay unavailable on hosted connections).
+     */
+    readonly openHandoffFrameSource?: (
       request: NodeBrowserFrameRequest,
       handlers: NodeBrowserFrameSourceHandlers,
     ) => NodeBrowserFrameSource;
@@ -888,6 +898,8 @@ export function createWsRpcClient(
   device?: DeviceRpcClient,
   options?: {
     readonly openNodeBrowserFrameSource?: WsRpcClient["nodeBrowser"]["openFrameSource"];
+    /** Frames of handed-off desktop tabs only (`nodeBrowser.openHandoffFrameSource`). */
+    readonly openHandoffFrameSource?: WsRpcClient["nodeBrowser"]["openHandoffFrameSource"];
   },
 ): WsRpcClient {
   const projectCopy = lazyProjectCopyRpc(transport);
@@ -1508,6 +1520,9 @@ export function createWsRpcClient(
         }),
       ...(options?.openNodeBrowserFrameSource
         ? { openFrameSource: options.openNodeBrowserFrameSource }
+        : {}),
+      ...(options?.openHandoffFrameSource
+        ? { openHandoffFrameSource: options.openHandoffFrameSource }
         : {}),
     },
     providerSignIn: {

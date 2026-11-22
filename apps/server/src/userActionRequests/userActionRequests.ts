@@ -252,6 +252,16 @@ const opened = new Map<
   { readonly threadId: ThreadId; readonly request: UserActionRequestView }
 >();
 const released = new Set<string>();
+
+/**
+ * The thread of a request this process opened or restored and still counts as pending, or
+ * undefined. Callers confirm its status with {@link currentUserActionRequest}: this is only where
+ * to look.
+ */
+export const findOpenUserActionRequest = (
+  requestId: string,
+): { readonly threadId: ThreadId; readonly request: UserActionRequestView } | undefined =>
+  opened.get(requestId);
 const remember = (threadId: ThreadId, request: UserActionRequestView) => {
   if (request.status === "pending") opened.set(request.requestId, { threadId, request });
 };
@@ -425,6 +435,8 @@ export interface OpenUserActionRequestInput {
   readonly message: string;
   readonly target?: string | undefined;
   readonly ttlMs?: number | undefined;
+  /** The surface streams its target to remote clients while pending. */
+  readonly remoteView?: boolean | undefined;
   readonly maxPending: number;
 }
 
@@ -493,6 +505,7 @@ export const openUserActionRequest = (
         message,
         ...(input.target === undefined ? {} : { target: input.target }),
         expiresAt: new Date(nowMs + clampUserActionTtlMs(input.ttlMs)).toISOString(),
+        ...(input.remoteView === true ? { remoteView: true } : {}),
       };
       // Only a payload every reader accepts is recorded: one the derivation drops would leave the
       // surface handed over with no card and nothing pending.
@@ -531,6 +544,7 @@ export const openUserActionRequest = (
         need: input.need,
         message,
         target: input.target ?? null,
+        remoteView: input.remoteView === true,
         requestedAt: createdAt,
         expiresAt: payload.expiresAt,
         turnId: input.turnId,

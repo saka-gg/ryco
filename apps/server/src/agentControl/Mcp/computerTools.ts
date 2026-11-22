@@ -21,6 +21,7 @@ import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/Worksp
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlSessionRegistryShape } from "../Services/AgentControlSessionRegistry.ts";
 import { registerUserActionSurfaceHook } from "../../userActionRequests/surfaceHooks.ts";
+import { registerHandoffTabSource, type HandoffTabSource } from "../../nodeBrowser/handoffTabs.ts";
 import type { UserActionWaitDeps } from "../../userActionRequests/userActionRequests.ts";
 
 class ComputerBridgeError {
@@ -234,6 +235,18 @@ export function withComputerUseTools(
   // Every end of a browser hand-off (the card, the expiry, the condition) gives the tab back,
   // also for a request this process did not open.
   if (deps.handoff) {
+    const handoffDeps = deps.handoff;
+    // The owner's remote view of a handed-off tab (the phone, another browser): loads with the
+    // first view.
+    let remoteView: Promise<HandoffTabSource> | undefined;
+    registerHandoffTabSource(
+      Effect.promise(
+        () =>
+          (remoteView ??= import("./browserHandoffRemoteView.ts").then((module) =>
+            module.makeHandoffTabSource({ post: handoffBridge, requests: handoffDeps }),
+          )),
+      ),
+    );
     registerUserActionSurfaceHook("browser", (ended) =>
       Effect.flatMap(loadBrowserHandoff, (module) =>
         module.giveHandoffTabBack(handoffBridge, ended),

@@ -2,7 +2,9 @@
  * The card for an agent's user action request (a browser tab or terminal handed to the user),
  * shared by web and mobile: which requests a thread shows, the answer payload, the copy and who
  * may answer. The surface itself (the Browser panel, the terminal drawer) is opened by the client
- * through its own Show handler; a client that cannot show it says where to continue instead.
+ * through its own Show handler; a client that cannot show it says where to continue instead, or,
+ * when the node serves the handed-off tab to remote viewers (`remoteView`), opens it there itself
+ * (Open tab) under `userActionRemoteViewTabId`.
  *
  * @module userActionRequests
  */
@@ -19,6 +21,7 @@ import { WS_METHODS } from "@ryco/contracts/rpc";
 import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 import {
   userActionOutcomeLine,
+  userActionRemoteViewTabId,
   userActionRequestFailureMessage,
   userActionRequestLabel,
 } from "@ryco/shared/userActionRequests";
@@ -30,7 +33,7 @@ import {
 import * as Schema from "effect/Schema";
 
 export type { UserActionRequestView } from "@ryco/shared/userActionRequestState";
-export { userActionOutcomeLine, userActionRequestLabel };
+export { userActionOutcomeLine, userActionRemoteViewTabId, userActionRequestLabel };
 
 /** Cheap: whether a thread has ever handed something over, so a client loads the card only then. */
 export function hasUserActionRequestActivity(
@@ -52,6 +55,8 @@ export function userActionRequestCards(
 export const USER_ACTION_SHOW_LABEL = "Show";
 export const USER_ACTION_DONE_LABEL = "Done";
 export const USER_ACTION_DECLINE_LABEL = "Won't do";
+/** Opens the handed-off tab on this client, when the node serves it (`remoteView`). */
+export const USER_ACTION_OPEN_TAB_LABEL = "Open tab";
 
 const SURFACE_NOUN: Record<UserActionSurface, string> = {
   browser: "browser tab",
@@ -71,6 +76,27 @@ export function userActionContinueElsewhereHint(surface: UserActionSurface): str
   return surface === "browser"
     ? "Continue on your desktop: the tab is in Ryco's Browser panel there."
     : "Continue on your desktop: the terminal is in Ryco there.";
+}
+
+/** Under the agent's message, when this client can open the handed-off tab (Open tab). */
+export const USER_ACTION_REMOTE_VIEW_HINT =
+  "Open the tab here and sign in; the agent can't use it meanwhile.";
+
+/** In the remote viewer, once the node stopped serving the tab (the hand-off ended or left). */
+export const USER_ACTION_REMOTE_VIEW_ENDED_TEXT =
+  "The tab is no longer available here. Continue on your desktop.";
+
+/**
+ * Whether a client that cannot show the surface itself may offer Open tab: the request's
+ * browser tab is served to remote viewers (`remoteView`) and this session may answer it, which
+ * means the owner (the node serves `userActionRemoteViewTabId` ids to the owner only). The
+ * client still needs a way to stream or poll the tab; otherwise it says where to continue.
+ */
+export function userActionOffersRemoteView(
+  request: Pick<UserActionRequestView, "surface" | "remoteView">,
+  access: Pick<UserActionAnswerAccess, "canAnswer">,
+): boolean {
+  return request.surface === "browser" && request.remoteView && access.canAnswer;
 }
 
 export function userActionAnswerInput(

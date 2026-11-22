@@ -44,6 +44,12 @@ import {
   NODE_BROWSER_FRAME_PARAMS,
 } from "@ryco/shared/nodeBrowserFrame";
 import {
+  coalesceInput,
+  editingCommand,
+  nodeBrowserInputCommands,
+  releaseHeldCommands,
+} from "@ryco/shared/nodeBrowserInputCdp";
+import {
   Clock,
   Data,
   Effect,
@@ -274,38 +280,7 @@ export const chromeIdentity = (
 };
 
 /** Headless Chromium needs editing commands for Cmd shortcuts and for Ctrl copy and cut. */
-export const editingCommand = (key: string, modifiers: number) => {
-  const modifier = modifiers & 0b0111;
-  if (modifier !== 2 && modifier !== 4) return null;
-  const lower = key.toLowerCase();
-  const command =
-    lower === "c"
-      ? "copy"
-      : lower === "x"
-        ? "cut"
-        : modifier !== 4
-          ? null
-          : lower === "a"
-            ? "selectAll"
-            : lower === "z"
-              ? modifiers & 8
-                ? "redo"
-                : "undo"
-              : null;
-  return command ? { commands: [command] } : null;
-};
-
-/** A mouse move with no button held, which a later one replaces. */
-const isHover = (event: NodeBrowserInputEvent) =>
-  event.type === "mouse" && event.action === "move" && event.buttons === 0;
-
-/** Drops hovers a later hover in the same batch replaces, so clicks never wait behind them. */
-export const coalesceInput = (events: ReadonlyArray<NodeBrowserInputEvent>) =>
-  events.filter(
-    (event, index) => !(isHover(event) && events[index + 1] && isHover(events[index + 1]!)),
-  );
-
-const clamp = (value: number, max: number) => Math.min(Math.max(value, 0), max);
+export { coalesceInput, editingCommand };
 
 /** The frame socket's query, clamped to what the node streams. */
 export const viewerRequestFrom = (params: URLSearchParams) => {
@@ -1254,20 +1229,10 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
     Effect.gen(function* () {
       const page = tab.page;
       const cdp = running?.cdp;
-      const keys = [...tab.pressedKeys.values()];
-      const buttons = [...tab.pressedButtons];
-      tab.pressedKeys.clear();
-      tab.pressedButtons.clear();
+      const commands = releaseHeldCommands(tab);
       if (!page || !cdp) return;
-      for (const { key, code } of keys) {
-        yield* cdp.post("Input.dispatchKeyEvent", { type: "keyUp", key, code }, page.sessionId);
-      }
-      for (const [button, point] of buttons) {
-        yield* cdp.post(
-          "Input.dispatchMouseEvent",
-          { type: "mouseReleased", button, ...point, buttons: 0, clickCount: 1 },
-          page.sessionId,
-        );
+      for (const command of commands) {
+        yield* cdp.post(command.method, command.params, page.sessionId);
       }
     });
 
@@ -1285,68 +1250,11 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
           Effect.timeout(INPUT_TIMEOUT),
           Effect.match({ onFailure: () => false, onSuccess: () => true }),
         );
-    switch (event.type) {
-      case "mouse": {
-        const x = clamp(event.x, tab.viewport.width);
-        const y = clamp(event.y, tab.viewport.height);
-        const type =
-          event.action === "down"
-            ? "mousePressed"
-            : event.action === "up"
-              ? "mouseReleased"
-              : "mouseMoved";
-        if (event.button !== "none") {
-          if (event.action === "down") tab.pressedButtons.set(event.button, { x, y });
-          else if (event.action === "up") tab.pressedButtons.delete(event.button);
-        }
-        return send("Input.dispatchMouseEvent", {
-          type,
-          x,
-          y,
-          button: event.button,
-          buttons: event.buttons,
-          clickCount: event.clickCount,
-          modifiers: event.modifiers,
-        });
-      }
-      case "wheel":
-        tab.scrolledAt = now();
-        return send("Input.dispatchMouseEvent", {
-          type: "mouseWheel",
-          x: clamp(event.x, tab.viewport.width),
-          y: clamp(event.y, tab.viewport.height),
-          deltaX: event.deltaX,
-          deltaY: event.deltaY,
-          modifiers: event.modifiers,
-        });
-      case "key": {
-        if (event.action === "up") {
-          tab.pressedKeys.delete(event.code || event.key);
-          return send("Input.dispatchKeyEvent", {
-            type: "keyUp",
-            key: event.key,
-            code: event.code,
-            modifiers: event.modifiers,
-          });
-        }
-        tab.pressedKeys.set(event.code || event.key, { key: event.key, code: event.code });
-        const text = event.text;
-        return send("Input.dispatchKeyEvent", {
-          type: text ? "keyDown" : "rawKeyDown",
-          key: event.key,
-          code: event.code,
-          modifiers: event.modifiers,
-          ...(text ? { text, unmodifiedText: text } : {}),
-          ...editingCommand(event.key, event.modifiers),
-          windowsVirtualKeyCode:
-            event.keyCode ?? (event.key.length === 1 ? event.key.toUpperCase().charCodeAt(0) : 0),
-        });
-      }
-      case "text":
-        return send("Input.insertText", { text: event.text });
-      case "release":
-        return Effect.as(releaseHeld(tab), true);
-    }
+    if (event.type === "release") return Effect.as(releaseHeld(tab), true);
+    if (event.type === "wheel") tab.scrolledAt = now();
+    // The shared mapping (`@ryco/shared/nodeBrowserInputCdp`): one command per event here.
+    const [command] = nodeBrowserInputCommands(event, tab, tab.viewport);
+    return command ? send(command.method, command.params) : Effect.succeed(true);
   };
 
   const input = (request: NodeBrowserInputRequest) =>

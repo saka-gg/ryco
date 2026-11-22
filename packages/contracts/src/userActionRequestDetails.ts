@@ -40,6 +40,11 @@ export const UserActionRequestedActivityPayload = Schema.Struct({
   message: UserActionRequestMessage,
   target: Schema.optionalKey(UserActionRequestTarget),
   expiresAt: IsoDateTime,
+  /**
+   * The surface can be viewed and driven remotely while the request is pending (a browser tab
+   * streamed through the node to the phone or another browser). Absent: only on the desktop.
+   */
+  remoteView: Schema.optionalKey(Schema.Boolean),
 });
 export type UserActionRequestedActivityPayload = typeof UserActionRequestedActivityPayload.Type;
 

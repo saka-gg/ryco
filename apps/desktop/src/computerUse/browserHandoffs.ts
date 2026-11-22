@@ -22,7 +22,18 @@ import type {
   BrowserHandoffDoneWhen,
   BrowserHandoffPage,
 } from "@ryco/contracts/browser-handoff";
+import { randomBytes } from "node:crypto";
+
 import type { ProjectBrowserTab, UserActionNeed, UserActionOutcome } from "@ryco/contracts";
+import {
+  coalesceInput,
+  isDroppedHandoffInput,
+  makeNodeBrowserPressedState,
+  nodeBrowserInputCommands,
+  releaseHeldCommands,
+  type NodeBrowserCdpCommand,
+  type NodeBrowserPressedState,
+} from "@ryco/shared/nodeBrowserInputCdp";
 import {
   BROWSER_HANDOFF_SETTLE_MS,
   BROWSER_SCRUB_SCRIPT,
@@ -55,6 +66,22 @@ export interface BrowserHandoffHost {
   holdAgents(tab: string): Promise<boolean>;
   releaseAgents(tab: string): void;
   endWithholding(tab: string): { requests: number; messages: number };
+  /** Remote view: a frame of the tab (EmbeddedComputerBrowser.captureHandoffFrame). */
+  captureHandoffFrame(
+    tab: string,
+    options: { readonly maxWidth: number; readonly maxHeight: number; readonly quality: number },
+  ): Promise<{
+    readonly cssWidth: number;
+    readonly cssHeight: number;
+    readonly width: number;
+    readonly height: number;
+    readonly fingerprint: string;
+    readonly encode: () => Buffer;
+  }>;
+  /** Remote input: CDP commands on the tab's page, held apart from the agent's. */
+  sendHandoffInput(tab: string, commands: ReadonlyArray<NodeBrowserCdpCommand>): Promise<void>;
+  releaseHandoffInput(tab: string): void;
+  handoffViewport(tab: string): { width: number; height: number } | null;
 }
 
 const PROBE_TIMEOUT_MS = 2_000;
@@ -81,6 +108,17 @@ interface Handoff {
   /** The scrub failed: the tab stays with the user until a later `end` succeeds. */
   stuck: boolean;
   readonly safety: ReturnType<typeof setTimeout>;
+  /**
+   * The remote viewer token: random per hand-off and process, a generation marker, not a secret
+   * (`view` returns it to the bridge's caller, the node). Frames and input must name it, the
+   * request and the tab; it dies with the hand-off (`gone`), and a token of an earlier hand-off or
+   * process is `stale`.
+   */
+  readonly viewer: string;
+  /** Keys and buttons the remote user holds down, let go of before the tab is given back. */
+  readonly pressed: NodeBrowserPressedState;
+  /** Remote input is dispatched one batch at a time, in order. */
+  inputs: Promise<unknown>;
 }
 
 const clip = (value: string, max: number) =>
@@ -97,10 +135,19 @@ export class BrowserHandoffs {
   >();
   private readonly host: BrowserHandoffHost;
   private readonly now: () => number;
+  private readonly enabled: () => boolean;
 
-  constructor(host: BrowserHandoffHost, options: { now?: () => number } = {}) {
+  constructor(
+    host: BrowserHandoffHost,
+    options: {
+      now?: () => number;
+      /** Whether the Ryco browser is enabled in Computer use settings; read on every request. */
+      enabled?: () => boolean;
+    } = {},
+  ) {
     this.host = host;
     this.now = options.now ?? Date.now;
+    this.enabled = options.enabled ?? (() => true);
   }
 
   /**
@@ -124,19 +171,114 @@ export class BrowserHandoffs {
   async handle(request: BrowserHandoffBridgeRequest): Promise<BrowserHandoffBridgeResponse> {
     switch (request.op) {
       case "begin":
+        if (!this.enabled()) {
+          return {
+            status: "refused",
+            text: "The Ryco browser is disabled in Computer use settings.",
+          };
+        }
         return this.begin(request);
       case "probe":
+        // The Ryco browser was turned off: a pending hand-off is over. `missing` makes the node
+        // end it as cancelled; its `end` then gives the tab back (scrubbed) as always.
+        if (!this.enabled() && this.byRequest.has(request.requestId)) return { status: "missing" };
         return this.probe(request.requestId);
       case "end":
         return this.end(request.requestId, request.outcome);
+      case "view":
+      case "frame":
+      case "input":
+        return this.remote(request);
     }
+  }
+
+  /**
+   * The gate of remote view and input: only a hand-off this desktop itself tracks as pending, for
+   * that request and that tab, not ending (a scrub in progress), and with its current viewer token.
+   * Everything else is refused: `gone` (no such pending hand-off, or the Ryco browser turned off
+   * in Computer use settings), `refused` (another tab), `stale` (an earlier hand-off's or
+   * process's viewer token). The node checks the owner role and the request before it asks; this
+   * is the desktop's own check of its own state. Who may ask at all is the bridge's bearer token
+   * (`runtime.ts`): only the node holds it. The viewer token is no second authentication: `view`
+   * hands it to any bridge caller. It marks the hand-off's generation, so a caller still holding
+   * an earlier hand-off's token (the same tab handed off again, a restarted desktop) is `stale`
+   * rather than served the new one by accident.
+   */
+  private remoteGate(
+    request: Extract<BrowserHandoffBridgeRequest, { op: "view" | "frame" | "input" }>,
+  ): Handoff | Extract<BrowserHandoffBridgeResponse, { status: "gone" | "stale" | "refused" }> {
+    const handoff = this.byRequest.get(request.requestId);
+    if (
+      !this.enabled() ||
+      !handoff ||
+      handoff.ending !== null ||
+      this.byTab.get(handoff.tab) !== handoff
+    ) {
+      return { status: "gone" };
+    }
+    if (handoff.tab !== request.tab) {
+      return { status: "refused", text: "That tab is not the one handed to the user." };
+    }
+    if (!this.host.hasTab(handoff.tab)) return { status: "gone" };
+    if (request.op !== "view" && request.viewer !== handoff.viewer) return { status: "stale" };
+    return handoff;
+  }
+
+  private async remote(
+    request: Extract<BrowserHandoffBridgeRequest, { op: "view" | "frame" | "input" }>,
+  ): Promise<BrowserHandoffBridgeResponse> {
+    const gate = this.remoteGate(request);
+    if (!("requestId" in gate)) return gate;
+    const handoff = gate;
+    if (request.op === "view") {
+      const viewport = this.host.handoffViewport(handoff.tab) ?? { width: 0, height: 0 };
+      return {
+        status: "viewing",
+        viewer: handoff.viewer,
+        cssWidth: viewport.width,
+        cssHeight: viewport.height,
+      };
+    }
+    if (request.op === "frame") {
+      const frame = await this.host.captureHandoffFrame(handoff.tab, request);
+      // Ended while it was captured: nothing of the page leaves after the hand-off.
+      if (this.remoteGate(request) !== handoff) return { status: "gone" };
+      if (request.since !== undefined && request.since === frame.fingerprint) {
+        return { status: "unchanged" };
+      }
+      return {
+        status: "frame",
+        jpeg: frame.encode().toString("base64"),
+        width: frame.width,
+        height: frame.height,
+        cssWidth: frame.cssWidth,
+        cssHeight: frame.cssHeight,
+        fingerprint: frame.fingerprint,
+      };
+    }
+    // Batches in order; each one is checked again when its turn comes.
+    const run = handoff.inputs.then(async () => {
+      if (this.remoteGate(request) !== handoff) return false;
+      const viewport = this.host.handoffViewport(handoff.tab);
+      if (viewport === null) return false;
+      // App-level chords (close, quit, reload, devtools…) never reach the tab: Electron routes
+      // unhandled keys to menu accelerators on Windows and Linux. Nor do key pastes (the desktop's
+      // clipboard; the viewer's paste arrives as text) or middle clicks (a link in a new tab).
+      const commands = coalesceInput(request.events)
+        .filter((event) => !isDroppedHandoffInput(event))
+        .flatMap((event) => nodeBrowserInputCommands(event, handoff.pressed, viewport));
+      await this.host.sendHandoffInput(handoff.tab, commands);
+      return true;
+    });
+    handoff.inputs = run.catch(() => undefined);
+    return (await run) ? { status: "accepted" } : { status: "gone" };
   }
 
   private async begin(
     request: Extract<BrowserHandoffBridgeRequest, { op: "begin" }>,
   ): Promise<BrowserHandoffBridgeResponse> {
     const repeated = this.byRequest.get(request.requestId);
-    if (repeated) return { status: "handed-off" };
+    if (repeated) return { status: "handed-off", remoteView: true };
     if (!this.host.hasTab(request.tab)) {
       return { status: "refused", text: "Tab is no longer available. List tabs again." };
     }
@@ -206,6 +348,9 @@ export class BrowserHandoffs {
       metSince: null,
       ending: null,
       stuck: false,
+      viewer: randomBytes(16).toString("hex"),
+      pressed: makeNodeBrowserPressedState(),
+      inputs: Promise.resolve(),
       safety: setTimeout(
         () => void this.end(request.requestId, "timeout"),
         request.ttlMs + SAFETY_GRACE_MS,
@@ -223,7 +368,7 @@ export class BrowserHandoffs {
       need: request.need,
       message: request.message,
     });
-    return { status: "handed-off" };
+    return { status: "handed-off", remoteView: true };
   }
 
   private async probe(requestId: string): Promise<BrowserHandoffBridgeResponse> {
@@ -281,6 +426,14 @@ export class BrowserHandoffs {
   ): Promise<BrowserHandoffBridgeResponse> {
     const { tab } = handoff;
     const open = this.host.hasTab(tab);
+    // Remote input already queued finishes first (the gate refuses new batches now that it is
+    // ending), and anything the remote user held down is let go of, before the scrub.
+    await handoff.inputs;
+    if (open) {
+      await this.host
+        .sendHandoffInput(tab, releaseHeldCommands(handoff.pressed))
+        .catch(() => undefined);
+    }
     let scrubbed = 0;
     let scrubFailed = false;
     if (open) {
@@ -308,6 +461,7 @@ export class BrowserHandoffs {
       };
     }
     const withheld = open ? this.host.endWithholding(tab) : { requests: 0, messages: 0 };
+    if (open) this.host.releaseHandoffInput(tab);
     clearTimeout(handoff.safety);
     this.byTab.delete(tab);
     this.byRequest.delete(handoff.requestId);

@@ -1,7 +1,10 @@
 import type { WebContents } from "electron";
 
-/** Holders of a page's debugger session. "picker" is browser-picker's element picker. */
-export type CdpHolder = "agent" | "picker";
+/**
+ * Holders of a page's debugger session. "picker" is browser-picker's element picker; "handoff" is
+ * the user's remote input into a tab handed to them (browserHandoffs.ts).
+ */
+export type CdpHolder = "agent" | "picker" | "handoff";
 /** A command on one attachment; given to ready steps. */
 export type CdpSend = (method: string, params?: object) => Promise<unknown>;
 export interface CdpSendOptions {

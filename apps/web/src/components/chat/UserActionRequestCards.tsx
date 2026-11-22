@@ -1,11 +1,16 @@
+import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import {
   USER_ACTION_DECLINE_LABEL,
   USER_ACTION_DONE_LABEL,
+  USER_ACTION_OPEN_TAB_LABEL,
+  USER_ACTION_REMOTE_VIEW_HINT,
   USER_ACTION_SHOW_LABEL,
   userActionAnswerInput,
   userActionContinueElsewhereHint,
   userActionDoneHint,
+  userActionOffersRemoteView,
   userActionOutcomeLine,
+  userActionRemoteViewTabId,
   userActionRequestCards,
   userActionRequestFailureText,
   userActionRequestLabel,
@@ -25,17 +30,35 @@ import {
   type UserActionHint,
 } from "@ryco/shared/userActionHints";
 import { HandIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
+import type { NodeBrowserViewerClient } from "~/browser/useBrowserMode";
 import { readEnvironmentApi } from "~/environmentApi";
+import { readEnvironmentConnection } from "~/environments/runtime";
 import { readHostedRpcCapability, useHostedRpcCapability } from "~/hostedHub/capabilities";
 import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
+import { usePresentationTier } from "~/hooks/usePresentationTier";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 
 const selectAnswersUserActionRequests = (config: ServerConfig | null) =>
   config?.environment.capabilities.userActionRequests === true;
 
 /** Expiry is re-read this often, so a card left open past its time closes. */
 const EXPIRY_RECHECK_MS = 15_000;
+
+/** The handed-off tab's viewer: loads on the first Open tab. */
+const LazyHandoffTabViewer = preloadableLazy(() =>
+  import("./HandoffTabViewer").then((module) => module.HandoffTabViewer),
+);
+
+type NodeBrowserRpc = WsRpcClient["nodeBrowser"];
+
+/** The connection's node-browser client, when it can stream a handed-off tab. */
+function readHandoffNodeBrowser(environmentId: EnvironmentId): NodeBrowserRpc | null {
+  const nodeBrowser: NodeBrowserRpc | undefined =
+    readEnvironmentConnection(environmentId)?.client.nodeBrowser;
+  return nodeBrowser?.openHandoffFrameSource !== undefined ? nodeBrowser : null;
+}
 
 /**
  * Opens the request's tab or terminal on this client, when it can: the surface's own code (the
@@ -72,6 +95,8 @@ export function UserActionRequestCards({
     const timer = setInterval(() => setNowMs(Date.now()), EXPIRY_RECHECK_MS);
     return () => clearInterval(timer);
   }, []);
+  // The web phone tier is frozen: it keeps saying where to continue.
+  const phoneTier = usePresentationTier() === "phone";
   const requests = userActionRequestCards(activities, nowMs);
   if (requests.length === 0) return null;
   const hints = userActionRequestHints(activities);
@@ -80,6 +105,8 @@ export function UserActionRequestCards({
     : !capability.allowed
       ? (capability.reason ?? "Only the node's owner can answer this request.")
       : disabledReason;
+  // Read per render, as the Browser panel reads it: the connection's own object.
+  const remoteNodeBrowser = phoneTier ? null : readHandoffNodeBrowser(environmentId);
   return (
     <>
       {requests.map((request) => (
@@ -91,6 +118,7 @@ export function UserActionRequestCards({
           reason={reason}
           show={showHandler?.(request) ?? null}
           hint={hints.get(request.requestId)}
+          remoteNodeBrowser={remoteNodeBrowser}
         />
       ))}
     </>
@@ -104,6 +132,7 @@ function UserActionRequestCard({
   reason,
   show,
   hint,
+  remoteNodeBrowser,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -112,12 +141,34 @@ function UserActionRequestCard({
   show: (() => void) | null;
   /** Sign-in links and codes the surface found (a terminal's device code). */
   hint: UserActionHint | undefined;
+  /** The connection's node-browser client when it can stream a handed-off tab, else null. */
+  remoteNodeBrowser: NodeBrowserRpc | null;
 }) {
   const [sending, setSending] = useState<"done" | "declined" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<UserActionOutcome | null>(null);
+  const [viewing, setViewing] = useState(false);
   const locked = reason !== null || sending !== null || outcome !== null;
   const label = userActionRequestLabel(request);
+  // Open tab: a client that cannot show the tab itself views it through the node, owner only.
+  const viewerClient = useMemo<NodeBrowserViewerClient | null>(() => {
+    const openFrameSource = remoteNodeBrowser?.openHandoffFrameSource;
+    return remoteNodeBrowser && openFrameSource ? { ...remoteNodeBrowser, openFrameSource } : null;
+  }, [remoteNodeBrowser]);
+  const openTab =
+    show === null &&
+    viewerClient !== null &&
+    userActionOffersRemoteView(request, { canAnswer: reason === null });
+  // Once open it stays open through a brief disconnect (Done and Won't do lock meanwhile); an
+  // answer here or elsewhere (the card unmounts) closes it.
+  const viewerOpen =
+    viewing && show === null && viewerClient !== null && request.remoteView && outcome === null;
+  const viewerReady = useLazyComponentReady(LazyHandoffTabViewer, viewerOpen, {
+    onLoadError: () => {
+      setViewing(false);
+      setError("Could not open the tab. Try again.");
+    },
+  });
 
   const submit = (answer: "done" | "declined") => {
     if (locked) return;
@@ -161,11 +212,25 @@ function UserActionRequestCard({
       ) : (
         <>
           <p className="mt-1 text-xs text-muted-foreground">
-            {show === null
-              ? userActionContinueElsewhereHint(request.surface)
-              : userActionDoneHint(request.surface)}
+            {show !== null
+              ? userActionDoneHint(request.surface)
+              : openTab
+                ? USER_ACTION_REMOTE_VIEW_HINT
+                : userActionContinueElsewhereHint(request.surface)}
           </p>
           <div className="mt-3 flex items-center gap-3">
+            {openTab ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setViewing(true);
+                }}
+                className="rounded-md border border-border px-3 py-2 text-sm"
+              >
+                {USER_ACTION_OPEN_TAB_LABEL}
+              </button>
+            ) : null}
             {show !== null ? (
               <button
                 type="button"
@@ -203,6 +268,18 @@ function UserActionRequestCard({
         <p role="alert" className="mt-2 text-sm text-destructive">
           {error}
         </p>
+      ) : null}
+      {viewerOpen && viewerReady && viewerClient !== null ? (
+        <LazyHandoffTabViewer
+          client={viewerClient}
+          tabId={userActionRemoteViewTabId(request.requestId)}
+          label={label}
+          onClose={() => setViewing(false)}
+          locked={locked}
+          sending={sending}
+          onAnswer={submit}
+          error={error}
+        />
       ) : null}
     </section>
   );

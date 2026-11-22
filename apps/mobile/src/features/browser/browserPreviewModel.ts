@@ -1,4 +1,5 @@
 import type { ThreadLocalServer } from "@ryco/contracts";
+import { userActionRequestIdOfRemoteViewTab } from "@ryco/shared/userActionRequests";
 import type {
   NodeBrowserCapability,
   NodeBrowserInputEvent,
@@ -178,3 +179,29 @@ export function viewportToRestore(
   if (before.width === own.width && before.height === own.height) return null;
   return { width: before.width, height: before.height };
 }
+
+/**
+ * The handed-off desktop tab a ThreadBrowser route shows (its `tabId` param, from a user action
+ * request's Open tab), or null for the thread's own tabs. Only a hand-off tab id
+ * (`userActionRemoteViewTabId`) counts: any other value opens the usual screen.
+ */
+export function handoffTabOfRoute(tabId: string | null): string | null {
+  return tabId !== null && userActionRequestIdOfRemoteViewTab(tabId) !== null ? tabId : null;
+}
+
+/**
+ * Whether a failed still read means the handed-off tab is gone for good: the node no longer
+ * serves it (the hand-off ended, `not-found`) or no desktop serves it (`unavailable`). Other
+ * failures (a dropped connection) keep polling.
+ */
+export function handoffTabEnded(cause: unknown): boolean {
+  if (typeof cause !== "object" || cause === null) return false;
+  if (!("_tag" in cause) || cause._tag !== "NodeBrowserRpcError" || !("code" in cause)) {
+    return false;
+  }
+  return cause.code === "not-found" || cause.code === "unavailable";
+}
+
+export const HANDOFF_TAB_TITLE = "Handed-off tab";
+export const HANDOFF_TAB_ENDED_TITLE = "This tab is no longer handed to you";
+export const HANDOFF_TAB_ENDED_DETAIL = "Continue on your desktop, or go back to the thread.";

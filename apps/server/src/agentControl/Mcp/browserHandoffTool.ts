@@ -133,7 +133,8 @@ const watchTab = (
     check: bridge({ op: "probe", requestId }).pipe(
       Effect.map((response): UserActionOutcome | null => {
         if (response.status === "closed") return "closed";
-        // The desktop no longer knows it (it restarted): nothing is handed over any more.
+        // The desktop no longer has it (it restarted, or the Ryco browser was turned off in its
+        // settings): nothing is handed over any more.
         if (response.status === "missing") return "cancelled";
         if (response.status === "active" && response.met) return "condition-met";
         return null;
@@ -326,6 +327,8 @@ export const handOffRycoBrowserTab = (input: {
         message,
         target: args.tab,
         ttlMs,
+        // The desktop serves the owner's remote view of the tab while it is pending.
+        remoteView: begun.remoteView === true,
         maxPending: USER_ACTION_REQUEST_MAX_PENDING_PER_THREAD,
       }).pipe(
         Effect.tapError(() =>

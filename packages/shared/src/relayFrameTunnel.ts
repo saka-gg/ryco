@@ -4,7 +4,10 @@
  * A direct client watches a device on its own WebSocket (`/ws/device-frames`):
  * binary H.264 envelopes one way, the live input protocol as text both ways. A
  * hosted client has no socket to the node, only its relay channel, so this
- * module tunnels that same socket through the channel. Each tunnel message is
+ * module tunnels that same socket through the channel. A second target carries
+ * the node browser's frame socket (`/ws/node-browser-frames`: JPEG envelopes
+ * one way, the client's `{"type":"ack"}` per frame the other), for handed-off
+ * desktop tabs (`handoff-<32 hex>`) only; ordinary node tabs stay off the relay. Each tunnel message is
  * the body of an ordinary RPC inner record (relay-e2ee-protocol.md §3.4,
  * `0x01`), exactly like a §4.6 compressed frame: the Hub forwards ciphertext,
  * sees only record lengths, and needs no change. The first byte tells a tunnel
@@ -24,6 +27,8 @@
  * until the next keyframe beyond that the way the direct socket does. Video
  * therefore never fills the Hub's per-connection queue, whose high-water mark
  * pauses the whole channel, RPC included.
+ * A node browser stream needs no dropping: its viewer sends the next frame
+ * only after the client's per-frame ack, so at most one frame is out.
  *
  * Layout, big-endian:
  *
@@ -37,7 +42,7 @@
  *
  * Bodies: `open` is UTF-8 JSON naming the target; `close` is an optional
  * uint16 close code then UTF-8 reason; `text` is UTF-8; `binary` is opaque
- * bytes (a device frame envelope); `ack` is a uint32 count of binary messages
+ * bytes (a device or node browser frame envelope); `ack` is a uint32 count of binary messages
  * received on the stream so far, modulo 2^32.
  */
 
@@ -69,22 +74,55 @@ export const RELAY_FRAME_TUNNEL_MAX_OPEN_BYTES = 512;
 export const RELAY_FRAME_TUNNEL_MAX_TEXT_BYTES = 8_192;
 export const RELAY_FRAME_TUNNEL_MAX_REASON_BYTES = 123;
 
-/** What a stream connects to. Only the device frame socket, for now. */
+/** What a stream connects to: a device's frame socket. */
 export const RELAY_FRAME_TUNNEL_DEVICE_FRAMES = "device-frames";
+/**
+ * Or a node browser tab's frame socket, for a handed-off desktop tab only
+ * (`isRelayFrameTunnelNodeBrowserTabId`).
+ */
+export const RELAY_FRAME_TUNNEL_NODE_BROWSER_FRAMES = "node-browser-frames";
 
-export interface RelayFrameTunnelOpenTarget {
+export interface RelayFrameTunnelDeviceTarget {
   readonly target: typeof RELAY_FRAME_TUNNEL_DEVICE_FRAMES;
   readonly udid: string;
 }
+
+export interface RelayFrameTunnelNodeBrowserTarget {
+  readonly target: typeof RELAY_FRAME_TUNNEL_NODE_BROWSER_FRAMES;
+  /** `handoff-<32 lowercase hex>`; no other tab id is ever tunnelled. */
+  readonly tabId: string;
+  /** The viewer's frame size in device pixels and JPEG quality, as the frame socket's query. */
+  readonly maxWidth?: number;
+  readonly maxHeight?: number;
+  readonly quality?: number;
+}
+
+const boundedInt = (value: unknown, min: number, max: number): number | undefined =>
+  typeof value === "number" && Number.isInteger(value) && value >= min && value <= max
+    ? value
+    : undefined;
+
+export type RelayFrameTunnelOpenTarget =
+  | RelayFrameTunnelDeviceTarget
+  | RelayFrameTunnelNodeBrowserTarget;
 
 /** WebSocket close codes the node uses on a tunnelled stream. */
 export const RELAY_FRAME_TUNNEL_CLOSE = {
   /** The client closed it, or the channel is ending. */
   normal: 1000,
-  /** The node does not stream devices, or the device is unknown. */
+  /**
+   * The node does not stream devices, or the device is unknown; for a node
+   * browser stream, the node serves no handed-off tabs through the tunnel.
+   */
   unavailable: 4404,
   /** Too many streams on this channel, or a malformed open. */
   refused: 4400,
+  /**
+   * This channel's role may not open the target: a node browser stream needs
+   * an owner channel. The node browser frame socket's own `forbidden` code, so
+   * the client's frame source stops instead of retrying.
+   */
+  forbidden: 4403,
 } as const;
 
 export type RelayFrameTunnelMessage =
@@ -113,6 +151,15 @@ const KIND_BY_CODE = new Map<number, RelayFrameTunnelKind>(
 );
 
 const UDID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
+const HANDOFF_TAB_ID_PATTERN = /^handoff-[0-9a-f]{32}$/u;
+
+/**
+ * Whether a node browser tab id may be tunnelled: a handed-off desktop tab's id
+ * (`userActionRemoteViewTabId`), nothing else.
+ */
+export function isRelayFrameTunnelNodeBrowserTabId(tabId: string): boolean {
+  return HANDOFF_TAB_ID_PATTERN.test(tabId);
+}
 
 /** Whether a reassembled RPC record body is a tunnel message rather than JSON RPC. */
 export function isRelayFrameTunnelMessage(bytes: Uint8Array): boolean {
@@ -176,10 +223,36 @@ function decodeOpenTarget(body: Uint8Array): RelayFrameTunnelOpenTarget | null {
   try {
     const parsed: unknown = JSON.parse(decoder.decode(body));
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { target, udid } = parsed as { readonly target?: unknown; readonly udid?: unknown };
-    if (target !== RELAY_FRAME_TUNNEL_DEVICE_FRAMES) return null;
-    if (typeof udid !== "string" || !UDID_PATTERN.test(udid)) return null;
-    return { target, udid };
+    const { target, udid, tabId, maxWidth, maxHeight, quality } = parsed as {
+      readonly target?: unknown;
+      readonly udid?: unknown;
+      readonly tabId?: unknown;
+      readonly maxWidth?: unknown;
+      readonly maxHeight?: unknown;
+      readonly quality?: unknown;
+    };
+    switch (target) {
+      case RELAY_FRAME_TUNNEL_DEVICE_FRAMES:
+        if (typeof udid !== "string" || !UDID_PATTERN.test(udid)) return null;
+        return { target, udid };
+      case RELAY_FRAME_TUNNEL_NODE_BROWSER_FRAMES:
+        if (typeof tabId !== "string" || !isRelayFrameTunnelNodeBrowserTabId(tabId)) return null;
+        {
+          // Out-of-range sizes are dropped (the node's defaults apply), never trusted.
+          const width = boundedInt(maxWidth, 64, 4096);
+          const height = boundedInt(maxHeight, 64, 4096);
+          const jpegQuality = boundedInt(quality, 20, 80);
+          return {
+            target,
+            tabId,
+            ...(width === undefined ? {} : { maxWidth: width }),
+            ...(height === undefined ? {} : { maxHeight: height }),
+            ...(jpegQuality === undefined ? {} : { quality: jpegQuality }),
+          };
+        }
+      default:
+        return null;
+    }
   } catch {
     return null;
   }

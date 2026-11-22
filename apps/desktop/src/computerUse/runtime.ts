@@ -45,7 +45,11 @@ export class DesktopComputerUseRuntime {
   readonly beta: DesktopComputerBeta;
   readonly embedded = new EmbeddedComputerBrowser();
   /** Ryco tabs agents handed to the user (`POST /handoff`, outside the action queue). */
-  private readonly handoffs = new BrowserHandoffs(this.embedded);
+  private readonly handoffs = new BrowserHandoffs(this.embedded, {
+    enabled: () =>
+      this.policyController.policy.enabled &&
+      this.policyController.policy.browsers.includes("ryco"),
+  });
   /** Private directory for browser uploads; null until start() (or when it could not be made). */
   private uploads: BrowserUploadStore | null = null;
   private readonly browser = new BrowserComputerDriver(this.transports, {
@@ -226,20 +230,13 @@ export class DesktopComputerUseRuntime {
         }
         if (request.url === "/handoff") {
           // A hand-off waits on a person: it never enters the action queue, so other threads'
-          // browser use goes on. Giving a tab to the user needs the Ryco browser enabled; giving
-          // it back and probing it never do.
+          // browser use goes on. The Ryco browser's setting is checked on every request
+          // (`BrowserHandoffs`, `enabled`): turned off, nothing is handed over or shown remotely,
+          // and a pending hand-off ends; giving a tab back always works.
           const handoff = Schema.decodeUnknownSync(BrowserHandoffBridgeRequest)(
             JSON.parse(Buffer.concat(chunks).toString("utf8")),
           );
-          const value =
-            handoff.op === "begin" &&
-            (!this.policyController.policy.enabled ||
-              !this.policyController.policy.browsers.includes("ryco"))
-              ? {
-                  status: "refused" as const,
-                  text: "The Ryco browser is disabled in Computer use settings.",
-                }
-              : await this.handoffs.handle(handoff);
+          const value = await this.handoffs.handle(handoff);
           response.writeHead(200, { "content-type": "application/json" });
           response.end(JSON.stringify(value));
           return;

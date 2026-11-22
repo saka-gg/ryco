@@ -18,6 +18,7 @@ import {
   type NodeBrowserInputQueue,
   type NodeBrowserMouseButton,
 } from "@ryco/client-runtime/nodeBrowser/viewerInput";
+import { USER_ACTION_REMOTE_VIEW_ENDED_TEXT } from "@ryco/client-runtime/userActionRequests";
 import type { NodeBrowserInputEvent, NodeBrowserTab } from "@ryco/contracts/node-browser";
 import {
   type FormEvent,
@@ -56,14 +57,22 @@ const isAccessRefusal = (error: unknown) =>
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
-const stopMessage = (stop: NodeBrowserFrameStop) =>
-  stop.reason === "gone"
-    ? "This tab is closed."
-    : stop.reason === "forbidden"
-      ? "Only operators of this node can watch its browser tabs."
-      : stop.reason === "unavailable"
-        ? "The node's browser is not available right now."
-        : "The node refused the connection to this tab.";
+const stopMessage = (stop: NodeBrowserFrameStop, handoff: boolean) =>
+  handoff
+    ? stop.reason === "gone"
+      ? USER_ACTION_REMOTE_VIEW_ENDED_TEXT
+      : stop.reason === "forbidden"
+        ? "Only the node's owner can open this tab."
+        : stop.reason === "unavailable"
+          ? "The desktop is not serving this tab right now."
+          : "The node refused the connection to this tab."
+    : stop.reason === "gone"
+      ? "This tab is closed."
+      : stop.reason === "forbidden"
+        ? "Only operators of this node can watch its browser tabs."
+        : stop.reason === "unavailable"
+          ? "The node's browser is not available right now."
+          : "The node refused the connection to this tab.";
 
 /**
  * One node browser tab, streamed: frames painted onto a canvas, scaled to fit,
@@ -72,13 +81,20 @@ const stopMessage = (stop: NodeBrowserFrameStop) =>
  * (accents, CJK input) and paste arrive as text. The page's size follows the
  * panel's. T3 Code's viewer (`ServerBrowserSurface.tsx`), over Ryco's frame
  * socket and input RPC.
+ *
+ * `handoff`: the tab is a desktop tab an agent handed to the user (`userActionRemoteViewTabId`).
+ * The node answers its stills, frames and input but never resizes, navigates or reloads it, so
+ * the surface sends no `resize` or `history` commands and offers no Reload; frames still follow
+ * the surface's size.
  */
 export function NodeBrowserSurface({
   client,
   tab,
+  handoff = false,
 }: {
   readonly client: NodeBrowserViewerClient;
   readonly tab: NodeBrowserTab;
+  readonly handoff?: boolean;
 }) {
   const tabId = tab.id;
   const crashed = tab.state === "crashed";
@@ -177,22 +193,24 @@ export function NodeBrowserSurface({
       const previous = sizeRef.current;
       if (previous?.width === size.width && previous.height === size.height) return;
       sizeRef.current = size;
-      void client
-        .command({
-          type: "resize",
-          tabId,
-          width: clamp(
-            size.width,
-            NODE_BROWSER_MIN_VIEWPORT.width,
-            NODE_BROWSER_MAX_VIEWPORT.width,
-          ),
-          height: clamp(
-            size.height,
-            NODE_BROWSER_MIN_VIEWPORT.height,
-            NODE_BROWSER_MAX_VIEWPORT.height,
-          ),
-        })
-        .catch(() => undefined);
+      if (!handoff) {
+        void client
+          .command({
+            type: "resize",
+            tabId,
+            width: clamp(
+              size.width,
+              NODE_BROWSER_MIN_VIEWPORT.width,
+              NODE_BROWSER_MAX_VIEWPORT.width,
+            ),
+            height: clamp(
+              size.height,
+              NODE_BROWSER_MIN_VIEWPORT.height,
+              NODE_BROWSER_MAX_VIEWPORT.height,
+            ),
+          })
+          .catch(() => undefined);
+      }
       if (capTimer !== null) clearTimeout(capTimer);
       capTimer = setTimeout(growCap, previous === null ? 0 : NODE_BROWSER_RESIZE_THROTTLE_MS * 2);
     };
@@ -206,7 +224,7 @@ export function NodeBrowserSurface({
       if (timer !== null) clearTimeout(timer);
       if (capTimer !== null) clearTimeout(capTimer);
     };
-  }, [client, tabId]);
+  }, [client, handoff, tabId]);
 
   // The stream: a crashed page has none until it is reloaded.
   useEffect(() => {
@@ -387,6 +405,8 @@ export function NodeBrowserSurface({
     const delta = historyDeltaOf(event.button);
     if (delta === null) return;
     event.preventDefault();
+    // A handed-off tab's history stays the user's on the desktop.
+    if (handoff) return;
     void client.command({ type: "history", tabId, delta }).catch(() => undefined);
   };
 
@@ -500,7 +520,7 @@ export function NodeBrowserSurface({
           role="status"
           className="absolute inset-x-0 top-3 text-center text-xs text-muted-foreground"
         >
-          Connecting to the node's browser…
+          {handoff ? "Connecting to the tab…" : "Connecting to the node's browser…"}
         </p>
       ) : null}
       {refused ? (
@@ -514,9 +534,9 @@ export function NodeBrowserSurface({
       {crashed || stop !== null ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background p-4 text-center">
           <p role="alert" className="max-w-sm text-sm text-muted-foreground">
-            {crashed ? "This page crashed." : stopMessage(stop!)}
+            {crashed ? "This page crashed." : stopMessage(stop!, handoff)}
           </p>
-          {crashed ? (
+          {crashed && !handoff ? (
             <Button
               variant="outline"
               size="sm"

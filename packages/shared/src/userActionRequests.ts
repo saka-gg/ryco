@@ -60,3 +60,22 @@ const FAILURE_MESSAGES: Record<UserActionRequestFailureReason, string> = {
 export function userActionRequestFailureMessage(reason: UserActionRequestFailureReason): string {
   return FAILURE_MESSAGES[reason] ?? "Could not answer the request.";
 }
+
+/** Node-browser tab ids that stand for a handed-off desktop tab: `handoff-` and 32 hex. */
+export const USER_ACTION_REMOTE_VIEW_TAB_PATTERN = /^handoff-[0-9a-f]{32}$/u;
+
+/**
+ * The node-browser tab id remote clients view a request's handed-off tab by (the frame socket,
+ * `nodeBrowser.read` stills and `nodeBrowser.input`): derived from the request id, so the card
+ * needs nothing else.
+ */
+export function userActionRemoteViewTabId(requestId: string): string {
+  return `handoff-${requestId.replace(/^user-action-/u, "")}`;
+}
+
+/** The request id a remote-view tab id stands for, or null for any other tab id. */
+export function userActionRequestIdOfRemoteViewTab(tabId: string): string | null {
+  return USER_ACTION_REMOTE_VIEW_TAB_PATTERN.test(tabId)
+    ? `user-action-${tabId.slice("handoff-".length)}`
+    : null;
+}

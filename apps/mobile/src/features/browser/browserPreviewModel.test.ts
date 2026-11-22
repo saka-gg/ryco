@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { ThreadLocalServer } from "@ryco/contracts";
-import type { NodeBrowserTab } from "@ryco/contracts/node-browser";
+import { NodeBrowserRpcError, type NodeBrowserTab } from "@ryco/contracts/node-browser";
 
 import {
   clickEvents,
+  handoffTabEnded,
+  handoffTabOfRoute,
   nodeBrowserUnavailableMessage,
   pagePoint,
   previewViewport,
@@ -109,5 +111,25 @@ describe("browser preview", () => {
       "node",
       "Vite",
     ]);
+  });
+});
+
+describe("handed-off tabs", () => {
+  it("shows a route's tabId alone only when it is a hand-off tab id", () => {
+    const tabId = `handoff-${"a".repeat(32)}`;
+    expect(handoffTabOfRoute(tabId)).toBe(tabId);
+    expect(handoffTabOfRoute(null)).toBeNull();
+    expect(handoffTabOfRoute("tab-1")).toBeNull();
+    expect(handoffTabOfRoute(`handoff-${"A".repeat(32)}`)).toBeNull();
+  });
+
+  it("ends on a still the node no longer serves, and keeps polling through other failures", () => {
+    const failure = (code: NodeBrowserRpcError["code"]) =>
+      new NodeBrowserRpcError({ code, message: "x", retryable: false });
+    expect(handoffTabEnded(failure("not-found"))).toBe(true);
+    expect(handoffTabEnded(failure("unavailable"))).toBe(true);
+    expect(handoffTabEnded(failure("failed"))).toBe(false);
+    expect(handoffTabEnded(new Error("socket closed"))).toBe(false);
+    expect(handoffTabEnded(undefined)).toBe(false);
   });
 });

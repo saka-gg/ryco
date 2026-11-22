@@ -186,6 +186,32 @@ describe("node browser surface", () => {
     expect(fake.mock.input.mock.calls.length).toBe(calls);
   });
 
+  it("lets the browser paste for Shift+Insert and Ctrl+V, so the viewer's clipboard arrives as text", async () => {
+    const fake = fakeClient();
+    await mountSurface(fake);
+    const field = document.querySelector<HTMLTextAreaElement>(
+      "[data-node-browser-surface] textarea",
+    )!;
+    const press = (init: KeyboardEventInit) => {
+      const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+      field.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    // A key the page types is the surface's own. A paste chord is never sent as a key (keyInput
+    // answers null for it), so the surface does not cancel it and the browser's paste runs.
+    expect(press({ key: "a", code: "KeyA" })).toBe(true);
+    expect(press({ key: "Insert", code: "Insert", shiftKey: true })).toBe(false);
+    expect(press({ key: "v", code: "KeyV", ctrlKey: true })).toBe(false);
+    const data = new DataTransfer();
+    data.setData("text/plain", "from the viewer");
+    field.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }),
+    );
+    await expect
+      .poll(() => fake.sent.filter((event) => event.type === "text").map((event) => event.text))
+      .toEqual(["from the viewer"]);
+  });
+
   it("asks the node to fit the page to the panel", async () => {
     const fake = fakeClient();
     await mountSurface(fake);

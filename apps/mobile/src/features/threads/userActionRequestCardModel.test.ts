@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   ThreadId,
   UserActionRequestError,
   UserActionRequestId,
@@ -11,6 +12,7 @@ import {
   mobileUserActionRequestCards,
   sendUserActionRequestAnswer,
   UserActionRequestUnavailableError,
+  userActionOpenTabRoute,
 } from "./userActionRequestCardModel";
 
 const threadId = ThreadId.make("thread-1");
@@ -169,6 +171,36 @@ describe("the card's send", () => {
       kind: "failed",
       error: "Could not answer the request. Check the connection and try again.",
     });
+  });
+
+  it("offers Open tab for a remote-view browser tab, to a device that may answer", () => {
+    const environmentId = EnvironmentId.make("env-1");
+    const request = { requestId, surface: "browser" as const, remoteView: true };
+    expect(userActionOpenTabRoute({ environmentId, threadId, request, canAnswer: true })).toEqual({
+      name: "ThreadBrowser",
+      params: { environmentId, threadId, tabId: `handoff-${"d".repeat(32)}` },
+    });
+    // No remote view: the card says where to continue instead.
+    expect(
+      userActionOpenTabRoute({
+        environmentId,
+        threadId,
+        request: { ...request, remoteView: false },
+        canAnswer: true,
+      }),
+    ).toBeNull();
+    // Not the owner, or not connected: no Open tab.
+    expect(
+      userActionOpenTabRoute({ environmentId, threadId, request, canAnswer: false }),
+    ).toBeNull();
+    expect(
+      userActionOpenTabRoute({
+        environmentId,
+        threadId,
+        request: { ...request, surface: "terminal" },
+        canAnswer: true,
+      }),
+    ).toBeNull();
   });
 });
 
