@@ -369,6 +369,18 @@ node-owned, like a secret request, and the same for every surface
 - **The card.** Done and Won't do (`userActions.answerRequest`, owner only, never replayed), and
   Show where the client can show the surface (the desktop app for its own browser tabs). Other
   clients say "Continue on your desktop". The web phone tier shows no card.
+- **Remote view.** A browser hand-off recorded with `remoteView` can be watched and driven by the
+  node's owner from the phone app or another browser while it is pending: the node-browser tab id
+  `handoff-<32 hex>` (from the request id) is served in front of the node's own browser runtime,
+  owner only, through `nodeBrowser.read` stills, `nodeBrowser.input`, the frame socket and the
+  relay frame tunnel (`docs/relay-frame-tunnel.md`). Every still, input batch and frame checks the
+  request on the node and the desktop's own pending hand-off with the Ryco browser still enabled
+  (`apps/desktop/src/computerUse/browserHandoffs.ts`), so the view stops the moment the request
+  ends, expires, its tab closes, its thread is removed or the Ryco browser is turned off (which
+  also ends the hand-off as cancelled). Only the node can call the desktop's bridge (bearer
+  token); the per-hand-off viewer token only marks the hand-off's generation, so stale callers are
+  refused. The card offers Open tab there; without
+  `remoteView` it says to continue on the desktop.
 - **Waiting.** A surface's tool waits at most 45 s per call (every Agent Control call is cut at
   60 s) and answers pending; the agent calls again with the same `requestId`. The surface may also
   watch its own condition (`watchUserActionRequest`, for example the browser's `done_when`), and

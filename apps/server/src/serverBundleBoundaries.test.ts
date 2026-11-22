@@ -354,9 +354,11 @@ describe("server boot import boundaries", () => {
       ),
     ).toEqual([]);
     // Node browser tabs load with the first node browser call or frame socket; boot carries only
-    // the facade and the frame route.
+    // the facade, the frame route and the registry of handed-off desktop tabs (types and a
+    // setter; their source loads with the first remote view).
     expect(reached(/^apps\/server\/src\/nodeBrowser\//u).toSorted()).toEqual([
       "apps/server/src/nodeBrowser/NodeBrowser.ts",
+      "apps/server/src/nodeBrowser/handoffTabs.ts",
       "apps/server/src/nodeBrowser/nodeBrowserRoute.ts",
     ]);
     expect(staticGraph("src/bin.ts", { dynamic: true }).files).toContain(
@@ -534,6 +536,9 @@ describe("server boot import boundaries", () => {
       "apps/server/src/nodeRequests/nodeRequestLifecycle.ts",
       // The browser's hand-off (`ryco_browser` action `handoff`) and its rules.
       "apps/server/src/agentControl/Mcp/browserHandoffTool.ts",
+      // The owner's remote view of a handed-off tab; the boot path keeps only its registry.
+      "apps/server/src/agentControl/Mcp/browserHandoffRemoteView.ts",
+      "apps/server/src/nodeBrowser/handoffTunnelViewer.ts",
       "packages/shared/src/browserHandoff.ts",
       "packages/contracts/src/browserHandoff.ts",
     ];
@@ -904,7 +909,16 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // reads; Ryco's shell marks read and stripped in the output drain, so their nonce never
     // reaches a client or a history file) and the terminal hand-off's hint activity kind and
     // schema (+0.5 KB). The tools, emulator, shell scripts and tty reader load through import().
-    expect(bytes).toBeLessThan(7_350_000);
+    // 7.3535 MB on 2026-11-21 with the browser hand-off and the owner's remote view of the
+    // handed-off desktop tab on top (measured 7.352729 MB; with the hand-off alone 7.349704 MB,
+    // under 7.350 MB). Hand-off (+2.8 KB): the `ryco_browser` action's description and arguments,
+    // the bridge forwarder and the give-back hook's registration; the bridge, the tool and the
+    // request module load through import(). Remote view (+3.0 KB): the node-browser RPCs' and the
+    // frame route's owner-only branch for `handoff-` tab ids and the registry of the hand-off
+    // source; the source, its commands, the relay tunnel's viewer glue and `effect/socket`'s close
+    // events load through import(). Importing the `effect/socket` barrel dynamically from the Hub
+    // connector had pulled every socket module into a boot chunk (+23 KB).
+    expect(bytes).toBeLessThan(7_353_500);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

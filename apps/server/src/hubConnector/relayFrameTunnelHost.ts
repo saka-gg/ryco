@@ -36,19 +36,37 @@
  * picture degrades to a lower frame rate on a long drag instead of the
  * channel closing.
  *
+ * Node browser streams. An owner channel may also open a handed-off desktop
+ * tab (`handoff-<32 hex>`, `nodeBrowser/handoffTabs`) as a node browser frame
+ * viewer: JPEG envelopes out as `binary`, the client's per-frame
+ * `{"type":"ack"}` in as `text`. Each frame stands alone, so none of the
+ * keyframe logic applies, but the viewer (`serveViewerSocket`) sends the next
+ * frame only after the client acknowledged the last one, so a frame must never
+ * silently vanish. Such a stream therefore spends the same channel budget and
+ * window, yet waits for them instead of dropping; and a frame the channel
+ * refuses (`backpressure`, `too_large`) is acknowledged on the client's behalf,
+ * so the viewer goes on with the next. The host builds the viewer's socket and
+ * hands it to `nodeBrowserFrames.serve`; it never runs an effect itself.
+ *
  * @module hubConnector/relayFrameTunnelHost
  */
 import { DeviceUdid } from "@ryco/contracts";
 import { peekDeviceFrameHeader } from "@ryco/shared/deviceFrame";
+import { NODE_BROWSER_FRAME_ACK } from "@ryco/shared/nodeBrowserFrame";
 import {
   RELAY_FRAME_TUNNEL_CLOSE,
   RELAY_FRAME_TUNNEL_MAX_STREAMS,
+  RELAY_FRAME_TUNNEL_NODE_BROWSER_FRAMES,
   RELAY_FRAME_TUNNEL_WINDOW_BYTES,
   decodeRelayFrameTunnelMessage,
   encodeRelayFrameTunnelBinary,
   encodeRelayFrameTunnelClose,
   encodeRelayFrameTunnelText,
+  type RelayFrameTunnelNodeBrowserTarget,
+  type RelayFrameTunnelOpenTarget,
 } from "@ryco/shared/relayFrameTunnel";
+import { Effect } from "effect";
+import { Socket } from "effect/socket";
 
 import type { DeviceFrameSink } from "../device/deviceFrameTransport.ts";
 import {
@@ -56,6 +74,7 @@ import {
   type DeviceFrameViewer,
   type DeviceFrameViewerTarget,
 } from "../device/deviceFrameViewer.ts";
+import type { ViewerSocket } from "../nodeBrowser/nodeBrowserViewerSocket.ts";
 import type { NodeE2eeEmitResult } from "./NodeE2eeChannelSession.ts";
 
 /** The least time between two keyframe requests one stream makes after a refused frame. */
@@ -73,12 +92,25 @@ export interface RelayFrameTunnelDevices {
   readonly manager: DeviceFrameViewerTarget;
 }
 
+/** Handed-off desktop tabs, streamed as node browser frame viewers. */
+export interface RelayFrameTunnelNodeBrowserFrames {
+  /** Whether this channel may watch them: owner channels only. */
+  readonly canView: boolean;
+  /**
+   * Serve one viewer of `tabId` (already a `handoff-` id) on `socket` until it
+   * ends; returns its cancel, which the host calls once the stream ends.
+   */
+  readonly serve: (target: RelayFrameTunnelNodeBrowserTarget, socket: ViewerSocket) => () => void;
+}
+
 export interface RelayFrameTunnelHostOptions {
   /** The channel's §4.2 send pipeline (`NodeE2eeChannelSession.emit`). */
   readonly emit: (bytes: Uint8Array) => Promise<NodeE2eeEmitResult>;
   /** Whether this channel's role may send live input (`relayFrameTunnelCanDrive`). */
   readonly canDrive: boolean;
   readonly devices: RelayFrameTunnelDevices | null;
+  /** Absent where the node serves no handed-off tabs; every such open is then `unavailable`. */
+  readonly nodeBrowserFrames?: RelayFrameTunnelNodeBrowserFrames;
   readonly now?: () => number;
   /** Run `task` after `delayMs`; returns its cancel. A timer by default. */
   readonly schedule?: (task: () => void, delayMs: number) => () => void;
@@ -99,22 +131,59 @@ interface Outstanding {
   state: "pending" | "sent" | "dropped";
 }
 
-interface TunnelStream {
+interface StreamWindow {
   readonly id: number;
-  readonly udid: string;
-  viewer: DeviceFrameViewer | null;
   open: boolean;
   /** Oldest first. Dropped entries are skipped by acknowledgements. */
   readonly outstanding: Outstanding[];
   outstandingBytes: number;
   /** Binary messages acknowledged so far, modulo 2^32, as the client counts them. */
   acknowledged: number;
+}
+
+interface DeviceTunnelStream extends StreamWindow {
+  readonly kind: "device";
+  readonly udid: string;
+  viewer: DeviceFrameViewer | null;
   readonly drainListeners: Set<() => void>;
   /** Set by a refused frame: forward nothing but codec config until a keyframe. */
   awaitingKeyframe: boolean;
   lastKeyframeRequestAt: number;
   cancelKeyframeRequest: (() => void) | null;
 }
+
+/** One frame the viewer wrote, waiting for the window and the channel's budget. */
+interface QueuedFrame {
+  readonly message: Uint8Array;
+  readonly done: (sent: boolean) => void;
+}
+
+interface NodeBrowserTunnelStream extends StreamWindow {
+  readonly kind: "node-browser";
+  /** The viewer's cancel, once `serve` returned it. */
+  cancel: (() => void) | null;
+  /** Client text (its acks) the viewer has not pulled yet. */
+  readonly inbox: string[];
+  readonly pullWaiters: Set<() => void>;
+  /** Oldest first; only the head is ever sent. */
+  readonly queue: QueuedFrame[];
+  queuedBytes: number;
+  cancelBudgetWait: (() => void) | null;
+}
+
+type TunnelStream = DeviceTunnelStream | NodeBrowserTunnelStream;
+
+/**
+ * Client messages a node browser stream keeps for its viewer. One ack per
+ * frame and one frame out at a time: anything past a few is not an ack the
+ * viewer waits for.
+ */
+const NODE_BROWSER_INBOX_LIMIT = 16;
+
+const viewerSocketClosed = () =>
+  new Socket.SocketError({
+    reason: new Socket.SocketCloseError({ code: RELAY_FRAME_TUNNEL_CLOSE.normal }),
+  });
 
 const defaultSchedule = (task: () => void, delayMs: number) => {
   const timer = setTimeout(task, delayMs);
@@ -125,7 +194,7 @@ const defaultSchedule = (task: () => void, delayMs: number) => {
 export function makeRelayFrameTunnelHost(
   options: RelayFrameTunnelHostOptions,
 ): RelayFrameTunnelHost {
-  const { canDrive, devices } = options;
+  const { canDrive, devices, nodeBrowserFrames } = options;
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? defaultSchedule;
   const streams = new Map<number, TunnelStream>();
@@ -165,28 +234,46 @@ export function makeRelayFrameTunnelHost(
     if (!stream.open) return;
     stream.open = false;
     if (streams.get(stream.id) === stream) streams.delete(stream.id);
-    stream.cancelKeyframeRequest?.();
-    stream.cancelKeyframeRequest = null;
-    stream.drainListeners.clear();
     stream.outstanding.length = 0;
     stream.outstandingBytes = 0;
-    stream.viewer?.close();
-    stream.viewer = null;
+    if (stream.kind === "device") {
+      stream.cancelKeyframeRequest?.();
+      stream.cancelKeyframeRequest = null;
+      stream.drainListeners.clear();
+      stream.viewer?.close();
+      stream.viewer = null;
+    } else {
+      stream.cancelBudgetWait?.();
+      stream.cancelBudgetWait = null;
+      stream.inbox.length = 0;
+      stream.queuedBytes = 0;
+      for (const frame of stream.queue.splice(0)) frame.done(false);
+      // Every pull now fails, which ends the viewer; the cancel makes sure.
+      for (const wake of [...stream.pullWaiters]) wake();
+      stream.pullWaiters.clear();
+      const cancel = stream.cancel;
+      stream.cancel = null;
+      try {
+        cancel?.();
+      } catch {
+        // The stream is gone either way.
+      }
+    }
     if (notify) sendClose(stream.id, notify.code, notify.reason);
   };
 
-  const drained = (stream: TunnelStream) => {
+  const drained = (stream: DeviceTunnelStream) => {
     for (const listener of [...stream.drainListeners]) {
       if (!stream.open) return;
       listener();
     }
   };
 
-  const trimDropped = (stream: TunnelStream) => {
+  const trimDropped = (stream: StreamWindow) => {
     while (stream.outstanding[0]?.state === "dropped") stream.outstanding.shift();
   };
 
-  const requestKeyframe = (stream: TunnelStream) => {
+  const requestKeyframe = (stream: DeviceTunnelStream) => {
     if (!stream.open || !stream.awaitingKeyframe || stream.cancelKeyframeRequest) return;
     const wait = Math.max(
       stream.lastKeyframeRequestAt + RELAY_FRAME_TUNNEL_KEYFRAME_REQUEST_MS - now(),
@@ -203,7 +290,7 @@ export function makeRelayFrameTunnelHost(
     void devices?.manager.requestKeyframe(stream.udid).catch(() => undefined);
   };
 
-  const settle = (stream: TunnelStream, entry: Outstanding, result: NodeE2eeEmitResult) => {
+  const settle = (stream: DeviceTunnelStream, entry: Outstanding, result: NodeE2eeEmitResult) => {
     if (!stream.open) return;
     if (result === "sent") {
       if (entry.state === "pending") entry.state = "sent";
@@ -226,7 +313,7 @@ export function makeRelayFrameTunnelHost(
     drained(stream);
   };
 
-  const sendBinary = (stream: TunnelStream, envelope: Uint8Array) => {
+  const sendBinary = (stream: DeviceTunnelStream, envelope: Uint8Array) => {
     if (!stream.open) return;
     if (stream.awaitingKeyframe) {
       const header = peekDeviceFrameHeader(envelope);
@@ -253,7 +340,7 @@ export function makeRelayFrameTunnelHost(
     void emit(message).then((result) => settle(stream, entry, result));
   };
 
-  const sendText = (stream: TunnelStream, text: string) => {
+  const sendText = (stream: DeviceTunnelStream, text: string) => {
     if (!stream.open) return;
     // Tiny, and not windowed: input-ready and input errors only.
     void emit(encodeRelayFrameTunnelText(stream.id, text)).then((result) => {
@@ -277,10 +364,183 @@ export function makeRelayFrameTunnelHost(
     }
     trimDropped(stream);
     stream.acknowledged = (stream.acknowledged + applied) >>> 0;
-    if (applied > 0) drained(stream);
+    if (applied === 0) return;
+    if (stream.kind === "device") drained(stream);
+    else pump(stream);
   };
 
-  const openStream = (streamId: number, rawUdid: string) => {
+  // --- Node browser streams -------------------------------------------------
+
+  const deliverToViewer = (stream: NodeBrowserTunnelStream, text: string) => {
+    if (!stream.open || stream.inbox.length >= NODE_BROWSER_INBOX_LIMIT) return;
+    stream.inbox.push(text);
+    for (const wake of [...stream.pullWaiters]) wake();
+  };
+
+  const settleNodeBrowser = (
+    stream: NodeBrowserTunnelStream,
+    entry: Outstanding,
+    result: NodeE2eeEmitResult,
+  ) => {
+    if (!stream.open) return;
+    if (result === "sent") {
+      if (entry.state === "pending") entry.state = "sent";
+      return;
+    }
+    if (result === "unavailable") {
+      endStream(stream);
+      return;
+    }
+    // `backpressure` or `too_large`: the frame is gone, and the viewer would
+    // wait for its ack forever. Acknowledge it on the client's behalf.
+    if (entry.state === "pending") {
+      entry.state = "dropped";
+      stream.outstandingBytes -= entry.bytes;
+      trimDropped(stream);
+      deliverToViewer(stream, NODE_BROWSER_FRAME_ACK);
+    }
+    pump(stream);
+  };
+
+  /** Send queued frames, oldest first, while the window and the budget carry them. */
+  const pump = (stream: NodeBrowserTunnelStream) => {
+    while (stream.open && stream.cancelBudgetWait === null) {
+      const head = stream.queue[0];
+      if (head === undefined) return;
+      const bytes = head.message.byteLength;
+      // An empty window takes any frame, so one larger than the window still goes.
+      if (
+        stream.outstandingBytes > 0 &&
+        stream.outstandingBytes + bytes > RELAY_FRAME_TUNNEL_WINDOW_BYTES
+      ) {
+        return; // An acknowledgement pumps again.
+      }
+      refillBudget();
+      const needed = Math.min(bytes, RELAY_FRAME_TUNNEL_BURST_BYTES);
+      if (budget < needed) {
+        // Wait for the budget instead of dropping: the viewer waits for this frame's ack.
+        const waitMs = Math.ceil(
+          ((needed - budget) * 1_000) / RELAY_FRAME_TUNNEL_RATE_BYTES_PER_SECOND,
+        );
+        stream.cancelBudgetWait = schedule(() => {
+          stream.cancelBudgetWait = null;
+          pump(stream);
+        }, waitMs);
+        return;
+      }
+      budget = Math.max(0, budget - bytes);
+      stream.queue.shift();
+      stream.queuedBytes -= bytes;
+      const entry: Outstanding = { bytes, state: "pending" };
+      stream.outstanding.push(entry);
+      stream.outstandingBytes += bytes;
+      void emit(head.message).then((result) => settleNodeBrowser(stream, entry, result));
+      head.done(true);
+    }
+  };
+
+  const viewerSocket = (stream: NodeBrowserTunnelStream): ViewerSocket => ({
+    write: (chunk) => {
+      if (Socket.isCloseEvent(chunk)) {
+        return Effect.sync(() =>
+          endStream(stream, { code: chunk.code, reason: chunk.reason ?? "" }),
+        );
+      }
+      return Effect.callback<void, Socket.SocketError>((resume) => {
+        if (!stream.open) {
+          resume(Effect.fail(viewerSocketClosed()));
+          return;
+        }
+        const frame: QueuedFrame = {
+          message: encodeRelayFrameTunnelBinary(stream.id, chunk),
+          done: (sent) => resume(sent ? Effect.void : Effect.fail(viewerSocketClosed())),
+        };
+        stream.queue.push(frame);
+        stream.queuedBytes += frame.message.byteLength;
+        pump(stream);
+        return Effect.sync(() => {
+          const index = stream.queue.indexOf(frame);
+          if (index < 0) return;
+          stream.queue.splice(index, 1);
+          stream.queuedBytes -= frame.message.byteLength;
+        });
+      });
+    },
+    pull: Effect.callback<ReadonlyArray<string>, Socket.SocketError>((resume) => {
+      const attempt = () => {
+        if (!stream.open) {
+          resume(Effect.fail(viewerSocketClosed()));
+          return true;
+        }
+        if (stream.inbox.length === 0) return false;
+        resume(Effect.succeed(stream.inbox.splice(0)));
+        return true;
+      };
+      if (attempt()) return;
+      const wake = () => {
+        if (attempt()) stream.pullWaiters.delete(wake);
+      };
+      stream.pullWaiters.add(wake);
+      return Effect.sync(() => {
+        stream.pullWaiters.delete(wake);
+      });
+    }),
+    bufferedBytes: () => stream.outstandingBytes + stream.queuedBytes,
+    cut: Effect.sync(() =>
+      endStream(stream, {
+        code: RELAY_FRAME_TUNNEL_CLOSE.normal,
+        reason: "The viewer fell behind.",
+      }),
+    ),
+  });
+
+  const openNodeBrowserStream = (streamId: number, target: RelayFrameTunnelNodeBrowserTarget) => {
+    const { tabId } = target;
+    if (!nodeBrowserFrames) {
+      sendClose(
+        streamId,
+        RELAY_FRAME_TUNNEL_CLOSE.unavailable,
+        "Browser tab streaming is unavailable.",
+      );
+      return;
+    }
+    if (!nodeBrowserFrames.canView) {
+      sendClose(streamId, RELAY_FRAME_TUNNEL_CLOSE.forbidden, "Owner sessions only.");
+      return;
+    }
+    const stream: NodeBrowserTunnelStream = {
+      kind: "node-browser",
+      id: streamId,
+      open: true,
+      outstanding: [],
+      outstandingBytes: 0,
+      acknowledged: 0,
+      cancel: null,
+      inbox: [],
+      pullWaiters: new Set(),
+      queue: [],
+      queuedBytes: 0,
+      cancelBudgetWait: null,
+    };
+    // Registered first: the viewer may write before `serve` returns.
+    streams.set(streamId, stream);
+    let cancel: () => void;
+    try {
+      cancel = nodeBrowserFrames.serve(target, viewerSocket(stream));
+    } catch {
+      endStream(stream, {
+        code: RELAY_FRAME_TUNNEL_CLOSE.unavailable,
+        reason: "Browser tab streaming is unavailable.",
+      });
+      return;
+    }
+    if (stream.open) stream.cancel = cancel;
+    else cancel();
+  };
+
+  // --- Opening --------------------------------------------------------------
+
+  const openStream = (streamId: number, target: RelayFrameTunnelOpenTarget) => {
     const existing = streams.get(streamId);
     if (existing) {
       // Both ends must agree on what the id names; the one close covers both.
@@ -292,6 +552,14 @@ export function makeRelayFrameTunnelHost(
       sendClose(streamId, RELAY_FRAME_TUNNEL_CLOSE.refused, "Too many streams on this channel.");
       return;
     }
+    if (target.target === RELAY_FRAME_TUNNEL_NODE_BROWSER_FRAMES) {
+      openNodeBrowserStream(streamId, target);
+      return;
+    }
+    openDeviceStream(streamId, target.udid);
+  };
+
+  const openDeviceStream = (streamId: number, rawUdid: string) => {
     if (!devices?.supported) {
       sendClose(streamId, RELAY_FRAME_TUNNEL_CLOSE.unavailable, "Device streaming is unavailable.");
       return;
@@ -303,7 +571,8 @@ export function makeRelayFrameTunnelHost(
       sendClose(streamId, RELAY_FRAME_TUNNEL_CLOSE.unavailable, "Invalid device.");
       return;
     }
-    const stream: TunnelStream = {
+    const stream: DeviceTunnelStream = {
+      kind: "device",
       id: streamId,
       udid,
       viewer: null,
@@ -353,16 +622,19 @@ export function makeRelayFrameTunnelHost(
       if (message === null) return;
       switch (message.kind) {
         case "open":
-          openStream(message.streamId, message.target.udid);
+          openStream(message.streamId, message.target);
           return;
         case "close": {
           const stream = streams.get(message.streamId);
           if (stream) endStream(stream);
           return;
         }
-        case "text":
-          streams.get(message.streamId)?.viewer?.receive(message.text);
+        case "text": {
+          const stream = streams.get(message.streamId);
+          if (stream?.kind === "device") stream.viewer?.receive(message.text);
+          else if (stream) deliverToViewer(stream, message.text);
           return;
+        }
         case "ack": {
           const stream = streams.get(message.streamId);
           if (stream) acknowledge(stream, message.received);

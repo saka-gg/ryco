@@ -32,6 +32,11 @@ import { useEnvironmentMutationReady } from "../home/useEnvironmentMutationReady
 import { ToolTextField } from "../sourceControl/gitToolsParts";
 import {
   clickEvents,
+  HANDOFF_TAB_ENDED_DETAIL,
+  HANDOFF_TAB_ENDED_TITLE,
+  HANDOFF_TAB_TITLE,
+  handoffTabEnded,
+  handoffTabOfRoute,
   nodeBrowserUnavailableMessage,
   pagePoint,
   PREVIEW_STILL_INTERVAL_MS,
@@ -53,6 +58,11 @@ type ThreadBrowserRouteProps = StaticScreenProps<{
   readonly environmentId: string;
   readonly threadId: string;
   readonly url?: string;
+  /**
+   * A handed-off desktop tab to show alone (`userActionRemoteViewTabId`, from a user action
+   * request's Open tab): no tab picking, opening, navigating or resizing.
+   */
+  readonly tabId?: string;
 }>;
 
 function failureText(cause: unknown): string {
@@ -129,9 +139,20 @@ function ToolbarButton(props: {
   );
 }
 
-/** Reads the shown tab's still while the screen is in front and the app active. */
-function useTabStill(client: NodeBrowserClient | null, tabId: string | null, active: boolean) {
+/**
+ * Reads the shown tab's still while the screen is in front and the app active. With
+ * `stopWhenEnded` (a handed-off tab), a read the node answers with the tab gone ends the polling
+ * and reports `ended`.
+ */
+function useTabStill(
+  client: NodeBrowserClient | null,
+  tabId: string | null,
+  active: boolean,
+  stopWhenEnded: boolean,
+) {
   const [still, setStill] = useState<NodeBrowserStill | null>(null);
+  const [endedFor, setEndedFor] = useState<string | null>(null);
+  const ended = tabId !== null && endedFor === tabId;
   const [appActive, setAppActive] = useState(AppState.currentState === "active");
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) =>
@@ -143,7 +164,7 @@ function useTabStill(client: NodeBrowserClient | null, tabId: string | null, act
     setStill(null);
   }, [tabId]);
   useEffect(() => {
-    if (!client || !tabId || !active || !appActive) return;
+    if (!client || !tabId || !active || !appActive || ended) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const read = () => {
@@ -159,7 +180,11 @@ function useTabStill(client: NodeBrowserClient | null, tabId: string | null, act
           (response) => {
             if (!stopped && response.type === "still") setStill(response.still);
           },
-          () => {},
+          (cause: unknown) => {
+            if (stopped || !stopWhenEnded || !handoffTabEnded(cause)) return;
+            stopped = true;
+            setEndedFor(tabId);
+          },
         )
         .finally(() => {
           if (!stopped) timer = setTimeout(read, PREVIEW_STILL_INTERVAL_MS);
@@ -170,21 +195,203 @@ function useTabStill(client: NodeBrowserClient | null, tabId: string | null, act
       stopped = true;
       if (timer !== null) clearTimeout(timer);
     };
-  }, [active, appActive, client, tabId]);
-  return still;
+  }, [active, appActive, client, ended, stopWhenEnded, tabId]);
+  return { still, ended };
+}
+
+/** The drawn still's size, once both the still and the page area are measured. */
+function shownImage(still: NodeBrowserStill | null, layoutWidth: number): ShownImage | null {
+  const cssWidth = still ? still.cssWidth : 0;
+  const cssHeight = still ? still.cssHeight : 0;
+  return cssWidth > 0 && layoutWidth > 0
+    ? {
+        cssWidth,
+        cssHeight,
+        viewWidth: layoutWidth,
+        viewHeight: (layoutWidth * cssHeight) / cssWidth,
+      }
+    : null;
+}
+
+/** The page's still, tap to click and drag to scroll; a spinner until the first still. */
+function PageStill(props: {
+  readonly still: NodeBrowserStill | null;
+  readonly layoutWidth: number;
+  readonly label: string;
+  readonly client: NodeBrowserClient | null;
+  readonly tabId: string;
+  readonly onError: (message: string) => void;
+}) {
+  const { client, layoutWidth, onError, still, tabId } = props;
+  const cssWidth = still ? still.cssWidth : 0;
+  const cssHeight = still ? still.cssHeight : 0;
+  const pan = useMemo(
+    () =>
+      createPagePan(
+        cssWidth > 0 && layoutWidth > 0
+          ? {
+              cssWidth,
+              cssHeight,
+              viewWidth: layoutWidth,
+              viewHeight: (layoutWidth * cssHeight) / cssWidth,
+            }
+          : null,
+        (events) => sendInput(client, tabId, events, onError),
+      ),
+    [client, cssHeight, cssWidth, layoutWidth, onError, tabId],
+  );
+  const shown = shownImage(still, layoutWidth);
+  if (!shown || !still) {
+    return (
+      <View className="items-center py-16">
+        <ActivityIndicator />
+      </View>
+    );
+  }
+  return (
+    <View {...pan.panHandlers} style={{ width: shown.viewWidth, height: shown.viewHeight }}>
+      <Image
+        source={{ uri: `data:${still.mimeType};base64,${still.bytesBase64}` }}
+        style={{ width: shown.viewWidth, height: shown.viewHeight }}
+        contentFit="fill"
+        transition={0}
+        // Page screenshots stay in memory: never on disk.
+        cachePolicy="none"
+        accessibilityLabel={`Page: ${props.label}`}
+      />
+    </View>
+  );
+}
+
+/** The field under the page: typed text goes to the page, Return also presses Enter. */
+function PageTypingBar(props: { readonly onInput: (events: NodeBrowserInputEvent[]) => void }) {
+  const [typing, setTyping] = useState("");
+  return (
+    <View className="flex-row items-center gap-2 border-t border-border-subtle px-3 py-2">
+      <ToolTextField
+        value={typing}
+        onChangeText={setTyping}
+        placeholder="Type into the page"
+        accessibilityLabel="Type into the page"
+        returnKeyType="send"
+        onSubmitEditing={() => {
+          props.onInput(typingEvents(typing, true));
+          setTyping("");
+        }}
+        className="min-h-10 flex-1 rounded-full px-3.5 py-2 text-[14px]"
+      />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Send text"
+        disabled={typing.length === 0}
+        onPress={() => {
+          props.onInput(typingEvents(typing, false));
+          setTyping("");
+        }}
+        className="h-10 justify-center rounded-full bg-primary px-4 active:opacity-75 disabled:opacity-35"
+      >
+        <Text className="text-[13px] font-ryco-bold text-primary-foreground">Send</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 /**
  * A page running in the machine's browser: a still of the tab refreshed while
  * you look, tap to click, drag to scroll, a field to type, and back / forward /
- * reload. Tabs belong to the thread's workspace, as on the desktop.
+ * reload. Tabs belong to the thread's workspace, as on the desktop. With a
+ * hand-off `tabId` it shows only that desktop tab (`HandedOffTabScreen`).
  */
 export function ThreadBrowserRouteScreen(props: ThreadBrowserRouteProps) {
-  const navigation = useNavigation();
-  const focused = useIsFocused();
   const environmentId = EnvironmentId.make(firstRouteParam(props.route.params.environmentId) ?? "");
   const threadId = ThreadId.make(firstRouteParam(props.route.params.threadId) ?? "");
-  const requestedUrl = firstRouteParam(props.route.params.url);
+  const handoffTabId = handoffTabOfRoute(firstRouteParam(props.route.params.tabId));
+  return handoffTabId !== null ? (
+    <HandedOffTabScreen environmentId={environmentId} tabId={handoffTabId} />
+  ) : (
+    <ThreadTabsScreen
+      environmentId={environmentId}
+      threadId={threadId}
+      requestedUrl={firstRouteParam(props.route.params.url)}
+    />
+  );
+}
+
+/**
+ * A desktop tab an agent handed to the user, served by the node to its owner under a hand-off
+ * tab id: its still, tap, scroll and typing, as for the thread's own tabs. The tab stays the
+ * desktop's: no tab strip, address bar, history, reload or resize. Once the node no longer
+ * serves it, the screen says so.
+ */
+function HandedOffTabScreen(props: {
+  readonly environmentId: EnvironmentId;
+  readonly tabId: string;
+}) {
+  const navigation = useNavigation();
+  const focused = useIsFocused();
+  const client = useNodeBrowserClient(props.environmentId);
+  // Input needs the node to take changes; the still only the connection.
+  const mutable = useEnvironmentMutationReady(props.environmentId);
+  const actingClient = mutable ? client : null;
+  const { still, ended } = useTabStill(client, props.tabId, focused, true);
+  const [error, setError] = useState<string | null>(null);
+  const [layoutWidth, setLayoutWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    navigation.setOptions({ title: HANDOFF_TAB_TITLE });
+  }, [navigation]);
+
+  if (ended || !client) {
+    return (
+      <View className="flex-1 bg-screen px-5 py-16">
+        <EmptyState
+          variant="plain"
+          title={ended ? HANDOFF_TAB_ENDED_TITLE : "Tab unavailable"}
+          detail={ended ? HANDOFF_TAB_ENDED_DETAIL : "Reconnect to this machine to view the tab."}
+          actionLabel="Back"
+          onAction={() => navigation.goBack()}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <View className="flex-1 bg-screen">
+      {error || !mutable ? (
+        <View className="px-3 pt-2">
+          <ErrorBanner
+            message={error ?? "This machine is not ready for changes; the tab is view-only."}
+          />
+        </View>
+      ) : null}
+      <ScrollView
+        className="flex-1"
+        scrollEnabled={false}
+        onLayout={(event: LayoutChangeEvent) => setLayoutWidth(event.nativeEvent.layout.width)}
+      >
+        <PageStill
+          still={still}
+          layoutWidth={layoutWidth}
+          label={HANDOFF_TAB_TITLE}
+          client={actingClient}
+          tabId={props.tabId}
+          onError={setError}
+        />
+      </ScrollView>
+      <PageTypingBar onInput={(events) => sendInput(actingClient, props.tabId, events, setError)} />
+    </View>
+  );
+}
+
+/** The thread's own tabs on the node: pick, open, navigate, and size them for the phone. */
+function ThreadTabsScreen(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly requestedUrl: string | null;
+}) {
+  const { environmentId, threadId, requestedUrl } = props;
+  const navigation = useNavigation();
+  const focused = useIsFocused();
   const scope = useThreadWorkspaceCwd(environmentId, threadId);
   const client = useNodeBrowserClient(environmentId);
   // Reading the page needs the connection; acting on it also needs the node to take changes.
@@ -193,7 +400,6 @@ export function ThreadBrowserRouteScreen(props: ThreadBrowserRouteProps) {
   const { tabs, capability, failed } = useNodeBrowserTabs(client);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [address, setAddress] = useState("");
-  const [typing, setTyping] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [layoutWidth, setLayoutWidth] = useState(0);
@@ -201,7 +407,7 @@ export function ThreadBrowserRouteScreen(props: ThreadBrowserRouteProps) {
 
   const scoped = useMemo(() => (tabs && scope ? tabsInScope(tabs, scope) : []), [scope, tabs]);
   const selected = scoped.find((tab) => tab.id === selectedId) ?? scoped.at(-1) ?? null;
-  const still = useTabStill(client, selected ? selected.id : null, focused);
+  const { still } = useTabStill(client, selected ? selected.id : null, focused, false);
 
   const command = async (next: NodeBrowserCommand) => {
     if (!actingClient) return null;
@@ -286,35 +492,6 @@ export function ThreadBrowserRouteScreen(props: ThreadBrowserRouteProps) {
         void actingClient.command({ type: "resize", tabId, ...restore }).catch(() => undefined);
     };
   }, [actingClient, focused, tabId]);
-  const input = (events: NodeBrowserInputEvent[]) =>
-    sendInput(actingClient, tabId, events, setError);
-
-  const cssWidth = still ? still.cssWidth : 0;
-  const cssHeight = still ? still.cssHeight : 0;
-  const shown: ShownImage | null =
-    cssWidth > 0 && layoutWidth > 0
-      ? {
-          cssWidth,
-          cssHeight,
-          viewWidth: layoutWidth,
-          viewHeight: (layoutWidth * cssHeight) / cssWidth,
-        }
-      : null;
-  const pan = useMemo(
-    () =>
-      createPagePan(
-        cssWidth > 0 && layoutWidth > 0
-          ? {
-              cssWidth,
-              cssHeight,
-              viewWidth: layoutWidth,
-              viewHeight: (layoutWidth * cssHeight) / cssWidth,
-            }
-          : null,
-        (events) => sendInput(actingClient, tabId, events, setError),
-      ),
-    [actingClient, cssHeight, cssWidth, layoutWidth, tabId],
-  );
 
   const go = () => {
     const parsed = parseAddress(address);
@@ -452,51 +629,21 @@ export function ThreadBrowserRouteScreen(props: ThreadBrowserRouteProps) {
               detail="Enter an address above, or preview a server from the thread's Servers."
             />
           </View>
-        ) : shown && still ? (
-          <View {...pan.panHandlers} style={{ width: shown.viewWidth, height: shown.viewHeight }}>
-            <Image
-              source={{ uri: `data:${still.mimeType};base64,${still.bytesBase64}` }}
-              style={{ width: shown.viewWidth, height: shown.viewHeight }}
-              contentFit="fill"
-              transition={0}
-              // Page screenshots stay in memory: never on disk.
-              cachePolicy="none"
-              accessibilityLabel={`Page: ${tabLabel(selected)}`}
-            />
-          </View>
         ) : (
-          <View className="items-center py-16">
-            <ActivityIndicator />
-          </View>
+          <PageStill
+            still={still}
+            layoutWidth={layoutWidth}
+            label={tabLabel(selected)}
+            client={actingClient}
+            tabId={selected.id}
+            onError={setError}
+          />
         )}
       </ScrollView>
       {selected ? (
-        <View className="flex-row items-center gap-2 border-t border-border-subtle px-3 py-2">
-          <ToolTextField
-            value={typing}
-            onChangeText={setTyping}
-            placeholder="Type into the page"
-            accessibilityLabel="Type into the page"
-            returnKeyType="send"
-            onSubmitEditing={() => {
-              input(typingEvents(typing, true));
-              setTyping("");
-            }}
-            className="min-h-10 flex-1 rounded-full px-3.5 py-2 text-[14px]"
-          />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Send text"
-            disabled={typing.length === 0}
-            onPress={() => {
-              input(typingEvents(typing, false));
-              setTyping("");
-            }}
-            className="h-10 justify-center rounded-full bg-primary px-4 active:opacity-75 disabled:opacity-35"
-          >
-            <Text className="text-[13px] font-ryco-bold text-primary-foreground">Send</Text>
-          </Pressable>
-        </View>
+        <PageTypingBar
+          onInput={(events) => sendInput(actingClient, selected.id, events, setError)}
+        />
       ) : null}
     </View>
   );

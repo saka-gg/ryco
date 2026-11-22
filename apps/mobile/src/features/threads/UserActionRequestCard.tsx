@@ -1,3 +1,4 @@
+import { useNavigation } from "@react-navigation/native";
 import { useState } from "react";
 import { Linking, Pressable, View } from "react-native";
 
@@ -5,6 +6,8 @@ import type { EnvironmentId, ThreadId, UserActionOutcome } from "@ryco/contracts
 import {
   USER_ACTION_DECLINE_LABEL,
   USER_ACTION_DONE_LABEL,
+  USER_ACTION_OPEN_TAB_LABEL,
+  USER_ACTION_REMOTE_VIEW_HINT,
   USER_ACTION_SHOW_LABEL,
   userActionContinueElsewhereHint,
   userActionDoneHint,
@@ -21,13 +24,14 @@ import {
 import { AppText as Text } from "../../components/AppText";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
-import { sendUserActionRequestAnswer } from "./userActionRequestCardModel";
+import { sendUserActionRequestAnswer, userActionOpenTabRoute } from "./userActionRequestCardModel";
 
 /**
  * One card for an agent's user action request: a browser tab or terminal on the node that waits
  * for the user (a sign-in, a code, a captcha, a consent). A terminal opens on the phone (Show);
- * a browser tab cannot, so the card says where to continue. Sign-in links and codes the terminal
- * printed show with Open and Copy.
+ * a browser tab opens in the browser screen (Open tab) when the node serves the handed-off tab to
+ * the owner (`remoteView`), otherwise the card says where to continue. Sign-in links and codes the
+ * terminal printed show with Open and Copy. Done and Won't do are always there.
  */
 export function UserActionRequestCard(props: {
   readonly environmentId: EnvironmentId;
@@ -44,6 +48,14 @@ export function UserActionRequestCard(props: {
   const [outcome, setOutcome] = useState<UserActionOutcome | null>(null);
   const locked = props.disabledReason !== null || sending !== null || outcome !== null;
   const label = userActionRequestLabel(props.request);
+  const navigation = useNavigation();
+  // Owner only: the card's own access (no disabled reason) is the owner's over a ready connection.
+  const openTab = userActionOpenTabRoute({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    request: props.request,
+    canAnswer: props.disabledReason === null,
+  });
 
   const submit = async (answer: "done" | "declined") => {
     if (locked) return;
@@ -74,9 +86,11 @@ export function UserActionRequestCard(props: {
       ) : (
         <>
           <Text className="mt-1 font-sans text-sm text-foreground-muted">
-            {props.onShow === undefined
-              ? userActionContinueElsewhereHint(props.request.surface)
-              : userActionDoneHint(props.request.surface)}
+            {openTab
+              ? USER_ACTION_REMOTE_VIEW_HINT
+              : props.onShow === undefined
+                ? userActionContinueElsewhereHint(props.request.surface)
+                : userActionDoneHint(props.request.surface)}
           </Text>
           {props.hint === undefined ? null : <UserActionHintRows hint={props.hint} />}
           {props.onShow === undefined ? null : (
@@ -90,13 +104,34 @@ export function UserActionRequestCard(props: {
               </Text>
             </Pressable>
           )}
+          {openTab ? (
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => navigation.navigate(openTab.name, openTab.params)}
+              className="mt-4 h-11 items-center justify-center rounded-full bg-primary px-4 active:opacity-70 disabled:opacity-40"
+            >
+              <Text className="text-sm font-ryco-bold text-primary-foreground">
+                {USER_ACTION_OPEN_TAB_LABEL}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityRole="button"
             disabled={locked}
             onPress={() => void submit("done")}
-            className="mt-4 h-11 items-center justify-center rounded-full bg-primary px-4 active:opacity-70 disabled:opacity-40"
+            className={
+              openTab
+                ? "mt-3 h-11 items-center justify-center rounded-full bg-subtle-strong px-4 active:opacity-70 disabled:opacity-40"
+                : "mt-4 h-11 items-center justify-center rounded-full bg-primary px-4 active:opacity-70 disabled:opacity-40"
+            }
           >
-            <Text className="text-sm font-ryco-bold text-primary-foreground">
+            <Text
+              className={
+                openTab
+                  ? "text-sm font-ryco-bold text-foreground"
+                  : "text-sm font-ryco-bold text-primary-foreground"
+              }
+            >
               {sending === "done" ? "Finishing…" : USER_ACTION_DONE_LABEL}
             </Text>
           </Pressable>

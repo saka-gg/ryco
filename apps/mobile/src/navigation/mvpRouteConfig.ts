@@ -409,7 +409,8 @@ export const MVP_ROOT_ROUTES = {
   },
   /**
    * A page in the machine's browser, shown as a refreshed still with tap, scroll
-   * and typing. A solid header: the page must not slide under it.
+   * and typing. A solid header: the page must not slide under it. `?tabId=`
+   * (a user action request's Open tab) shows only that handed-off desktop tab.
    */
   ThreadBrowser: {
     linking: `${THREAD}/preview`,

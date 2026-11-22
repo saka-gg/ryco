@@ -1008,6 +1008,89 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       }
     }
   }
+  /**
+   * A frame of a tab handed to the user, for their remote view (browserHandoffs.ts): JPEG of the
+   * page at most `maxWidth` × `maxHeight` device pixels, the page's size in CSS pixels, and a
+   * fingerprint of the pixels, so an unchanged page costs no encoding. Viewing holds the tab live
+   * and unthrottled, like the thumbnail.
+   */
+  async captureHandoffFrame(
+    tab: string,
+    options: { readonly maxWidth: number; readonly maxHeight: number; readonly quality: number },
+  ): Promise<{
+    readonly cssWidth: number;
+    readonly cssHeight: number;
+    readonly width: number;
+    readonly height: number;
+    readonly fingerprint: string;
+    readonly encode: () => Buffer;
+  }> {
+    const entry = this.entry(tab);
+    const now = Date.now();
+    entry.previewUntil = now + BROWSER_PREVIEW_HOLD_MS;
+    entry.lastActiveAt = now;
+    if (!entry.live) this.revive(tab, entry);
+    this.scheduleBudget(entry.previewUntil);
+    if (!entry.live || this.reloading(entry, now))
+      throw new Error("This browser tab is reloading.");
+    const page = this.liveOf(entry);
+    const wc = page.view.webContents;
+    const loadedUnthrottled = !wc.getBackgroundThrottling();
+    this.syncThrottling(entry, now);
+    const captured = await this.capturePainted(entry, wc, loadedUnthrottled);
+    const size = captured.getSize();
+    const scale = Math.min(1, options.maxWidth / size.width, options.maxHeight / size.height);
+    const image =
+      scale < 1
+        ? captured.resize({
+            width: Math.max(1, Math.round(size.width * scale)),
+            height: Math.max(1, Math.round(size.height * scale)),
+          })
+        : captured;
+    const bounds = page.view.getBounds();
+    const zoom = wc.getZoomFactor() || 1;
+    const encoded = image.getSize();
+    return {
+      cssWidth: Math.round(bounds.width / zoom),
+      cssHeight: Math.round(bounds.height / zoom),
+      width: encoded.width,
+      height: encoded.height,
+      fingerprint: createHash("sha1").update(image.toBitmap()).digest("base64"),
+      encode: () => image.toJPEG(options.quality),
+    };
+  }
+  /**
+   * The user's remote input into a tab handed to them: CDP commands on the page's shared session,
+   * held as "handoff" (not as the agent) until `releaseHandoffInput`. Never through the agent's
+   * paths, so the sign-in rules and the agent's claim do not apply; the hand-off itself gates it.
+   * CDP key events reach the page only on macOS: not the tab's `before-input-event` hook
+   * (Cmd/Ctrl+W, R, L) and not the app menu's shortcuts (`scripts/browser-handoff-keys-smoke.ts`).
+   * Windows and Linux are not verified, so `BrowserHandoffs` drops app-level chords first
+   * (`isAppLevelChord`).
+   */
+  async sendHandoffInput(
+    tab: string,
+    commands: ReadonlyArray<{ readonly method: string; readonly params: Record<string, unknown> }>,
+  ): Promise<void> {
+    const page = this.entries.get(tab)?.live;
+    if (!page) throw new Error("This browser tab is reloading.");
+    if (!page.cdp.holds("handoff")) page.cdp.acquire("handoff");
+    for (const command of commands) {
+      await page.cdp.send(command.method, command.params, { timeoutMs: 2_000 });
+    }
+  }
+  /** Ends the user's remote input session on the tab (the hand-off ended). */
+  releaseHandoffInput(tab: string): void {
+    this.entries.get(tab)?.live?.cdp.release("handoff");
+  }
+  /** The tab's page size in CSS pixels, for clamping remote input; null while it has no page. */
+  handoffViewport(tab: string): { width: number; height: number } | null {
+    const page = this.entries.get(tab)?.live;
+    if (!page || page.view.webContents.isDestroyed()) return null;
+    const bounds = page.view.getBounds();
+    const zoom = page.view.webContents.getZoomFactor() || 1;
+    return { width: Math.round(bounds.width / zoom), height: Math.round(bounds.height / zoom) };
+  }
   /** Sign-in rules for agent control: an open popup refuses it; an armed grant is cancelled. */
   private guard(tab: string): void {
     if (this.signIn.state(tab) === "open")

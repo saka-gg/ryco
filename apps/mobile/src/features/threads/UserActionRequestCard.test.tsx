@@ -9,6 +9,8 @@ vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View" }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../lib/copyTextWithHaptic", () => ({ copyTextWithHaptic: vi.fn() }));
 vi.mock("../../connection/environmentApi", () => ({ ensureEnvironmentApi: vi.fn(() => ({})) }));
+const navigate = vi.fn();
+vi.mock("@react-navigation/native", () => ({ useNavigation: () => ({ navigate }) }));
 import { UserActionRequestCard } from "./UserActionRequestCard";
 
 function elements(node: unknown): ReactElement<Record<string, unknown>>[] {
@@ -40,6 +42,7 @@ const props = {
     need: "sign-in" as const,
     message: "Sign in to GitHub in the tab.",
     target: "tab-1",
+    remoteView: false,
     requestedAt: "2026-11-21T08:00:00.000Z",
     expiresAt: "2026-11-21T08:10:00.000Z",
     turnId: null,
@@ -69,4 +72,34 @@ it("native user action cards are read-only for a session that cannot answer", ()
   expect(buttonLabelled(tree, "Done")?.props.disabled).toBe(true);
   expect(buttonLabelled(tree, "Won't do")?.props.disabled).toBe(true);
   expect(texts(tree)).toContain(reason);
+});
+
+it("native user action cards open a remote-view tab in the browser screen", () => {
+  const request = { ...props.request, remoteView: true };
+  const tree = elements(UserActionRequestCard({ ...props, request }));
+  expect(texts(tree)).toContain("Open the tab here and sign in; the agent can't use it meanwhile.");
+  expect(texts(tree)).not.toContain(
+    "Continue on your desktop: the tab is in Ryco's Browser panel there.",
+  );
+  const open = buttonLabelled(tree, "Open tab");
+  (open?.props.onPress as () => void)();
+  expect(navigate).toHaveBeenCalledWith("ThreadBrowser", {
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    tabId: `handoff-${"e".repeat(32)}`,
+  });
+  // Done and Won't do stay.
+  expect(buttonLabelled(tree, "Done")?.props.disabled).toBe(false);
+  expect(buttonLabelled(tree, "Won't do")?.props.disabled).toBe(false);
+});
+
+it("native user action cards offer no Open tab to a session that cannot answer", () => {
+  const request = { ...props.request, remoteView: true };
+  const tree = elements(
+    UserActionRequestCard({ ...props, request, disabledReason: "Reconnect to answer." }),
+  );
+  expect(buttonLabelled(tree, "Open tab")).toBeUndefined();
+  expect(texts(tree)).toContain(
+    "Continue on your desktop: the tab is in Ryco's Browser panel there.",
+  );
 });

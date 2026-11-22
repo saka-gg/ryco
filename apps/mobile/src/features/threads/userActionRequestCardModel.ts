@@ -1,5 +1,6 @@
 import type {
   EnvironmentApi,
+  EnvironmentId,
   NodeSessionRole,
   ThreadId,
   UserActionAnswerResult,
@@ -9,6 +10,8 @@ import type {
 import {
   userActionAnswerAccess,
   userActionAnswerInput,
+  userActionOffersRemoteView,
+  userActionRemoteViewTabId,
   userActionRequestCards,
   userActionRequestFailureText,
   type UserActionAnswerAccess,
@@ -21,8 +24,10 @@ import type { UserActionRequestActivity } from "@ryco/shared/userActionRequestSt
  * The thread screen's user action request cards (an agent handed a browser tab or terminal to
  * the user): the unanswered requests and whether this device may answer them. Presentation lives
  * in `UserActionRequestCard.tsx`; the request rules and copy are the shared ones in
- * `@ryco/client-runtime/userActionRequests`. The phone cannot show the desktop's tab or terminal,
- * so its card says where to continue and offers Done and Won't do only.
+ * `@ryco/client-runtime/userActionRequests`. A terminal opens on the phone (Show); a desktop tab
+ * opens through the node (Open tab) only when the request serves it to remote viewers
+ * (`remoteView`) and this device may answer (the owner), and otherwise the card says where to
+ * continue. Done and Won't do are always there.
  */
 export interface MobileUserActionRequestCards {
   readonly requests: ReadonlyArray<UserActionRequestView>;
@@ -66,6 +71,38 @@ export function mobileUserActionRequestCards(input: {
 }
 
 const NO_HINTS: ReadonlyMap<string, UserActionHint> = new Map();
+
+/** The ThreadBrowser route showing exactly the handed-off tab (`userActionRemoteViewTabId`). */
+export interface UserActionOpenTabRoute {
+  readonly name: "ThreadBrowser";
+  readonly params: {
+    readonly environmentId: EnvironmentId;
+    readonly threadId: ThreadId;
+    readonly tabId: string;
+  };
+}
+
+/**
+ * Where Open tab goes, or null when the card offers none: the request's tab must be served to
+ * remote viewers and this device must be able to answer (`access.canAnswer`: the owner over a
+ * ready connection; the node serves these tab ids to the owner only).
+ */
+export function userActionOpenTabRoute(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly request: Pick<UserActionRequestView, "requestId" | "surface" | "remoteView">;
+  readonly canAnswer: boolean;
+}): UserActionOpenTabRoute | null {
+  if (!userActionOffersRemoteView(input.request, { canAnswer: input.canAnswer })) return null;
+  return {
+    name: "ThreadBrowser",
+    params: {
+      environmentId: input.environmentId,
+      threadId: input.threadId,
+      tabId: userActionRemoteViewTabId(input.request.requestId),
+    },
+  };
+}
 
 export class UserActionRequestUnavailableError extends Error {
   constructor() {

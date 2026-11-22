@@ -4,6 +4,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   hasUserActionRequestActivity,
+  USER_ACTION_OPEN_TAB_LABEL,
+  USER_ACTION_REMOTE_VIEW_ENDED_TEXT,
+  USER_ACTION_REMOTE_VIEW_HINT,
+  userActionOffersRemoteView,
+  userActionRemoteViewTabId,
   userActionAnswerAccess,
   userActionAnswerInput,
   userActionContinueElsewhereHint,
@@ -66,5 +71,25 @@ describe("user action request cards", () => {
       userActionAnswerAccess({ nodeSupports: true, role: undefined, mutationReady: true })
         .canAnswer,
     ).toBe(false);
+  });
+
+  it("offers Open tab only for a remote-view browser tab the session may answer", () => {
+    const owner = { canAnswer: true };
+    expect(userActionOffersRemoteView({ surface: "browser", remoteView: true }, owner)).toBe(true);
+    expect(userActionOffersRemoteView({ surface: "browser", remoteView: false }, owner)).toBe(
+      false,
+    );
+    expect(userActionOffersRemoteView({ surface: "terminal", remoteView: true }, owner)).toBe(
+      false,
+    );
+    expect(
+      userActionOffersRemoteView({ surface: "browser", remoteView: true }, { canAnswer: false }),
+    ).toBe(false);
+    expect(userActionRemoteViewTabId(requestId)).toBe(`handoff-${"c".repeat(32)}`);
+    expect(USER_ACTION_OPEN_TAB_LABEL).toBe("Open tab");
+    expect(USER_ACTION_REMOTE_VIEW_HINT).toMatch(/Open the tab here/);
+    expect(USER_ACTION_REMOTE_VIEW_ENDED_TEXT).toMatch(/Continue on your desktop/);
+    // Without a remote view the card still says where to continue.
+    expect(userActionContinueElsewhereHint("browser")).toMatch(/Browser panel/);
   });
 });

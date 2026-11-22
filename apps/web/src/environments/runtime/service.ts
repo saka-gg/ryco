@@ -140,6 +140,14 @@ import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspac
 /** Desktop-only, and off the boot path: loaded by the first Hub machine connection. */
 const loadDesktopHubLinkedRoutes = () => import("../../platform/desktopHubLinkedRoutes");
 
+/**
+ * A direct connection's node browser frames: its frame socket serves ordinary node tabs and
+ * handed-off desktop tabs alike, so the hand-off source is the same one.
+ */
+function nodeBrowserFrameOptions(open: ReturnType<typeof directNodeBrowserFrames>) {
+  return { openNodeBrowserFrameSource: open, openHandoffFrameSource: open };
+}
+
 function isSavedEnvironmentConnectionCancelledError(
   error: unknown,
 ): error is SavedEnvironmentConnectionCancelledError {
@@ -892,7 +900,7 @@ function createPrimaryEnvironmentClient(
           }),
       },
     ),
-    { openNodeBrowserFrameSource: directNodeBrowserFrames(webSocket, authenticatedSocketUrl) },
+    nodeBrowserFrameOptions(directNodeBrowserFrames(webSocket, authenticatedSocketUrl)),
   );
 }
 
@@ -1065,7 +1073,7 @@ function createSavedEnvironmentClient(
           }),
       },
     ),
-    { openNodeBrowserFrameSource: directNodeBrowserFrames(webSocket, (path) => socketUrl(path)) },
+    nodeBrowserFrameOptions(directNodeBrowserFrames(webSocket, (path) => socketUrl(path))),
   );
 }
 

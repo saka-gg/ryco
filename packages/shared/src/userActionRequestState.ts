@@ -37,6 +37,8 @@ export interface UserActionRequestView {
   readonly message: string;
   /** The tab or terminal it is about, when the surface named one. */
   readonly target: string | null;
+  /** Remote clients may view and drive the target while it is pending (`remoteViewTabId`). */
+  readonly remoteView: boolean;
   readonly requestedAt: string;
   readonly expiresAt: string;
   readonly turnId: string | null;
@@ -93,6 +95,7 @@ export function deriveUserActionRequests(
       need: payload.need,
       message: payload.message,
       target: payload.target ?? null,
+      remoteView: payload.remoteView === true,
       requestedAt: activity.createdAt,
       expiresAt: payload.expiresAt,
       turnId: activity.turnId ?? null,

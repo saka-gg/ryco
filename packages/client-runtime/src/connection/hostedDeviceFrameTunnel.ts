@@ -1,8 +1,7 @@
 import type { DeviceUdid } from "@ryco/contracts";
 import { RELAY_FRAME_TUNNEL_DEVICE_FRAMES } from "@ryco/shared/relayFrameTunnel";
 
-import { RelayFrameTunnelClient, type RelayFrameTunnelSocket } from "../relay/relayFrameTunnel.ts";
-import type { HostedFrameTunnelChannel } from "../relay/transport.ts";
+import type { RelayFrameTunnelSocket } from "../relay/relayFrameTunnel.ts";
 import {
   createDeviceFrameSource,
   DeviceFrameSourceUnavailableError,
@@ -10,30 +9,7 @@ import {
   type DeviceFrameSourceHandlers,
 } from "./deviceFrameSource.ts";
 import type { HostedDeviceFrameSourceOptions } from "./hostedDeviceFrameSource.ts";
-
-/**
- * A placeholder the frame source resolves instead of a socket URL; the
- * tunnel's sockets are opened by name, never by address.
- */
-const TUNNEL_URL = "ryco-relay-tunnel://node/";
-
-/** One tunnel per relay channel, bound on its first stream. */
-const tunnels = new WeakMap<object, RelayFrameTunnelClient>();
-
-function tunnelFor(channel: HostedFrameTunnelChannel): RelayFrameTunnelClient | null {
-  const existing = tunnels.get(channel.socket);
-  if (existing && !existing.closed) return existing;
-  let send: ((bytes: Uint8Array) => boolean) | null = null;
-  const client = new RelayFrameTunnelClient({
-    send: (bytes) => send?.(bytes) ?? false,
-    queueMicrotask: (callback) => void Promise.resolve().then(callback),
-  });
-  send = channel.bind(client);
-  // Already bound (by a tunnel this module no longer holds) or not `e2ee`.
-  if (send === null) return null;
-  tunnels.set(channel.socket, client);
-  return client;
-}
+import { HOSTED_FRAME_TUNNEL_URL, hostedFrameTunnelFor } from "./hostedFrameTunnel.ts";
 
 /**
  * Device frames over the hosted relay: the direct path's frame source,
@@ -54,13 +30,13 @@ export function openHostedDeviceFrameSource(
     handlers,
     resolveUrl: async () => {
       if (!options.readiness.read()) throw new Error("The hosted session is not ready.");
-      return TUNNEL_URL;
+      return HOSTED_FRAME_TUNNEL_URL;
     },
     socket: {
       webSocketConstructor: () => {
         const channel = options.readiness.read() ? options.channel() : null;
         if (channel === null) throw new Error("No relay channel is ready.");
-        const tunnel = tunnelFor(channel);
+        const tunnel = hostedFrameTunnelFor(channel);
         // A ready session's channel is locked: one that will not bind is a
         // `legacy` channel, which never carries the tunnel (it is plaintext to
         // the Hub). The viewer falls back to screenshots for this connection.

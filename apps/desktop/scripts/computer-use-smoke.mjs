@@ -13,9 +13,13 @@ const scripts = {
   "tab-budget": "scripts/browser-tab-budget-smoke.ts",
   // Hidden windows and synthetic input into its own fixture page only (no native helper).
   picker: "scripts/browser-element-picker-smoke.ts",
+  // Hidden windows and CDP key input into its own fixture page only (no native helper).
+  "handoff-keys": "scripts/browser-handoff-keys-smoke.ts",
 };
 if (!Object.hasOwn(scripts, kind ?? ""))
-  throw new Error("Choose browser, integration, project, signin, tab-budget or picker.");
+  throw new Error(
+    "Choose browser, integration, project, signin, tab-budget, picker or handoff-keys.",
+  );
 const cache = join(desktop, "node_modules/.cache");
 mkdirSync(cache, { recursive: true });
 const directory = mkdtempSync(join(cache, "computer-use-smoke-"));
