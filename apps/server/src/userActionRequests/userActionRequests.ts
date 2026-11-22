@@ -376,6 +376,26 @@ export const reconcileUserActionRequestsAfterRestart = (
       (activities) => pendingUserActionRequests(activities),
       (threadId, request) =>
         Effect.gen(function* () {
+          // A terminal's shell never outlives the node: its hand-off has nothing left to wait
+          // for, and would hold the terminal (and the card) until it expired. The generic
+          // release covers removed threads only. A close that cannot be recorded falls back to
+          // the expiry below, like any other request.
+          if (request.surface === "terminal") {
+            const closed = yield* resolveUserActionRequest(
+              deps,
+              threadId,
+              request.requestId,
+              "closed",
+            ).pipe(
+              Effect.map((ended) => ended === undefined || ended.status !== "pending"),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("failed to close a terminal hand-off after a restart", {
+                  cause,
+                }).pipe(Effect.as(false)),
+              ),
+            );
+            if (closed) return;
+          }
           remember(threadId, request);
           yield* scheduleUserActionRequestExpiry(deps, threadId, request);
         }),

@@ -1256,6 +1256,8 @@ interface ThreadTerminalDrawerProps {
   height: number;
   terminalIds: string[];
   runningTerminalIds: string[];
+  /** Terminals an agent handed to the user that still wait for them: their tab shows a marker. */
+  waitingTerminalIds?: ReadonlyArray<string>;
   activeTerminalId: string;
   terminalGroups: ThreadTerminalGroup[];
   activeTerminalGroupId: string;
@@ -1288,6 +1290,8 @@ function TerminalTabItem(props: {
   group: { readonly id: string; readonly terminalIds: ReadonlyArray<string> };
   isActive: boolean;
   isRunning: boolean;
+  /** A terminal of the tab waits for the user (an agent's hand-off). */
+  isWaitingForUser: boolean;
   label: string;
   groupActiveTerminalId: string;
   canCloseTab: boolean;
@@ -1298,6 +1302,7 @@ function TerminalTabItem(props: {
     group,
     isActive,
     isRunning,
+    isWaitingForUser,
     label,
     groupActiveTerminalId,
     canCloseTab,
@@ -1346,8 +1351,17 @@ function TerminalTabItem(props: {
       >
         <TerminalSquare className="size-3 shrink-0" />
         <span className="truncate">{label}</span>
-        {isRunning && (
-          <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" aria-label="Running" />
+        {isWaitingForUser ? (
+          <span
+            className="size-1.5 shrink-0 rounded-full bg-amber-500 ring-2 ring-amber-500/30"
+            role="img"
+            aria-label="Waiting for you"
+            title="Waiting for you"
+          />
+        ) : (
+          isRunning && (
+            <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" aria-label="Running" />
+          )
         )}
       </button>
       {canCloseTab && (
@@ -1416,6 +1430,7 @@ export default function ThreadTerminalDrawer({
   height,
   terminalIds,
   runningTerminalIds,
+  waitingTerminalIds,
   activeTerminalId,
   terminalGroups,
   activeTerminalGroupId,
@@ -1450,6 +1465,7 @@ export default function ThreadTerminalDrawer({
     return cleaned.length > 0 ? cleaned : [DEFAULT_THREAD_TERMINAL_ID];
   }, [terminalIds]);
 
+  const waitingSet = new Set(waitingTerminalIds ?? []);
   const normalizedRunningTerminalIds = useMemo(() => {
     if (runningTerminalIds.length === 0) return [];
     const validIdSet = new Set(normalizedTerminalIds);
@@ -1745,6 +1761,7 @@ export default function ThreadTerminalDrawer({
                 group={group}
                 isActive={isActive}
                 isRunning={isRunning}
+                isWaitingForUser={group.terminalIds.some((id) => waitingSet.has(id))}
                 label={label}
                 groupActiveTerminalId={groupActiveTerminalId}
                 canCloseTab={canCloseTab}

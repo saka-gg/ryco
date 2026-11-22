@@ -1586,6 +1586,15 @@ export function ThreadDetailScreen(props: {
       }),
     [environmentId, navigation, threadId],
   );
+  const openTerminalAt = useCallback(
+    (terminalId: string) =>
+      navigation.navigate("ThreadTerminal", {
+        environmentId,
+        threadId,
+        terminalId,
+      }),
+    [environmentId, navigation, threadId],
+  );
   const openDevice = useCallback(
     () => navigation.navigate("ThreadDevice", { environmentId, threadId }),
     [environmentId, navigation, threadId],
@@ -3382,6 +3391,7 @@ export function ThreadDetailScreen(props: {
           promptsDisabled={promptsDisabled}
           secretRequests={secretRequests}
           userActionRequests={userActionRequests}
+          onShowTerminal={openTerminalAt}
           agentControlProposals={pendingAgentControlProposals}
           agentControlDisabled={cachedView.promptsDisabled}
         />

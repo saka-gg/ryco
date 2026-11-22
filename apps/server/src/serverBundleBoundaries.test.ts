@@ -892,7 +892,15 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // checks and history reads; Ryco's shell marks read and stripped in the output drain, so
     // their nonce never reaches a client or a history file. The tool, its emulator, the shell
     // scripts and the tty reader load through import().
-    expect(bytes).toBeLessThan(7_340_000);
+    // 7.350 MB on 2026-11-21 for the Copane port (measured 7.346901 MB with all three, over
+    // main's 7.322070 MB): user action requests (+8.4 KB: the request and answer schemas, the RPC,
+    // the surface hooks, pending-input and alert reads), agent terminal tools (+15.3 KB: the
+    // per-task terminal consent plan through validator, executor, audit and presentation; the
+    // terminal manager's read-only inspection, tty flag read, agent write checks and history
+    // reads; Ryco's shell marks read and stripped in the output drain, so their nonce never
+    // reaches a client or a history file) and the terminal hand-off's hint activity kind and
+    // schema (+0.5 KB). The tools, emulator, shell scripts and tty reader load through import().
+    expect(bytes).toBeLessThan(7_350_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.

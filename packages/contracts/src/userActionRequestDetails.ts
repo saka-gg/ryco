@@ -2,6 +2,9 @@ import * as Schema from "effect/Schema";
 
 import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
+  USER_ACTION_HINT_CODE_MAX_CHARS,
+  USER_ACTION_HINT_LINK_MAX_CHARS,
+  USER_ACTION_HINT_MAX_ITEMS,
   USER_ACTION_REQUEST_MESSAGE_MAX_CHARS,
   USER_ACTION_REQUEST_TARGET_MAX_CHARS,
   UserActionNeed,
@@ -46,3 +49,35 @@ export const UserActionResolvedActivityPayload = Schema.Struct({
   outcome: UserActionOutcome,
 });
 export type UserActionResolvedActivityPayload = typeof UserActionResolvedActivityPayload.Type;
+
+/**
+ * The `user-action.hint` activity's payload: the links and codes a surface found for the request,
+ * the newest set replacing earlier ones. Links are http(s) only.
+ */
+export const UserActionHintActivityPayload = Schema.Struct({
+  requestId: UserActionRequestId,
+  links: Schema.Array(
+    Schema.Struct({
+      url: Schema.String.check(
+        Schema.isMaxLength(USER_ACTION_HINT_LINK_MAX_CHARS),
+        Schema.isPattern(/^https?:\/\/[^\s]+$/),
+      ),
+      /**
+       * The host the node's URL parser found (ASCII; an international name as punycode): what a
+       * card shows, so no client parses the link itself.
+       */
+      host: Schema.String.check(
+        Schema.isMaxLength(253),
+        Schema.isPattern(/^[a-z0-9.-]+(?::\d{1,5})?$/),
+      ),
+    }),
+  ).check(Schema.isMaxLength(USER_ACTION_HINT_MAX_ITEMS)),
+  codes: Schema.Array(
+    Schema.String.check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(USER_ACTION_HINT_CODE_MAX_CHARS),
+      Schema.isPattern(/^[A-Za-z0-9-]+$/),
+    ),
+  ).check(Schema.isMaxLength(USER_ACTION_HINT_MAX_ITEMS)),
+});
+export type UserActionHintActivityPayload = typeof UserActionHintActivityPayload.Type;

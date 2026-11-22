@@ -627,26 +627,45 @@ export function retainTurnItemsAfterRevert<
 }
 
 /**
- * Whether a user action request (a browser tab or terminal handed to the user) in these
- * activities still waits: requested, not resolved, not past its expiry. Reads only ids and the
- * expiry string, so views on the boot path can ask without the payload schemas
- * (`@ryco/shared/userActionRequestState` derives the requests properly for the card).
+ * The targets (tab or terminal ids) of the user action requests in these activities that still
+ * wait: requested, not resolved, not past their expiry, on `surface` when given. Reads only ids,
+ * surface, target and the expiry string, so views on the boot path can ask without the payload
+ * schemas (`@ryco/shared/userActionRequestState` derives the requests properly for the card). A
+ * pending request without a target counts as `""`.
  */
-export function hasPendingUserActionRequest(
+export function pendingUserActionTargets(
   activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>,
   nowMs: number,
-): boolean {
+  surface?: string,
+): ReadonlyArray<string> {
   const resolved = new Set<unknown>();
   for (const activity of activities) {
     if (hasActivityKind(activity, USER_ACTION_RESOLVED_ACTIVITY_KIND)) {
       resolved.add((activity.payload as { requestId?: unknown } | null)?.requestId);
     }
   }
-  return activities.some((activity) => {
-    if (!hasActivityKind(activity, USER_ACTION_REQUESTED_ACTIVITY_KIND)) return false;
-    const payload = activity.payload as { requestId?: unknown; expiresAt?: unknown } | null;
-    if (typeof payload?.requestId !== "string" || resolved.has(payload.requestId)) return false;
+  const targets = new Set<string>();
+  for (const activity of activities) {
+    if (!hasActivityKind(activity, USER_ACTION_REQUESTED_ACTIVITY_KIND)) continue;
+    const payload = activity.payload as {
+      requestId?: unknown;
+      expiresAt?: unknown;
+      surface?: unknown;
+      target?: unknown;
+    } | null;
+    if (typeof payload?.requestId !== "string" || resolved.has(payload.requestId)) continue;
+    if (surface !== undefined && payload.surface !== surface) continue;
     const expiresAt = typeof payload.expiresAt === "string" ? Date.parse(payload.expiresAt) : NaN;
-    return Number.isFinite(expiresAt) && expiresAt > nowMs;
-  });
+    if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) continue;
+    targets.add(typeof payload.target === "string" ? payload.target : "");
+  }
+  return [...targets];
+}
+
+/** Whether a user action request (a browser tab or terminal handed to the user) still waits. */
+export function hasPendingUserActionRequest(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>,
+  nowMs: number,
+): boolean {
+  return pendingUserActionTargets(activities, nowMs).length > 0;
 }

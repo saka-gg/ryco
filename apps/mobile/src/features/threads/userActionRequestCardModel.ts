@@ -14,6 +14,7 @@ import {
   type UserActionAnswerAccess,
   type UserActionRequestView,
 } from "@ryco/client-runtime/userActionRequests";
+import { userActionRequestHints, type UserActionHint } from "@ryco/shared/userActionHints";
 import type { UserActionRequestActivity } from "@ryco/shared/userActionRequestState";
 
 /**
@@ -26,6 +27,8 @@ import type { UserActionRequestActivity } from "@ryco/shared/userActionRequestSt
 export interface MobileUserActionRequestCards {
   readonly requests: ReadonlyArray<UserActionRequestView>;
   readonly access: UserActionAnswerAccess;
+  /** Sign-in links and codes a terminal printed, by request id. */
+  readonly hints: ReadonlyMap<string, UserActionHint>;
 }
 
 /** Expiry is re-read this often while a card shows, so a card left open past its time closes. */
@@ -55,8 +58,14 @@ export function mobileUserActionRequestCards(input: {
     mutationReady: input.mutationReady && !input.promptsDisabled,
     mutationReason: input.promptsDisabled ? "Reconnect to answer." : null,
   });
-  return { requests, access };
+  const hints =
+    requests.length === 0 || input.activities === undefined
+      ? NO_HINTS
+      : userActionRequestHints(input.activities);
+  return { requests, access, hints };
 }
+
+const NO_HINTS: ReadonlyMap<string, UserActionHint> = new Map();
 
 export class UserActionRequestUnavailableError extends Error {
   constructor() {

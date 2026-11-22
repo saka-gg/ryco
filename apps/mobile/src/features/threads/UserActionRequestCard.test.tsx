@@ -7,6 +7,7 @@ vi.mock("react", async (original) => ({
 }));
 vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View" }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
+vi.mock("../../lib/copyTextWithHaptic", () => ({ copyTextWithHaptic: vi.fn() }));
 vi.mock("../../connection/environmentApi", () => ({ ensureEnvironmentApi: vi.fn(() => ({})) }));
 import { UserActionRequestCard } from "./UserActionRequestCard";
 
