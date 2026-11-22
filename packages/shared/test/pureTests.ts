@@ -25,6 +25,7 @@ export const SHARED_PURE_TEST_FILES = [
   "src/appSnapShortcut.test.ts",
   "src/attachmentPrompt.test.ts",
   "src/backgroundWork.test.ts",
+  "src/browserHandoff.test.ts",
   "src/bytesEqual.test.ts",
   "src/changeRequestHostCapabilities.test.ts",
   "src/cliArgs.test.ts",

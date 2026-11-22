@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 
+import { UserActionNeed } from "./userActionRequest.ts";
 import {
   BROWSER_ELEMENT_MAX_NAME_LENGTH,
   BROWSER_ELEMENT_MAX_PAGE_TITLE_LENGTH,
@@ -27,6 +28,20 @@ export const ProjectBrowserTab = Schema.Struct({
   suspended: Schema.optionalKey(Schema.Boolean),
   /** The user's element pick on this tab: choosing an element, or one picked and highlighted. */
   picker: Schema.optionalKey(Schema.Literals(["picking", "picked"])),
+  /** The thread whose agent opened this tab. */
+  thread: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
+  /**
+   * An agent handed this tab to the user (`ryco_browser` action `handoff`): agents cannot use it
+   * until the request ends (Done, Won't do, its condition, its expiry).
+   */
+  handoff: Schema.optionalKey(
+    Schema.Struct({
+      thread: Schema.String.check(Schema.isMaxLength(256)),
+      request: Schema.String.check(Schema.isMaxLength(128)),
+      need: UserActionNeed,
+      message: Schema.String.check(Schema.isMaxLength(300)),
+    }),
+  ),
 });
 export type ProjectBrowserTab = typeof ProjectBrowserTab.Type;
 export const ProjectBrowserState = Schema.Struct({ tabs: Schema.Array(ProjectBrowserTab) });

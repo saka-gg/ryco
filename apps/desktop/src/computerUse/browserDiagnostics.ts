@@ -12,6 +12,10 @@ export const DIAGNOSTICS_OUTPUT_MAX_BYTES = 64 * 1024;
 export const NETWORK_IDLE_WINDOW_MS = 500;
 export const DIAGNOSTICS_DEFAULT_LIMIT = 100;
 export const DIAGNOSTICS_MAX_LIMIT = 200;
+/** What a console message logged while the user had the tab reads instead of its text. */
+export const BROWSER_HANDOFF_WITHHELD_TEXT = "(logged while the user had the tab; withheld)";
+/** The path a request sent while the user had the tab shows instead of its own. */
+export const BROWSER_HANDOFF_WITHHELD_PATH = "(sent while the user had the tab; withheld)";
 
 export interface BrowserConsoleEntry {
   readonly kind: "console";
@@ -434,7 +438,75 @@ export class BrowserTabDiagnostics {
     return new Date(time).toISOString();
   }
 
-  private push(entry: BrowserDiagnosticEntry): void {
+  /**
+   * Hand-offs of this tab to the user (`ryco_browser` action `handoff`): while one runs, and for
+   * console messages a later session replays with a timestamp inside one, entries are withheld.
+   * Requests started during one stay withheld when their response or failure arrives later.
+   */
+  private withholding: { since: number; requests: number; messages: number } | null = null;
+  private readonly withheldWindows: Array<{ from: number; to: number }> = [];
+  private readonly withheldRequests = new Set<string>();
+
+  /** Starts withholding what the page logs and sends: the user has the tab. */
+  beginWithholding(): void {
+    if (this.withholding === null) {
+      this.withholding = { since: Date.now(), requests: 0, messages: 0 };
+    }
+  }
+
+  /** Stops withholding new entries. Returns how many were withheld since it began. */
+  endWithholding(): { requests: number; messages: number } {
+    const current = this.withholding;
+    if (current === null) return { requests: 0, messages: 0 };
+    this.withholding = null;
+    this.withheldWindows.push({ from: current.since, to: Date.now() });
+    if (this.withheldWindows.length > 32) this.withheldWindows.shift();
+    return { requests: current.requests, messages: current.messages };
+  }
+
+  private withheld(entry: BrowserDiagnosticEntry): BrowserDiagnosticEntry | null {
+    if (entry.kind === "console") {
+      const time = Date.parse(entry.timestamp);
+      const inWindow = this.withheldWindows.some(
+        (window) => time >= window.from && time <= window.to,
+      );
+      if (this.withholding === null && !inWindow) return null;
+      if (this.withholding !== null) this.withholding.messages += 1;
+      return {
+        kind: "console",
+        timestamp: entry.timestamp,
+        level: entry.level,
+        text: BROWSER_HANDOFF_WITHHELD_TEXT,
+      };
+    }
+    if (this.withholding === null && !this.withheldRequests.has(entry.requestId)) return null;
+    if (this.withholding !== null && entry.phase === "request") {
+      this.withholding.requests += 1;
+      this.withheldRequests.add(entry.requestId);
+      if (this.withheldRequests.size > MAX_TRACKED_REQUESTS) {
+        const oldest = this.withheldRequests.values().next().value;
+        if (oldest !== undefined) this.withheldRequests.delete(oldest);
+      }
+    }
+    let origin = "about:blank";
+    try {
+      origin = new URL(entry.url).origin;
+    } catch {
+      // Keeps the placeholder.
+    }
+    return {
+      kind: "network",
+      timestamp: entry.timestamp,
+      phase: entry.phase,
+      requestId: entry.requestId,
+      url: `${origin}/${BROWSER_HANDOFF_WITHHELD_PATH}`,
+      method: entry.method,
+      ...(entry.status === undefined ? {} : { status: entry.status }),
+    };
+  }
+
+  private push(raw: BrowserDiagnosticEntry): void {
+    const entry = this.withheld(raw) ?? raw;
     this.entries.push(entry);
     if (this.entries.length <= MAX_DIAGNOSTIC_ENTRIES) return;
     for (const removed of this.entries.splice(0, this.entries.length - MAX_DIAGNOSTIC_ENTRIES))

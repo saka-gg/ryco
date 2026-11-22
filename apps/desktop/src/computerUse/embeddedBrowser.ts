@@ -52,6 +52,16 @@ interface TabEntry {
    */
   live: LivePage | null;
   project: string;
+  /** The thread whose agent opened the tab (BrowserTransport.recordOpener), when one did. */
+  thread: string | null;
+  /** The user has the tab for an agent's request (browserHandoffs.ts); the tab stays live. */
+  handoff: NonNullable<ProjectBrowserTab["handoff"]> | null;
+  /**
+   * What the page logs and sends is withheld from agents (a hand-off). Kept on the tab, not on its
+   * page: every page the tab gets meanwhile (a revival, a reload after a crash) withholds from its
+   * first entry, and the counts of pages torn down meanwhile carry over.
+   */
+  withholding: { requests: number; messages: number } | null;
   presentation: "background" | "panel" | "window";
   error: string | null;
   requestedUrl: string;
@@ -129,6 +139,17 @@ const USER_NAVIGATION: ReadonlySet<ProjectBrowserCommand["action"]> = new Set([
 ]);
 
 /** One tab owner shared by manual preview and the consent-gated agent transport. */
+/** An agent path into a tab that is (being) handed to the user (`holdAgents`). */
+export class BrowserTabHeldError extends Error {
+  constructor() {
+    super("This tab is with the user for a hand-off. List tabs again.");
+    this.name = "BrowserTabHeldError";
+  }
+}
+
+/** How long `holdAgents` waits for agent CDP calls in flight to settle after cutting them off. */
+const HOLD_DRAIN_MS = 3_000;
+
 export class EmbeddedComputerBrowser implements BrowserTransport {
   private readonly signIn = new SignInPopups(() => {
     this.publish();
@@ -136,6 +157,13 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   });
   private readonly picker = new BrowserElementPicker({ publish: () => this.publish() });
   private readonly entries = new Map<string, TabEntry>();
+  /**
+   * Tabs held for a hand-off (`holdAgents`): every agent path into the page refuses there
+   * (`withAgentCdp`, `wake`), whichever action it belongs to and whenever that action started.
+   */
+  private readonly agentHolds = new Set<string>();
+  /** Per tab: cuts off the agent CDP work in flight when a hand-off holds the tab. */
+  private readonly agentCutoffs = new Map<string, AbortController>();
   /** The memory budget's single timer (see browserTabBudget.ts) and when it fires. */
   private budgetTimer: ReturnType<typeof setTimeout> | undefined;
   private budgetDueAt = Number.POSITIVE_INFINITY;
@@ -188,6 +216,10 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   state(): ProjectBrowserState {
     return {
       tabs: [...this.entries].map(([id, entry]) => {
+        const owner = {
+          ...(entry.thread === null ? {} : { thread: entry.thread }),
+          ...(entry.handoff === null ? {} : { handoff: entry.handoff }),
+        };
         if (!entry.live)
           return {
             id,
@@ -202,6 +234,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
             error: entry.error,
             signInPopup: "idle",
             suspended: true,
+            ...owner,
           };
         const wc = this.liveOf(entry).view.webContents;
         const tab: Mutable<ProjectBrowserTab> = {
@@ -216,6 +249,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           presentation: entry.presentation,
           error: entry.error,
           signInPopup: this.signIn.state(id),
+          ...owner,
         };
         const picker = this.picker.state(id);
         if (picker) tab.picker = picker;
@@ -241,6 +275,125 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       if (suspended) tab.suspended = true;
       return tab;
     });
+  }
+  /** Records the thread whose agent opened `tab` (BrowserTransport). */
+  recordOpener(tab: string, thread: string): void {
+    const entry = this.entries.get(tab);
+    if (!entry || entry.thread === thread) return;
+    entry.thread = thread;
+    this.publish();
+  }
+  /** Whether the tab is open (live or suspended). */
+  hasTab(tab: string): boolean {
+    return this.entries.has(tab);
+  }
+  /** The tab's address as the user sees it. */
+  tabUrl(tab: string): string {
+    const entry = this.entries.get(tab);
+    if (!entry) return "about:blank";
+    const wc = entry.live?.view.webContents;
+    return wc && !wc.isDestroyed() ? wc.getURL() || entry.requestedUrl : entry.requestedUrl;
+  }
+  /**
+   * Marks the tab as handed to the user (or gives it back with null). A handed-off tab stays live
+   * (the budget never suspends it) and the Browser panel shows the request on it.
+   */
+  setHandoff(tab: string, handoff: NonNullable<ProjectBrowserTab["handoff"]> | null): void {
+    const entry = this.entries.get(tab);
+    if (!entry) return;
+    entry.handoff = handoff;
+    this.publish();
+    this.scheduleBudget();
+  }
+  /**
+   * A hand-off takes the tab from every agent before anything is handed over: new agent CDP use
+   * refuses, calls in flight are cut off (their results dropped), the agent's session hold ends
+   * (its dialog scopes and emulation with it), and this waits until no agent call is in flight.
+   * False when that did not happen within HOLD_DRAIN_MS, or the tab is gone: the hold is lifted.
+   */
+  async holdAgents(tab: string): Promise<boolean> {
+    const entry = this.entries.get(tab);
+    if (!entry) return false;
+    this.agentHolds.add(tab);
+    this.agentCutoffs.get(tab)?.abort(new BrowserTabHeldError());
+    this.agentCutoffs.delete(tab);
+    const page = entry.live;
+    if (page && !page.view.webContents.isDestroyed()) {
+      page.automation.beforeAgentRelease();
+      page.automation.clearEmulation();
+      page.cdp.release("agent");
+    }
+    const deadline = Date.now() + HOLD_DRAIN_MS;
+    while (entry.agentBusy > 0) {
+      if (Date.now() >= deadline || this.entries.get(tab) !== entry) {
+        this.agentHolds.delete(tab);
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return this.entries.get(tab) === entry;
+  }
+  /** Agents may use the tab again (the hand-off ended, or never started). */
+  releaseAgents(tab: string): void {
+    this.agentHolds.delete(tab);
+  }
+  private refuseHeld(tab: string): void {
+    if (this.agentHolds.has(tab)) throw new BrowserTabHeldError();
+  }
+  /** Starts withholding what the tab's pages log and send, for this page and every later one. */
+  beginWithholding(tab: string): void {
+    const entry = this.entries.get(tab);
+    if (!entry) return;
+    entry.withholding ??= { requests: 0, messages: 0 };
+    entry.live?.automation.beginWithholding();
+  }
+  /** Stops withholding; returns what was withheld since it began, across every page meanwhile. */
+  endWithholding(tab: string): { requests: number; messages: number } {
+    const entry = this.entries.get(tab);
+    if (!entry || entry.withholding === null) return { requests: 0, messages: 0 };
+    const carried = entry.withholding;
+    entry.withholding = null;
+    const live = entry.live?.automation.endWithholding() ?? { requests: 0, messages: 0 };
+    return {
+      requests: carried.requests + live.requests,
+      messages: carried.messages + live.messages,
+    };
+  }
+  /**
+   * Evaluates `code` in the tab's main world, outside the agent's CDP session and its guards: the
+   * hand-off's own probe and scrub, which must work while the user types in the tab. With
+   * `allFrames`, also in every subframe (cross-origin ones included), each on its own. Returns one
+   * value per frame; a frame that failed or timed out gives undefined. A suspended tab gives [].
+   */
+  async evaluateInFrames(
+    tab: string,
+    code: string,
+    options: { allFrames: boolean; timeoutMs: number },
+  ): Promise<unknown[]> {
+    const wc = this.entries.get(tab)?.live?.view.webContents;
+    if (!wc || wc.isDestroyed()) return [];
+    const main = wc.mainFrame;
+    const frames = options.allFrames
+      ? [main, ...main.framesInSubtree.filter((f) => f !== main)]
+      : [main];
+    return Promise.all(
+      frames.map(
+        (frame) =>
+          new Promise<unknown>((resolve) => {
+            const timer = setTimeout(() => resolve(undefined), options.timeoutMs);
+            frame.executeJavaScript(code).then(
+              (value: unknown) => {
+                clearTimeout(timer);
+                resolve(value);
+              },
+              () => {
+                clearTimeout(timer);
+                resolve(undefined);
+              },
+            );
+          }),
+      ),
+    );
   }
   /** The tab's dialogs, diagnostics, human-input guard and emulation (BrowserTransport). */
   automation(tab: string): EmbeddedTabAutomation | undefined {
@@ -300,6 +453,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       attach: (signal) => this.withAgentCdp(id, signal, async () => undefined),
       send: (method, params, signal) => this.send(id, method, params, signal),
     });
+    // A page made while the tab is with the user withholds from its first entry.
+    if (entry.withholding !== null) automation.beginWithholding();
     const page: LivePage = { view, host, cdp, focusEmulation: false, automation };
     // Only the tab's current page may change the tab. Electron destroys contents asynchronously, so
     // a page that was torn down (closed, or replaced when the tab gets a new page) can still emit
@@ -431,6 +586,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     const entry: TabEntry = {
       live: null,
       project,
+      thread: null,
+      handoff: null,
+      withholding: null,
       presentation: "background",
       error: null,
       requestedUrl: target,
@@ -628,6 +786,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   async show(tab: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
+    this.refuseHeld(tab);
     // Agent presentation never creates a native window. The user can view
     // this retained tab in the workspace panel or explicitly choose Pop out.
     this.entry(tab);
@@ -638,6 +797,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     // Remove ownership before Electron emits nested close/destroy events. A closing guest
     // must never be reparented or asked to close again from its own destroyed callback.
     this.entries.delete(tab);
+    this.agentCutoffs.delete(tab);
+    this.agentHolds.delete(tab);
     this.signIn.cancel(tab);
     const page = entry.live;
     entry.live = null;
@@ -656,6 +817,13 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    * debugger session, then the page itself. `destroyed` names the side Electron already destroyed.
    */
   private teardownPage(id: string, page: LivePage, destroyed?: "guest" | "host"): void {
+    // What this page withheld still counts for the tab's hand-off.
+    const withholding = this.entries.get(id)?.withholding;
+    if (withholding) {
+      const counts = page.automation.endWithholding();
+      withholding.requests += counts.requests;
+      withholding.messages += counts.messages;
+    }
     // Settles a pending pick before the session it runs on goes away.
     void this.picker.end(id, "destroyed");
     page.automation.dispose();
@@ -667,6 +835,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
   }
   async close(tab: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
+    // An agent's close never takes a tab a hand-off holds, even one begun since the action's start.
+    this.refuseHeld(tab);
     this.destroy(tab);
   }
   async command(input: ProjectBrowserCommand): Promise<void> {
@@ -854,13 +1024,26 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     run: (cdp: CdpLease) => Promise<T>,
   ): Promise<T> {
     signal.throwIfAborted();
+    this.refuseHeld(tab);
     this.guard(tab);
+    // A hand-off cuts off every call in flight on the tab at once (holdAgents).
+    let cutoff = this.agentCutoffs.get(tab);
+    if (!cutoff) {
+      cutoff = new AbortController();
+      this.agentCutoffs.set(tab, cutoff);
+    }
+    const handedOff = cutoff.signal;
+    const cutOff = new Promise<never>((_resolve, reject) => {
+      handedOff.addEventListener("abort", () => reject(new BrowserTabHeldError()), { once: true });
+    });
+    cutOff.catch(() => undefined);
     // A suspended tab reloads first, outside the 15 s guard; the agent's use holds it live. A live
     // tab goes on without yielding.
     const { loading } = this.startWake(tab, signal);
     if (loading) {
       await loading;
       // While it reloaded, the user may have armed a sign-in grant or a popup may have opened.
+      this.refuseHeld(tab);
       this.guard(tab);
     }
     const entry = this.entry(tab);
@@ -874,6 +1057,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       cdp.release("agent");
     };
     signal.addEventListener("abort", release, { once: true });
+    handedOff.addEventListener("abort", release, { once: true });
     entry.agentBusy++;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -892,6 +1076,9 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
           }
           await page.automation.activate(); // Console capture back on, idle timer re-armed.
           signal.throwIfAborted();
+          // Cut off while it waited (the race has already refused it): another holder may keep
+          // the session open, so it must not send now.
+          if (handedOff.aborted) throw new BrowserTabHeldError();
           return run(cdp);
         })(),
         new Promise<never>((_resolve, reject) => {
@@ -900,15 +1087,20 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
             reject(new Error("Browser command timed out."));
           }, 15_000);
         }),
+        cutOff,
       ]);
       signal.throwIfAborted();
+      // Nothing read while a hand-off holds the tab leaves, whenever the call started.
+      this.refuseHeld(tab);
       return value;
     } catch (error) {
       if (first) release();
+      if (this.agentHolds.has(tab)) throw new BrowserTabHeldError();
       throw error;
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", release);
+      handedOff.removeEventListener("abort", release);
       entry.agentBusy--;
       // No longer pinned. While the agent's hold lasts nothing changes, and a check is already due
       // at its end; plan at once only when the hold is gone (emergency stop during the call).
@@ -923,6 +1115,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    * once in total); a page still loading after that is used as it is.
    */
   async wake(tab: string, signal: AbortSignal): Promise<BrowserTabRevival> {
+    this.refuseHeld(tab);
     const { entry, loading, fresh } = this.startWake(tab, signal);
     if (loading) await loading;
     if (!entry.reloadUnreported) return null;
@@ -968,6 +1161,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    */
   async beginAgentMutation(tab: string, signal: AbortSignal): Promise<() => void> {
     signal.throwIfAborted();
+    this.refuseHeld(tab);
     const entry = this.entries.get(tab);
     // Closed meanwhile: the action's own lookup reports it.
     if (!entry) return () => undefined;
@@ -1046,7 +1240,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
       this.lastShown === id ||
       entry.presentation === "window" ||
       entry.busy > 0 ||
-      entry.agentBusy > 0
+      entry.agentBusy > 0 ||
+      entry.handoff !== null
     )
       return true;
     const signIn = this.signIn.state(id);

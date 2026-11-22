@@ -24,6 +24,8 @@ import { noteComputerSetupMissingOnce } from "../computerUse/computerSetupNotice
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
 import { hasPendingUserActionRequest } from "@ryco/shared/threadActivity";
+import { projectBrowserKey, showProjectBrowserTab } from "../browser/browserState";
+import { isDesktopOwnBackend } from "../browser/useBrowserMode";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { taskDraftSend } from "./tasks/taskDraft";
 import {
@@ -7132,10 +7134,22 @@ export default function ChatView(props: ChatViewProps) {
       setTerminalFocusRequestId((value) => value + 1);
     };
   };
+  // A browser hand-off's tab opens in this workspace's Browser panel, when this window has it
+  // (the desktop app's own tabs).
+  const showUserActionBrowserTab = (request: UserActionRequestView) => {
+    const tab = request.target;
+    if (tab === null || !isDesktopOwnBackend(environmentId)) return null;
+    const project = projectBrowserKey(environmentId, activeWorkspaceRoot ?? null);
+    return () => {
+      if (onOpenBrowserPanel) showProjectBrowserTab(project, tab, onOpenBrowserPanel);
+    };
+  };
   const userActionShowHandler = (request: UserActionRequestView) => {
     switch (request.surface) {
       case "terminal":
         return showUserActionTerminal(request);
+      case "browser":
+        return showUserActionBrowserTab(request);
       default:
         return null;
     }

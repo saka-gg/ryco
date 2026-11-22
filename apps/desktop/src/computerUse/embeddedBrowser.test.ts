@@ -12,7 +12,8 @@ import {
   fakeTab,
   resetFakeElectron,
 } from "./embeddedBrowser.fixtures.ts";
-import { EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
+import { EmbeddedTabAutomation } from "./browserTabAutomation.ts";
+import { BrowserTabHeldError, EmbeddedComputerBrowser } from "./embeddedBrowser.ts";
 import {
   BROWSER_IDLE_SUSPEND_MS,
   BROWSER_LIVE_TAB_LIMIT,
@@ -21,8 +22,10 @@ import {
   BROWSER_TAB_LIMIT,
 } from "./browserTabBudget.ts";
 import { BrowserComputerDriver } from "./browser.ts";
+import { BrowserHandoffs } from "./browserHandoffs.ts";
 import { INSPECT_MODE_OFF, NO_AUTO_ATTACH } from "../browser/elementPicker.ts";
 import { BROWSER_ELEMENT_PAGE_NODE_FUNCTION } from "@ryco/shared/browserElementPickScript";
+import { BROWSER_SCRUB_SCRIPT } from "@ryco/shared/browserHandoff";
 import { COMPUTER_TARGET_CLAIM_MS, type ComputerOperationContext } from "./policy.ts";
 
 const browsers: EmbeddedComputerBrowser[] = [];
@@ -566,6 +569,47 @@ describe("agent automation", () => {
     expect(automationOf(browser, tab.id)).not.toBe(first);
     await browser.close(tab.id, signal());
     expect(browser.automation(tab.id)).toBeUndefined();
+  });
+
+  it("withholds on every page a handed-off tab gets, and counts them all", async () => {
+    const begin = vi.spyOn(EmbeddedTabAutomation.prototype, "beginWithholding");
+    const end = vi
+      .spyOn(EmbeddedTabAutomation.prototype, "endWithholding")
+      .mockReturnValueOnce({ requests: 2, messages: 1 })
+      .mockReturnValueOnce({ requests: 1, messages: 0 });
+    try {
+      const browser = newBrowser();
+      const tab = await browser.open("https://example.com/", false, signal());
+      const inner = internals(browser);
+      const entry = inner.entries.get(tab.id)!;
+      // Suspended when it is handed over: no page yet, the tab still withholds.
+      const first = entry.live!;
+      entry.live = null;
+      inner.teardownPage(tab.id, first);
+      browser.beginWithholding(tab.id);
+      expect(begin).not.toHaveBeenCalled();
+      // Revived on Show: the new page withholds from its first entry.
+      entry.live = inner.createPage(entry, tab.id).page;
+      expect(begin).toHaveBeenCalledTimes(1);
+      // Its renderer crashes and the tab gets another page: that one withholds too, and what
+      // the torn-down page withheld still counts.
+      const second = entry.live;
+      entry.live = null;
+      inner.teardownPage(tab.id, second);
+      entry.live = inner.createPage(entry, tab.id).page;
+      expect(begin).toHaveBeenCalledTimes(2);
+      expect(browser.endWithholding(tab.id)).toEqual({ requests: 3, messages: 1 });
+      // Ended: a later page does not withhold.
+      const third = entry.live;
+      entry.live = null;
+      inner.teardownPage(tab.id, third);
+      entry.live = inner.createPage(entry, tab.id).page;
+      expect(begin).toHaveBeenCalledTimes(2);
+      expect(end).toHaveBeenCalledTimes(2);
+    } finally {
+      begin.mockRestore();
+      end.mockRestore();
+    }
   });
 
   it("opens agent tabs whose page answers CDP only once it starts loading", async () => {
@@ -1969,5 +2013,213 @@ describe("uploaded files", () => {
     expect(reset).toHaveBeenCalledExactlyOnceWith(tab.id);
     // The tab itself stays (the user can reload it).
     expect((await browser.tabs(signal())).map(({ id }) => id)).toContain(tab.id);
+  });
+});
+
+describe("a hand-off takes the tab from agents", () => {
+  const PAGE = { title: "Sign in", url: "https://example.com/login", text: "", elements: [] };
+  const handoff = {
+    op: "begin" as const,
+    requestId: `user-action-${"a".repeat(32)}`,
+    threadId: "thread",
+    message: "Sign in to Example.",
+    need: "sign-in" as const,
+    ttlMs: 600_000,
+  };
+  function context(args: Record<string, unknown>): ComputerOperationContext {
+    return {
+      request: {
+        sessionId: "session",
+        threadId: ThreadId.make("thread"),
+        turnId: TurnId.make("turn"),
+        tool: "browser",
+        args,
+      },
+      signal: signal(),
+      check: vi.fn(),
+      authorizeApp: vi.fn(async () => undefined),
+      authorizeForeground: vi.fn(async () => undefined),
+      claim: vi.fn(),
+      activity: vi.fn(async () => undefined),
+    };
+  }
+  /** A tab whose page never matches a wait; `evaluate` answers the page's Runtime.evaluate calls. */
+  async function setup(
+    evaluate: (count: number) => unknown = () => ({ result: { value: { selector: false } } }),
+  ) {
+    const browser = newBrowser();
+    let evaluated = 0;
+    const tab = await browser.open("https://example.com/login", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    // The scrub answers how many fields it emptied; the probes answer the page.
+    contents.mainFrameExecuteJavaScript.mockImplementation(async (code) =>
+      code === BROWSER_SCRUB_SCRIPT
+        ? 0
+        : JSON.stringify({ href: contents.url, title: "Sign in", ready: "complete" }),
+    );
+    contents.debugger.respond = (method) => {
+      if (method === "Page.getFrameTree")
+        return { frameTree: { frame: { id: "F", loaderId: "L" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 3 };
+      if (method === "Runtime.evaluate") return evaluate(++evaluated);
+      return {};
+    };
+    const handoffs = new BrowserHandoffs(browser);
+    const driver = new BrowserComputerDriver(new Map([["ryco", browser]]), { handoffs });
+    return { browser, tab, contents, handoffs, driver };
+  }
+  /** A promise and the function that settles it: a milestone a test awaits. */
+  function milestone() {
+    let reached!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    return { promise, reached };
+  }
+
+  it("ends a wait started before it with the refusal, and sends no CDP after it began", async () => {
+    const polling = milestone();
+    const { tab, contents, handoffs, driver } = await setup((count) => {
+      if (count >= 2) polling.reached();
+      return { result: { value: { selector: false } } };
+    });
+    const waiting = driver.execute(
+      context({
+        action: "wait",
+        tab: tab.id,
+        selector: "input[type=password]:not(:placeholder-shown)",
+        timeout: 30_000,
+      }),
+      "ryco",
+    );
+    const outcome = waiting.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error: String(error) }),
+    );
+    await polling.promise; // The wait is polling.
+    expect(await handoffs.handle({ ...handoff, tab: tab.id })).toMatchObject({
+      status: "handed-off",
+    });
+    const sentAtBegin = contents.debugger.commands.length;
+    const ended = await outcome;
+    // The normal refusal, no match and no elapsed time.
+    expect(ended).toEqual({ error: expect.stringMatching(/is with the user for your request/) });
+    expect(JSON.stringify(ended)).not.toMatch(/matched|elapsedMs/);
+    // The wait has ended, so its loop sends nothing more; nothing was sent since the hand-off.
+    expect(contents.debugger.commands.length).toBe(sentAtBegin);
+  });
+
+  it("refuses an action that starts while it is begun or after, without touching the page", async () => {
+    const { tab, contents, handoffs, driver } = await setup();
+    let probed!: () => void;
+    const probing = milestone();
+    // The hand-off's first probe waits, so the action below starts while it is being begun.
+    contents.mainFrameExecuteJavaScript.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          probed = () =>
+            resolve(JSON.stringify({ href: contents.url, title: "Sign in", ready: "complete" }));
+          probing.reached();
+        }),
+    );
+    const begun = handoffs.handle({ ...handoff, tab: tab.id });
+    await probing.promise;
+    const sent = contents.debugger.commands.length;
+    await expect(
+      driver.execute(context({ action: "observe", tab: tab.id }), "ryco"),
+    ).rejects.toThrow(/is with the user for your request/);
+    probed();
+    expect(await begun).toMatchObject({ status: "handed-off" });
+    await expect(
+      driver.execute(context({ action: "screenshot", tab: tab.id }), "ryco"),
+    ).rejects.toThrow(/is with the user for your request/);
+    expect(contents.debugger.commands.length).toBe(sent);
+  });
+
+  it("never lets an observe running when it begins return the page from after it began", async () => {
+    let answer: ((value: unknown) => void) | undefined;
+    const reading = milestone();
+    const { tab, handoffs, driver } = await setup(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+          reading.reached();
+        }),
+    );
+    const observing = driver.execute(context({ action: "observe", tab: tab.id }), "ryco").then(
+      (value) => JSON.stringify(value),
+      (error: unknown) => `error: ${String(error)}`,
+    );
+    await reading.promise; // The observe's read is in flight.
+    expect(await handoffs.handle({ ...handoff, tab: tab.id })).toMatchObject({
+      status: "handed-off",
+    });
+    // The page answers only now, with what the user typed meanwhile.
+    answer?.({ result: { value: { ...PAGE, text: "hunter2" } } });
+    const ended = await observing;
+    expect(ended).toMatch(/^error: .*is with the user for your request/);
+    expect(ended).not.toContain("hunter2");
+  });
+
+  it("keeps the tab when the hand-off begins between an agent's close check and the close", async () => {
+    const { browser, tab, handoffs, driver } = await setup();
+    const closing = context({ action: "close", tab: tab.id });
+    // The driver awaits the activity report after its hand-off check: the hand-off begins there.
+    closing.activity = vi.fn(async () => {
+      expect(await handoffs.handle({ ...handoff, tab: tab.id })).toMatchObject({
+        status: "handed-off",
+      });
+    });
+    await expect(driver.execute(closing, "ryco")).rejects.toThrow(
+      /is with the user for your request/,
+    );
+    expect(browser.state().tabs.map(({ id }) => id)).toContain(tab.id);
+    // The transport refuses on its own too (the driver's mutation bracket caught this one first),
+    // and so do show and the bracket.
+    await expect(browser.close(tab.id, signal())).rejects.toThrow(BrowserTabHeldError);
+    expect(browser.state().tabs.map(({ id }) => id)).toContain(tab.id);
+    await expect(browser.show(tab.id, signal())).rejects.toThrow(BrowserTabHeldError);
+    await expect(browser.beginAgentMutation(tab.id, signal())).rejects.toThrow(BrowserTabHeldError);
+    // Given back: agents may close it again.
+    await handoffs.handle({ op: "end", requestId: handoff.requestId, outcome: "done" });
+    await browser.close(tab.id, signal());
+    expect(browser.state().tabs).toEqual([]);
+  });
+
+  it("never sends a cut-off call's command, also while another holder keeps the session", async () => {
+    const browser = newBrowser();
+    const tab = await browser.open("https://example.com/", false, signal(), "project");
+    const { contents } = fakeTab(tab.id);
+    let ready!: () => void;
+    const waiting = milestone();
+    // The session's first ready step (focus emulation) waits until the test lets it go.
+    contents.debugger.respond = (method) =>
+      method === "Emulation.setFocusEmulationEnabled"
+        ? new Promise((resolve) => {
+            ready = () => resolve({});
+            waiting.reached();
+          })
+        : {};
+    // Another holder (a user's element pick) keeps the session open through the hold.
+    internals(browser).entries.get(tab.id)!.live!.cdp.acquire("picker");
+    const call = browser.send(
+      tab.id,
+      "Runtime.evaluate",
+      { expression: "document.title" },
+      signal(),
+    );
+    const outcome = call.then(
+      () => "sent",
+      (error: unknown) => String(error),
+    );
+    await waiting.promise; // The agent's call waits for the ready steps.
+    expect(await browser.holdAgents(tab.id)).toBe(true);
+    expect(await outcome).toMatch(/with the user for a hand-off/);
+    ready();
+    await flush();
+    await flush();
+    const methods = contents.debugger.commands.map(({ method }) => method);
+    expect(methods).not.toContain("Runtime.evaluate");
+    browser.releaseAgents(tab.id);
   });
 });
