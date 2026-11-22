@@ -166,11 +166,13 @@ export class FakeWebContents extends EventEmitter {
     readonly frameTreeNodeId: number;
     readonly url: string;
     readonly executeJavaScript: (code: string) => Promise<unknown>;
+    readonly framesInSubtree: readonly unknown[];
   } {
     return {
       frameTreeNodeId: this.id,
       url: this.url,
       executeJavaScript: this.mainFrameExecuteJavaScript,
+      framesInSubtree: [],
     };
   }
   /** The main frame's `executeJavaScript` (WebFrameMain); resolves at once unless a test holds it. */

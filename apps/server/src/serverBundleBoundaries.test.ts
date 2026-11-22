@@ -532,6 +532,10 @@ describe("server boot import boundaries", () => {
       "packages/shared/src/userActionRequests.ts",
       // Shared with secret requests: locks, expiry timers, restart rescheduling.
       "apps/server/src/nodeRequests/nodeRequestLifecycle.ts",
+      // The browser's hand-off (`ryco_browser` action `handoff`) and its rules.
+      "apps/server/src/agentControl/Mcp/browserHandoffTool.ts",
+      "packages/shared/src/browserHandoff.ts",
+      "packages/contracts/src/browserHandoff.ts",
     ];
     const boot = staticGraph("src/cliMain.ts").files;
     expect(userActionRequests.filter((file) => boot.includes(file))).toEqual([]);

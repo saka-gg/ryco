@@ -396,6 +396,15 @@ export class EmbeddedTabAutomation implements BrowserTabAutomation {
     return this.recorder.read(kind, limit);
   }
 
+  /** While the user has the tab (a hand-off), what the page logs and sends is withheld. */
+  beginWithholding(): void {
+    this.recorder.beginWithholding();
+  }
+
+  endWithholding(): { requests: number; messages: number } {
+    return this.recorder.endWithholding();
+  }
+
   recordEmulation(change: {
     viewport?: { width: number; height: number } | null;
     colorScheme?: "dark" | "light" | null;
