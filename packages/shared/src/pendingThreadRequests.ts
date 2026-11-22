@@ -1,7 +1,8 @@
 /**
  * Every request a thread waits on the user for: the provider callbacks (approvals and questions,
  * `derivePendingProviderCallbackRequests` in `@ryco/shared/threadActivity`) and the node's own
- * secret requests (`@ryco/shared/secretRequestState`). The node counts them as pending input
+ * secret requests (`@ryco/shared/secretRequestState`) and user action requests (a browser tab or
+ * terminal handed to the user, `@ryco/shared/userActionRequestState`). The node counts them as pending input
  * (settlement, queued wakes, restart continuation).
  *
  * Its own module: the web boot chunk carries `threadActivity`, and only the node reads the
@@ -11,6 +12,7 @@
  */
 import type { PendingThreadRequestActivity } from "./pendingRequestOrder.ts";
 import { pendingSecretRequests } from "./secretRequestState.ts";
+import { pendingUserActionRequests } from "./userActionRequestState.ts";
 import {
   derivePendingProviderCallbackRequests,
   type PendingProviderCallbackRequest,
@@ -18,7 +20,7 @@ import {
 
 export interface PendingThreadRequest {
   readonly requestId: string;
-  readonly kind: PendingProviderCallbackRequest["kind"] | "secret";
+  readonly kind: PendingProviderCallbackRequest["kind"] | "secret" | "user-action";
   readonly nonBlocking?: boolean;
   readonly turnId: string | null;
 }
@@ -36,7 +38,8 @@ export interface PendingThreadRequestState {
  * its `secret.resolved` activity (answered, declined or expired) or, given `nowMs`, at its
  * expiry, so a lost expiry timer or a failed record cannot hold the thread for good. Secret
  * requests come from `pendingSecretRequests` (`@ryco/shared/secretRequestState`), so this and
- * the card always agree.
+ * the card always agree. A `user-action` request (a hand-off of a browser tab or terminal) works
+ * the same way, from `pendingUserActionRequests`.
  */
 export function derivePendingThreadRequests(
   activities: ReadonlyArray<PendingThreadRequestActivity>,
@@ -49,21 +52,28 @@ export function derivePendingThreadRequests(
       turnId: request.turnId,
       kind: "secret" as const,
     })),
+    ...pendingUserActionRequests(activities, nowMs).map((request) => ({
+      requestId: request.requestId,
+      turnId: request.turnId,
+      kind: "user-action" as const,
+    })),
   ];
 }
 
-/** With `nowMs`, an expired secret request no longer counts (see {@link derivePendingThreadRequests}). */
+/** With `nowMs`, an expired secret or user action request no longer counts (see {@link derivePendingThreadRequests}). */
 export function derivePendingThreadRequestState(
   activities: ReadonlyArray<PendingThreadRequestActivity>,
   nowMs?: number,
 ): PendingThreadRequestState {
   const requests = derivePendingThreadRequests(activities, nowMs);
   const pendingApprovalCount = requests.filter((request) => request.kind === "approval").length;
-  // A pending secret request waits on the user like a blocking question: it holds settlement,
-  // queued wakes and restart continuation the same way.
+  // A pending secret or user action request waits on the user like a blocking question: it
+  // holds settlement, queued wakes and restart continuation the same way.
   const pendingUserInputCount = requests.filter(
     (request) =>
-      (request.kind === "user-input" && !request.nonBlocking) || request.kind === "secret",
+      (request.kind === "user-input" && !request.nonBlocking) ||
+      request.kind === "secret" ||
+      request.kind === "user-action",
   ).length;
   return {
     pendingApprovalCount,

@@ -14,6 +14,7 @@ import { makeThreadLocalServerHandlers } from "./threadLocalServersRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { makeSecretRequestHandlers } from "./secretRequestRpc.ts";
+import { makeUserActionRequestHandlers } from "./userActionRequestRpc.ts";
 import { Effect, Layer, Option, type Scope, type Stream } from "effect";
 import { WsDeviceRpcGroup } from "@ryco/contracts";
 import { WsApplicationRpcGroup } from "@ryco/contracts/project-copy-rpc";
@@ -63,6 +64,7 @@ type WsRpcHandlerMap = ReturnType<typeof makeAgentControlHandlers> &
   ReturnType<typeof makeThreadForkHandlers> &
   ReturnType<typeof makeThreadLocalServerHandlers> &
   ReturnType<typeof makeSecretRequestHandlers> &
+  ReturnType<typeof makeUserActionRequestHandlers> &
   ReturnType<typeof makeStorageHandlers> &
   ReturnType<typeof makeLifecycleHandlers> &
   ReturnType<typeof makeDailyRecapHandlers> &
@@ -108,6 +110,7 @@ const makeWsRpcHandlers = (
       ...makeThreadForkHandlers(ctx),
       ...makeThreadLocalServerHandlers(ctx),
       ...makeSecretRequestHandlers(ctx),
+      ...makeUserActionRequestHandlers(ctx),
       ...makeStorageHandlers(ctx),
       ...makeLifecycleHandlers(ctx),
       ...makeDailyRecapHandlers(ctx),

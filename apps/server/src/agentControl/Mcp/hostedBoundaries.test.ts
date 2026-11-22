@@ -98,6 +98,7 @@ describe("pre-auth server environment descriptor", () => {
       "threadTriage",
       "usageLimitRecovery",
       "usagePriceOverrides",
+      "userActionRequests",
       "workingTreeComparison",
       "worktreeNotes",
       "worktreeSubmoduleSettings",

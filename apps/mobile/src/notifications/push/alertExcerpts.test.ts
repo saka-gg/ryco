@@ -104,5 +104,10 @@ describe("alert excerpts on the phone", () => {
     expect(read(record({ rq: undefined }))).toBeNull();
     // The excerpt must match the alert's kind.
     expect(read(record({ k: "input" }))).toBeNull();
+    // A user action request's label is the alert's line only: no provisional card.
+    expect(
+      read(record({ k: "input", rq: undefined, x: { l: { t: "Login required in browser" } } })),
+    ).toBeNull();
+    expect(read(record({ x: { l: { t: "Login required in browser" } } }))).toBeNull();
   });
 });

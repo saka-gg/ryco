@@ -117,6 +117,10 @@ and the thread opens with its card already there. Older phones ignore it; older 
 - `u`, a question: its request id, its request event id (`ev`, the key of the app's answer draft),
   and its questions with header, text, option labels (descriptions left out) and multi-select.
   `c` says questions or options were left out to fit.
+- `l`, a label: an input alert for a thread that waits on a user action request (a browser tab or
+  terminal handed to the user) and has no open question carries only the request's fixed label
+  (`{ "l": { "t": "Login required in browser" } }`, at most 80 characters), never the agent's
+  message, a URL or anything the page or terminal showed.
 - At most 1 KB of JSON (`PUSH_ALERT_EXCERPT_MAX_BYTES`), and the whole plaintext must fit the seal
   the Hub takes: the reason goes first, then questions and options, then text is cut, ending with
   "…". When nothing fits, the alert goes without one. A failed read never holds the alert up.

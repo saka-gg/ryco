@@ -351,10 +351,12 @@ export function floatingThreadAttention(input: {
   readonly agentControlProposals: number;
   readonly userInputs: number;
   readonly secretRequests: number;
+  /** A browser tab or terminal handed to the reader (a sign-in, a code): it waits for input. */
+  readonly userActionRequests: number;
 }): "approval" | "question" | null {
   return input.approvals > 0 || input.agentControlProposals > 0
     ? "approval"
-    : input.userInputs > 0 || input.secretRequests > 0
+    : input.userInputs > 0 || input.secretRequests > 0 || input.userActionRequests > 0
       ? "question"
       : null;
 }

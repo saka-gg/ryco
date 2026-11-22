@@ -2,6 +2,7 @@ import type { ThreadNotificationEvent } from "@ryco/client-runtime/state/threads
 import { ApprovalRequestId, EnvironmentId, EventId, ThreadId, TurnId } from "@ryco/contracts";
 import {
   PUSH_ALERT_EXCERPT_MAX_BYTES,
+  PUSH_ALERT_LABEL_MAX_LENGTH,
   PUSH_ALERT_REQUEST_ID_MAX_LENGTH,
   PUSH_ALERT_TITLE_MAX_LENGTH,
   PushAlertPlaintext,
@@ -18,6 +19,7 @@ import {
   clampSealedMaxLength,
   fitAlertPlaintext,
   inputExcerpt,
+  labelExcerpt,
   maxPlaintextBytes,
 } from "./alertExcerpt.ts";
 import { sealAttentionDeliveries } from "./attentionPublisher.ts";
@@ -88,6 +90,24 @@ describe("alert excerpts", () => {
     ).toEqual({ u: { rq: "q", qs: [{ id: "only", h: "Name", q: "What name?" }] } });
   });
 
+  it("carries a user action request's fixed label only, within its cap", () => {
+    expect(labelExcerpt("  Login required in browser ")).toEqual({
+      l: { t: "Login required in browser" },
+    });
+    expect(labelExcerpt(" ")).toBeNull();
+    const long = labelExcerpt("x".repeat(200))!;
+    expect("l" in long && long.l.t.length).toBe(PUSH_ALERT_LABEL_MAX_LENGTH);
+    // A label goes whole or not at all.
+    const base = { ...worstBase("input"), t: "short" };
+    const excerpt = labelExcerpt("Login required in browser");
+    const fitted = JSON.parse(
+      new TextDecoder().decode(fitAlertPlaintext({ base, excerpt, maxBytes: 975 })),
+    );
+    expect(fitted.x).toEqual({ l: { t: "Login required in browser" } });
+    const tight = fitAlertPlaintext({ base, excerpt, maxBytes: bytes(base) + 10 });
+    expect(JSON.parse(new TextDecoder().decode(tight))).toEqual(base);
+  });
+
   it("names the legacy size until a Hub says it takes more, within known bounds", () => {
     expect(clampSealedMaxLength(undefined)).toBe(PUSH_SEALED_LEGACY_MAX_LENGTH);
     expect(clampSealedMaxLength(10)).toBe(PUSH_SEALED_LEGACY_MAX_LENGTH);
@@ -104,6 +124,7 @@ describe("alert excerpts", () => {
         approvalExcerpt({ requestKind: "command", detail: longCommand, reason: "x".repeat(400) }),
       ],
       ["question", bigQuestion],
+      ["label", labelExcerpt("Login required in browser")!],
     ] as const) {
       it(`fits a worst-case ${name} into ${sealedMaxLength} sealed characters`, () => {
         const base = worstBase(name === "approval" ? "approval" : "input");

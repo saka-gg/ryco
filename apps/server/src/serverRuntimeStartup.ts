@@ -5,6 +5,7 @@ import {
   pendingCallbackInvalidation,
 } from "./orchestration/approvalResponses.ts";
 import { pendingSecretRequests } from "@ryco/shared/secretRequestState";
+import { pendingUserActionRequests } from "@ryco/shared/userActionRequestState";
 import { derivePendingProviderCallbackRequests } from "@ryco/shared/threadActivity";
 import {
   TURN_FINALIZATION_REASON,
@@ -751,6 +752,35 @@ const rescheduleSecretRequestExpiries = (
     : Effect.void;
 
 /**
+ * User action requests (a browser tab or terminal handed to the user) outlive a restart, but
+ * their expiry timers do not: set them again. Their module loads only when a request is pending.
+ */
+const rescheduleUserActionRequestExpiries = (
+  snapshot: OrchestrationReadModel,
+  engine: typeof OrchestrationEngineService.Service,
+) =>
+  snapshot.threads.some(
+    (thread) =>
+      thread.deletedAt === null && pendingUserActionRequests(thread.activities).length > 0,
+  )
+    ? Effect.promise(() => import("./userActionRequests/userActionRequests.ts")).pipe(
+        Effect.flatMap((module) =>
+          module.reconcileUserActionRequestsAfterRestart(
+            { engine, findThreadInArray },
+            snapshot.threads,
+          ),
+        ),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to schedule user action request expiries", {
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      )
+    : Effect.void;
+
+/**
  * Settle projected provider sessions whose native process did not survive this
  * server process, and put back to rest the ones a handoff left in the digest
  * error. This runs after the provider/orchestration roots subscribe, but before
@@ -769,6 +799,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   const snapshot = yield* currentCommandReadModel(orchestrationEngine, projectionSnapshotQuery);
   yield* settleStaleProjectedTurns(snapshot);
   yield* rescheduleSecretRequestExpiries(snapshot, orchestrationEngine, projectionSnapshotQuery);
+  yield* rescheduleUserActionRequestExpiries(snapshot, orchestrationEngine);
 
   const liveSessionsExit = yield* Effect.exit(providerService.listSessions());
   if (Exit.isFailure(liveSessionsExit)) {

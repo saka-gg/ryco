@@ -174,6 +174,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
             ...(rpcClient.threads.answerSecretRequest
               ? { answerSecretRequest: rpcClient.threads.answerSecretRequest }
               : {}),
+            ...(rpcClient.threads.answerUserActionRequest
+              ? { answerUserActionRequest: rpcClient.threads.answerUserActionRequest }
+              : {}),
           },
         }
       : {}),

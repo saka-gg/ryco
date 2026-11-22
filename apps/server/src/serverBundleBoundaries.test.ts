@@ -523,6 +523,25 @@ describe("server boot import boundaries", () => {
     expect(monitor.filter((file) => reachable.includes(file))).toEqual(monitor);
   });
 
+  it("loads user action requests (open, answer, wait, expiry) on first use, never at boot", () => {
+    // A surface's tool and the owner's answer load the module through import(); the boot path
+    // keeps the activity kinds, the derivation the pending-input count reads and the surfaces'
+    // tiny hook registry.
+    const userActionRequests = [
+      "apps/server/src/userActionRequests/userActionRequests.ts",
+      "packages/shared/src/userActionRequests.ts",
+      // Shared with secret requests: locks, expiry timers, restart rescheduling.
+      "apps/server/src/nodeRequests/nodeRequestLifecycle.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(userActionRequests.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/ws/userActionRequestRpc.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(userActionRequests.filter((file) => reachable.includes(file))).toEqual(
+      userActionRequests,
+    );
+  });
+
   it("loads secret requests (tool, answer, dotenv writer) on first use, never at boot", () => {
     // `ryco_request_secret` loads through `withLazyAgentControlTools`, the owner's answer and the
     // restart's expiry timers through import(); the boot path keeps the activity kinds and the
