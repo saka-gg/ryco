@@ -32,6 +32,41 @@ export const CHANGELOG_PAGE_URL = "https://ryco.space/changelog";
 
 export const CHANGELOG_RELEASES: ReadonlyArray<ChangelogRelease> = [
   {
+    version: "0.1.51",
+    date: "November 22, 2026",
+    dateTime: "2026-11-22",
+    summary:
+      "Agents can now hand a browser tab or a terminal to you when a sign-in, a code or a decision needs a person, and they can work in the same terminals you see. You get a card and a notification, do your part, and the agent carries on.",
+    releaseUrl: `${RELEASE_BASE}/v0.1.51`,
+    highlights: [
+      {
+        title: "Sign-ins the agent hands to you",
+        summary:
+          "When a page in Ryco's browser needs a sign-in, a code or a captcha, the agent hands the tab to you instead of asking for credentials in chat. A card says what is needed, the thread shows Needs your answer and you get a notification. Sign in, and the agent continues by itself once the page moves on, or press Done or Won't do.",
+      },
+      {
+        title: "What you type stays yours",
+        summary:
+          "While a tab is with you, agents cannot read or use it. Before the agent gets it back, password and code fields are emptied, and what the page logged or sent while you were signing in is withheld from the agent.",
+      },
+      {
+        title: "Agents in your terminals",
+        summary:
+          "Agents can run commands in their thread's terminals, read what is on screen, wait for output and answer simple prompts, in the same terminals you see and can type in. An agent's terminal opens as a quiet tab. Typing into a terminal you opened asks you once per task, unless the thread has Full access.",
+      },
+      {
+        title: "Passwords and device codes in the terminal",
+        summary:
+          "When a command waits for a password or a sign-in, the agent hands the terminal to you. The card shows the sign-in link and the device code with Open and Copy, and Show opens that terminal. Agents cannot type into a hidden password prompt, and what you type there never reaches them.",
+      },
+      {
+        title: "Finish a sign-in from another device",
+        summary:
+          "A browser tab that waits for you on your desktop can be opened from another browser or from the iPhone app, still in development: Open tab on the card shows that one tab, for you only, until the hand-off ends.",
+      },
+    ],
+  },
+  {
     version: "0.1.50",
     date: "November 18, 2026",
     dateTime: "2026-11-18",
