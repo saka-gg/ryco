@@ -498,20 +498,21 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   kept as output cursors outside the mirror, so after a rebuild `new` output, a command's output
   and its exit code are still right.
 - **Command ends and exit codes.** zsh and bash terminals start with startup files that mark
-  prompts, command starts and command ends (OSC 133, `terminal/shellIntegration.ts`) and then
-  source the user's own (`$ZDOTDIR` or `~` for zsh, `/etc/bash.bashrc` and `~/.bashrc` for bash).
-  Every mark carries a nonce made for that shell's spawn (`ryco=<nonce>`, handed over in
-  `RYCO_SHELL_MARK_NONCE` and unset before any user file runs; afterwards it lives only in the
-  body of the one function that prints the marks, which `typeset -f` / `declare -f` typed in that
-  shell still shows). Only marks carrying it count, so output that prints a look-alike mark (a
-  file, a test, a remote host, iTerm2's or VS Code's own integration) never ends a command. The
-  terminal manager reads the marks (at the prompt, typed at since, the last exit code) and
-  removes them from the history it stores and from what clients receive: the nonce is never in a
-  history file, `ryco_inspect_thread` or a client. Only the agent mirror gets the raw stream. The
-  files are safe under `setopt nounset` and `set -u`.
-  Other shells, or `RYCO_TERMINAL_SHELL_INTEGRATION=0` in the node's environment, fall back to a
-  guess: the output went quiet at something that looks like a shell prompt and the process table
-  shows the shell idle again; the exit code is then unknown, and results say so.
+  prompts, command starts and command ends (OSC 133, `terminal/shellIntegration.ts`) and then source
+  the user's own (`$ZDOTDIR` or `~` for zsh, `/etc/bash.bashrc` and `~/.bashrc` for bash). Every
+  mark carries a nonce made for that shell's spawn (`ryco=<nonce>`, handed over in
+  `RYCO_SHELL_MARK_NONCE` and unset before any user file runs; afterwards it lives only in the body
+  of the one function that prints the marks, which `typeset -f` / `declare -f` typed in that shell
+  still shows; on Linux `/proc/<pid>/environ` also keeps the spawn's environment after the unset.
+  Both stay inside that one terminal: every spawn gets a new nonce). Only marks carrying it count,
+  so output that prints a look-alike mark (a file, a test, a remote host, iTerm2's or VS Code's own
+  integration) never ends a command. The terminal manager reads the marks (at the prompt, typed at
+  since, the last exit code) and removes them from the history it stores and from what clients
+  receive: the nonce is never in a history file, `ryco_inspect_thread` or a client. Only the agent
+  mirror gets the raw stream. The files are safe under `setopt nounset` and `set -u`. Other shells,
+  or `RYCO_TERMINAL_SHELL_INTEGRATION=0` in the node's environment, fall back to a guess: the output
+  went quiet at something that looks like a shell prompt and the process table shows the shell idle
+  again; the exit code is then unknown, and results say so.
 - **Still running.** A command that outlives its wait keeps running; the result says what it is
   doing: `working`, `waiting-for-input`, `full-screen` or `silent`, with `secret` when the prompt
   asks for hidden input and `sign-in` with the link and code of a device-code or browser sign-in.
@@ -521,11 +522,17 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   otherwise from a secret word at the end of the cursor's own line. `run` and `wait` stop early
   when new output leaves the command waiting for input.
 - **Every agent write is checked first,** in the terminal manager under the thread's lock, so
-  nothing changes between the check and the write. `run` types only once the shell drew its
-  prompt (with marks; a shell whose startup files wait for a key passphrase is refused), when no
-  command runs, when nobody typed at that prompt since (a half-typed line is never extended), and
-  never into hidden input. Where the platform can read the tty's flags and the read fails,
-  nothing is typed; where it cannot (Windows), the screen is the only sign and results say so.
+  nothing changes between the check and the write. `run` types only once the shell drew its prompt
+  (with marks; a shell whose startup files wait for a key passphrase is refused), when no command
+  runs, when nobody typed at that prompt since (a half-typed line is never extended), and never into
+  hidden input. Keys typed while the command before ran are forgotten at the next prompt: what the
+  command read (a pager's `q`) must never leave a refusal behind, so a line typed ahead that the
+  shell then shows can still get the agent's command added to it. The command begins only once the
+  agent mirror parsed every mark the manager had read at that prompt (the mirror parses later), and
+  the write is refused, then tried once more, when the shell printed a mark since: an earlier
+  command's end never counts as the agent's. Where the platform can read the tty's flags and the
+  read fails, nothing is typed; where it cannot (Windows), the screen is the only sign and results
+  say so.
 - **Secrets.** `send` reads the tty's flags on every call and refuses to type text or characters
   while a hidden-input prompt shows, also right after it appeared or when no command seems to run (keys
   such as Ctrl+C and Escape still go through), and the tool tells the agent never to type a

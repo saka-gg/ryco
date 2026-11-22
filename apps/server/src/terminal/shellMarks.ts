@@ -20,6 +20,10 @@ export interface ShellMarkState {
   atPrompt: boolean;
   /** Input reached the shell since it drew that prompt (a half-typed line, or an Enter). */
   inputSincePrompt: boolean;
+  /** Ryco's marks read so far, in order: tells whether a mark came after a given moment. */
+  markCount: number;
+  /** The output cursor of the chunk with the latest mark (set by the manager), 0 before one. */
+  lastMarkSequence: number;
   /** How the last command ended, and the output cursor of that mark. */
   lastEnd: { readonly exitCode: number | null; readonly sequence: number } | null;
   /** Output held back because a mark may continue in the next chunk. */
@@ -30,6 +34,8 @@ export const emptyShellMarkState = (): ShellMarkState => ({
   promptSeen: false,
   atPrompt: false,
   inputSincePrompt: false,
+  markCount: 0,
+  lastMarkSequence: 0,
   lastEnd: null,
   pending: "",
 });
@@ -93,6 +99,7 @@ function applyMark(
   params: ReadonlyArray<string>,
   onEnd: (exitCode: number | null) => void,
 ): void {
+  state.markCount += 1;
   const kind = params[0];
   if (kind === "A") {
     state.promptSeen = true;
