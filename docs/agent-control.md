@@ -374,6 +374,12 @@ node-owned, like a secret request, and the same for every surface
   watch its own condition (`watchUserActionRequest`, for example the browser's `done_when`), and
   every end, however it came, runs the surface's hook (`surfaceHooks.ts`), which gives the tab or
   terminal back.
+- **Hints.** A surface may record `user-action.hint` activities for a pending request: links
+  (http and https only, never with a user name before the host, each stored with the host the
+  node's URL parser found; cards show that host beside the link and parse nothing themselves, and
+  flag an international (punycode) host as one to check) and one-time codes it found, at most 3 of each and 4 updates per request,
+  the newest replacing earlier ones. The card shows them with Open and Copy. They are never a
+  timeline row, never in an alert, and their summary never carries the text.
 
 ## Secret requests
 
@@ -522,6 +528,23 @@ terminal drawer (web, desktop and the phone app) and can type in at any time. On
   terminals. The `terminals.control` grant, exact active-turn authority, private sessions only.
 - **Clients.** A terminal an agent opens appears as an "Agent <n>" tab without opening or
   focusing the drawer, on the web and on the phone.
+- **Hand-off.** `handoff` gives a terminal to the user for what the agent must not or cannot do: a
+  password or sudo prompt, a 2FA code, `gh auth login` or another device-code or browser sign-in,
+  a decision. It is a user action request (surface `terminal`, target the terminal id; see
+  [User action requests](#user-action-requests)) with the agent's `requestId` and `message`, an
+  optional `need` (default `sign-in` when the screen shows a sign-in, else `input`), optional
+  `command` to start first and `expires_in_seconds` (30 to 3600, default 600). It ends when that
+  command (or the one already running) finishes (`condition-met`, with its exit code), the user
+  clicks Done or Won't do, it expires, the terminal closes or exits, or the agent cancels. While it
+  waits, `run`, `send`, `interrupt` and `close` on that terminal are refused, read from the
+  thread's own record (and refused too when that record cannot be read); `read` and `wait` still
+  work. A shell never outlives the node, so the restart pass ends pending terminal hand-offs as
+  `closed`. The node watches the terminal
+  every second and records the sign-in links and device codes it shows as hints for the card. The
+  result steers the agent (declined: do not ask again; timeout: ask in chat first) and carries the
+  rendered output since the hand-off. The card's Show opens the terminal: the web drawer on that
+  tab, the phone's terminal screen through the `terminalId` route parameter. The terminal's tab
+  shows an amber marker while it waits.
 
 ## Tasks
 

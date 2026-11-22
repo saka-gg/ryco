@@ -38,6 +38,8 @@ export function ThreadPromptCards(props: {
   readonly promptsDisabled: boolean;
   readonly secretRequests: MobileSecretRequestCards;
   readonly userActionRequests: MobileUserActionRequestCards;
+  /** Opens one of the thread's terminals (a terminal hand-off's Show). */
+  readonly onShowTerminal?: ((terminalId: string) => void) | undefined;
   readonly agentControlProposals: ReadonlyArray<AgentControlProposalView>;
   readonly agentControlDisabled: boolean;
 }) {
@@ -103,6 +105,14 @@ export function ThreadPromptCards(props: {
           threadId={threadId}
           request={request}
           disabledReason={props.userActionRequests.access.reason}
+          hint={props.userActionRequests.hints.get(request.requestId)}
+          onShow={
+            request.surface === "terminal" &&
+            request.target !== null &&
+            props.onShowTerminal !== undefined
+              ? () => props.onShowTerminal?.(request.target ?? "")
+              : undefined
+          }
         />
       ))}
       {props.agentControlProposals.map((proposal) => (

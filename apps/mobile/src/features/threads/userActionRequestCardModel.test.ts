@@ -171,3 +171,35 @@ describe("the card's send", () => {
     });
   });
 });
+
+describe("hand-off link hints on the phone", () => {
+  it("shows the host the node stored (punycode) and flags it, never parsing the link here", () => {
+    const cards = mobileUserActionRequestCards({
+      ...base,
+      activities: [
+        ...activities,
+        {
+          id: "hint",
+          kind: "user-action.hint",
+          createdAt: "2026-11-21T08:01:00.000Z",
+          turnId: "turn-1",
+          payload: {
+            requestId,
+            links: [{ url: "https://xn--gthub-zsa.com/login/device", host: "xn--gthub-zsa.com" }],
+            codes: ["WXYZ-5678"],
+          },
+        },
+      ],
+    });
+    expect(cards.hints.get(requestId)).toEqual({
+      links: [
+        {
+          url: "https://xn--gthub-zsa.com/login/device",
+          host: "xn--gthub-zsa.com",
+          international: true,
+        },
+      ],
+      codes: ["WXYZ-5678"],
+    });
+  });
+});

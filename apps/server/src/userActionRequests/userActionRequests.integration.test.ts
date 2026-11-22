@@ -292,6 +292,25 @@ layer("user action requests", (it) => {
     }),
   );
 
+  it.effect("ends a terminal hand-off as closed after a restart: its shell is gone", () =>
+    Effect.gen(function* () {
+      const { engine, threadId, deps } = yield* setup("restart-terminal");
+      yield* open(deps, threadId, "pw", { surface: "terminal", need: "input", target: "agent-1" });
+      yield* open(deps, threadId, "tab", { ttlMs: 60_000 });
+      if (engine.getReadModel === undefined) return assert.fail("The engine has no read model.");
+      const model = yield* engine.getReadModel();
+      yield* reconcileUserActionRequestsAfterRestart(deps, model.threads);
+      const requests = yield* readThreadUserActionRequests(deps, threadId);
+      assert.deepEqual(
+        requests?.map((candidate) => [candidate.surface, candidate.status]),
+        [
+          ["terminal", "closed"],
+          ["browser", "pending"],
+        ],
+      );
+    }),
+  );
+
   it.effect("expires as timeout, and a restart schedules the expiry again", () =>
     Effect.gen(function* () {
       const { engine, threadId, deps } = yield* setup("expiry");

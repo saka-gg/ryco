@@ -22,6 +22,17 @@ import { ThreadId } from "./baseSchemas.ts";
 
 export const USER_ACTION_REQUESTED_ACTIVITY_KIND = "user-action.requested";
 export const USER_ACTION_RESOLVED_ACTIVITY_KIND = "user-action.resolved";
+/**
+ * What a surface found for the user while its request waits: links and one-time codes a sign-in
+ * printed (a terminal's `gh auth login`). Shown on the card with Open and Copy; never in an alert,
+ * never a timeline row.
+ */
+export const USER_ACTION_HINT_ACTIVITY_KIND = "user-action.hint";
+/** Hint activities one request records at most (each a changed set of links and codes). */
+export const USER_ACTION_HINTS_MAX_PER_REQUEST = 4;
+export const USER_ACTION_HINT_MAX_ITEMS = 3;
+export const USER_ACTION_HINT_LINK_MAX_CHARS = 500;
+export const USER_ACTION_HINT_CODE_MAX_CHARS = 32;
 export const USER_ACTION_REQUEST_ACTIVITY_KINDS = [
   USER_ACTION_REQUESTED_ACTIVITY_KIND,
   USER_ACTION_RESOLVED_ACTIVITY_KIND,

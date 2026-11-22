@@ -416,6 +416,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
                   ),
                 projections,
                 terminals: terminals.value,
+                userActions: { engine, findThreadInArray, waitUntil, threadWakeSource },
               }),
             ),
         })

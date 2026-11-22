@@ -955,6 +955,8 @@ const WORK_LOG_HIDDEN_KINDS: ReadonlyArray<string> = [
   "prompt.suggestion",
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   THREAD_FORKED_ACTIVITY_KIND,
+  // A hand-off's sign-in links and codes: shown on its card, never a row of their own.
+  "user-action.hint",
 ] satisfies ReadonlyArray<ThreadActivityKind>;
 
 /** Task rows whose summary a work-log entry shows. */
