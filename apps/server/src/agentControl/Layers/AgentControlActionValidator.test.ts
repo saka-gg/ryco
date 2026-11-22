@@ -485,6 +485,138 @@ it.effect("binds a device consent to the caller's scope and to the task that ask
   }),
 );
 
+it.effect(
+  "binds a terminal consent to the caller's scope, a user terminal and the asking task",
+  () =>
+    Effect.gen(function* () {
+      const snapshot = yield* Ref.make(makeSnapshot());
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      const plan = {
+        kind: "terminalControlConsent" as const,
+        threadId: callerThreadId,
+        projectId,
+        providerInstanceId,
+        terminalId: "default",
+      };
+      const validator = makeValidator(snapshot, providers);
+
+      const principal = yield* validator.validateSubmission({ session, authority, plan });
+      assert.deepInclude(principal, { kind: "provider-session", turnId, runtimeSessionId });
+      for (const outOfScope of [
+        { ...plan, threadId: targetThreadId },
+        { ...plan, projectId: ProjectId.make("project-other") },
+        { ...plan, providerInstanceId: ProviderInstanceId.make("other") },
+      ]) {
+        const refused = yield* Effect.flip(
+          validator.validateSubmission({ session, authority, plan: outOfScope }),
+        );
+        assert.strictEqual(refused.reason, "project-scope");
+      }
+      // The agent's own terminals never need a consent.
+      const own = yield* Effect.flip(
+        validator.validateSubmission({
+          session,
+          authority,
+          plan: { ...plan, terminalId: "agent-1" },
+        }),
+      );
+      assert.strictEqual(own.reason, "invalid-plan");
+
+      const integration: AgentControlExternalIntegration = {
+        integrationId: AgentControlIntegrationId.make("integration-terminal-consent"),
+        displayName: "External Codex",
+        clientKind: "codex",
+        projectScope: { kind: "all" },
+        capabilities: Object.values(AGENT_CONTROL_CAPABILITIES),
+        rateLimitPerMinute: 60,
+        activeTaskLimit: 1,
+        activeTaskCount: 0,
+        expiresAt: null,
+        revokedAt: null,
+        pairingState: "paired",
+        pairingCodeExpiresAt: null,
+        pairedAt: now,
+        createdAt: now,
+        updatedAt: now,
+        lastUsedAt: null,
+      };
+      const external = yield* Effect.flip(
+        validator.validateExternalSubmission({ integration, plan }),
+      );
+      assert.strictEqual(external.reason, "privilege-escalation");
+      assert.strictEqual(external.detail, "External integrations cannot control terminals.");
+
+      const proposal: AgentControlProposal = {
+        proposalId: AgentControlProposalId.make("proposal-terminal-consent"),
+        requestId: AgentControlRequestId.make("request-terminal-consent"),
+        principal,
+        planVersion: 1,
+        plan,
+        planDigest: "d".repeat(64),
+        riskTags: [],
+        promptSummary: null,
+        status: "approved",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        decidedAt: now,
+        result: null,
+      };
+      yield* validator.revalidateExecution(proposal);
+      // An approved plan for another thread or an agent terminal still grants nothing.
+      assert.strictEqual(
+        (yield* Effect.flip(
+          validator.revalidateExecution({
+            ...proposal,
+            plan: { ...plan, threadId: targetThreadId },
+          }),
+        )).reason,
+        "project-scope",
+      );
+      assert.strictEqual(
+        (yield* Effect.flip(
+          validator.revalidateExecution({ ...proposal, plan: { ...plan, terminalId: "agent-2" } }),
+        )).reason,
+        "invalid-plan",
+      );
+
+      // An external principal can never carry one, even as an approved proposal.
+      const externalProposal = yield* Effect.flip(
+        makeValidator(snapshot, providers, [], () =>
+          Effect.succeed(integration),
+        ).revalidateExecution({
+          ...proposal,
+          principal: {
+            kind: "external-integration",
+            integrationId: integration.integrationId,
+            projectId,
+            runtimeMode: "approval-required",
+            envMode: "worktree",
+          },
+        }),
+      );
+      assert.strictEqual(externalProposal.reason, "privilege-escalation");
+
+      // The task that asked has ended: a later approval grants nothing.
+      const nextTurn = thread({
+        id: callerThreadId,
+        runtimeMode: "approval-required",
+        envMode: "worktree",
+        running: true,
+      });
+      yield* Ref.set(
+        snapshot,
+        makeSnapshot({
+          ...nextTurn,
+          session: { ...nextTurn.session!, activeTurnId: TurnId.make("turn-next") },
+        }),
+      );
+      const ended = yield* Effect.flip(validator.revalidateExecution(proposal));
+      assert.strictEqual(ended.reason, "caller-stale");
+      assert.strictEqual(ended.detail, "The task that asked has ended.");
+    }),
+);
+
 it.effect("scopes project mutations and allows closed non-secret settings plans", () =>
   Effect.gen(function* () {
     const snapshot = yield* Ref.make(makeSnapshot());

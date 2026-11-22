@@ -450,6 +450,79 @@ app, not the frozen web phone tier), and the node writes `KEY='value'` into that
 - **Instructions.** Agents are told never to ask for secrets in chat, and to load a provided key
   from the environment without printing it or reading the file to see it.
 
+## Terminals
+
+`ryco_terminal` lets an agent use its own thread's terminals: the shells the user sees in the
+terminal drawer (web, desktop and the phone app) and can type in at any time. One tool with an
+`action`:
+
+| Action      | What it does                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------------ |
+| `run`       | Types a command at the prompt and waits (at most 45 s) for its end; returns output and exit code |
+| `read`      | `new` output since the thread's last look, the last `command`'s output (paged), or the `screen`  |
+| `wait`      | Until the running command ends or `for_text` appears (at most 45 s)                              |
+| `send`      | Types text and presses named keys (`Enter`, `Ctrl+C`, `Up`, ...)                                 |
+| `interrupt` | Ctrl+C, then waits up to 5 s for the command to end                                              |
+| `create`    | Opens another terminal of the agent's (`agent-<n>`)                                              |
+| `list`      | The thread's terminals: owner, state, running command, last exit code                            |
+| `close`     | Closes a terminal the agent opened                                                               |
+
+- **What the agent sees.** A headless xterm.js per terminal an agent uses renders its output as
+  the user sees it (carriage returns, colours and full-screen programs interpreted). Output is
+  cut to `max_chars` (default 20,000, at most 60,000) keeping the end, a very long line is cut in
+  its middle, and every cut names the exact call that reads the rest. Each thread has its own read
+  position per terminal. Mirrors start from the retained history the first time an agent uses a
+  terminal, follow its output events off the output path, keep 2,000 lines of at most 250
+  columns (about 4 MB for a busy 120-column terminal, 7.4 MB at most), and are dropped after 10
+  minutes without an agent call, also while a command runs (8 at most; a timer sweeps them, and
+  the next call rebuilds one from the history; never one a wait or a hand-off holds, and when
+  all are held a new one is refused, naming them). Read positions and the agent's commands are
+  kept as output cursors outside the mirror, so after a rebuild `new` output, a command's output
+  and its exit code are still right.
+- **Command ends and exit codes.** zsh and bash terminals start with startup files that mark
+  prompts, command starts and command ends (OSC 133, `terminal/shellIntegration.ts`) and then
+  source the user's own (`$ZDOTDIR` or `~` for zsh, `/etc/bash.bashrc` and `~/.bashrc` for bash).
+  Every mark carries a nonce made for that shell's spawn (`ryco=<nonce>`, handed over in
+  `RYCO_SHELL_MARK_NONCE` and unset before any user file runs; afterwards it lives only in the
+  body of the one function that prints the marks, which `typeset -f` / `declare -f` typed in that
+  shell still shows). Only marks carrying it count, so output that prints a look-alike mark (a
+  file, a test, a remote host, iTerm2's or VS Code's own integration) never ends a command. The
+  terminal manager reads the marks (at the prompt, typed at since, the last exit code) and
+  removes them from the history it stores and from what clients receive: the nonce is never in a
+  history file, `ryco_inspect_thread` or a client. Only the agent mirror gets the raw stream. The
+  files are safe under `setopt nounset` and `set -u`.
+  Other shells, or `RYCO_TERMINAL_SHELL_INTEGRATION=0` in the node's environment, fall back to a
+  guess: the output went quiet at something that looks like a shell prompt and the process table
+  shows the shell idle again; the exit code is then unknown, and results say so.
+- **Still running.** A command that outlives its wait keeps running; the result says what it is
+  doing: `working`, `waiting-for-input`, `full-screen` or `silent`, with `secret` when the prompt
+  asks for hidden input and `sign-in` with the link and code of a device-code or browser sign-in.
+  Hidden input is read from the tty itself where the node can: echo off in line mode is what
+  `getpass`, `sudo`, `ssh` and `read -s` set up (Bun reads the flags directly, node-pty through
+  `stty` on the pty device, a few milliseconds, only when a waiting command's output paused);
+  otherwise from a secret word at the end of the cursor's own line. `run` and `wait` stop early
+  when new output leaves the command waiting for input.
+- **Every agent write is checked first,** in the terminal manager under the thread's lock, so
+  nothing changes between the check and the write. `run` types only once the shell drew its
+  prompt (with marks; a shell whose startup files wait for a key passphrase is refused), when no
+  command runs, when nobody typed at that prompt since (a half-typed line is never extended), and
+  never into hidden input. Where the platform can read the tty's flags and the read fails,
+  nothing is typed; where it cannot (Windows), the screen is the only sign and results say so.
+- **Secrets.** `send` reads the tty's flags on every call and refuses to type text or characters
+  while a hidden-input prompt shows, also right after it appeared or when no command seems to run (keys
+  such as Ctrl+C and Escape still go through), and the tool tells the agent never to type a
+  secret it was not given and never to ask for one in chat. What anyone types at a hidden prompt
+  is never echoed, so it never reaches the mirror or the agent. Text the terminal displays does,
+  including what the user typed at a prompt that echoes.
+- **Access.** Only the caller's own thread's terminals (other threads stay readable through
+  `ryco_inspect_thread`). Terminals the agent opened (`agent-<n>`) are its own. A terminal the
+  user opened can be read; typing into it (`run`, `send`, `interrupt`) needs the user's consent
+  for the task, a `terminalControlConsent` card, except in a Full access thread. A decline binds
+  the task and keeps the agent from asking again for 10 minutes; only the user closes their
+  terminals. The `terminals.control` grant, exact active-turn authority, private sessions only.
+- **Clients.** A terminal an agent opens appears as an "Agent <n>" tab without opening or
+  focusing the drawer, on the web and on the phone.
+
 ## Tasks
 
 The Tasks page is the user's to-do list on the node (problems, ideas, follow-ups), each task with

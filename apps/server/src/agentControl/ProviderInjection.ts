@@ -173,6 +173,8 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.watchPullRequests,
   AGENT_CONTROL_CAPABILITIES.watchCommands,
   AGENT_CONTROL_CAPABILITIES.requestSecrets,
+  // The thread's own terminals (`ryco_terminal`); the user's ones need a per-task consent.
+  AGENT_CONTROL_CAPABILITIES.controlTerminals,
   // Cross-node projects: proposals the user approves, and the node directory they target.
   AGENT_CONTROL_CAPABILITIES.importProject,
   AGENT_CONTROL_CAPABILITIES.copyProjectToNode,

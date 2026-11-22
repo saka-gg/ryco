@@ -16,13 +16,82 @@ import {
   TerminalHistoryError,
   TerminalNotRunningError,
   TerminalOpenInput,
+  type TerminalRef,
   TerminalResizeInput,
   TerminalRestartInput,
   TerminalSessionSnapshot,
   TerminalSessionLookupError,
   TerminalWriteInput,
+  type TerminalCursor,
 } from "@ryco/contracts";
-import { Effect, Context } from "effect";
+import { Effect, Context, type Option } from "effect";
+
+import type { PtyInputMode } from "./PTY.ts";
+
+/** One session as agent terminal tools read it; nothing here starts or changes it. */
+export interface TerminalSessionInspection {
+  /** With the retained (sanitized) history. */
+  readonly snapshot: TerminalSessionSnapshot;
+  readonly hasRunningSubprocess: boolean;
+  readonly cols: number;
+  readonly rows: number;
+  /** The tty's foreground process name where the platform tells it cheaply (macOS node-pty). */
+  readonly foregroundProcessName?: string;
+  /** What the foreground process is called while the shell is idle, once seen. */
+  readonly idleForegroundName?: string;
+  /** The nonce in the shell's prompt and command marks (one per spawn); absent without them. */
+  readonly markNonce?: string;
+  /** What the shell's marks say, for a shell with them. */
+  readonly shell?: {
+    readonly promptSeen: boolean;
+    readonly atPrompt: boolean;
+    readonly inputSincePrompt: boolean;
+    readonly lastEnd: { readonly exitCode: number | null; readonly sequence: number } | null;
+  };
+}
+
+/** One chunk of a terminal's output as the shell printed it, Ryco's marks included. */
+export interface TerminalAgentOutput {
+  readonly threadId: string;
+  readonly terminalId: string;
+  readonly data: string;
+  readonly cursor: TerminalCursor;
+  /** The session's mark nonce, null for a shell without marks. */
+  readonly markNonce: string | null;
+}
+
+/** What an agent's write checks first, inside the thread's lock, before anything is typed. */
+export interface TerminalAgentWriteChecks {
+  /** The shell runs no command (`requireIdle`'s process-table read). */
+  readonly idle?: boolean;
+  /** A shell with marks drew its prompt, runs nothing and nobody typed at it since. */
+  readonly prompt?: boolean;
+  /** The tty does not hide input (echo off in line mode: a password prompt). */
+  readonly visibleInput?: boolean;
+}
+
+export type TerminalAgentWriteRefusal =
+  | "running"
+  | "unverified"
+  | "input-raced"
+  | "starting"
+  | "user-typing"
+  | "hidden-input"
+  | "input-mode-unknown"
+  | "not-running";
+
+export class TerminalAgentWriteRefused {
+  readonly _tag = "TerminalAgentWriteRefused";
+  readonly reason: TerminalAgentWriteRefusal;
+  constructor(reason: TerminalAgentWriteRefusal) {
+    this.reason = reason;
+  }
+}
+
+export interface TerminalAgentWriteResult {
+  /** False where the platform cannot read the tty's flags (Windows): only the screen tells. */
+  readonly inputModeChecked: boolean;
+}
 
 export {
   TerminalCwdError,
@@ -101,6 +170,39 @@ export interface TerminalManagerShape {
    * state before live events continue.
    */
   readonly listSessions: Effect.Effect<ReadonlyArray<TerminalSessionSnapshot>>;
+
+  /** One session with its history and process state; `none` for an unknown terminal. */
+  readonly inspect?: (ref: TerminalRef) => Effect.Effect<Option.Option<TerminalSessionInspection>>;
+
+  /**
+   * Whether the shell is idle at this moment (no command running), by the same fresh
+   * process-table read a `requireIdle` write makes; false when busy or it cannot tell.
+   */
+  readonly verifyIdle?: (ref: TerminalRef) => Effect.Effect<boolean>;
+
+  /** The tty's echo and line-mode flags now, when the PTY adapter can read them. */
+  readonly readInputMode?: (ref: TerminalRef) => Effect.Effect<Option.Option<PtyInputMode>>;
+
+  /**
+   * The retained history after `sequence`: `none` for an unknown terminal, `null` when the
+   * history no longer reaches back that far (trimmed, cleared, restarted).
+   */
+  readonly historySince?: (
+    ref: TerminalRef,
+    sequence: number,
+  ) => Effect.Effect<Option.Option<string | null>>;
+
+  /** Raw output, Ryco's shell marks included, for agent terminal mirrors only. */
+  readonly subscribeAgentOutput?: (
+    listener: (output: TerminalAgentOutput) => void,
+  ) => Effect.Effect<() => void>;
+
+  /** An agent's input, typed only when `checks` pass, all inside the thread's lock. */
+  readonly agentWrite?: (input: {
+    readonly ref: TerminalRef;
+    readonly data: string;
+    readonly checks: TerminalAgentWriteChecks;
+  }) => Effect.Effect<TerminalAgentWriteResult, TerminalAgentWriteRefused>;
 }
 
 /**

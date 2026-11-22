@@ -800,6 +800,28 @@ function planPresentation(proposal: AgentControlProposalView): PlanPresentation 
           },
         ],
       };
+    case "terminalControlConsent":
+      return {
+        actionLabel: "Allow terminal for this task",
+        targetLabel: `terminal ${plan.terminalId}`,
+        runtimeLabel: "this task only",
+        detailSections: [
+          {
+            heading: "Terminal input until this response ends",
+            lines: [
+              "The agent may run commands, type, press keys and interrupt programs in this terminal you opened.",
+              "It can see what the terminal shows.",
+              "Closing the terminal stays yours.",
+              "Use Stop in chat to end the task. The next task asks again.",
+              `Terminal: ${plan.terminalId}`,
+              `Thread: ${plan.threadId}`,
+              `Project: ${plan.projectId}`,
+              `Provider instance: ${plan.providerInstanceId}`,
+              "Nothing the agent types is stored with this request.",
+            ],
+          },
+        ],
+      };
     case "importProject":
       return importProjectPresentation(plan);
     case "copyProjectToNode":

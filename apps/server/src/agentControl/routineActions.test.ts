@@ -64,6 +64,19 @@ describe("routine device control", () => {
     );
   });
 
+  it("never lets the agent grant itself consent to type in a terminal the user opened", () => {
+    const consent: AgentControlActionPlan = {
+      kind: "terminalControlConsent",
+      threadId,
+      projectId,
+      providerInstanceId,
+      terminalId: "default",
+    };
+    for (const mode of ["full-access", "approval-required", "auto-accept-edits", "auto"] as const) {
+      expect(isRoutineAgentControlAction(session(mode), consent)).toBe(false);
+    }
+  });
+
   it("never auto-approves for a separately paired integration", () => {
     expect(
       isRoutineAgentControlAction(

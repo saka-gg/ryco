@@ -2,7 +2,7 @@ import { constants as osConstants } from "node:os";
 
 import { Effect, Layer } from "effect";
 import { PtyAdapter, PtySpawnError } from "../Services/PTY.ts";
-import type { PtyAdapterShape, PtyExitEvent, PtyProcess } from "../Services/PTY.ts";
+import type { PtyAdapterShape, PtyExitEvent, PtyInputMode, PtyProcess } from "../Services/PTY.ts";
 
 /** Bun names the signal ("SIGTERM"); the PTY contract carries its number. */
 function signalNumber(name: NodeJS.Signals | null | undefined): number | null {
@@ -46,6 +46,19 @@ class BunPtyProcess implements PtyProcess {
       throw new Error("Bun PTY resize is unavailable");
     }
     this.process.terminal.resize(cols, rows);
+  }
+
+  /** Bun reads termios on the master, which shares the slave's line discipline. */
+  async readInputMode(): Promise<PtyInputMode | undefined> {
+    try {
+      const terminal = this.process.terminal;
+      if (!terminal || terminal.closed) return undefined;
+      const localFlags = terminal.localFlags;
+      const { inputModeFromLocalFlags } = await import("../ttyInputMode.ts");
+      return inputModeFromLocalFlags(localFlags, process.platform);
+    } catch {
+      return undefined;
+    }
   }
 
   kill(signal?: string): void {

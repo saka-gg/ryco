@@ -11,6 +11,7 @@ import {
   selectTerminalEventEntriesAfterSnapshot,
   terminalEventNeedsHydration,
   type TerminalReplayGate,
+  agentTerminalLabel,
 } from "@ryco/client-runtime/state/terminal";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
 
@@ -231,7 +232,8 @@ export function createTerminalOutputBatcher(options: {
 }
 
 export function resolveTabLabel(group: ThreadTerminalGroup, groupIndex: number): string {
-  return group.terminalIds.length > 1 ? `Split ${groupIndex}` : `Terminal ${groupIndex}`;
+  if (group.terminalIds.length > 1) return `Split ${groupIndex}`;
+  return agentTerminalLabel(group.terminalIds[0] ?? "") ?? `Terminal ${groupIndex}`;
 }
 
 export function groupHasRunningTerminal(
