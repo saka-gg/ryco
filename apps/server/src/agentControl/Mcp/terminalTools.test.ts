@@ -27,6 +27,9 @@ import * as NodePTY from "../../terminal/Layers/NodePTY.ts";
 import { makeTerminalManagerWithOptions } from "../../terminal/Layers/Manager.ts";
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import { PtyAdapter } from "../../terminal/Services/PTY.ts";
+import { SHELL_MARK_NONCE_ENV } from "../../terminal/shellIntegration.ts";
+import { FakePtyAdapter, type FakePtyProcess } from "../../terminal/testUtils/fakePty.ts";
+import { MIRROR_IDLE_MS } from "../../terminal/agent/AgentTerminals.ts";
 import { NO_DELEGATION_LIMITS } from "../../orchestration/delegationLimits.ts";
 import { AgentControlCapabilityDeniedError } from "../Errors.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
@@ -220,7 +223,11 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
       Scope.provide(scope),
     );
 
-  const toolsFor = (terminals: TerminalManagerShape, userActions?: UserActionWaitDeps) => {
+  const toolsFor = (
+    terminals: TerminalManagerShape,
+    userActions?: UserActionWaitDeps,
+    now?: () => number,
+  ) => {
     const mutationDeps: Pick<AgentControlMcpToolDeps, "validator" | "proposals"> = {
       validator: {
         validateOwnerAutomation: () => Effect.die("unused"),
@@ -285,6 +292,7 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
       },
       terminals,
       ...(userActions === undefined ? {} : { userActions }),
+      ...(now === undefined ? {} : { now }),
     });
     return async (args: Record<string, unknown>) => {
       const result = await Effect.runPromise(
@@ -532,6 +540,67 @@ describe.runIf(posix)("ryco_terminal on a real shell", () => {
       );
       for (const body of seen) expect(body).not.toContain("should-not-run\n");
     });
+
+    it("pins the hand-off's terminal before the request opens, so no other terminal pushes it out", async () => {
+      const { mkdirSync } = await import("node:fs");
+      mkdirSync(path.join(root, "home-pin"), { recursive: true });
+      const own = await Effect.runPromise(makeManager(true, "home-pin"));
+      let clock = Date.now();
+      // A mirror built again reads the history since its positions: counted per terminal.
+      const rebuilt: Array<string> = [];
+      const terminals: TerminalManagerShape = {
+        ...own,
+        historySince: (ref, since) => {
+          rebuilt.push(ref.terminalId);
+          return own.historySince!(ref, since);
+        },
+      };
+      let whileOpening: (() => Promise<unknown>) | undefined;
+      const pinCall = toolsFor(
+        terminals,
+        {
+          ...userActions,
+          engine: {
+            ...userActions.engine,
+            dispatch: (command) => {
+              const meanwhile = whileOpening;
+              whileOpening = undefined;
+              return meanwhile === undefined
+                ? userActions.engine.dispatch(command)
+                : Effect.promise(meanwhile).pipe(
+                    Effect.andThen(userActions.engine.dispatch(command)),
+                  );
+            },
+          },
+        },
+        () => clock,
+      );
+      expect((await pinCall({ action: "run", command: "true", timeout_seconds: 15 })).isError).toBe(
+        false,
+      );
+      const other = await pinCall({ action: "create" });
+      const otherId = /Opened (agent-\d+)/.exec(other.body)![1]!;
+      // While the request opens, long enough later for an unpinned mirror to count as unused,
+      // the agent uses its other terminal: that drops every unused mirror.
+      whileOpening = async () => {
+        clock += MIRROR_IDLE_MS + 1;
+        await pinCall({ action: "read", terminal: otherId });
+      };
+      const opened = await pinCall({
+        action: "handoff",
+        requestId: "pin-first",
+        terminal: "agent-1",
+        message: "Answer the question.",
+        command: "bash yesno.sh",
+        timeout_seconds: 1,
+      });
+      expect(whileOpening).toBeUndefined();
+      expect(opened.body).toContain("The user has agent-1");
+      const before = rebuilt.length;
+      expect((await pinCall({ action: "read", terminal: "agent-1" })).isError).toBe(false);
+      expect(rebuilt.slice(before)).not.toContain("agent-1");
+      await pinCall({ action: "handoff", requestId: "pin-first", cancel: true });
+    }, 40_000);
 
     it("hands a password prompt to the user, refuses input meanwhile and ends with the command", async () => {
       const opened = await handoffCall({
@@ -795,4 +864,145 @@ describe.runIf(posix)("ryco_terminal while a shell's startup files wait for inpu
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe("ryco_terminal when its mirror parses output after the terminal manager", () => {
+  const mark = (nonce: string, body: string) => `\u001b]133;${body};ryco=${nonce}\u0007`;
+  // The command before as each shell marks it: bash before 4.4 (macOS /bin/bash) prints no
+  // start mark, zsh prints none for an empty Enter, bash 5 prints one from PS0.
+  const shells: Array<{
+    readonly name: string;
+    readonly typed: string;
+    readonly before: (nonce: string) => string;
+    readonly mine: (nonce: string) => string;
+    /** A command end and prompt come after the tool read the state, before it types. */
+    readonly redraws?: boolean;
+  }> = [
+    {
+      name: "bash without PS0",
+      typed: "ls\r",
+      before: (nonce: string) => `ls\r\nfile-1\r\n${mark(nonce, "D;7")}${mark(nonce, "A")}$ `,
+      mine: (nonce: string) => `echo mine\r\nmine\r\n${mark(nonce, "D;0")}${mark(nonce, "A")}$ `,
+    },
+    {
+      name: "zsh, an empty Enter",
+      typed: "\r",
+      before: (nonce: string) => `\r\nfile-1\r\n${mark(nonce, "D;7")}${mark(nonce, "A")}% `,
+      mine: (nonce: string) =>
+        `echo mine\r\n${mark(nonce, "C")}mine\r\n${mark(nonce, "D;0")}${mark(nonce, "A")}% `,
+    },
+    {
+      name: "bash 5 with PS0",
+      typed: "ls\r",
+      before: (nonce: string) =>
+        `ls\r\n${mark(nonce, "C")}file-1\r\n${mark(nonce, "D;7")}${mark(nonce, "A")}$ `,
+      mine: (nonce: string) =>
+        `echo mine\r\n${mark(nonce, "C")}mine\r\n${mark(nonce, "D;0")}${mark(nonce, "A")}$ `,
+    },
+  ];
+  shells.push({ ...shells[2]!, name: "a prompt drawn again just before the write", redraws: true });
+
+  it.each(shells)(
+    "never ends the agent's command at the end of the one before ($name)",
+    async (shell) => {
+      const root = mkdtempSync(path.join(os.tmpdir(), "ryco-terminal-late-mirror-"));
+      const scope = await Effect.runPromise(Scope.make());
+      try {
+        const pty = new FakePtyAdapter();
+        const manager = await Effect.runPromise(
+          makeTerminalManagerWithOptions({
+            logsDir: path.join(root, "logs"),
+            ptyAdapter: pty,
+            shellResolver: () => "/bin/zsh",
+            shellIntegrationDir: path.join(root, "shell-integration"),
+            outputCoalesceMs: 0,
+            historyPersistDebounceMs: 60_000,
+            processKillGraceMs: 0,
+            processTableSnapshotter: () =>
+              Effect.succeed({ childrenByParent: new Map<number, number[]>() }),
+          }).pipe(Effect.provide(NodeServices.layer), Scope.provide(scope)),
+        );
+        // The mirror's raw output arrives late: held until the tool has read the shell's state at
+        // its prompt, then delivered a macrotask later (the manager reads marks first, the mirror
+        // parses them later).
+        let holding = false;
+        let redrawn = false;
+        const held: Array<() => void> = [];
+        const release = () => {
+          holding = false;
+          for (const deliver of held.splice(0)) deliver();
+        };
+        const terminals: TerminalManagerShape = {
+          ...manager,
+          subscribeAgentOutput: (listener) =>
+            manager.subscribeAgentOutput!((output) => {
+              if (holding) held.push(() => listener(output));
+              else listener(output);
+            }),
+          inspect: (ref) =>
+            manager.inspect!(ref).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (held.length > 0) setTimeout(release, 0);
+                }),
+              ),
+            ),
+          // In the redraw case, a command end and prompt reach the manager after the tool read
+          // the state and began its command, just before it types.
+          agentWrite: (input) =>
+            shell.redraws === true && !redrawn
+              ? Effect.promise(async () => {
+                  redrawn = true;
+                  const shown = outputShows(manager, terminalId, "redrawn ");
+                  shellProcess.emitData(`\r\n${mark(nonce, "D;5")}${mark(nonce, "A")}redrawn `);
+                  await shown;
+                }).pipe(Effect.andThen(manager.agentWrite!(input)))
+              : manager.agentWrite!(input),
+        };
+        const terminalId = "agent-1";
+        let shellProcess: FakePtyProcess;
+        let nonce = "";
+        const call = toolsForRoot(terminals, root);
+        await Effect.runPromise(manager.open({ threadId: THREAD, terminalId, cwd: root }));
+        shellProcess = pty.processes.at(-1)!;
+        nonce = pty.spawnInputs.at(-1)!.env[SHELL_MARK_NONCE_ENV]!;
+        Object.assign(shellProcess, {
+          write: (data: string) => {
+            shellProcess.writes.push(data);
+            if (data === "echo mine\r")
+              setTimeout(() => shellProcess.emitData(shell.mine(nonce)), 0);
+          },
+        });
+        const prompted = outputShows(manager, terminalId, "ready ");
+        shellProcess.emitData(`${mark(nonce, "A")}ready `);
+        await prompted;
+        expect((await call({ action: "read", terminal: terminalId })).isError).toBe(false);
+
+        // The user's command (or empty Enter) ends; the manager has read its marks, the mirror
+        // has not yet.
+        holding = true;
+        await Effect.runPromise(manager.write({ threadId: THREAD, terminalId, data: shell.typed }));
+        const ended = outputShows(manager, terminalId, "file-1");
+        shellProcess.emitData(shell.before(nonce));
+        await ended;
+
+        const ran = await call({
+          action: "run",
+          terminal: terminalId,
+          command: "echo mine",
+          timeout_seconds: 5,
+        });
+        expect(ran.isError).toBe(false);
+        expect(ran.body).toContain("exited with code 0");
+        expect(ran.body).not.toMatch(/code [57]/);
+        expect(ran.body).toContain("mine");
+        // Typed once: a refused write typed nothing.
+        expect(shellProcess.writes.filter((data) => data === "echo mine\r")).toHaveLength(1);
+      } finally {
+        await Effect.runPromise(Scope.close(scope, Exit.void));
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 });

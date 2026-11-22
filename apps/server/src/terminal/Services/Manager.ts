@@ -46,6 +46,10 @@ export interface TerminalSessionInspection {
     readonly promptSeen: boolean;
     readonly atPrompt: boolean;
     readonly inputSincePrompt: boolean;
+    /** How many of Ryco's marks the shell printed so far (they arrive in order). */
+    readonly markCount: number;
+    /** The output cursor of the chunk that carried the latest of them (0 before one). */
+    readonly lastMarkSequence: number;
     readonly lastEnd: { readonly exitCode: number | null; readonly sequence: number } | null;
   };
 }
@@ -68,6 +72,8 @@ export interface TerminalAgentWriteChecks {
   readonly prompt?: boolean;
   /** The tty does not hide input (echo off in line mode: a password prompt). */
   readonly visibleInput?: boolean;
+  /** The shell printed exactly this many marks (`shell.markCount` as the caller last read it). */
+  readonly marksSeen?: number;
 }
 
 export type TerminalAgentWriteRefusal =
@@ -78,6 +84,7 @@ export type TerminalAgentWriteRefusal =
   | "user-typing"
   | "hidden-input"
   | "input-mode-unknown"
+  | "marks-moved"
   | "not-running";
 
 export class TerminalAgentWriteRefused {

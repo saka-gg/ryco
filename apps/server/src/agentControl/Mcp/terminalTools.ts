@@ -50,6 +50,7 @@ import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/
 import type {
   TerminalAgentWriteChecks,
   TerminalAgentWriteRefused,
+  TerminalAgentWriteResult,
   TerminalManagerShape,
 } from "../../terminal/Services/Manager.ts";
 import {
@@ -125,6 +126,8 @@ const MAX_SEND_WAIT_SECONDS = 10;
 const INTERRUPT_WAIT_MS = 5_000;
 /** A new shell gets this long to draw its first prompt. */
 const SHELL_READY_MS = 10_000;
+/** How long the mirror may take to parse the output the manager has read (normally ms). */
+const CATCH_UP_MS = 2_000;
 /** How long `run` waits for a shell that just finished a command to draw its prompt. */
 const PROMPT_SETTLE_MS = 2_000;
 /** Activity checks (which may read the tty) during a wait, at most this often. */
@@ -785,19 +788,35 @@ export function withTerminalTools(
 
   /**
    * With marks: until the shell draws its prompt (after a command, or once its startup files
-   * are done); bounded, and the write checks again.
+   * are done); bounded, and the write checks again. Then until the mirror has parsed every mark
+   * the manager had read by then (it parses later: up to the chunk with the latest one), so an
+   * earlier command's end or start never reaches the mirror after this command began. Returns
+   * how many marks that was, for the write to check none came since; undefined for a shell
+   * without marks.
    */
   const waitForPrompt = (rt: AgentTerminals, t: TrackedTerminal) =>
-    rt.waitUntil(
-      t,
-      rt.inspect(t.ref).pipe(
-        Effect.map((inspection) => {
-          const shell = Option.isSome(inspection) ? inspection.value.shell : undefined;
-          return shell === undefined || (shell.promptSeen && shell.atPrompt);
-        }),
-      ),
-      PROMPT_SETTLE_MS,
-    );
+    Effect.gen(function* () {
+      let seen: { readonly markCount: number; readonly sequence: number } | undefined;
+      yield* rt.waitUntil(
+        t,
+        rt.inspect(t.ref).pipe(
+          Effect.map((inspection) => {
+            const shell = Option.isSome(inspection) ? inspection.value.shell : undefined;
+            seen =
+              shell === undefined
+                ? undefined
+                : { markCount: shell.markCount, sequence: shell.lastMarkSequence };
+            return shell === undefined || (shell.promptSeen && shell.atPrompt);
+          }),
+        ),
+        PROMPT_SETTLE_MS,
+      );
+      if (seen === undefined) return undefined;
+      if (!(yield* rt.catchUp(t, seen.sequence, CATCH_UP_MS))) {
+        return yield* Effect.fail(new ToolFailure(refusalText(t.ref.terminalId, "unverified")));
+      }
+      return seen.markCount;
+    });
 
   const trackOrFail = (rt: AgentTerminals, ref: TerminalRef) =>
     rt.track(ref).pipe(
@@ -954,6 +973,8 @@ export function withTerminalTools(
         return `Nothing was typed: ${id} waits for hidden input (echo is off: a password or passphrase prompt). Never type a password, token or code you were not given, and never ask for one in chat; hand the terminal to the user: ${call({ action: "handoff", terminal: id, requestId: "<your id>", message: "<what to enter>" })}. Keys such as Ctrl+C or Escape still go through.`;
       case "input-mode-unknown":
         return `Nothing was typed: whether ${id} hides input right now (its tty's echo flag) could not be read, so Ryco typed nothing. Try again in a moment.`;
+      case "marks-moved":
+        return `Nothing was typed: ${id}'s shell printed its prompt again just as Ryco was about to type. Try again in a moment.`;
       case "not-running":
         return `Nothing was typed: ${id}'s shell is not running.`;
     }
@@ -963,7 +984,15 @@ export function withTerminalTools(
    * An agent's input through the terminal manager's guarded write: the checks and the write
    * share the thread's lock. Retried once when idleness could not be told.
    */
-  const guardedWrite = (t: TrackedTerminal, data: string, checks: TerminalAgentWriteChecks) => {
+  const guardedWrite = (t: TrackedTerminal, data: string, checks: TerminalAgentWriteChecks) =>
+    checkedWrite(t, data, checks).pipe(Effect.mapError(toToolFailure(t)));
+
+  /** `guardedWrite`, its refusal kept as it is (a caller may try again). */
+  const checkedWrite = (
+    t: TrackedTerminal,
+    data: string,
+    checks: TerminalAgentWriteChecks,
+  ): Effect.Effect<TerminalAgentWriteResult, TerminalAgentWriteRefused | ToolFailure> => {
     const agentWrite = deps.terminals.agentWrite;
     if (agentWrite === undefined) {
       return write(t, data, checks.idle === true).pipe(
@@ -978,9 +1007,15 @@ export function withTerminalTools(
           ? Effect.sleep(600).pipe(Effect.andThen(once))
           : Effect.fail(refused),
       ),
-      Effect.mapError((refused) => new ToolFailure(refusalText(t.ref.terminalId, refused.reason))),
     );
   };
+
+  const toToolFailure =
+    (t: TrackedTerminal) =>
+    (error: ToolFailure | TerminalAgentWriteRefused): ToolFailure =>
+      error instanceof ToolFailure
+        ? error
+        : new ToolFailure(refusalText(t.ref.terminalId, error.reason));
 
   /** The bytes that run `command` at the prompt as one command line. */
   const commandBytes = (t: TrackedTerminal, command: string) => {
@@ -1029,19 +1064,33 @@ export function withTerminalTools(
   // ── actions ────────────────────────────────────────────────────────
 
   /** Types `command` at `t`'s idle prompt and tracks it; nothing is typed when the shell is busy. */
-  const startCommand = (rt: AgentTerminals, t: TrackedTerminal, command: string) =>
-    Effect.gen(function* () {
-      const data = commandBytes(t, command);
-      // A command that just ended: its shell draws the prompt a moment later. Only then does
-      // this command begin, so the end of the one before it never counts as this one's.
-      yield* waitForPrompt(rt, t);
+  const startCommand = (rt: AgentTerminals, t: TrackedTerminal, command: string) => {
+    const data = commandBytes(t, command);
+    const attempt = Effect.gen(function* () {
+      // A command that just ended: its shell draws the prompt a moment later. Only then, with
+      // the mirror caught up to that prompt, does this command begin, so the end (or start) of
+      // the one before it never counts as this one's.
+      const marksSeen = yield* waitForPrompt(rt, t);
       const execution = rt.beginExecution(t, command);
-      // Typed only at an idle prompt nobody is typing at, never into hidden input.
-      yield* guardedWrite(t, data, { idle: true, prompt: true, visibleInput: true }).pipe(
-        Effect.tapError(() => Effect.sync(() => rt.abandonExecution(t, execution))),
-      );
+      // Typed only at an idle prompt nobody is typing at, never into hidden input, and only
+      // when the shell printed no mark since its state was read.
+      yield* checkedWrite(t, data, {
+        idle: true,
+        prompt: true,
+        visibleInput: true,
+        ...(marksSeen === undefined ? {} : { marksSeen }),
+      }).pipe(Effect.tapError(() => Effect.sync(() => rt.abandonExecution(t, execution))));
       return execution;
     });
+    return attempt.pipe(
+      // The shell drew its prompt again between the read and the write: once more.
+      Effect.catchIf(
+        (error) => !(error instanceof ToolFailure) && error.reason === "marks-moved",
+        () => attempt,
+      ),
+      Effect.mapError(toToolFailure(t)),
+    );
+  };
 
   const runAction = (
     rt: AgentTerminals,
@@ -1674,7 +1723,11 @@ export function withTerminalTools(
           yield* refuseWhileHandedOff(t);
           execution = t.current !== undefined && !t.current.ended ? t.current : undefined;
         }
-        const activity = yield* rt.activityOf(t);
+        // Pinned before the request opens: another thread's terminals must not push this mirror
+        // out meanwhile (its start position and hints live there). Kept by the hand-off once it
+        // exists, released otherwise.
+        const release = rt.pin(t.ref);
+        const activity = yield* rt.activityOf(t).pipe(Effect.onError(() => Effect.sync(release)));
         const opened = yield* openUserActionRequest(userActions, {
           threadId,
           turnId: authority.turnId,
@@ -1698,8 +1751,10 @@ export function withTerminalTools(
                 : reason,
             );
           }),
+          Effect.onError(() => Effect.sync(release)),
         );
         request = opened.request;
+        if (!opened.created) release();
         if (opened.created) {
           const state: HandoffState = {
             callerRequestId: input.requestId,
@@ -1710,7 +1765,7 @@ export function withTerminalTools(
             lastHint: "",
             ended: false,
             // Its start position and hints must not be lost to a mirror rebuild meanwhile.
-            release: rt.pin(t.ref),
+            release,
           };
           handoffs.set(request.requestId, state);
           yield* recordHints(userActions, t, request, state);

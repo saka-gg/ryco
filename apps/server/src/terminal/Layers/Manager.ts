@@ -2112,6 +2112,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           // Ryco's shell marks: read once here, then gone from what clients and the history
           // get; only agent output listeners see them (`shellMarks.ts`).
           let commandEnd: { readonly exitCode: number | null } | null = null;
+          const marksBefore = session.shellMarks.markCount;
           const clientData = readShellMarks(
             session.shellMarks,
             outputData,
@@ -2147,6 +2148,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             );
           }
 
+          if (session.shellMarks.markCount !== marksBefore) {
+            session.shellMarks.lastMarkSequence = cursor.sequence;
+          }
           if (commandEnd !== null) {
             session.shellMarks.lastEnd = {
               exitCode: (commandEnd as { readonly exitCode: number | null }).exitCode,
@@ -3324,6 +3328,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         Effect.map(
           Option.map((session) => {
             const foreground = readForegroundName(session);
+            // A copy, without output held back for a split mark (it may hold the nonce).
+            const { pending: _held, ...shell } = session.shellMarks;
             return {
               snapshot: snapshot(session),
               hasRunningSubprocess: session.hasRunningSubprocess,
@@ -3337,12 +3343,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 ? {}
                 : {
                     markNonce: session.markNonce,
-                    shell: {
-                      promptSeen: session.shellMarks.promptSeen,
-                      atPrompt: session.shellMarks.atPrompt,
-                      inputSincePrompt: session.shellMarks.inputSincePrompt,
-                      lastEnd: session.shellMarks.lastEnd,
-                    },
+                    shell,
                   }),
             };
           }),
@@ -3449,6 +3450,14 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           const process = session.process;
           if (process === null || process !== reader || session.status !== "running") {
             return yield* refuse("not-running");
+          }
+          // A mark since the caller read the shell's state: what it saw (and what its mirror
+          // parsed) is no longer the shell's state. Checked last: the reads above may have yielded.
+          if (
+            input.checks.marksSeen !== undefined &&
+            input.checks.marksSeen !== session.shellMarks.markCount
+          ) {
+            return yield* refuse("marks-moved");
           }
           const inputAtMs = yield* Clock.currentTimeMillis;
           session.hasReceivedInput = true;

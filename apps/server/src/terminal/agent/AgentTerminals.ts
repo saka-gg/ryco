@@ -592,6 +592,22 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
         (release) => Effect.sync(release),
       );
 
+    /**
+     * Until `t`'s mirror has parsed the output up to `sequence` (the manager's cursor when its
+     * shell state was read), so the marks that state counted are in the mirror too: the manager
+     * reads them first, the mirror parses them later. False when that did not happen in time.
+     */
+    const catchUp = (t: TrackedTerminal, sequence: number, timeoutMs: number) =>
+      Effect.gen(function* () {
+        const reached = yield* waitUntil(
+          t,
+          Effect.sync(() => t.lastSequence >= sequence),
+          timeoutMs,
+        );
+        if (reached) yield* Effect.promise(() => t.mirror.flush());
+        return reached;
+      });
+
     const isRunning = (t: TrackedTerminal) =>
       (t.record.current !== undefined && !t.record.current.ended) ||
       (!t.mirror.shellIntegration && t.hasRunningSubprocess);
@@ -734,6 +750,7 @@ export const makeAgentTerminals = (deps: AgentTerminalsDeps) =>
       activityOf,
       fallbackEnded,
       beginExecution,
+      catchUp,
       abandonExecution,
       endExecution,
       outputOf,

@@ -137,6 +137,36 @@ describe("Ryco's shell marks in the terminal manager", () => {
     expect(await write({ prompt: true })).toBe("running");
   });
 
+  it("refuses an agent's write when the shell printed a mark since its state was read", async () => {
+    const h = await harness();
+    const { process, nonce } = await h.open();
+    await h.print(process, `${mark(nonce, "A")}$ `);
+    const seen = await h.shellState();
+    expect(seen?.lastMarkSequence).toBeGreaterThan(0);
+    // The prompt drawn again (an empty Enter, a resize) after the caller looked.
+    await h.print(process, `\r\n${mark(nonce, "D;0")}${mark(nonce, "A")}$ `);
+    const refused = await Effect.runPromise(
+      Effect.flip(
+        h.manager.agentWrite!({
+          ref,
+          data: "echo hi\r",
+          checks: { prompt: true, marksSeen: seen!.markCount },
+        }),
+      ),
+    );
+    expect(refused.reason).toBe("marks-moved");
+    expect(process.writes).toEqual([]);
+    const now = await h.shellState();
+    await Effect.runPromise(
+      h.manager.agentWrite!({
+        ref,
+        data: "echo hi\r",
+        checks: { prompt: true, marksSeen: now!.markCount },
+      }),
+    );
+    expect(process.writes).toEqual(["echo hi\r"]);
+  });
+
   it("refuses typing where the tty flags cannot be read, and into hidden input", async () => {
     const h = await harness();
     const { process } = await h.open();
